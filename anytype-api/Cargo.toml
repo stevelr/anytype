@@ -3,4 +3,12 @@ name = "anytype"
 version = "0.1.0"
 edition = "2024"
 
+license = "MIT OR Apache-2.0"
+keywords = ["anytype"]
+categories = ["api-bindings"]
+description = "An ergonomic Anytype API client in Rust"
+repository = "https://github.com/stevelr/anytype"
+homepage = "https://github.com/stevelr/anytype"
+readme = "README.md"
+
 [dependencies]
