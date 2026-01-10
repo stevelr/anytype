@@ -15,7 +15,7 @@ name = "anyr"
 
 [dependencies]
 anyhow.workspace = true
-anytype = { path = "../anytype-api" }
+anytype = { version = "0.2.6", path = "../anytype-api" }
 clap.workspace = true
 dirs.workspace = true
 serde.workspace = true
