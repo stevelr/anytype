@@ -1,9 +1,9 @@
 [package]
 name = "anytype"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 description = "Rust client for Anytype API"
-repository = "https://github.com/stevelr/anytype_rs"
+repository = "https://github.com/stevelr/anytype"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 keywords = ["anytype", "api", "client"]
