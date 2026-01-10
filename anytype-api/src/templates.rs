@@ -5,7 +5,7 @@
 //!
 //! ## Template methods on AnytypeClient
 //!
-//! - [templates](AnytypeClient::templates) - list templtes in a space
+//! - [templates](AnytypeClient::templates) - list templates in a space
 //! - [template](AnytypeClient::template) - get a template
 //!
 //! To update template or delete templates, use the Object methods

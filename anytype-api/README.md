@@ -8,7 +8,7 @@ An ergonomic Anytype API client in Rust.
 
 - Source: https://github.com/stevelr/anytype
 - Documentation: [anytype](https://docs.rs/anytype)
-- Examples: [examples](./exmples/README.md)
+- Examples: [examples](./examples/README.md)
 
 [Anytype](https://doc.anytype.io/anytype-docs) is an encrypted, local-first alternative to the cloud-based Internet.
 

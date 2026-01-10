@@ -43,7 +43,7 @@ use crate::{
 /// View layout for list types
 ///
 /// The 2025-11-08 openapi spec defined only grid and table.
-/// Current implementation (as of 2026-Jan) removed table and adds calendar, gallary, graph, kanban, and list.
+/// Current implementation (as of 2026-Jan) removed table and adds calendar, gallery, graph, kanban, and list.
 #[derive(
     Debug, Deserialize, Serialize, Clone, PartialEq, Eq, strum::Display, strum::EnumString,
 )]

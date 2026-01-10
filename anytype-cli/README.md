@@ -4,10 +4,9 @@ Command-line interface for the Anytype local API, built on [`anytype`](https://g
 
 ## Install / Run
 
-````sh
+```sh
 cargo install --path .
 ```
-
 
 ```sh
 anyr \
@@ -132,7 +131,6 @@ Log HTTP request/response:
 RUST_LOG=warn,anytype::http_json=trace anyr object list <SPACE_ID>
 ```
 
-
 ## Testing
 
 Python CLI tests expect the same environment variables as the API tests:
@@ -152,5 +150,3 @@ Licensed under either of:
 
 - Apache License, Version 2.0 (`LICENSE-APACHE`)
 - MIT License (`LICENSE-MIT`)
-```
-````
