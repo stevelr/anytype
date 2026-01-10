@@ -1,0 +1,50 @@
+
+_default:
+    just --list
+
+check:
+    cargo build
+    cargo clippy -- -D warnings
+    rustfmt --edition 2024 --check src/*.rs 
+
+check-all: (check)
+    cargo shear
+    just spellcheck
+    cargo audit -f ../Cargo.lock
+    cargo outdated
+
+test:
+    #!/usr/bin/env bash
+    source ../.test-env
+    cargo test -- --nocapture
+    
+run-examples:
+    #!/usr/bin/env bash
+    source ../.test-example
+    cargo run --example list_spaces
+    #cargo run --example interactive_auth
+    cargo run --example list_types_and_properties
+    cargo run --example create_object
+    cargo run --example update_object_properties
+    cargo run --example update_markdown_body
+    cargo run --example filters_basic
+    cargo run --example filter_expressions
+    cargo run --example search_global
+    cargo run --example search_in_space
+    cargo run --example templates
+    cargo run --example retry_eventual_consistency
+    cargo run --example pagination_stream
+    cargo run --example views_list_objects
+
+# check for typos
+spellcheck:
+    typos
+    cspell "**/*.{rs,md}"
+
+# generate rust docs and open browser to view
+docs-browse:
+    cargo doc --no-deps --open
+
+# open docs to view and continuously update
+serve-docs: (docs-browse)
+    cargo watch -s 'cargo doc --no-deps'

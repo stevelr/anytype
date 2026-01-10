@@ -1,0 +1,12 @@
+# typos (spell checker) configuration
+
+[files]
+# ignore these files
+extend-exclude = ["spec/*.yaml", "docs/cli-plan.md"]
+
+[default.extend-identifiers]
+# overrides: if right side of equals is same as left side, no change is made
+nin = "nin"                               # serialize-key for NotIn 
+ba000000 = "ba000000"                     # example object id
+ba111111 = "ba111111"                     # example object id
+FilterConditionNin = "FilterConditionNin"

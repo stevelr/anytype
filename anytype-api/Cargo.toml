@@ -1,14 +1,47 @@
 [package]
 name = "anytype"
-version = "0.1.0"
+version = "0.2.5"
+authors = ["Steve Schoettler <stevelr-git@pm.me>"]
+description = "Rust client for Anytype API"
+repository = "https://github.com/stevelr/anytype_rs"
 edition = "2024"
-
 license = "MIT OR Apache-2.0"
-keywords = ["anytype"]
+keywords = ["anytype", "api", "client"]
 categories = ["api-bindings"]
-description = "An ergonomic Anytype API client in Rust"
-repository = "https://github.com/stevelr/anytype"
-homepage = "https://github.com/stevelr/anytype"
 readme = "README.md"
 
+[features]
+default = []
+# support for custom external keystore
+keystore-ext = []
+
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
+#anyhow.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+#clap.workspace = true
+dirs.workspace = true
+futures.workspace = true
+#governor.workspace = true
+#httpdate.workspace = true
+keyring.workspace = true
+#nonzero_ext.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+#serde_yaml.workspace = true
+serde_path_to_error.workspace = true
+snafu.workspace = true
+strum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+#tracing-subscriber.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serial_test = "3.2.0"
+test-log.workspace = true
