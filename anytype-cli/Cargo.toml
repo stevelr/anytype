@@ -1,9 +1,14 @@
 [package]
 name = "anyr"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
-description = "Anytype api client in rust, using anytype-api"
+description = "CLI for Anytype - list, search, and perform CRUD operations on Anytype objects."
 license = "MIT OR Apache-2.0"
+authors = ["Steve Schoettler <stevelr-git@pm.me>"]
+repository = "https://github.com/stevelr/anytype"
+keywords = ["anytype", "cli"]
+categories = ["api-bindings"]
+readme = "README.md"
 
 [[bin]]
 name = "anyr"
