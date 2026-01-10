@@ -1,0 +1,20 @@
+
+_default:
+    just --list
+
+check:
+    cargo build
+    cargo clippy -- -D warnings
+    rustfmt --edition 2024 --check src/*.rs src/*/*.rs
+
+check-all: (check)
+    cargo shear
+    just spellcheck
+    cargo audit -f ../Cargo.lock
+    cargo outdated
+
+# check for typos
+spellcheck:
+    typos
+    cspell "**/*.{rs,md}"
+

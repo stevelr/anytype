@@ -1,0 +1,30 @@
+{
+	"version": "0.2",
+	"language": "en",
+	"dictionaries": ["rust"],
+	"ignorePaths": ["target/", "Cargo.lock", "spec/*.yaml", "*.json"],
+	"ignoreRegExpList": [
+		"/bafyrei[a-z0-9]*/gi",
+		"/xafyrei[a-z0-9]*/gi",
+		"/[a-z]{20,}/gi"
+	],
+	"words": [
+		"anyr",
+		"anytype",
+		"ANYTYPECLIENT",
+		"chrono",
+		"didip",
+		"etest",
+		"justfile",
+		"ncontains",
+		"nempty",
+		"nocapture",
+		"objs",
+		"reqwest",
+		"retryable",
+		"spaceid",
+		"splitn",
+		"subsec",
+		"zeroize"
+	]
+}
