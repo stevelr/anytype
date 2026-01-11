@@ -1,9 +1,5 @@
 [workspace]
-members = [
-  "anytype-api",
-  "anytype-cli",
-  # "anytype-rpc"
-]
+members = ["anytype-api", "anytype-cli", "anytype-rpc"]
 resolver = "3"
 
 [workspace.dependencies]

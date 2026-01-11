@@ -2,7 +2,7 @@
 name = "anytype"
 version = "0.2.6"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
-description = "Rust client for Anytype API"
+description = "An ergonomic Anytype API client in rust"
 repository = "https://github.com/stevelr/anytype"
 edition = "2024"
 license = "MIT OR Apache-2.0"
