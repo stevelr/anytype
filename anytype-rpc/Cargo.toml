@@ -1,0 +1,29 @@
+[package]
+name = "anytype-rpc"
+version = "0.1.0"
+edition = "2024"
+description = "Anytype gRPC client"
+authors = ["Steve Schoettler <stevelr-git@pm.me>"]
+repository = "https://github.com/stevelr/anytype"
+license = "MIT OR Apache-2.0"
+keywords = ["anytype", "client", "grpc"]
+categories = ["api-bindings"]
+readme = "README.md"
+
+[dependencies]
+clap.workspace = true
+prost-types = "0.14.1"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng = "=0.10.0"
+tokio.workspace = true
+prost = "0.14.2"
+tonic = "0.14.2"
+tonic-prost = "0.14.2"
+
+[build-dependencies]
+tonic-prost-build = "0.14.1"
+
+[[bin]]
+name = "anytype-rpc"
+path = "src/bin/anytype-rpc.rs"
