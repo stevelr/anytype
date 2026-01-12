@@ -82,11 +82,13 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "anytype",
+ "anytype-rpc",
  "clap",
  "dirs",
  "serde",
  "serde_json",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]
