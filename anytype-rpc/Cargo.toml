@@ -17,12 +17,12 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng = "=0.10.0"
 tokio.workspace = true
-prost = "0.14.2"
-tonic = "0.14.2"
-tonic-prost = "0.14.2"
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
 
 [build-dependencies]
-tonic-prost-build = "0.14.1"
+tonic-prost-build.workspace = true
 
 [[bin]]
 name = "anytype-rpc"

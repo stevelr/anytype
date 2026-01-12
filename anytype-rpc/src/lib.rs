@@ -29,3 +29,5 @@ pub mod anytype {
 
 /// Authentication helpers for creating sessions and attaching tokens.
 pub mod auth;
+/// Helpers for dataview view metadata.
+pub mod views;
