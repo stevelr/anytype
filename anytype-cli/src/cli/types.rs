@@ -1,4 +1,4 @@
-use crate::cli::common::resolve_type_id;
+use crate::cli::common::{resolve_space_id, resolve_type_id};
 use crate::cli::{
     AppContext, ensure_authenticated, pagination_limit, pagination_offset, resolve_icon,
 };
@@ -14,6 +14,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             pagination,
             filter,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx
                 .client
                 .types(space_id)
@@ -39,6 +40,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::TypeCommands::Get { space_id, type_id } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let item = ctx.client.get_type(space_id, type_id).get().await?;
             ctx.output.emit_json(&item)
@@ -52,6 +54,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             layout,
             properties,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx.client.new_type(space_id, name).key(key);
             if let Some(plural) = plural {
                 request = request.plural_name(plural);
@@ -78,6 +81,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             icon_emoji,
             layout,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let mut request = ctx.client.update_type(space_id, type_id);
 
@@ -101,6 +105,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::TypeCommands::Delete { space_id, type_id } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let item = ctx.client.get_type(space_id, type_id).delete().await?;
             ctx.output.emit_json(&item)

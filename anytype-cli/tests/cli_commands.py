@@ -148,6 +148,8 @@ class TestAnyrCommands(unittest.TestCase):
 
     def test_real_operations(self) -> None:
         space_id = os.environ["ANYTYPE_TEST_SPACE_ID"]
+        space = run_anyr_json("space", "get", space_id)
+        space_name = space.get("name")
         suffix = str(int(time.time() * 1000))
         type_key = f"cli_test_type_{suffix}"
         type_name = f"CLI Test Type {suffix}"
@@ -164,6 +166,12 @@ class TestAnyrCommands(unittest.TestCase):
         created_obj_id = None
 
         try:
+            if space_name:
+                spaces = run_anyr_json("space", "list", "--limit", "200").get("items", [])
+                matches = [item for item in spaces if item.get("name") == space_name]
+                if len(matches) != 1:
+                    space_name = None
+
             typ = run_anyr_json(
                 "type",
                 "create",
@@ -179,6 +187,11 @@ class TestAnyrCommands(unittest.TestCase):
             type_by_key = run_anyr_json("type", "get", space_id, type_key)
             self.assertEqual(
                 type_by_key.get("id"), created_type_id, "type get by key mismatch"
+            )
+
+            type_by_name = run_anyr_json("type", "get", space_id, type_name)
+            self.assertEqual(
+                type_by_name.get("id"), created_type_id, "type get by name mismatch"
             )
 
             updated_type = run_anyr_json(
@@ -260,8 +273,8 @@ class TestAnyrCommands(unittest.TestCase):
             obj = run_anyr_json(
                 "object",
                 "create",
-                space_id,
-                type_key,
+                space_name or space_id,
+                f"@{type_key}",
                 "--name",
                 obj_name,
                 f"{type_prop_key}=hello",
@@ -283,12 +296,33 @@ class TestAnyrCommands(unittest.TestCase):
             )
 
             list_by_key = run_anyr_json(
-                "object", "list", space_id, "--type", type_key, "--limit", "200"
+                "object",
+                "list",
+                space_name or space_id,
+                "--type",
+                type_key,
+                "--limit",
+                "200",
             )
             items_by_key = list_by_key.get("items", [])
             self.assertTrue(
                 any(item.get("id") == created_obj_id for item in items_by_key),
                 "object list by type key missing created object",
+            )
+
+            list_by_name = run_anyr_json(
+                "object",
+                "list",
+                space_name or space_id,
+                "--type",
+                type_name,
+                "--limit",
+                "200",
+            )
+            items_by_name = list_by_name.get("items", [])
+            self.assertTrue(
+                any(item.get("id") == created_obj_id for item in items_by_name),
+                "object list by type name missing created object",
             )
 
             list_by_id = run_anyr_json(
@@ -300,7 +334,7 @@ class TestAnyrCommands(unittest.TestCase):
                 "object list by type id missing created object",
             )
 
-            run_anyr_json("template", "list", space_id, "page")
+            run_anyr_json("template", "list", space_id, "@page")
 
         finally:
             if created_obj_id:

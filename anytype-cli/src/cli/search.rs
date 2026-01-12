@@ -1,4 +1,5 @@
 use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
+use crate::cli::common::{resolve_space_id, resolve_type_ids};
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
 use anyhow::Result;
@@ -7,8 +8,12 @@ use anytype::prelude::*;
 pub async fn handle(ctx: &AppContext, args: super::SearchArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
 
-    let mut request = if let Some(space_id) = args.space_id {
-        ctx.client.search_in(space_id)
+    let resolved_space_id = match args.space_id.as_deref() {
+        Some(space_id) => Some(resolve_space_id(ctx, space_id).await?),
+        None => None,
+    };
+    let mut request = if let Some(space_id) = resolved_space_id.as_deref() {
+        ctx.client.search_in(space_id.to_string())
     } else {
         ctx.client.search_global()
     };
@@ -18,7 +23,12 @@ pub async fn handle(ctx: &AppContext, args: super::SearchArgs) -> Result<()> {
     }
 
     if !args.types.is_empty() {
-        request = request.types(args.types);
+        if let Some(space_id) = resolved_space_id.as_deref() {
+            let resolved = resolve_type_ids(ctx, space_id, &args.types).await?;
+            request = request.types(resolved);
+        } else {
+            request = request.types(args.types);
+        }
     }
 
     let filters = parse_filters(&args.filter.filters)?;

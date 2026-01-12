@@ -1,4 +1,5 @@
 use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
+use crate::cli::common::resolve_space_id;
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
 use anyhow::Result;
@@ -14,6 +15,7 @@ pub async fn handle(ctx: &AppContext, args: super::MemberArgs) -> Result<()> {
             role,
             status,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx
                 .client
                 .members(space_id)
@@ -53,6 +55,7 @@ pub async fn handle(ctx: &AppContext, args: super::MemberArgs) -> Result<()> {
             space_id,
             member_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let item = ctx.client.member(space_id, member_id).get().await?;
             ctx.output.emit_json(&item)
         }

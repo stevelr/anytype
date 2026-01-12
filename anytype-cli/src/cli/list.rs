@@ -1,4 +1,5 @@
 use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
+use crate::cli::common::resolve_space_id;
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
 use anyhow::Result;
@@ -13,6 +14,7 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
             pagination,
             filter,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx
                 .client
                 .view_list_objects(space_id, list_id)
@@ -46,6 +48,7 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
             list_id,
             pagination,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let request = ctx
                 .client
                 .list_views(space_id, list_id)
@@ -71,6 +74,7 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
             list_id,
             object_ids,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let result = ctx
                 .client
                 .view_add_objects(space_id, list_id, object_ids)
@@ -83,6 +87,7 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
             list_id,
             object_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let result = ctx
                 .client
                 .view_remove_object(space_id, list_id, object_id)

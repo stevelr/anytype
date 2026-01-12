@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 mod table;
 
-pub use table::{TableRow, render_table};
+pub use table::{TableRow, render_table, render_table_dynamic};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFormat {

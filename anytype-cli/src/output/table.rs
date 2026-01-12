@@ -26,6 +26,23 @@ pub fn render_table<T: TableRow>(items: &[T]) -> String {
     out
 }
 
+pub fn render_table_dynamic(headers: &[String], rows: &[Vec<String>]) -> String {
+    let header_refs: Vec<&str> = headers.iter().map(String::as_str).collect();
+    let widths = column_widths(&header_refs, rows);
+
+    let mut out = String::new();
+    out.push_str(&format_row(headers, &widths));
+    out.push('\n');
+    out.push_str(&format_separator(&widths));
+
+    for row in rows {
+        out.push('\n');
+        out.push_str(&format_row(row, &widths));
+    }
+
+    out
+}
+
 fn column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for row in rows {

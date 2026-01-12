@@ -1,4 +1,5 @@
 use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
+use crate::cli::common::resolve_space_id;
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
 use anyhow::Result;
@@ -32,6 +33,7 @@ pub async fn handle(ctx: &AppContext, args: super::SpaceArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::SpaceCommands::Get { space_id } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let space = ctx.client.space(space_id).get().await?;
             ctx.output.emit_json(&space)
         }
@@ -48,6 +50,7 @@ pub async fn handle(ctx: &AppContext, args: super::SpaceArgs) -> Result<()> {
             name,
             description,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx.client.update_space(space_id);
             if let Some(name) = name {
                 request = request.name(name);

@@ -18,6 +18,7 @@ pub mod space;
 pub mod tag;
 pub mod template;
 pub mod types;
+pub mod view;
 
 // default keyring service and default config subdir for storing key file
 const DEFAULT_KEYRING_SERVICE: &str = env!("CARGO_BIN_NAME");
@@ -48,6 +49,10 @@ pub struct Cli {
     /// Table output format
     #[arg(short, long, global = true)]
     pub table: bool,
+
+    /// Date format for table output
+    #[arg(long, env = "ANYTYPE_DATE_FORMAT", global = true)]
+    pub date_format: Option<String>,
 
     /// Quiet mode - suppress output
     #[arg(short, long, global = true)]
@@ -181,6 +186,10 @@ pub enum Commands {
     /// Template list and operations
     #[command(alias = "templates")]
     Template(TemplateArgs),
+
+    /// View operations
+    #[command(alias = "views")]
+    View(ViewArgs),
 
     /// Search - global or in-space
     Search(SearchArgs),
@@ -604,6 +613,41 @@ pub struct TemplateArgs {
     pub command: TemplateCommands,
 }
 
+#[derive(Args, Debug)]
+pub struct ViewArgs {
+    #[command(subcommand)]
+    pub command: ViewCommands,
+}
+
+#[derive(Subcommand, Debug)]
+    pub enum ViewCommands {
+        /// List objects for a view, showing only view columns
+        Objects {
+            /// View ID
+            #[arg(long)]
+            view: String,
+            /// Column keys for table output (comma-separated)
+            #[arg(long, alias = "cols")]
+            columns: Option<String>,
+            /// Space ID
+            space_id: String,
+            /// Type ID (list id)
+            type_id: String,
+            /// Limit number of items
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// gRPC server address
+        #[arg(long, default_value = "http://127.0.0.1:31010")]
+        grpc_addr: String,
+        /// gRPC session token (overrides config lookup)
+        #[arg(long)]
+        grpc_token: Option<String>,
+        /// Path to Anytype config.json (defaults to ~/.anytype/config.json)
+        #[arg(long)]
+        grpc_config: Option<PathBuf>,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 pub enum TemplateCommands {
     List {
@@ -737,11 +781,13 @@ pub struct AppContext {
     pub output: Output,
     pub base_url: String,
     pub keystore: KeystoreConfig,
+    pub date_format: String,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
     let config = CliConfig::load()?;
     let output = Output::new(resolve_output_format(&cli), cli.output.clone());
+    let date_format = resolve_table_date_format(&cli);
 
     if let Commands::Config(args) = &cli.command {
         return config::handle(args, &output).await;
@@ -760,6 +806,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         output,
         base_url,
         keystore,
+        date_format,
     };
 
     match cli.command {
@@ -771,6 +818,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Member(args) => member::handle(&ctx, args).await,
         Commands::Tag(args) => tag::handle(&ctx, args).await,
         Commands::Template(args) => template::handle(&ctx, args).await,
+        Commands::View(args) => view::handle(&ctx, args).await,
         Commands::Search(args) => search::handle(&ctx, args).await,
         Commands::List(args) => list::handle(&ctx, args).await,
         Commands::Config(_) => Ok(()),
@@ -795,6 +843,14 @@ fn resolve_output_format(cli: &Cli) -> OutputFormat {
     } else {
         OutputFormat::Json
     }
+}
+
+const DEFAULT_TABLE_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
+fn resolve_table_date_format(cli: &Cli) -> String {
+    cli.date_format
+        .clone()
+        .unwrap_or_else(|| DEFAULT_TABLE_DATE_FORMAT.to_string())
 }
 
 fn build_client(base_url: &str, keystore: &KeystoreConfig) -> Result<AnytypeClient> {

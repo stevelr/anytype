@@ -1,4 +1,4 @@
-use crate::cli::common::resolve_property_id;
+use crate::cli::common::{resolve_property_id, resolve_space_id};
 use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
@@ -15,6 +15,7 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             pagination,
             filter,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let mut request = ctx
                 .client
@@ -45,6 +46,7 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             property_id,
             tag_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let item = if looks_like_object_id(&tag_id) {
                 ctx.client.tag(space_id, property_id, tag_id).get().await?
@@ -74,6 +76,7 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             color,
             key,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let mut request = ctx
                 .client
@@ -96,6 +99,7 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             key,
             color,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let tag_id = ctx
                 .client
@@ -123,6 +127,7 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             property_id,
             tag_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let item = if looks_like_object_id(&property_id) && looks_like_object_id(&tag_id) {
                 ctx.client.tag(space_id, property_id, tag_id)
             } else {

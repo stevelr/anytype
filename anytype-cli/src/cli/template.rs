@@ -1,4 +1,4 @@
-use crate::cli::common::resolve_type_id;
+use crate::cli::common::{resolve_space_id, resolve_type_id};
 use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
@@ -13,6 +13,7 @@ pub async fn handle(ctx: &AppContext, args: super::TemplateArgs) -> Result<()> {
             pagination,
             filter,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let mut request = ctx
                 .client
@@ -43,6 +44,7 @@ pub async fn handle(ctx: &AppContext, args: super::TemplateArgs) -> Result<()> {
             type_id,
             template_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let item = ctx
                 .client

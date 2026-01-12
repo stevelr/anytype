@@ -30,11 +30,12 @@ anyr space list -t
 anyr space list --filter name=Work --json  | jq -r '.items[0].id]'
 anyr space list --json | jq -r '.items[] | select(.name == "Work") | .id'
 
-# List objects in a space
-anyr object list <SPACE_ID> -t
+# List objects in a space (id or name)
+anyr object list <SPACE_ID_OR_NAME> -t
 
-# List collections
-anyr object list --type collection <SPACE_ID> -t
+# List collections (type name or @key)
+anyr object list --type collection <SPACE_ID_OR_NAME> -t
+anyr object list --type @collection <SPACE_ID_OR_NAME> -t
 ```
 
 ### List items in a collection
@@ -95,8 +96,11 @@ anyr object list --type set <SPACE_ID> -t
 # list views of the query (look for view All, get the id <view_id>)
 anyr list views <SPACE_ID> <QUERY_ID> -t
 
-# list items in that view
-anyr list objects --view $view_id $space_id $query_id
+# list items in that view (table/list layouts)
+anyr view objects --view "All" $space_id $query_id --table
+
+# limit table columns (property keys or id/name)
+anyr view objects --view $view_id $space_id $query_id --table --cols name,status,created_date
 ```
 
 ### Search
@@ -116,6 +120,12 @@ anyr search --text "meeting notes"
 - `--pretty` (json pretty-print)
 - `--table` (readable)
 - `--quiet` (minimal output)
+- `--date-format` (table date output; default `%Y-%m-%d %H:%M:%S`)
+
+## Name Resolution
+
+- Arguments that expect `space_id` also accept a space name.
+- Arguments that expect a type accept a type name, and `@key` forces a type key lookup.
 
 ## Logging
 

@@ -1,6 +1,6 @@
 use crate::cli::{
     AppContext,
-    common::{resolve_type, resolve_type_ids},
+    common::{resolve_space_id, resolve_type, resolve_type_ids, resolve_type_key},
     ensure_authenticated, must_have_body, pagination_limit, pagination_offset, resolve_icon,
 };
 use crate::filter::{parse_filters, parse_property};
@@ -17,6 +17,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             filter,
             types,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx
                 .client
                 .objects(&space_id)
@@ -54,6 +55,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             space_id,
             object_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let object = ctx.client.object(space_id, object_id).get().await?;
             ctx.output.emit_json(&object)
         }
@@ -71,6 +73,8 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             properties,
             property_args,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let type_key = resolve_type_key(ctx, &space_id, type_key).await?;
             let mut request = ctx.client.new_object(&space_id, type_key);
 
             if let Some(name) = name {
@@ -122,6 +126,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             properties,
             property_args,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx.client.update_object(&space_id, &object_id);
 
             if let Some(name) = name {
@@ -137,6 +142,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             }
 
             if let Some(type_key) = type_key {
+                let type_key = resolve_type_key(ctx, &space_id, type_key).await?;
                 request = request.type_key(type_key);
             }
 
@@ -164,6 +170,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             space_id,
             object_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let object = ctx.client.object(space_id, object_id).delete().await?;
             ctx.output.emit_json(&object)
         }

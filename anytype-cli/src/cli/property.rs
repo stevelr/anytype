@@ -1,4 +1,4 @@
-use crate::cli::common::resolve_property_id;
+use crate::cli::common::{resolve_property_id, resolve_space_id};
 use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
@@ -15,6 +15,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             filter,
             format,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx
                 .client
                 .properties(space_id)
@@ -50,6 +51,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             space_id,
             property_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let item = if looks_like_object_id(&property_id) {
                 ctx.client.property(space_id, property_id).get().await?
             } else {
@@ -66,6 +68,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             key,
             tags,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let mut request = ctx.client.new_property(space_id, name, format.to_format());
 
             if let Some(key) = key {
@@ -89,6 +92,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             name,
             key,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let mut request = ctx.client.update_property(space_id, property_id);
 
@@ -106,6 +110,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             space_id,
             property_id,
         } => {
+            let space_id = resolve_space_id(ctx, &space_id).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let item = ctx.client.property(space_id, property_id).delete().await?;
             ctx.output.emit_json(&item)
