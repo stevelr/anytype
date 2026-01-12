@@ -61,7 +61,6 @@ use std::sync::Arc;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
-use tracing::error;
 
 use crate::{
     Result,
@@ -272,7 +271,7 @@ pub struct Object {
     /// ID of the space containing this object
     pub space_id: String,
 
-    /// Type of the object (may be None if type was deleted)
+    /// Type of the object (may be None if type was deleted or object is itself a Type)
     #[serde(rename = "type")]
     pub r#type: Option<Type>,
 }
@@ -324,15 +323,7 @@ impl Object {
     /// Returns the property as a chrono::DateTime, in the stored time zone.
     /// If the property is not defined, or is not a Date, returns None.
     pub fn get_property_date(&self, key: &str) -> Option<DateTime<FixedOffset>> {
-        self.get_property(key)
-            .and_then(|prop| prop.value.as_date())
-            .and_then(|date_str| match DateTime::parse_from_rfc3339(date_str) {
-                Err(e) => {
-                    error!(?e, key, "Date property has invalid format \"{date_str}\"");
-                    None
-                }
-                Ok(date) => Some(date),
-            })
+        self.get_property(key).and_then(|prop| prop.value.as_date())
     }
 
     /// Returns a numeric property value as f64.

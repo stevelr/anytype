@@ -72,6 +72,7 @@
 */
 use std::sync::Arc;
 
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Number, Value, json};
 use tracing::error;
@@ -343,12 +344,18 @@ impl PropertyValue {
         }
     }
 
-    /// Returns the date value as a String
+    /// Returns the date value as DateTime object.
     ///
-    /// Property must be Date format
-    pub fn as_date(&self) -> Option<&str> {
+    /// Returns None if the property is not defined to have format Date, or could not be parsed as a date.
+    pub fn as_date(&self) -> Option<DateTime<FixedOffset>> {
         match self {
-            PropertyValue::Date { date } => Some(date.as_str()),
+            PropertyValue::Date { date } => match DateTime::parse_from_rfc3339(date) {
+                Err(e) => {
+                    error!(?e, "Date property has invalid format \"{date}\"");
+                    None
+                }
+                Ok(date) => Some(date),
+            },
             _ => None,
         }
     }
