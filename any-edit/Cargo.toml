@@ -1,6 +1,6 @@
 [package]
 name = "any-edit"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Edit Anytype documents in an external editor"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-anytype = { version = "0.2.7", path = "../anytype-api" }
+anytype = { version = "0.2.8", path = "../anytype-api" }
 clap.workspace = true
 regex = "1.12"
 serde.workspace = true

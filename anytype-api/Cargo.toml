@@ -1,6 +1,6 @@
 [package]
 name = "anytype"
-version = "0.2.7"
+version = "0.2.8"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 description = "An ergonomic Anytype API client in rust"
 repository = "https://github.com/stevelr/anytype"
