@@ -315,21 +315,23 @@ impl AnytypeClient {
         self.client.has_key()
     }
 
-    /// Attempts to load client's api key from keystore.
-    /// If the keystore is the OS Keyring, the user may be prompted for password or biometric confirmation.
+    /// Attempts to load client's api key from keystore: file or keyring.
+    /// For keyring keystores, the user may be prompted to give the app permission.
     ///
     /// # Parameters
-    /// * `force_reload` - If true, always ask keystore for key. if false, and client has the key already, returns true without checking keystore.
+    /// * `force_reload` - If true, always ask keystore for key. if false, and client
+    ///   has the key already (from a previous `load_key` or `authenticate_interactive`),
+    ///   returns true without checking keystore.
     ///
     /// # Returns
-    /// * `Ok(true)` if key was retrieved
-    /// * `Ok(false)` keystore does not contain key
+    /// * `Ok(true)`: key is available and client is authenticated
+    /// * `Ok(false)`: keystore does not contain key
     ///
     /// # Errors
     /// * `NoKeyStore` - no Keystore is configured: client should initialize a KeyStore implementation
     /// * `KeyStore` - error loading key
     ///
-    /// For keyring keystores, most likely error causes are user failed biometric auth or
+    /// For keyring keystores, the most likely error causes are user failed biometric auth or
     /// entered wrong password.
     /// For file keystore, file may have been deleted.
     ///
@@ -337,7 +339,7 @@ impl AnytypeClient {
     /// ```no_run
     /// # use anytype::{prelude::*, Result};
     /// # async fn example() -> Result<()> {
-    /// let mut client = AnytypeClient::new("my-app")?
+    /// let client = AnytypeClient::new("my-app")?
     ///     .set_key_store(KeyStoreFile::new("my-app")?);
     /// if !client.load_key(false)? {
     ///     println!("Not authenticated. Please log in.");

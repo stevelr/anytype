@@ -57,7 +57,7 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     Result,
@@ -138,7 +138,16 @@ pub struct Type {
     pub plural_name: Option<String>,
 
     /// Properties linked to the type
+    #[serde(default, deserialize_with = "deserialize_vec_properties_or_null")]
     pub properties: Vec<Property>,
+}
+
+fn deserialize_vec_properties_or_null<'de, D>(deserializer: D) -> Result<Vec<Property>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Vec<Property>>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
 }
 
 impl Type {
