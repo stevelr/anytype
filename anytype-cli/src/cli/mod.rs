@@ -1,4 +1,3 @@
-use crate::config::CliConfig;
 use crate::output::{Output, OutputFormat};
 use anyhow::{Result, bail};
 use anytype::prelude::*;
@@ -8,7 +7,6 @@ use tracing::warn;
 
 pub mod auth;
 pub mod common;
-pub mod config;
 pub mod list;
 pub mod member;
 pub mod object;
@@ -23,12 +21,13 @@ pub mod view;
 // default keyring service and default config subdir for storing key file
 const DEFAULT_KEYRING_SERVICE: &str = env!("CARGO_BIN_NAME");
 
+/// date strftime-inspired format
+/// Defined in https://docs.rs/chrono/latest/chrono/format/strftime/index.html
+const DEFAULT_TABLE_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
 #[derive(Parser, Debug)]
 #[command(name = "anyr")]
 #[command(author, version, about = "Anytype CLI", long_about = None)]
-#[command(
-    after_help = "Logging:\n  RUST_LOG=warn,anytype::http_json=debug   Log JSON requests/responses\n  RUST_LOG=info                               Default CLI info logs\n"
-)]
 pub struct Cli {
     /// API endpoint URL
     #[arg(short = 'u', long, env = "ANYTYPE_URL")]
@@ -50,7 +49,7 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub table: bool,
 
-    /// Date format for table output
+    /// Date format for table output, defined by [chrono-strftime format](https://docs.rs/chrono/latest/chrono/format/strftime/index.html). Defaults to "%Y-%m-%d %H:%M:%S"
     #[arg(long, env = "ANYTYPE_DATE_FORMAT", global = true)]
     pub date_format: Option<String>,
 
@@ -73,7 +72,7 @@ pub struct Cli {
 #[derive(Args, Debug)]
 #[group(multiple = false)]
 pub struct KeystoreArgs {
-    /// Use default keyfile (~/.config/anytype/credentials)
+    /// Use file-based key storage with default path.
     #[arg(long)]
     pub keyfile: bool,
 
@@ -91,50 +90,40 @@ pub struct KeystoreArgs {
 }
 
 impl KeystoreArgs {
-    pub fn resolve(&self, config: Option<&CliConfig>) -> KeystoreConfig {
-        if self.keyfile {
+    pub fn resolve(&self) -> KeystoreConfig {
+        let env_keyfile = !std::env::var("ANYTYPE_KEYSTORE_FILE")
+            .unwrap_or_default()
+            .is_empty();
+        let env_keyring = !std::env::var("ANYTYPE_KEYSTORE_KEYRING")
+            .unwrap_or_default()
+            .is_empty();
+
+        if self.keyfile || env_keyfile {
             return KeystoreConfig::File(default_keyfile_path());
         }
         if let Some(path) = &self.keyfile_path {
             return KeystoreConfig::File(path.clone());
         }
-        if self.keyring {
-            return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
-        }
-        if let Some(service) = &self.keyring_service {
-            return KeystoreConfig::Keyring(service.clone());
-        }
-
-        if let Ok(val) = std::env::var("ANYTYPE_KEY_FILE") {
-            if val == "1" || val.eq_ignore_ascii_case("true") {
-                return KeystoreConfig::File(default_keyfile_path());
-            }
+        if let Ok(val) = std::env::var("ANYTYPE_KEY_FILE")
+            && !val.is_empty()
+        {
             return KeystoreConfig::File(PathBuf::from(val));
         }
-        if let Ok(val) = std::env::var("ANYTYPE_KEYSTORE_KEYRING") {
-            if val == "1" || val.eq_ignore_ascii_case("true") {
-                return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
-            }
-            return KeystoreConfig::Keyring(val);
+
+        if self.keyring || env_keyring {
+            return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
         }
 
-        if let Some(config) = config
-            && let Some(keystore) = config.keystore.as_deref()
-        {
-            if keystore.eq_ignore_ascii_case("file") {
-                return KeystoreConfig::File(default_keyfile_path());
-            }
-            if let Some(rest) = keystore.strip_prefix("file:") {
-                return KeystoreConfig::File(PathBuf::from(rest));
-            }
-            if keystore.eq_ignore_ascii_case("keyring") {
-                return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
-            }
-            if let Some(rest) = keystore.strip_prefix("keyring:") {
-                return KeystoreConfig::Keyring(rest.to_string());
-            }
+        if let Some(service) = &self.keyring_service {
+            return KeystoreConfig::Keyring(service.to_string());
         }
 
+        // no setting in command line or environment
+        // for macos and windows, default to os keyring
+        if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+            return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
+        }
+        // for linux, default to file
         KeystoreConfig::File(default_keyfile_path())
     }
 }
@@ -156,7 +145,7 @@ impl KeystoreConfig {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Authentication
+    /// Authentication commands
     Auth(AuthArgs),
 
     /// Space list and CRUD operations
@@ -194,10 +183,9 @@ pub enum Commands {
     /// Search - global or in-space
     Search(SearchArgs),
 
-    /// List operations
+    /// List (collection or query) operations
     #[command(alias = "lists")]
     List(ListArgs),
-    Config(ConfigArgs),
 }
 
 #[derive(Args, Debug)]
@@ -237,20 +225,26 @@ pub enum SpaceCommands {
         filter: FilterArgs,
     },
     Get {
-        space_id: String,
+        /// space id or name (required)
+        space: String,
     },
     Create {
+        /// new space name (required)
         name: String,
 
+        /// space description
         #[arg(long)]
         description: Option<String>,
     },
     Update {
-        space_id: String,
+        /// space id or name
+        space: String,
 
+        /// new space name
         #[arg(long)]
         name: Option<String>,
 
+        /// new space description
         #[arg(long)]
         description: Option<String>,
     },
@@ -265,46 +259,63 @@ pub struct ObjectArgs {
 #[derive(Subcommand, Debug)]
 pub enum ObjectCommands {
     List {
-        space_id: String,
+        /// space id or name
+        space: String,
 
         #[command(flatten)]
         pagination: PaginationArgs,
 
+        /// filters to limit results
         #[command(flatten)]
         filter: FilterArgs,
 
+        /// types to limit results
         #[arg(long = "type", value_name = "TYPE_KEY")]
         types: Vec<String>,
     },
     Get {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// id of object to get
         object_id: String,
     },
     Create {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// type of object to create. Must already be defined in space
         type_key: String,
 
+        /// object name
         #[arg(long)]
         name: Option<String>,
 
+        /// markdown body
         #[arg(long)]
         body: Option<String>,
 
+        /// read markdown body from file
         #[arg(long)]
         body_file: Option<PathBuf>,
 
+        /// set object's icon to an emoji
         #[arg(long)]
         icon_emoji: Option<String>,
 
+        /// set object's icon from file
         #[arg(long)]
         icon_file: Option<PathBuf>,
 
+        /// use template
         #[arg(long)]
         template: Option<String>,
 
+        /// set description
         #[arg(long)]
         description: Option<String>,
 
+        /// sets object's url (required for bookmark objects)
         #[arg(long)]
         url: Option<String>,
 
@@ -317,24 +328,33 @@ pub enum ObjectCommands {
         property_args: Vec<String>,
     },
     Update {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// id of object to modify
         object_id: String,
 
+        /// new object name
         #[arg(long)]
         name: Option<String>,
 
+        /// new object markdown body
         #[arg(long)]
         body: Option<String>,
 
+        /// new markdown from file
         #[arg(long)]
         body_file: Option<PathBuf>,
 
+        /// new icon emoji
         #[arg(long)]
         icon_emoji: Option<String>,
 
+        /// new icon from file
         #[arg(long)]
         icon_file: Option<PathBuf>,
 
+        /// change object's type
         #[arg(long = "type")]
         type_key: Option<String>,
 
@@ -347,7 +367,10 @@ pub enum ObjectCommands {
         property_args: Vec<String>,
     },
     Delete {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// id of object to delete
         object_id: String,
     },
 }
@@ -361,7 +384,8 @@ pub struct TypeArgs {
 #[derive(Subcommand, Debug)]
 pub enum TypeCommands {
     List {
-        space_id: String,
+        /// space id or name
+        space: String,
 
         #[command(flatten)]
         pagination: PaginationArgs,
@@ -370,56 +394,83 @@ pub enum TypeCommands {
         filter: FilterArgs,
     },
     Get {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// type id, name, or key
         type_id: String,
     },
     Create {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// type key (required)
         key: String,
+
+        /// type name (required)
         name: String,
 
+        /// plural name (defaults to name + 's')
         #[arg(long)]
         plural: Option<String>,
 
+        /// set type emoji icon
         #[arg(long)]
         icon_emoji: Option<String>,
 
+        /// set type layout
         #[arg(long, value_enum, default_value = "basic")]
         layout: TypeLayoutArg,
 
+        /// set type properties
         #[arg(short = 'p', long = "prop", alias = "property", value_name = "SPEC")]
         properties: Vec<String>,
     },
     Update {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// id of type to update
         type_id: String,
 
+        /// change type key
         #[arg(long)]
         key: Option<String>,
 
+        /// change type name
         #[arg(long)]
         name: Option<String>,
 
+        /// change type plural name
         #[arg(long)]
         plural: Option<String>,
 
+        /// change type emoji icon
         #[arg(long)]
         icon_emoji: Option<String>,
 
+        /// change type layout
         #[arg(long, value_enum)]
         layout: Option<TypeLayoutArg>,
     },
     Delete {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// id of type to delete
         type_id: String,
     },
 }
 
 #[derive(Clone, ValueEnum, Debug)]
 pub enum TypeLayoutArg {
+    /// standard object layout
     Basic,
+    /// profile layout for user/contact information
     Profile,
+    /// action/task layout
     Action,
+    /// simplified note layout
     Note,
 }
 
@@ -432,7 +483,8 @@ pub struct PropertyArgs {
 #[derive(Subcommand, Debug)]
 pub enum PropertyCommands {
     List {
-        space_id: String,
+        /// space id or name
+        space: String,
 
         #[command(flatten)]
         pagination: PaginationArgs,
@@ -444,34 +496,51 @@ pub enum PropertyCommands {
         format: Option<PropertyFormatArg>,
     },
     Get {
-        space_id: String,
-        property_id: String,
+        /// space id or name
+        space: String,
+
+        /// property id or key
+        property: String,
     },
     Create {
-        space_id: String,
+        /// space id or name
+        space: String,
+        /// new property name
         name: String,
+
+        /// property format
         #[arg(value_enum)]
         format: PropertyFormatArg,
 
+        /// property key (recommended), snake_case
         #[arg(long)]
         key: Option<String>,
 
+        /// tags
         #[arg(long = "tag", value_name = "NAME:COLOR")]
         tags: Vec<String>,
     },
     Update {
-        space_id: String,
-        property_id: String,
+        /// space id or name
+        space: String,
 
+        /// id or key of property to update
+        property: String,
+
+        /// change property name
         #[arg(long)]
         name: Option<String>,
 
+        /// change property key
         #[arg(long)]
         key: Option<String>,
     },
     Delete {
-        space_id: String,
-        property_id: String,
+        /// space id or name
+        space: String,
+
+        /// id or key of property to delete
+        property: String,
     },
 }
 
@@ -500,7 +569,8 @@ pub struct MemberArgs {
 #[derive(Subcommand, Debug)]
 pub enum MemberCommands {
     List {
-        space_id: String,
+        /// space id or name
+        space: String,
 
         #[command(flatten)]
         pagination: PaginationArgs,
@@ -515,11 +585,14 @@ pub enum MemberCommands {
         status: Option<MemberStatusArg>,
     },
     Get {
-        space_id: String,
+        /// space id or name
+        space: String,
+        /// member id
         member_id: String,
     },
 }
 
+/// member role
 #[derive(Clone, ValueEnum, Debug)]
 pub enum MemberRoleArg {
     Viewer,
@@ -527,6 +600,7 @@ pub enum MemberRoleArg {
     Owner,
 }
 
+/// member status
 #[derive(Clone, ValueEnum, Debug)]
 pub enum MemberStatusArg {
     Joining,
@@ -546,7 +620,10 @@ pub struct TagArgs {
 #[derive(Subcommand, Debug)]
 pub enum TagCommands {
     List {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// property
         property_id: String,
 
         #[command(flatten)]
@@ -556,39 +633,61 @@ pub enum TagCommands {
         filter: FilterArgs,
     },
     Get {
-        space_id: String,
+        /// space id or name
+        space: String,
+
         /// property id or key
         property_id: String,
+
         /// tag id or Name
         tag_id: String,
     },
     Create {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// property id
         property_id: String,
+
+        /// tag name
         name: String,
+
+        /// tag color
         #[arg(value_enum)]
         color: TagColorArg,
 
+        /// tag key (recommended), snake_case
         #[arg(long)]
         key: Option<String>,
     },
     Update {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// property id
         property_id: String,
+
+        /// tag id
         tag_id: String,
 
+        /// change tag name
         #[arg(long)]
         name: Option<String>,
 
+        /// change tag key
         #[arg(long)]
         key: Option<String>,
 
+        /// change tag color
         #[arg(long, value_enum)]
         color: Option<TagColorArg>,
     },
     Delete {
-        space_id: String,
+        /// space id or name
+        space: String,
+        /// property id
         property_id: String,
+        /// tag id
         tag_id: String,
     },
 }
@@ -620,38 +719,32 @@ pub struct ViewArgs {
 }
 
 #[derive(Subcommand, Debug)]
-    pub enum ViewCommands {
-        /// List objects for a view, showing only view columns
-        Objects {
-            /// View ID
-            #[arg(long)]
-            view: String,
-            /// Column keys for table output (comma-separated)
-            #[arg(long, alias = "cols")]
-            columns: Option<String>,
-            /// Space ID
-            space_id: String,
-            /// Type ID (list id)
-            type_id: String,
-            /// Limit number of items
+pub enum ViewCommands {
+    /// List objects for a view
+    Objects {
+        /// View ID
+        #[arg(long)]
+        view: String,
+        /// Column keys for table output (comma-separated)
+        #[arg(long, alias = "cols")]
+        columns: Option<String>,
+        /// Space ID
+        space: String,
+        /// Type ID (list id)
+        type_id: String,
+        /// Limit number of items
         #[arg(long, default_value = "100")]
         limit: usize,
-        /// gRPC server address
-        #[arg(long, default_value = "http://127.0.0.1:31010")]
-        grpc_addr: String,
-        /// gRPC session token (overrides config lookup)
-        #[arg(long)]
-        grpc_token: Option<String>,
-        /// Path to Anytype config.json (defaults to ~/.anytype/config.json)
-        #[arg(long)]
-        grpc_config: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum TemplateCommands {
     List {
-        space_id: String,
+        /// space id or name
+        space: String,
+
+        /// type the template applies to
         type_id: String,
 
         #[command(flatten)]
@@ -661,21 +754,27 @@ pub enum TemplateCommands {
         filter: FilterArgs,
     },
     Get {
-        space_id: String,
+        /// space id or name
+        space: String,
+        /// type the template applies to
         type_id: String,
+        /// template id
         template_id: String,
     },
 }
 
 #[derive(Args, Debug)]
 pub struct SearchArgs {
+    /// search within a space (default: global across all available spaces)
     #[arg(long)]
-    pub space_id: Option<String>,
+    pub space: Option<String>,
 
+    /// search for text in title or markdown body
     #[arg(long)]
     pub text: Option<String>,
 
-    #[arg(long = "type", value_name = "TYPE_KEY")]
+    /// Limit search to types (type_key). Repeat to include multiple types
+    #[arg(long = "type", value_name = "type")]
     pub types: Vec<String>,
 
     #[command(flatten)]
@@ -697,9 +796,13 @@ pub struct ListArgs {
 #[derive(Subcommand, Debug)]
 pub enum ListCommands {
     Objects {
-        space_id: String,
+        /// space id or name (required)
+        space: String,
+
+        /// list or collection id, or type id/name/key
         list_id: String,
 
+        /// optional view name or id
         #[arg(long)]
         view: Option<String>,
 
@@ -710,68 +813,67 @@ pub enum ListCommands {
         filter: FilterArgs,
     },
     Views {
-        space_id: String,
+        /// space id or name (required)
+        space: String,
+
+        /// list/collection id, or type id/name/key (required)
         list_id: String,
 
         #[command(flatten)]
         pagination: PaginationArgs,
     },
     Add {
-        space_id: String,
+        /// space id or name (required)
+        space: String,
+
+        /// list (collection) id
         list_id: String,
+
+        /// ids of objects to add
         #[arg(required = true)]
         object_ids: Vec<String>,
     },
     Remove {
-        space_id: String,
+        /// space id or name (required)
+        space: String,
+
+        /// list (collection) id
         list_id: String,
+
+        /// id of object to remove (required)
         object_id: String,
     },
 }
 
 #[derive(Args, Debug)]
-pub struct ConfigArgs {
-    #[command(subcommand)]
-    pub command: ConfigCommands,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ConfigCommands {
-    Show,
-    Set { key: ConfigKeyArg, value: String },
-    Reset,
-}
-
-#[derive(Clone, ValueEnum, Debug)]
-pub enum ConfigKeyArg {
-    Url,
-    Keystore,
-    DefaultSpace,
-}
-
-#[derive(Args, Debug)]
 pub struct PaginationArgs {
+    /// limit results to n items (default 100, max 1000)
     #[arg(long, default_value = "100")]
     pub limit: usize,
 
+    /// return results starting with offset (for continuation of previous search)
     #[arg(long, default_value = "0")]
     pub offset: usize,
 
+    /// collect all results from all pages
     #[arg(long)]
     pub all: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct FilterArgs {
+    /// add filter(s) to results
     #[arg(long = "filter", value_name = "FILTER")]
     pub filters: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct SortArgs {
-    #[arg(long)]
+    /// sort results by property key
+    #[arg(long, value_name = "property_key")]
     pub sort: Option<String>,
 
+    /// descending sort (default: ascending)
     #[arg(long)]
     pub desc: bool,
 }
@@ -785,21 +887,12 @@ pub struct AppContext {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
-    let config = CliConfig::load()?;
     let output = Output::new(resolve_output_format(&cli), cli.output.clone());
     let date_format = resolve_table_date_format(&cli);
 
-    if let Commands::Config(args) = &cli.command {
-        return config::handle(args, &output).await;
-    }
+    let base_url = cli.url.unwrap_or_else(|| ANYTYPE_DESKTOP_URL.to_string());
 
-    let base_url = cli
-        .url
-        .clone()
-        .or_else(|| config.url.clone())
-        .unwrap_or_else(|| ANYTYPE_DESKTOP_URL.to_string());
-
-    let keystore = cli.keystore.resolve(Some(&config));
+    let keystore = cli.keystore.resolve();
     let client = build_client(&base_url, &keystore)?;
     let ctx = AppContext {
         client,
@@ -821,7 +914,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::View(args) => view::handle(&ctx, args).await,
         Commands::Search(args) => search::handle(&ctx, args).await,
         Commands::List(args) => list::handle(&ctx, args).await,
-        Commands::Config(_) => Ok(()),
     }
 }
 
@@ -844,8 +936,6 @@ fn resolve_output_format(cli: &Cli) -> OutputFormat {
         OutputFormat::Json
     }
 }
-
-const DEFAULT_TABLE_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 fn resolve_table_date_format(cli: &Cli) -> String {
     cli.date_format

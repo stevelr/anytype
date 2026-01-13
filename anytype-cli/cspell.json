@@ -11,10 +11,12 @@
 	"words": [
 		"anyr",
 		"anytype",
+		"apikey",
 		"ANYTYPECLIENT",
 		"chrono",
 		"didip",
 		"etest",
+		"FOLDERID",
 		"justfile",
 		"ncontains",
 		"nempty",
@@ -24,6 +26,7 @@
 		"retryable",
 		"spaceid",
 		"splitn",
+		"strftime",
 		"subsec",
 		"zeroize"
 	]

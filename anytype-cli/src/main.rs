@@ -1,5 +1,4 @@
 mod cli;
-mod config;
 mod error;
 mod filter;
 mod output;

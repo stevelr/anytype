@@ -1,5 +1,5 @@
-use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
 use crate::cli::common::{resolve_space_id, resolve_type_ids};
+use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
 use anyhow::Result;
@@ -8,7 +8,7 @@ use anytype::prelude::*;
 pub async fn handle(ctx: &AppContext, args: super::SearchArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
 
-    let resolved_space_id = match args.space_id.as_deref() {
+    let resolved_space_id = match args.space.as_deref() {
         Some(space_id) => Some(resolve_space_id(ctx, space_id).await?),
         None => None,
     };

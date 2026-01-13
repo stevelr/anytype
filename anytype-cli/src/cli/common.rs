@@ -8,10 +8,7 @@ use anytype::validation::looks_like_object_id;
 use crate::cli::AppContext;
 
 /// resolve space name or id into space id
-pub(crate) async fn resolve_space_id(
-    ctx: &AppContext,
-    space_id_or_name: &str,
-) -> Result<String> {
+pub(crate) async fn resolve_space_id(ctx: &AppContext, space_id_or_name: &str) -> Result<String> {
     if looks_like_object_id(space_id_or_name) {
         return Ok(space_id_or_name.to_string());
     }
@@ -113,11 +110,7 @@ pub(crate) async fn resolve_type_key(
     }
 }
 
-async fn resolve_type_by_name(
-    ctx: &AppContext,
-    space_id: &str,
-    name: &str,
-) -> Result<Type> {
+async fn resolve_type_by_name(ctx: &AppContext, space_id: &str, name: &str) -> Result<Type> {
     let matches = ctx.client.lookup_types(space_id, name).await?;
     let needle = name.to_lowercase();
     let filtered: Vec<_> = matches
@@ -132,7 +125,10 @@ async fn resolve_type_by_name(
 }
 
 fn starts_with_uppercase(value: &str) -> bool {
-    value.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+    value
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 /// resolve view name or id into view id for a list/type

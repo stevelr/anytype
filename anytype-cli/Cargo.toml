@@ -1,6 +1,6 @@
 [package]
 name = "anyr"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "CLI for Anytype - list, search, and perform CRUD operations on Anytype objects."
 license = "MIT OR Apache-2.0"
@@ -15,13 +15,11 @@ name = "anyr"
 
 [dependencies]
 anyhow.workspace = true
-anytype = { version = "0.2.6", path = "../anytype-api", features = ["keystore-ext"] }
-anytype-rpc = { version = "0.1.0", path = "../anytype-rpc" }
+anytype = { version = "0.2.7", path = "../anytype-api", features = ["keystore-ext"] }
 clap.workspace = true
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

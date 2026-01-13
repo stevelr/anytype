@@ -2,130 +2,170 @@
 
 Command-line interface for the Anytype local API, built on [`anytype`](https://github.com/stevelr/anytype).
 
-## Install / Run
+## Install
 
 ```sh
-cargo install --path .
+cargo install anyr
 ```
 
+## Configure
+
+Configuration can be set with command-line parameters or environment variables.
+
+- **Url** The default url is the desktop client `http://127.0.0.1:31009`. Override with `--url` or the environment variable `ANYTYPE_URL`.
+
+- **Key Storage** The default key storage method should work on most platforms. Options for overriding the defaults are described below in [Key storage](#key-storage).
+
 ```sh
-anyr \
-    --url "http://127.0.0.1:31009" \
-    --keyfile-path "$HOME/.config/anytype/api.key" \
-    --help
+# use headless server and custom key path
+anyr --url "http://127.0.0.1:31012" --keyfile-path "$HOME/.config/anytype/api.key" ARGS ...`
+
+# custom url and key path in environment
+export ANYTYPE_URL=http://127.0.0.1:31012
+export ANYTYPE_KEY_FILE="$HOME/.config/anytype/api.key"
+anyr ARGS ...
 ```
+
+### Generate api key (first-time authentication)
+
+- **Desktop**: If the Anytype desktop app is running, type `anyr auth login` and the app will display a 4-digit code. Enter the code into the cli prompt, and a key is generated and stored in the KeyStore.
+
+- **Headless server**: If you are using the headless cli server, start the server, run `anytype auth apikey create anyr` to generate and display a key, save it in a file, and set the key file path as described in [Key storage](#key-storage).
+
+## Run
+
+```sh
+# show options
+anyr --help
+
+# check authentication status
+anyr auth status
+
+# List spaces your user is authorized to access
+anyr space list -t
+
+# List spaces with json output
+anyr space list            # default output is json
+anyr space list --json     # same as default
+anyr space list --pretty   # json formatted
+```
+
+## Common options
+
+- `--help` show context-specific help
+
+**Configuration**
+
+- `--url` anytype endpoint url
+- `--keyfile`, `--keyfile-path`, `--keyring`, `--keyring-service`: see [Key storage](#key-storage)
+
+**Output format**
+
+- `--json` (same as default).
+- `--pretty` (json pretty-print)
+- `-t/--table` (table format, easy to read in terminal)
+- `--quiet` (minimal output)
+
+**Filters**
+
+- `--filter` - add filters
+- `--type` - limit search results to type(s)
+- `--sort` - sort results by property key (ascending)
+- `--desc` - if used with `--sort`, sort descending
+
+- There are some apparent bugs in anytype-heart that limit the functionality of search filters, especially in 'list' commands. See [Troubleshooting](../anytype-api/Troubleshooting.md) for current known issues.
 
 ## Examples
 
+### List objects in a space
+
 ```sh
-# Auth
-anyr auth login
-anyr auth status
+# List <ENTITY> in a space. (entities: object, member, property, template)
+# anyr <ENTITY> list <SPACE_ID_OR_NAME>
 
-# List spaces
-anyr space list -t
+# list objects in space 'Personal'
+anyr object list "Personal" -t
 
-# get space id for space named "Work"
-# filter on server and take first result, or filter from results
-anyr space list --filter name=Work --json  | jq -r '.items[0].id]'
-anyr space list --json | jq -r '.items[] | select(.name == "Work") | .id'
+# list types in space 'Personal'
+anyr type list "Personal" -t
 
-# List objects in a space (id or name)
-anyr object list <SPACE_ID_OR_NAME> -t
-
-# List collections (type name or @key)
-anyr object list --type collection <SPACE_ID_OR_NAME> -t
-anyr object list --type @collection <SPACE_ID_OR_NAME> -t
 ```
 
-### List items in a collection
-
-Example: list all my planned trips
+### Search in space
 
 ```sh
-space_name="Personal"
-collection_name="Trips"
-
-# get space_id
-personal_space=$(anyr space list --filter name="$space_name" --json  | jq -r '.items[0].id]')
-# get collection id in space
-trip_collection=$(anyr object list --type collection --filter name="$collection_name" $personal_space | jq -r '.items[0].id')
-# get items in collection
-trip_objs=$(anyr object get $personal_space $trip_collection --json | jq -r '.properties[] | select(.key=="links") | .objects[]')
-# generate csv list of all trips (id,name)
-for obj in $trip_objs
-  anyr object get $personal_space $obj --json | jq -r '[.id,.name] | @csv'
-done
+# search space "Work" for tasks containing the text "customer"
+anyr search --space "Work" --type Task --text customer -t
 ```
 
-### List tasks
+### List tasks in space
 
 ```sh
-spaceid="bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.3333333333333"
-for task in $(anyr object list --type task $spaceid --json | jq -r '.items[] | .id'); do
+space_id="Work" # specify space using name or id
+for task in `anyr search --type Task --space $space_id --json | jq -r '.items[] | .id`; do
   data=$(anyr object get $space_id $task --json)
   status=$(jq -r '.properties[] | select (.key=="status") .select.name' <<< "$data")
   name=$(jq -r '.name' <<< "$data")
+  # get created_date as YYYY-MM-DD
   created_date=$(jq -r '.properties[] | select (.key=="created_date") .date' <<< "$data" | sed 's/T.*$//')
+  # generate formatted table with date, status, and name
   printf "%10s %-12s %s" $created_date $status $name
 done
 ```
 
-### List items in a collection
+### Get objects from a collection list or grid view.
+
+If you have a list or grid formatted view, you can use `view objects` to list the view items by specifying the space name, list, and view.
+
+- Results are filtered and sorted by the criteria in the view.
+- View can be specified by the view id or view name.
+- The --json and --pretty format outputs include all properties of the objects.
+
+Table listing features for `view objects`:
+
+- Table listing defaults to name column only. Specify columns in table output with `--cols/--columns` and a comma-separated list of property keys. Example `--cols name,creator,created_date,status`
+- Format dates with strftime format: `--date-format` or `ANYTYPE_DATE_FORMAT`, defaults to `%Y-%m-%d %H:%M:%S`.
+- Members names are displayed instead of member id.
+
+Example: get all tasks in space "Work" from view "All"
 
 ```sh
-# get the collection
-anyr object get <SPACE_ID> <COLLECTION_ID> --pretty
+# show names of all tasks in space "Work", using view 'All'
+anyr view objects --view All "Work" Task -t
 
-jq '.properties[] | select(.key == "links") | .objects[]'
+# show columns: Name, Created By, and Status (note: column names are specified by property_key)
+anyr view objects --view All "Work" Task --cols name,creator,status
 
-# If you want them as an array instead of individual values:
-jq '[.properties[] | select(.key == "links") | .objects[]]'
-
-# Or more simply:
-
-jq '.properties[] | select(.key == "links") | .objects'
+# get tasks from view ByProject in json, with all properties
+anyr view objects --view ByProject "Work" Task --json
 ```
 
-### List items in a query
+## Key storage
 
-```
-# list queries, look for the query you want (use in <query_id>)
-anyr object list --type set <SPACE_ID> -t
+`anyr` requires an api key to access Anytype documents, which is obtained with a one-time authentication step.
 
-# list views of the query (look for view All, get the id <view_id>)
-anyr list views <SPACE_ID> <QUERY_ID> -t
+First, decide which of two methods will be used for storing the key. The key should be kept secret like other passwords, as it can allow access to unencrypted anytype documents. Preferably, the api key is stored in the secure OS Keyring, which requires biometric or password authentication. Alternately, the key can be saved in a file on your drive, which is less secure.
 
-# list items in that view (table/list layouts)
-anyr view objects --view "All" $space_id $query_id --table
+Key storage is determined in the following order of precedence:
 
-# limit table columns (property keys or id/name)
-anyr view objects --view $view_id $space_id $query_id --table --cols name,status,created_date
-```
+1. If flag `--keyfile` is present, or environment variable `ANYTYPE_KEYSTORE_FILE` is `1`, api keys are stored in a file in a config folder.
 
-### Search
+| Platform | Value                                 | Example                                               |
+| -------- | ------------------------------------- | ----------------------------------------------------- |
+| Linux    | `$XDG_CONFIG_HOME` or `$HOME`/.config | /home/alice/.config/anyr/api.key                      |
+| macOS    | `$HOME`/Library/Application Support   | /Users/Alice/Library/Application Support/anyr/api.key |
+| Windows  | `{FOLDERID_RoamingAppData}`           | C:\Users\Alice\AppData\Roaming\anyr\api.key           |
+| (other)  |                                       | ./anyr/api.key                                        |
 
-Search for text in title and markdown body, across all spaces the user is authorized to access.
+2. If arg `--keyfile-path` is set, or environment variable `ANYTYPE_KEY_FILE` is set, api keys are stored in a file with that path.
 
-Add the `--space SPACE_ID` arg to limit search to a specific space.
+3. If flag `--keyring` is present, or `ANYTYPE_KEYSTORE_KEYRING` is `1`, the OS keyring is used and prompts user with service name "anyr".
 
-```
-anyr search --text "meeting notes"
+4. If arg `--keyring-service` is set, or environment variable `ANYTYPE_KEY`
 
-```
+5. If environment variable `ANYTYPE_KEYSTORE_KEYRING` is `1` or `true`,
 
-## Output Formats
-
-- `--json` (default)
-- `--pretty` (json pretty-print)
-- `--table` (readable)
-- `--quiet` (minimal output)
-- `--date-format` (table date output; default `%Y-%m-%d %H:%M:%S`)
-
-## Name Resolution
-
-- Arguments that expect `space_id` also accept a space name.
-- Arguments that expect a type accept a type name, and `@key` forces a type key lookup.
+6. If none of the above overrides are present, for MacOS and Windows, key storage defaults to the OS keyring for MacOS and Windows, and the default file path for Linux and other platforms.
 
 ## Logging
 
@@ -135,7 +175,7 @@ Debug logging
 RUST_LOG=debug anyr object list <SPACE_ID>
 ```
 
-Log HTTP request/response:
+Log HTTP requests and responses:
 
 ```sh
 RUST_LOG=warn,anytype::http_json=trace anyr object list <SPACE_ID>

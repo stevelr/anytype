@@ -10,12 +10,12 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
     match args.command {
         super::TagCommands::List {
-            space_id,
+            space,
             property_id,
             pagination,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let mut request = ctx
                 .client
@@ -42,11 +42,11 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::TagCommands::Get {
-            space_id,
+            space,
             property_id,
             tag_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let item = if looks_like_object_id(&tag_id) {
                 ctx.client.tag(space_id, property_id, tag_id).get().await?
@@ -70,13 +70,13 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::TagCommands::Create {
-            space_id,
+            space,
             property_id,
             name,
             color,
             key,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let mut request = ctx
                 .client
@@ -92,14 +92,14 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::TagCommands::Update {
-            space_id,
+            space,
             property_id,
             tag_id,
             name,
             key,
             color,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
             let tag_id = ctx
                 .client
@@ -123,11 +123,11 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::TagCommands::Delete {
-            space_id,
+            space,
             property_id,
             tag_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let item = if looks_like_object_id(&property_id) && looks_like_object_id(&tag_id) {
                 ctx.client.tag(space_id, property_id, tag_id)
             } else {

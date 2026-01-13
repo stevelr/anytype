@@ -10,12 +10,12 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
     match args.command {
         super::PropertyCommands::List {
-            space_id,
+            space,
             pagination,
             filter,
             format,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let mut request = ctx
                 .client
                 .properties(space_id)
@@ -47,28 +47,25 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             }
             ctx.output.emit_json(&result)
         }
-        super::PropertyCommands::Get {
-            space_id,
-            property_id,
-        } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
-            let item = if looks_like_object_id(&property_id) {
-                ctx.client.property(space_id, property_id).get().await?
+        super::PropertyCommands::Get { space, property } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let item = if looks_like_object_id(&property) {
+                ctx.client.property(space_id, property).get().await?
             } else {
                 ctx.client
-                    .lookup_property_by_key(&space_id, &property_id)
+                    .lookup_property_by_key(&space_id, &property)
                     .await?
             };
             ctx.output.emit_json(&item)
         }
         super::PropertyCommands::Create {
-            space_id,
+            space,
             name,
             format,
             key,
             tags,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let mut request = ctx.client.new_property(space_id, name, format.to_format());
 
             if let Some(key) = key {
@@ -87,14 +84,14 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::PropertyCommands::Update {
-            space_id,
-            property_id,
+            space,
+            property,
             name,
             key,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
-            let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
-            let mut request = ctx.client.update_property(space_id, property_id);
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let property = resolve_property_id(ctx, &space_id, &property).await?;
+            let mut request = ctx.client.update_property(space_id, property);
 
             if let Some(name) = name {
                 request = request.name(name);
@@ -106,13 +103,10 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             let item = request.update().await?;
             ctx.output.emit_json(&item)
         }
-        super::PropertyCommands::Delete {
-            space_id,
-            property_id,
-        } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
-            let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
-            let item = ctx.client.property(space_id, property_id).delete().await?;
+        super::PropertyCommands::Delete { space, property } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let property_id = resolve_property_id(ctx, &space_id, &property).await?;
+            let item = ctx.client.property(space_id, &property_id).delete().await?;
             ctx.output.emit_json(&item)
         }
     }

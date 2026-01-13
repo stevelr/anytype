@@ -10,11 +10,11 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
     match args.command {
         super::TypeCommands::List {
-            space_id,
+            space,
             pagination,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let mut request = ctx
                 .client
                 .types(space_id)
@@ -39,14 +39,14 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             }
             ctx.output.emit_json(&result)
         }
-        super::TypeCommands::Get { space_id, type_id } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+        super::TypeCommands::Get { space, type_id } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let item = ctx.client.get_type(space_id, type_id).get().await?;
             ctx.output.emit_json(&item)
         }
         super::TypeCommands::Create {
-            space_id,
+            space,
             key,
             name,
             plural,
@@ -54,7 +54,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             layout,
             properties,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let mut request = ctx.client.new_type(space_id, name).key(key);
             if let Some(plural) = plural {
                 request = request.plural_name(plural);
@@ -73,7 +73,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::TypeCommands::Update {
-            space_id,
+            space,
             type_id,
             key,
             name,
@@ -81,7 +81,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             icon_emoji,
             layout,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let mut request = ctx.client.update_type(space_id, type_id);
 
@@ -104,8 +104,8 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             let item = request.update().await?;
             ctx.output.emit_json(&item)
         }
-        super::TypeCommands::Delete { space_id, type_id } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+        super::TypeCommands::Delete { space, type_id } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let item = ctx.client.get_type(space_id, type_id).delete().await?;
             ctx.output.emit_json(&item)

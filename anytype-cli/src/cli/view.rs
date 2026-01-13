@@ -1,34 +1,20 @@
-use std::collections::{BTreeMap, HashMap};
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
-use tonic::transport::{Channel, Endpoint};
 
 use crate::{
-    cli::{AppContext, ensure_authenticated},
     cli::common::{resolve_space_id, resolve_type_id, resolve_view_id},
+    cli::{AppContext, ensure_authenticated},
     output::{OutputFormat, render_table_dynamic},
 };
 use anytype::prelude::{Member, Object};
-use anytype_rpc::{
-    anytype::ClientCommandsClient,
-    auth::{SessionAuth, create_session_token},
-    model::block::content::dataview::relation::FormulaType,
-    views::{GridViewInfo, fetch_grid_view_columns},
-};
 
-const DEFAULT_GRPC_ADDR: &str = "http://127.0.0.1:31010";
-
-#[derive(Debug, Default, serde::Deserialize)]
-struct AnytypeConfig {
-    #[serde(rename = "accountKey")]
-    account_key: Option<String>,
-    #[serde(rename = "sessionToken")]
-    session_token: Option<String>,
+#[derive(Debug, Clone)]
+struct ViewColumn {
+    relation_key: String,
+    name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,33 +36,18 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
         super::ViewCommands::Objects {
             view,
             columns,
-            space_id,
+            space,
             type_id,
             limit,
-            grpc_addr,
-            grpc_token,
-            grpc_config,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
-            let view = resolve_view_id(ctx, &space_id, &type_id, &view).await?;
-            let app_key = load_app_key_from_keystore(ctx)?;
-            let view_info = load_view_info(
-                grpc_addr,
-                grpc_token,
-                grpc_config.as_deref(),
-                app_key,
-                &space_id,
-                &type_id,
-                &view,
-            )
-            .await?;
-
-            let base_columns = view_info.columns.clone();
+            let view_id = resolve_view_id(ctx, &space_id, &type_id, &view).await?;
+            let base_columns = default_columns();
             let request = ctx
                 .client
                 .view_list_objects(&space_id, &type_id)
-                .view(view)
+                .view(view_id.clone())
                 .limit(limit);
             let result = request.list().await?;
 
@@ -86,7 +57,7 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
                         Some(value) => {
                             let property_names =
                                 load_type_property_names(ctx, &space_id, &type_id).await?;
-                            override_columns(&view_info, &property_names, &value)
+                            override_columns(&property_names, &value)
                         }
                         None => base_columns.clone(),
                     };
@@ -106,15 +77,16 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
                     ctx.output.emit_text(&table)
                 }
                 _ => {
-                    let items = view_objects_rows(&base_columns, &result.items);
+                    let property_names = load_type_property_names(ctx, &space_id, &type_id).await?;
+                    let json_columns = columns_for_items(&result.items, &property_names);
+                    let items = view_objects_rows(&json_columns, &result.items);
                     let output = ViewObjectsOutput {
-                        view_id: view_info.view_id,
-                        columns: view_info
-                            .columns
-                            .into_iter()
+                        view_id,
+                        columns: json_columns
+                            .iter()
                             .map(|col| ViewColumnOutput {
-                                key: col.relation_key,
-                                name: col.name,
+                                key: col.relation_key.clone(),
+                                name: col.name.clone(),
                             })
                             .collect(),
                         items,
@@ -124,84 +96,6 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
             }
         }
     }
-}
-
-async fn load_view_info(
-    grpc_addr: String,
-    grpc_token: Option<String>,
-    grpc_config: Option<&Path>,
-    app_key: Option<String>,
-    space_id: &str,
-    type_id: &str,
-    view_id: &str,
-) -> Result<GridViewInfo> {
-    let addr = if grpc_addr.is_empty() {
-        DEFAULT_GRPC_ADDR.to_string()
-    } else {
-        grpc_addr
-    };
-
-    let channel = connect(&addr).await?;
-    let token = resolve_grpc_token(&channel, grpc_token, grpc_config, app_key).await?;
-    let mut client = ClientCommandsClient::new(channel);
-    let info = fetch_grid_view_columns(&mut client, &token, space_id, type_id, view_id).await?;
-    Ok(info)
-}
-
-async fn resolve_grpc_token(
-    channel: &Channel,
-    grpc_token: Option<String>,
-    grpc_config: Option<&Path>,
-    app_key: Option<String>,
-) -> Result<String> {
-    if let Some(token) = grpc_token {
-        return Ok(token);
-    }
-
-    let config = load_anytype_config(grpc_config)?;
-    if let Some(token) = config.session_token {
-        return Ok(token);
-    }
-    if let Some(account_key) = config.account_key {
-        return create_session_token(channel.clone(), SessionAuth::AccountKey(account_key))
-            .await
-            .map_err(|err| anyhow!(err.to_string()));
-    }
-    if let Some(app_key) = app_key {
-        return create_session_token(channel.clone(), SessionAuth::AppKey(app_key))
-            .await
-            .map_err(|err| anyhow!(err.to_string()));
-    }
-
-    Err(anyhow!(
-        "no grpc auth found: pass --grpc-token or ensure ~/.anytype/config.json has sessionToken/accountKey"
-    ))
-}
-
-async fn connect(addr: &str) -> Result<Channel> {
-    let channel = Endpoint::from_shared(addr.to_string())?
-        .connect()
-        .await
-        .map_err(|err| anyhow!("Failed to connect to {}: {}", addr, err))?;
-    Ok(channel)
-}
-
-fn load_anytype_config(path: Option<&Path>) -> Result<AnytypeConfig> {
-    let path = match path {
-        Some(path) => path.to_path_buf(),
-        None => default_anytype_config_path()?,
-    };
-    if !path.exists() {
-        return Ok(AnytypeConfig::default());
-    }
-    let content = fs::read_to_string(&path)?;
-    let config = serde_json::from_str(&content)?;
-    Ok(config)
-}
-
-fn default_anytype_config_path() -> Result<PathBuf> {
-    let home = env::var("HOME").map_err(|_| anyhow!("HOME environment variable not set"))?;
-    Ok(PathBuf::from(home).join(".anytype").join("config.json"))
 }
 
 async fn load_type_property_names(
@@ -217,118 +111,68 @@ async fn load_type_property_names(
         .collect())
 }
 
-fn load_app_key_from_keystore(ctx: &AppContext) -> Result<Option<String>> {
-    let keystore = ctx.client.get_key_store();
-    let key = keystore
-        .load_key()
-        .map_err(|err| anyhow!(err.to_string()))?;
-    Ok(key.map(|secret| secret.get_key().to_string()))
+fn default_columns() -> Vec<ViewColumn> {
+    vec![ViewColumn {
+        relation_key: "name".to_string(),
+        name: "Name".to_string(),
+    }]
 }
 
-// fn visible_columns(view: &GridViewInfo) -> Vec<anytype_rpc::views::GridViewColumn> {
-//     let mut columns: Vec<anytype_rpc::views::GridViewColumn> = view
-//         .columns
-//         .iter()
-//         .filter(|col| col.is_visible || col.relation_key == "name")
-//         .cloned()
-//         .collect();
-
-//     if !columns.iter().any(|col| col.relation_key == "name") {
-//         columns.insert(
-//             0,
-//             anytype_rpc::views::GridViewColumn {
-//                 relation_key: "name".to_string(),
-//                 name: "Name".to_string(),
-//                 format: None,
-//                 formula: FormulaType::None,
-//                 is_visible: true,
-//                 width: 0,
-//             },
-//         );
-//     }
-
-//     columns
-// }
-
-fn override_columns(
-    view: &GridViewInfo,
-    property_names: &HashMap<String, String>,
-    columns: &str,
-) -> Vec<anytype_rpc::views::GridViewColumn> {
+fn override_columns(property_names: &HashMap<String, String>, columns: &str) -> Vec<ViewColumn> {
     columns
         .split(',')
         .map(|key| key.trim())
         .filter(|key| !key.is_empty())
         .map(|key| match key {
-            "id" => anytype_rpc::views::GridViewColumn {
+            "id" => ViewColumn {
                 relation_key: "id".to_string(),
                 name: "Id".to_string(),
-                format: None,
-                formula: FormulaType::None,
-                is_visible: true,
-                width: 0,
             },
-            "name" => anytype_rpc::views::GridViewColumn {
+            "name" => ViewColumn {
                 relation_key: "name".to_string(),
                 name: "Name".to_string(),
-                format: None,
-                formula: FormulaType::None,
-                is_visible: true,
-                width: 0,
             },
-            _ => resolve_column_for_key(view, property_names, key).unwrap_or_else(|| {
-                anytype_rpc::views::GridViewColumn {
-                    relation_key: key.to_string(),
-                    name: key.to_string(),
-                    format: None,
-                    formula: FormulaType::None,
-                    is_visible: true,
-                    width: 0,
-                }
-            }),
+            _ => ViewColumn {
+                relation_key: key.to_string(),
+                name: property_names
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| key.to_string()),
+            },
         })
         .collect()
 }
 
-fn resolve_column_for_key(
-    view: &GridViewInfo,
+fn columns_for_items(
+    items: &[Object],
     property_names: &HashMap<String, String>,
-    key: &str,
-) -> Option<anytype_rpc::views::GridViewColumn> {
-    if let Some(column) = view.columns.iter().find(|col| col.relation_key == key) {
-        return Some(with_property_name(column.clone(), property_names));
+) -> Vec<ViewColumn> {
+    let mut keys = BTreeSet::new();
+    for object in items {
+        for prop in &object.properties {
+            keys.insert(prop.key.clone());
+        }
     }
 
-    if let Some(name) = property_names.get(key) {
-        return Some(anytype_rpc::views::GridViewColumn {
-            relation_key: key.to_string(),
-            name: name.clone(),
-            format: None,
-            formula: FormulaType::None,
-            is_visible: true,
-            width: 0,
+    let mut columns = Vec::with_capacity(keys.len() + 2);
+    columns.push(ViewColumn {
+        relation_key: "name".to_string(),
+        name: "Name".to_string(),
+    });
+    columns.push(ViewColumn {
+        relation_key: "id".to_string(),
+        name: "Id".to_string(),
+    });
+    for key in keys {
+        columns.push(ViewColumn {
+            relation_key: key.clone(),
+            name: property_names.get(&key).cloned().unwrap_or(key),
         });
     }
-
-    None
+    columns
 }
 
-fn with_property_name(
-    mut column: anytype_rpc::views::GridViewColumn,
-    property_names: &HashMap<String, String>,
-) -> anytype_rpc::views::GridViewColumn {
-    if column.name == column.relation_key
-        && let Some(name) = property_names.get(&column.relation_key)
-    {
-        column.name = name.clone();
-    }
-    column
-}
-
-fn view_objects_rows(
-    columns: &[anytype_rpc::views::GridViewColumn],
-    items: &[Object],
-) -> Vec<BTreeMap<String, Value>> {
+fn view_objects_rows(columns: &[ViewColumn], items: &[Object]) -> Vec<BTreeMap<String, Value>> {
     items
         .iter()
         .map(|object| {
@@ -343,7 +187,7 @@ fn view_objects_rows(
 }
 
 fn view_objects_table_rows(
-    columns: &[anytype_rpc::views::GridViewColumn],
+    columns: &[ViewColumn],
     items: &[Object],
     space_id: &str,
     member_cache: &MemberCache,

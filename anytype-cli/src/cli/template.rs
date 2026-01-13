@@ -8,12 +8,12 @@ pub async fn handle(ctx: &AppContext, args: super::TemplateArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
     match args.command {
         super::TemplateCommands::List {
-            space_id,
+            space,
             type_id,
             pagination,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let mut request = ctx
                 .client
@@ -40,11 +40,11 @@ pub async fn handle(ctx: &AppContext, args: super::TemplateArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::TemplateCommands::Get {
-            space_id,
+            space,
             type_id,
             template_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
             let item = ctx
                 .client

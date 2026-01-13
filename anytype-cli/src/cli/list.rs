@@ -1,5 +1,5 @@
-use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
 use crate::cli::common::resolve_space_id;
+use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
 use crate::filter::parse_filters;
 use crate::output::OutputFormat;
 use anyhow::Result;
@@ -8,13 +8,13 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
     match args.command {
         super::ListCommands::Objects {
-            space_id,
+            space,
             list_id,
             view,
             pagination,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let mut request = ctx
                 .client
                 .view_list_objects(space_id, list_id)
@@ -44,11 +44,11 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::ListCommands::Views {
-            space_id,
+            space,
             list_id,
             pagination,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let request = ctx
                 .client
                 .list_views(space_id, list_id)
@@ -70,11 +70,11 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::ListCommands::Add {
-            space_id,
+            space,
             list_id,
             object_ids,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let result = ctx
                 .client
                 .view_add_objects(space_id, list_id, object_ids)
@@ -83,11 +83,11 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
                 .emit_json(&serde_json::json!({ "result": result }))
         }
         super::ListCommands::Remove {
-            space_id,
+            space,
             list_id,
             object_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let result = ctx
                 .client
                 .view_remove_object(space_id, list_id, object_id)

@@ -12,12 +12,12 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
     match args.command {
         super::ObjectCommands::List {
-            space_id,
+            space,
             pagination,
             filter,
             types,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let mut request = ctx
                 .client
                 .objects(&space_id)
@@ -51,16 +51,13 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             }
             ctx.output.emit_json(&result)
         }
-        super::ObjectCommands::Get {
-            space_id,
-            object_id,
-        } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+        super::ObjectCommands::Get { space, object_id } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
             let object = ctx.client.object(space_id, object_id).get().await?;
             ctx.output.emit_json(&object)
         }
         super::ObjectCommands::Create {
-            space_id,
+            space,
             type_key,
             name,
             body,
@@ -73,7 +70,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             properties,
             property_args,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let type_key = resolve_type_key(ctx, &space_id, type_key).await?;
             let mut request = ctx.client.new_object(&space_id, type_key);
 
@@ -115,7 +112,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             ctx.output.emit_json(&object)
         }
         super::ObjectCommands::Update {
-            space_id,
+            space,
             object_id,
             name,
             body,
@@ -126,7 +123,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             properties,
             property_args,
         } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
             let mut request = ctx.client.update_object(&space_id, &object_id);
 
             if let Some(name) = name {
@@ -166,11 +163,8 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             let object = request.update().await?;
             ctx.output.emit_json(&object)
         }
-        super::ObjectCommands::Delete {
-            space_id,
-            object_id,
-        } => {
-            let space_id = resolve_space_id(ctx, &space_id).await?;
+        super::ObjectCommands::Delete { space, object_id } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
             let object = ctx.client.object(space_id, object_id).delete().await?;
             ctx.output.emit_json(&object)
         }
