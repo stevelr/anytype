@@ -7,9 +7,12 @@ use tonic::service::Interceptor;
 use tonic::{Request, Status, transport::Channel};
 
 use crate::anytype::ClientCommandsClient;
+use crate::anytype::rpc::account::local_link::new_challenge::Request as LocalLinkChallengeRequest;
+use crate::anytype::rpc::account::local_link::solve_challenge::Request as LocalLinkSolveRequest;
 use crate::anytype::rpc::wallet::create_session::{
     Request as CreateSessionRequest, Response as CreateSessionResponse, request::Auth,
 };
+use crate::model::account::auth::LocalApiScope;
 
 /// Authentication options for `WalletCreateSession`.
 #[derive(Debug, Clone)]
@@ -104,6 +107,88 @@ pub async fn create_session_token(
         return Err(AuthError::EmptyToken);
     }
     Ok(response.token)
+}
+
+/// Create a session token from a LocalLink app key.
+pub async fn create_session_token_from_app_key(
+    channel: Channel,
+    app_key: impl AsRef<str>,
+) -> Result<String, AuthError> {
+    create_session_token(channel, SessionAuth::AppKey(app_key.as_ref().to_string())).await
+}
+
+/// Create a session token from a headless account key.
+pub async fn create_session_token_from_account_key(
+    channel: Channel,
+    account_key: impl AsRef<str>,
+) -> Result<String, AuthError> {
+    create_session_token(
+        channel,
+        SessionAuth::AccountKey(account_key.as_ref().to_string()),
+    )
+    .await
+}
+
+/// Response from LocalLink SolveChallenge.
+#[derive(Debug, Clone)]
+pub struct LocalLinkCredentials {
+    pub app_key: String,
+    pub session_token: Option<String>,
+}
+
+/// Create a LocalLink challenge for the given app name and scope.
+pub async fn create_local_link_challenge(
+    channel: Channel,
+    app_name: impl Into<String>,
+    scope: LocalApiScope,
+) -> Result<String, AuthError> {
+    let mut client = ClientCommandsClient::new(channel);
+    let request = LocalLinkChallengeRequest {
+        app_name: app_name.into(),
+        scope: scope as i32,
+    };
+    let response = client.account_local_link_new_challenge(request).await?;
+    let response = response.into_inner();
+    if let Some(error) = response.error.as_ref()
+        && error.code != 0
+    {
+        return Err(AuthError::Api {
+            code: error.code,
+            description: error.description.clone(),
+        });
+    }
+    Ok(response.challenge_id)
+}
+
+/// Solve a LocalLink challenge and return the app key.
+pub async fn solve_local_link_challenge(
+    channel: Channel,
+    challenge_id: impl Into<String>,
+    answer: impl Into<String>,
+) -> Result<LocalLinkCredentials, AuthError> {
+    let mut client = ClientCommandsClient::new(channel);
+    let request = LocalLinkSolveRequest {
+        challenge_id: challenge_id.into(),
+        answer: answer.into(),
+    };
+    let response = client.account_local_link_solve_challenge(request).await?;
+    let response = response.into_inner();
+    if let Some(error) = response.error.as_ref()
+        && error.code != 0
+    {
+        return Err(AuthError::Api {
+            code: error.code,
+            description: error.description.clone(),
+        });
+    }
+    Ok(LocalLinkCredentials {
+        app_key: response.app_key,
+        session_token: if response.session_token.is_empty() {
+            None
+        } else {
+            Some(response.session_token)
+        },
+    })
 }
 
 /// Convenience helper to add the `token` metadata to a request.

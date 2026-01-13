@@ -29,5 +29,9 @@ pub mod anytype {
 
 /// Authentication helpers for creating sessions and attaching tokens.
 pub mod auth;
+/// gRPC client configuration and helpers.
+pub mod client;
+/// Helpers for headless config-based auth.
+pub mod config;
 /// Helpers for dataview view metadata.
 pub mod views;
