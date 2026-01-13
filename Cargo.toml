@@ -1,29 +1,31 @@
 [workspace]
-members = ["anytype-api", "anytype-cli", "anytype-rpc"]
+members = ["anytype-api", "anytype-cli", "anytype-rpc", "any-edit"]
 resolver = "3"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
 bytes = "1.11.0"
 chrono = { version = "0.4.42", features = ["serde"] }
-clap = { version = "4.5.53", features = ["derive", "env"] }
+clap = { version = "4.5.54", features = ["derive", "env"] }
 dirs = "6.0.0"
 futures = "0.3"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 parking_lot = "0.12.5"
 reqwest = { version = "0.12.28", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.148"
+serde_json = "1.0.149"
 serde_path_to_error = "0.1.20"
+sha2 = "0.10"
 snafu = { version = "0.8.9" }
 strum = { version = "0.27.2", features = ["derive"] }
 test-log = { version = "0.2.19", features = ["log", "trace"] }
-tokio = { version = "1.48.0", features = ["full"] }
+tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
-prost = "0.14.2"
+# grpc
+prost = "0.14.3"
 tonic = "0.14.2"
 tonic-prost = "0.14.2"
-tonic-prost-build = "0.14.1"
+tonic-prost-build = "0.14.2"
