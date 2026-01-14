@@ -83,10 +83,6 @@ pub struct KeystoreArgs {
     /// Use OS keyring with default service ("anytype_rust")
     #[arg(long)]
     pub keyring: bool,
-
-    /// Use OS keyring with specified service name
-    #[arg(long, value_name = "SERVICE")]
-    pub keyring_service: Option<String>,
 }
 
 impl KeystoreArgs {
@@ -112,10 +108,6 @@ impl KeystoreArgs {
 
         if self.keyring || env_keyring {
             return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
-        }
-
-        if let Some(service) = &self.keyring_service {
-            return KeystoreConfig::Keyring(service.to_string());
         }
 
         // no setting in command line or environment

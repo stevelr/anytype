@@ -161,11 +161,7 @@ Key storage is determined in the following order of precedence:
 
 3. If flag `--keyring` is present, or `ANYTYPE_KEYSTORE_KEYRING` is `1`, the OS keyring is used and prompts user with service name "anyr".
 
-4. If arg `--keyring-service` is set, or environment variable `ANYTYPE_KEY`
-
-5. If environment variable `ANYTYPE_KEYSTORE_KEYRING` is `1` or `true`,
-
-6. If none of the above overrides are present, for MacOS and Windows, key storage defaults to the OS keyring for MacOS and Windows, and the default file path for Linux and other platforms.
+4. If none of the above overrides are present, for MacOS and Windows, key storage defaults to the OS keyring for MacOS and Windows, and the default file path for Linux and other platforms.
 
 ## Logging
 
