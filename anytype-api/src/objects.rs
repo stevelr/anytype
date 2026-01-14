@@ -61,6 +61,7 @@ use std::sync::Arc;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
+use snafu::prelude::*;
 
 use crate::{
     Result,
@@ -912,16 +913,16 @@ impl UpdateObjectRequest {
         self.limits.validate_id(&self.object_id, "object_id")?;
 
         // Check that at least one field is being updated
-        if self.name.is_none()
-            && self.body.is_none()
-            && self.icon.is_none()
-            && self.type_key.is_none()
-            && self.properties.is_empty()
-        {
-            return Err(AnytypeError::Validation {
+        ensure!(
+            self.name.is_some()
+                || self.body.is_some()
+                || self.icon.is_some()
+                || self.type_key.is_some()
+                || !self.properties.is_empty(),
+            ValidationSnafu {
                 message: "update_object: must set at least one field to update".to_string(),
-            });
-        }
+            }
+        );
 
         if let Some(ref name) = self.name {
             self.limits.validate_name(name, "name")?;

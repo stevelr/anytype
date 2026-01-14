@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, ser::SerializeStruct};
 use serde_json::{Number, Value};
+use snafu::prelude::*;
 use tracing::warn;
 
 use crate::{
@@ -265,15 +266,19 @@ pub(crate) struct QueryWithFilters {
 impl QueryWithFilters {
     pub(crate) fn validate(&self) -> crate::Result<()> {
         if let Some(error) = &self.error {
-            return Err(AnytypeError::Validation {
+            return ValidationSnafu {
                 message: error.to_owned(),
-            });
+            }
+            .fail();
         }
-        if self.params.iter().any(|(key, _)| key.trim().is_empty()) {
-            return Err(AnytypeError::Validation {
+
+        ensure!(
+            !self.params.iter().any(|(key, _)| key.trim().is_empty()),
+            ValidationSnafu {
                 message: "query filter has empty property name".to_string(),
-            });
-        }
+            }
+        );
+
         Ok(())
     }
 }

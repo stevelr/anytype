@@ -31,6 +31,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use snafu::prelude::*;
 
 use crate::{
     Result,
@@ -171,11 +172,12 @@ impl ViewListObjectsRequest {
             .add_filters(&self.filters);
 
         let path = if let Some(ref view_id) = self.view_id {
-            if view_id.is_empty() {
-                return Err(AnytypeError::Validation {
+            ensure!(
+                !view_id.is_empty(),
+                ValidationSnafu {
                     message: "view_id is empty".to_string(),
-                });
-            }
+                }
+            );
             format!(
                 "/v1/spaces/{}/lists/{}/views/{}/objects",
                 self.space_id, self.list_id, view_id

@@ -75,6 +75,7 @@ use std::sync::Arc;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Number, Value, json};
+use snafu::prelude::*;
 use tracing::error;
 
 use super::tags::CreateTagRequest;
@@ -433,10 +434,11 @@ fn try_tag(prop: &Property, key: &str, value: &str) -> Result<String> {
     } else if let Some(tag) = prop.tag_by_key(value) {
         &tag.id
     } else {
-        return Err(AnytypeError::NotFound {
+        return NotFoundSnafu {
             obj_type: "Tag".to_string(),
             key: format!("property {key} tag: {value}"),
-        });
+        }
+        .fail();
     };
     Ok(value.to_string())
 }
@@ -490,9 +492,10 @@ impl AnytypeClient {
                         if let Ok(val) = value.parse::<bool>() {
                             obj = obj.set_checkbox(key, val);
                         } else {
-                            return Err(AnytypeError::Validation {
+                            return ValidationSnafu {
                                 message: format!("Invalid bool value for property {key}: {value}"),
-                            });
+                            }
+                            .fail();
                         }
                     }
                     PropertyFormat::Url => {
@@ -510,9 +513,10 @@ impl AnytypeClient {
                     }
                 }
             } else {
-                return Err(AnytypeError::Validation {
+                return ValidationSnafu {
                     message: format!("invalid property {key} for type {}", &typ.key),
-                });
+                }
+                .fail();
             }
         }
         Ok(obj)
@@ -846,10 +850,11 @@ impl PropertyRequest {
                     return Ok(property);
                 }
             }
-            return Err(AnytypeError::NotFound {
-                obj_type: "Property".into(),
+            return NotFoundSnafu {
+                obj_type: "Property".to_string(),
                 key: self.property_id,
-            });
+            }
+            .fail();
         }
 
         // cache disabled, fetch directly
@@ -1021,17 +1026,17 @@ impl NewPropertyRequest {
         if let Some(ref key) = self.key {
             self.limits.validate_name(key, "property key")?;
         }
-        if !self.tags.is_empty()
-            && self.format != PropertyFormat::Select
-            && self.format != PropertyFormat::MultiSelect
-        {
-            return Err(AnytypeError::Validation {
+        ensure!(
+            self.tags.is_empty()
+                || self.format == PropertyFormat::Select
+                || self.format == PropertyFormat::MultiSelect,
+            ValidationSnafu {
                 message: format!(
                     "Property {} format {} cannot be created with tags, because tags are only supported for formats Select and MultiSelect",
                     &self.name, &self.format
                 ),
-            });
-        }
+            }
+        );
 
         let request_body = CreatePropertyRequestBody {
             name: self.name,
@@ -1181,12 +1186,13 @@ impl UpdatePropertyRequest {
         self.limits.validate_id(&self.property_id, "property_id")?;
 
         // Check that at least one field is being updated
-        if self.name.is_none() && self.key.is_none() {
-            return Err(AnytypeError::Validation {
+        ensure!(
+            self.name.is_some() || self.key.is_some(),
+            ValidationSnafu {
                 message: "update_property: must set at least one field to update (name or key)"
                     .to_string(),
-            });
-        }
+            }
+        );
 
         if let Some(ref name) = self.name {
             self.limits.validate_name(name, "property name")?;
@@ -1531,23 +1537,20 @@ impl AnytypeClient {
         space_id: &str,
         text: impl AsRef<str>,
     ) -> Result<Vec<Property>> {
-        if self.cache.is_enabled() {
-            // see note on locking design in cache.rs
-            if !self.cache.has_properties(space_id) {
-                prime_cache_properties(&self.client, &self.cache, &self.config.limits, space_id)
-                    .await?;
+        ensure!(self.cache.is_enabled(), CacheDisabledSnafu);
+        // see note on locking design in cache.rs
+        if !self.cache.has_properties(space_id) {
+            prime_cache_properties(&self.client, &self.cache, &self.config.limits, space_id)
+                .await?;
+        }
+        match self.cache.lookup_property(space_id, text.as_ref()) {
+            Some(properties) if !properties.is_empty() => {
+                Ok(properties.into_iter().map(|arc| (*arc).clone()).collect())
             }
-            match self.cache.lookup_property(space_id, text.as_ref()) {
-                Some(properties) if !properties.is_empty() => {
-                    Ok(properties.into_iter().map(|arc| (*arc).clone()).collect())
-                }
-                _ => Err(AnytypeError::NotFound {
-                    obj_type: "Property".into(),
-                    key: text.as_ref().to_string(),
-                }),
-            }
-        } else {
-            Err(AnytypeError::CacheDisabled)
+            _ => Err(AnytypeError::NotFound {
+                obj_type: "Property".into(),
+                key: text.as_ref().to_string(),
+            }),
         }
     }
 
@@ -1584,21 +1587,18 @@ impl AnytypeClient {
         space_id: &str,
         text: impl AsRef<str>,
     ) -> Result<Property> {
-        if self.cache.is_enabled() {
-            // see note on locking design in cache.rs
-            if !self.cache.has_properties(space_id) {
-                prime_cache_properties(&self.client, &self.cache, &self.config.limits, space_id)
-                    .await?;
-            }
-            match self.cache.lookup_property_by_key(space_id, text.as_ref()) {
-                Some(property) => Ok((*property).clone()),
-                None => Err(AnytypeError::NotFound {
-                    obj_type: "Property".into(),
-                    key: text.as_ref().to_string(),
-                }),
-            }
-        } else {
-            Err(AnytypeError::CacheDisabled)
+        ensure!(self.cache.is_enabled(), CacheDisabledSnafu);
+        // see note on locking design in cache.rs
+        if !self.cache.has_properties(space_id) {
+            prime_cache_properties(&self.client, &self.cache, &self.config.limits, space_id)
+                .await?;
+        }
+        match self.cache.lookup_property_by_key(space_id, text.as_ref()) {
+            Some(property) => Ok((*property).clone()),
+            None => Err(AnytypeError::NotFound {
+                obj_type: "Property".into(),
+                key: text.as_ref().to_string(),
+            }),
         }
     }
 

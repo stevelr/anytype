@@ -46,6 +46,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use snafu::prelude::*;
 
 use crate::{
     Result,
@@ -214,10 +215,11 @@ impl SpaceRequest {
                     return Ok(space);
                 }
             }
-            return Err(AnytypeError::NotFound {
-                obj_type: "Space".into(),
+            return NotFoundSnafu {
+                obj_type: "Space".to_string(),
                 key: self.space_id.clone(),
-            });
+            }
+            .fail();
         }
 
         let response: SpaceResponse = self
@@ -419,13 +421,14 @@ impl UpdateSpaceRequest {
     /// - [`AnytypeError::NotFound`] if the space doesn't exist
     pub async fn update(self) -> Result<Space> {
         // Check that at least one field is being updated
-        if self.name.is_none() && self.description.is_none() {
-            return Err(AnytypeError::Validation {
+        ensure!(
+            self.name.is_some() || self.description.is_some(),
+            ValidationSnafu {
                 message:
                     "update_space: must set at least one field to update (name or description)"
                         .to_string(),
-            });
-        }
+            }
+        );
 
         let request_body = UpdateSpaceRequestBody {
             name: self.name,

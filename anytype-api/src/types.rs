@@ -58,6 +58,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use snafu::prelude::*;
 
 use crate::{
     Result,
@@ -281,10 +282,11 @@ impl TypeRequest {
                     return Ok((*type_).clone());
                 }
             }
-            return Err(AnytypeError::NotFound {
+            return NotFoundSnafu {
                 obj_type: "Type".to_string(),
                 key: self.type_id.clone(),
-            });
+            }
+            .fail();
         }
         let response: TypeResponse = self
             .client
@@ -659,17 +661,17 @@ impl UpdateTypeRequest {
         self.limits.validate_id(&self.type_id, "type_id")?;
 
         // Check that at least one field is being updated
-        if self.name.is_none()
-            && self.key.is_none()
-            && self.plural_name.is_none()
-            && self.icon.is_none()
-            && self.layout.is_none()
-            && self.properties.is_empty()
-        {
-            return Err(AnytypeError::Validation {
+        ensure!(
+            self.name.is_some()
+                || self.key.is_some()
+                || self.plural_name.is_some()
+                || self.icon.is_some()
+                || self.layout.is_some()
+                || !self.properties.is_empty(),
+            ValidationSnafu {
                 message: "update_type: must set at least one field to update".to_string(),
-            });
-        }
+            }
+        );
 
         if let Some(ref name) = self.name {
             self.limits.validate_name(name, "type")?;
@@ -1023,22 +1025,20 @@ impl AnytypeClient {
     /// - AnytypeError::CacheDisabled if cache is disabled
     /// - AnytypeError::* any other error
     pub async fn lookup_types(&self, space_id: &str, text: impl AsRef<str>) -> Result<Vec<Type>> {
-        if self.cache.is_enabled() {
-            // see note on locking design in cache.rs
-            if !self.cache.has_types(space_id) {
-                prime_cache_types(&self.client, &self.cache, space_id).await?;
+        ensure!(self.cache.is_enabled(), CacheDisabledSnafu);
+        // see note on locking design in cache.rs
+        if !self.cache.has_types(space_id) {
+            prime_cache_types(&self.client, &self.cache, space_id).await?;
+        }
+        match self.cache.lookup_types(space_id, text.as_ref()) {
+            Some(types) if !types.is_empty() => {
+                Ok(types.into_iter().map(|arc| (*arc).clone()).collect())
             }
-            match self.cache.lookup_types(space_id, text.as_ref()) {
-                Some(types) if !types.is_empty() => {
-                    Ok(types.into_iter().map(|arc| (*arc).clone()).collect())
-                }
-                _ => Err(AnytypeError::NotFound {
-                    obj_type: "Type".to_string(),
-                    key: text.as_ref().to_string(),
-                }),
+            _ => NotFoundSnafu {
+                obj_type: "Type".to_string(),
+                key: text.as_ref().to_string(),
             }
-        } else {
-            Err(AnytypeError::CacheDisabled)
+            .fail(),
         }
     }
 
@@ -1065,20 +1065,18 @@ impl AnytypeClient {
     /// - AnytypeError::* any other error
     ///
     pub async fn lookup_type_by_key(&self, space_id: &str, text: impl AsRef<str>) -> Result<Type> {
-        if self.cache.is_enabled() {
-            // see note on locking design in cache.rs
-            if !self.cache.has_types(space_id) {
-                prime_cache_types(&self.client, &self.cache, space_id).await?;
+        ensure!(self.cache.is_enabled(), CacheDisabledSnafu);
+        // see note on locking design in cache.rs
+        if !self.cache.has_types(space_id) {
+            prime_cache_types(&self.client, &self.cache, space_id).await?;
+        }
+        match self.cache.lookup_type_by_key(space_id, text.as_ref()) {
+            Some(typ) => Ok((*typ).clone()),
+            None => NotFoundSnafu {
+                obj_type: "Type".to_string(),
+                key: text.as_ref().to_string(),
             }
-            match self.cache.lookup_type_by_key(space_id, text.as_ref()) {
-                Some(typ) => Ok((*typ).clone()),
-                None => Err(AnytypeError::NotFound {
-                    obj_type: "Type".to_string(),
-                    key: text.as_ref().to_string(),
-                }),
-            }
-        } else {
-            Err(AnytypeError::CacheDisabled)
+            .fail(),
         }
     }
 }

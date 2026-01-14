@@ -38,6 +38,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use snafu::prelude::*;
 
 use crate::{
     Result,
@@ -276,7 +277,7 @@ impl NewTagRequest {
         self.limits.validate_id(&self.space_id, "space_id")?;
         self.limits.validate_id(&self.property_id, "property_id")?;
 
-        let name = self.name.ok_or_else(|| AnytypeError::Validation {
+        let name = self.name.context(ValidationSnafu {
             message: "new_tag: name is required".to_string(),
         })?;
 
@@ -412,11 +413,12 @@ impl UpdateTagRequest {
         self.limits.validate_id(&self.property_id, "property_id")?;
         self.limits.validate_id(&self.tag_id, "tag_id")?;
 
-        if self.name.is_none() && self.key.is_none() && self.color.is_none() {
-            return Err(AnytypeError::Validation {
+        ensure!(
+            self.name.is_some() || self.key.is_some() || self.color.is_some(),
+            ValidationSnafu {
                 message: "update_tag: must set at least one field to update".to_string(),
-            });
-        }
+            }
+        );
 
         if let Some(ref name) = self.name {
             self.limits.validate_name(name, "tag")?;
