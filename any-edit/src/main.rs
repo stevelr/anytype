@@ -17,7 +17,7 @@ const CLI_KEY_SERVICE_NAME: &str = "any-edit";
 
 #[derive(Debug, Parser)]
 #[command(name = "any-edit")]
-#[command(about = "Edit Anytype objects using markdown files with YAML headers", long_about = None)]
+#[command(about = "Edit Anytype objects as markdown in external editor", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -26,7 +26,7 @@ struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     keyfile_path: Option<PathBuf>,
 
-    /// url to anytype server. Desktop defaults to http://127.0.0.1:31009
+    /// API endpoint URL. Default: environment $ANYTYPE_URL or http://127.0.0.1:31009 (desktop app)
     #[arg(short, long)]
     url: Option<String>,
 
@@ -47,13 +47,13 @@ enum Commands {
         command: AuthCommand,
     },
 
-    /// Get an object and output as markdown with YAML header
+    /// Get an object as markdown file
     Get {
-        /// Space ID (required unless using --url)
+        /// Space ID (required unless using --doc)
         #[arg(required_unless_present = "doc")]
         space_id: Option<String>,
 
-        /// Object ID (required unless using --url)
+        /// Object ID (required unless using --doc)
         #[arg(required_unless_present = "doc")]
         object_id: Option<String>,
 
@@ -66,7 +66,7 @@ enum Commands {
         doc: Option<String>,
     },
 
-    /// Update an object from markdown file with YAML header
+    /// Update an object from markdown file
     Update {
         /// Input file (default: stdin)
         #[arg(short, long)]
@@ -87,18 +87,22 @@ enum Commands {
 
     /// Get, edit with $EDITOR, and update
     Edit {
-        /// Space ID (required unless using --current)
-        #[arg(required_unless_present = "current")]
+        /// Space ID (required unless using --doc)
+        #[arg(required_unless_present = "doc")]
         space_id: Option<String>,
 
-        /// Object ID (required unless using --current)
-        #[arg(required_unless_present = "current")]
+        /// Object ID (required unless using --doc)
+        #[arg(required_unless_present = "doc")]
         object_id: Option<String>,
 
-        /// Use current Anytype document (macOS only)
-        #[arg(long, conflicts_with_all = ["space_id", "object_id"])]
-        current: bool,
+        /// Parse document URL to get space_id and object_id
+        #[arg(short, long)]
+        doc: Option<String>,
     },
+
+    /// Get the current visible object from the app, edit with $EDITOR, and update
+    #[cfg(target_os = "macos")]
+    EditCurrent {},
 }
 
 #[derive(Debug, Subcommand)]
@@ -136,9 +140,10 @@ async fn main() -> Result<()> {
     } else {
         KeyStoreFile::new(CLI_KEY_SERVICE_NAME)
     }?;
-    let url = cli.url.unwrap_or("http://127.0.0.1:31009".into());
+    let base_url = cli.url.unwrap_or_else(|| ANYTYPE_DESKTOP_URL.to_string());
+
     let client = AnytypeClient::with_config(ClientConfig {
-        base_url: url,
+        base_url,
         app_name: CLI_KEY_SERVICE_NAME.into(),
         ..Default::default()
     })?
@@ -174,16 +179,31 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Update { input } => update_command(&client, input.as_deref()).await?,
+
         #[cfg(target_os = "macos")]
         Commands::CopyLink {
             activate_delay,
             keystroke_delay,
         } => copy_link_command(activate_delay, keystroke_delay)?,
+
+        #[cfg(target_os = "macos")]
+        Commands::EditCurrent {} => edit_command_current(client).await?,
+
         Commands::Edit {
             space_id,
             object_id,
-            current,
-        } => edit_command(client, space_id, object_id, current).await?,
+            doc,
+        } => {
+            let (space_id, object_id) = if let Some(url_str) = doc {
+                parse_doc_url(&url_str)?
+            } else {
+                (
+                    space_id.ok_or_else(|| anyhow::anyhow!("space_id is required"))?,
+                    object_id.ok_or_else(|| anyhow::anyhow!("object_id is required"))?,
+                )
+            };
+            edit_command(client, space_id, object_id).await?
+        }
     }
     Ok(())
 }
@@ -447,6 +467,10 @@ fn copy_link_url(activate_delay: u64, keystroke_delay: u64) -> Result<String> {
     // Save current clipboard contents
     let saved_clipboard = clipboard.get_text().ok();
 
+    // Future: AFAIK, this is the only part that is mac-os specific: bringing anytype forward to get focus
+    // The other parts of this function: submitting the keystroke, and reading/writing clipboard,
+    // are done with crates that support linux and windows for these operations.
+    //
     // Activate Anytype app
     let status = Command::new("open")
         .args(["-a", "Anytype"])
@@ -504,8 +528,6 @@ fn copy_link_url(activate_delay: u64, keystroke_delay: u64) -> Result<String> {
         let _ = clipboard.set_text(&saved);
     }
 
-    //eprintln!("from clipboard: {url}");
-
     // Validate it looks like an Anytype URL
     if !url.contains("spaceId=") {
         anyhow::bail!(
@@ -521,31 +543,19 @@ fn copy_link_url(activate_delay: u64, keystroke_delay: u64) -> Result<String> {
     Ok(url)
 }
 
-async fn edit_command(
-    client: AnytypeClient,
-    space_id: Option<String>,
-    object_id: Option<String>,
-    current: bool,
-) -> Result<()> {
-    let (final_space_id, final_object_id) = if current {
-        #[cfg(target_os = "macos")]
-        {
-            let url = copy_link_url(300, 200)?;
-            parse_doc_url(&url)?
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            anyhow::bail!("--current is only supported on macOS");
-        }
-    } else {
-        (
-            space_id.ok_or_else(|| anyhow::anyhow!("space_id is required"))?,
-            object_id.ok_or_else(|| anyhow::anyhow!("object_id is required"))?,
-        )
+#[cfg(target_os = "macos")]
+async fn edit_command_current(client: AnytypeClient) -> Result<()> {
+    let (space_id, object_id) = {
+        let url = copy_link_url(300, 200)?;
+        parse_doc_url(&url)?
     };
 
+    edit_command(client, space_id, object_id).await
+}
+
+async fn edit_command(client: AnytypeClient, space_id: String, object_id: String) -> Result<()> {
     let tmp_path = temp_markdown_path()?;
-    get_command(&client, &final_space_id, &final_object_id, Some(&tmp_path)).await?;
+    get_command(&client, &space_id, &object_id, Some(&tmp_path)).await?;
 
     let original_body_hash = sha256_body_hash(&tmp_path)?;
     run_editor(&tmp_path)?;

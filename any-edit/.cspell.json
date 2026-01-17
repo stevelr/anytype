@@ -12,10 +12,13 @@
 		"anyr",
 		"anytype",
 		"arboard",
+		"Deeplink",
 		"enigo",
 		"osascript",
 		"peekable",
 		"reqwest",
+		"rustls",
+		"Schoettler",
 		"stevelr"
 	]
 }
