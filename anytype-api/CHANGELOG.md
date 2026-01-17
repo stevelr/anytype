@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.2.9] - 2025-01-17
+
+### Added
+
+- Documentation (README.md): listed limitations of the rest api
+- Optional feature flags to select os keystore flavor on linux
+
+### Changed
+
+- clippy fixes
+
 ## [0.2.8] - 2026-01-12
 
 ### Changed

@@ -197,7 +197,7 @@ async fn test_filter_checkbox_true() -> TestResult<()> {
             .collect_all()
             .await?;
 
-        let found = results.iter().any(|obj| &obj.id == &task.id);
+        let found = results.iter().any(|obj| obj.id == task.id);
         test_assert!(found, "Expected to find object with done=true");
 
         test_assert!(
@@ -239,7 +239,7 @@ async fn test_filter_checkbox_false() -> TestResult<()> {
             .collect_all()
             .await?;
 
-        let found = results.iter().any(|obj| &obj.id == &task.id);
+        let found = results.iter().any(|obj| obj.id == task.id);
         test_assert!(found, "Expected to find object with done=false");
 
         for t in results.iter() {
@@ -684,7 +684,7 @@ async fn test_filter_expression_and() -> TestResult<()> {
             .await?;
 
         assert!(!results.is_empty(), "filter should find a match");
-        assert!(results.iter().find(|obj| &obj.id == &new_obj.id).is_some());
+        assert!(results.iter().any(|obj| obj.id == new_obj.id));
 
         Ok(())
     })

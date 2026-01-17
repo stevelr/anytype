@@ -2,15 +2,11 @@
 
 An ergonomic Anytype API client in Rust.
 
+**[Home](https://github.com/stevelr/anytype) &nbsp; | &nbsp; [Documentation](https://docs.rs/anytype) &nbsp; | &nbsp; [Examples](https://github.com/stevelr/anytype/blob/main/anytype-api/examples/)**
+
 ## Overview
 
-`anytype` provides an ergonomic rust client the Anytype REST API. It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, and Views, with optional key storage and caching.
-
-- Source: https://github.com/stevelr/anytype
-- Documentation: [anytype](https://docs.rs/anytype)
-- Examples: [examples](./examples/README.md)
-
-[Anytype](https://doc.anytype.io/anytype-docs) is an encrypted, local-first alternative to the cloud-based Internet.
+`anytype` provides an ergonomic rust client for the [Anytype](https://anytype.io) REST API. It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, and Views, with optional key storage and caching.
 
 ### Features
 
@@ -22,7 +18,9 @@ An ergonomic Anytype API client in Rust.
 - Nested filter expression builder
 - Parameter validation
 - Metrics
-- Companion cli tool [anyr](../anytype-cli)
+- used in:
+  - [anyr](https://github.com/stevelr/anytype/tree/main/anytype-cli) - list, search, and manipulate anytype objects
+  - [any-edit](https://github.com/stevelr/anytype/tree/main/any-edit) - edit anytype docs in markdown in external editor
 
 ## Quick start
 
@@ -77,16 +75,22 @@ The crate has 100% coverage of the Anytype REST api 2025-11-08.
 
 Plus:
 
-- View Layouts (grid, kanban, calendar, gallery, graph) implemented in the desktop app but not in the openapi spec 2025-11-08.
+- View Layouts (grid, kanban, calendar, gallery, graph) implemented in the desktop app but not in the api spec 2025-11-08.
+
+### What's missing?
+
+The current version of the backend api does not provide access to some data stored by the Anytype app. Data that is current inaccessible from the http api:
+
+- Blocks. Pages and other document-like objects can be exported as markdown, but markdown export is somewhat lossy, for example, in tables, markdown export preserves table layout, with bold and italic styling, but foreground and background colors are lost.
+- Files (images, videos, etc.)
+- Relationships - only a subset of relation types are available in the REST api.
+- chats and messages
+
+Because of these limitations, it is not yet possible with this crate or with [anyr](../anytype-cli) to export a complete space. We are investigating using the gRPC api backend to access some of these additional features.
 
 ## Known issues & Troubleshooting
 
 See [Troubleshooting](./Troubleshooting.md)
-
-## Configuration
-
-- `ClientConfig` controls base URL, retry limits, validation limits, and cache behavior.
-- Cache is enabled by default. Disable with `ClientConfig::disable_cache(true)`.
 
 ## Eventual Consistency
 
@@ -109,10 +113,6 @@ To enable verification for _all_ new objects, types, and properties, add `.ensur
 ```rust,no_run
 let obj = client.new_object("space_id", "page").name("Quicker note").no_verify().create().await?;
 ```
-
-## Feature flags
-
-- `keystore-ext`: enables `SecretApiKey::get_key` for custom keystore integrations.
 
 ## Testing
 

@@ -1,9 +1,10 @@
 [package]
 name = "anytype"
-version = "0.2.8"
+version = "0.2.9"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 description = "An ergonomic Anytype API client in rust"
 repository = "https://github.com/stevelr/anytype"
+homepage = "https://github.com/stevelr/anytype"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 keywords = ["anytype", "api", "client"]
@@ -11,9 +12,15 @@ categories = ["api-bindings"]
 readme = "README.md"
 
 [features]
-default = []
+default = ["linux-native"]
 # support for custom external keystore
 keystore-ext = []
+# linux kernel keyutils credential store. See https://docs.rs/keyring 
+linux-native = ["keyring/linux-native"]
+# linux dbus-based Secret Service storage. See https://docs.rs/keyring 
+linux-dbus = ["keyring/sync-secret-service", "keyring/crypto-rust"]
+# linux native sync persistent See https://docs.rs/keyring 
+linux-native-persistent = ["keyring/linux-native-sync-persistent", "keyring/crypto-rust"]
 
 [lib]
 path = "src/lib.rs"
@@ -23,7 +30,7 @@ bytes.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 futures.workspace = true
-keyring.workspace = true
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native"] }
 parking_lot.workspace = true
 reqwest.workspace = true
 serde.workspace = true

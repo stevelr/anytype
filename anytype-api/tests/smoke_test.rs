@@ -445,19 +445,19 @@ async fn test_property_formats(ctx: &TestContext, results: &mut TestResults) {
             ));
 
             // Text format should always be present
-            if found_formats.iter().any(|f| *f == PropertyFormat::Text) {
+            if found_formats.contains(&PropertyFormat::Text) {
                 results.pass("property_format.text");
             } else {
                 results.fail("property_format.text", "Text format not found");
             }
 
             // Select format commonly present
-            if found_formats.iter().any(|f| *f == PropertyFormat::Select) {
+            if found_formats.contains(&PropertyFormat::Select) {
                 results.pass("property_format.select");
             }
 
             // Date format commonly present
-            if found_formats.iter().any(|f| *f == PropertyFormat::Date) {
+            if found_formats.contains(&PropertyFormat::Date) {
                 results.pass("property_format.date");
             }
         }

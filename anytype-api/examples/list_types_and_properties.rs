@@ -14,7 +14,7 @@ async fn main() -> Result<(), AnytypeError> {
     for typ in types.iter().take(5) {
         println!("  {:20} {:20}", typ.display_name(), typ.key);
     }
-    println!("");
+    println!();
 
     // list some properties in the space
     let properties = client.properties(&space.id).list().await?;

@@ -598,7 +598,6 @@ async fn test_types_get_template() -> TestResult<()> {
                     "template get should match listed template id"
                 );
                 return Ok(());
-            } else {
             }
         }
 
@@ -813,7 +812,7 @@ async fn test_types_display_name() -> TestResult<()> {
 #[test_log::test]
 async fn test_types_layouts() -> TestResult<()> {
     with_test_context(|ctx| async move {
-        let layouts = vec![
+        let layouts = &[
             TypeLayout::Basic,
             TypeLayout::Note,
             TypeLayout::Action,

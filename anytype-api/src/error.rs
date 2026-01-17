@@ -1,8 +1,7 @@
 //! Errors returned by AnytypeClient
 //!
-use std::path::PathBuf;
-
 use snafu::prelude::*;
+use std::path::PathBuf;
 
 /// Errors returned by anytype crate
 #[derive(Debug, Snafu)]

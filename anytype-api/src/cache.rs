@@ -499,6 +499,30 @@ impl AnytypeCache {
     }
 }
 
+impl std::fmt::Debug for AnytypeCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let spaces_keys = self
+            .spaces
+            .lock()
+            .as_ref()
+            .map(|spaces| {
+                spaces
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+
+        f.debug_struct("AnytypeCache")
+            .field("enabled", &self.is_enabled())
+            .field("spaces", &format!("keys: {}", &spaces_keys))
+            .field("properties", &format!("count: {}", self.num_properties()))
+            .field("types", &format!("count: {}", self.num_types()))
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -606,29 +630,5 @@ mod tests {
         let types = cache.lookup_types("space-a", "page").expect("type lookup");
         assert_eq!(types.len(), 1);
         assert_eq!(types[0].id, "t1");
-    }
-}
-
-impl std::fmt::Debug for AnytypeCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let spaces_keys = self
-            .spaces
-            .lock()
-            .as_ref()
-            .map(|spaces| {
-                spaces
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<&str>>()
-                    .join(",")
-            })
-            .unwrap_or_default();
-
-        f.debug_struct("AnytypeCache")
-            .field("enabled", &self.is_enabled())
-            .field("spaces", &format!("keys: {}", &spaces_keys))
-            .field("properties", &format!("count: {}", self.num_properties()))
-            .field("types", &format!("count: {}", self.num_types()))
-            .finish()
     }
 }

@@ -207,7 +207,7 @@ async fn test_search_with_text_query() {
             .client
             .new_object(&ctx.space_id, "page")
             .name(&unique_term)
-            .body(&format!(
+            .body(format!(
                 "This is a test document containing {}",
                 unique_term
             ))
@@ -260,7 +260,7 @@ async fn test_search_text_case_insensitive() {
         let lower_results = ctx
             .client
             .search_in(&ctx.space_id)
-            .text(&base_term.to_lowercase())
+            .text(base_term.to_lowercase())
             .execute()
             .await
             .expect("Failed to execute lowercase search");
@@ -269,7 +269,7 @@ async fn test_search_text_case_insensitive() {
         let upper_results = ctx
             .client
             .search_in(&ctx.space_id)
-            .text(&base_term.to_uppercase())
+            .text(base_term.to_uppercase())
             .execute()
             .await
             .expect("Failed to execute uppercase search");
@@ -703,7 +703,7 @@ async fn test_search_with_combined_text_and_filters() {
         let obj1 = ctx
             .client
             .new_object(&ctx.space_id, "page")
-            .name(&format!("{} One", base_name))
+            .name(format!("{} One", base_name))
             .description("Has description")
             .create()
             .await
@@ -713,7 +713,7 @@ async fn test_search_with_combined_text_and_filters() {
         let obj2 = ctx
             .client
             .new_object(&ctx.space_id, "page")
-            .name(&format!("{} Two", base_name))
+            .name(format!("{} Two", base_name))
             .create()
             .await
             .expect("Failed to create object 2");
@@ -905,7 +905,7 @@ async fn test_search_with_multiple_filter_types() {
         let page = ctx
             .client
             .new_object(&ctx.space_id, "page")
-            .name(&format!("{} Page", base_name))
+            .name(format!("{} Page", base_name))
             .create()
             .await;
 

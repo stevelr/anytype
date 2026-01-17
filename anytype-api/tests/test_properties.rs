@@ -416,7 +416,7 @@ async fn test_set_objects_property() -> TestResult<()> {
         let obj1 = ctx
             .client
             .new_object(&ctx.space_id, "page")
-            .name(&format!("{} Target 1", name))
+            .name(format!("{} Target 1", name))
             .create()
             .await?;
         ctx.register_object(&obj1.id);
@@ -424,7 +424,7 @@ async fn test_set_objects_property() -> TestResult<()> {
         let obj2 = ctx
             .client
             .new_object(&ctx.space_id, "page")
-            .name(&format!("{} Target 2", name))
+            .name(format!("{} Target 2", name))
             .create()
             .await?;
         ctx.register_object(&obj2.id);

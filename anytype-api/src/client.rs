@@ -14,19 +14,19 @@
 //!
 
 use std::sync::Arc;
-
 use tracing::debug;
 
 use crate::{
-    ANYTYPE_DESKTOP_URL, Result,
-    cache::AnytypeCache,
+    ANYTYPE_DESKTOP_URL,
+    Result,
+    //cache::AnytypeCache,
     config::{
         ANYTYPE_URL_ENV, DEFAULT_SERVICE_NAME, RATE_LIMIT_MAX_RETRIES_DEFAULT,
         RATE_LIMIT_MAX_RETRIES_ENV,
     },
     http_client::HttpClient,
     prelude::*,
-    verify::VerifyConfig,
+    //verify::VerifyConfig,
 };
 
 /// Configuration for the Anytype client. Defines endpoint url, validation limits, and other settings.

@@ -129,7 +129,7 @@ mod property_formats {
 
             // Should have at least Text format
             assert!(
-                found_formats.iter().any(|f| *f == PropertyFormat::Text),
+                found_formats.contains(&PropertyFormat::Text),
                 "Should have Text format"
             );
         })

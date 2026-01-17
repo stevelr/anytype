@@ -153,7 +153,6 @@ pub type Result<T, E = crate::error::AnytypeError> = std::result::Result<T, E>;
 
 /// Prelude module - import (nearly) all the things with `use anytype::prelude::*;`
 pub mod prelude {
-    // (public) Constants
     pub use super::{ANYTYPE_API_VERSION, ANYTYPE_DESKTOP_URL, ANYTYPE_HEADLESS_URL};
     // Error types
     pub use crate::error::*;

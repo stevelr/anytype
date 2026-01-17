@@ -12,6 +12,19 @@ use std::{
 };
 use tracing::{debug, error, warn};
 
+// ensure that not more than one linux keystore is selected
+#[cfg(all(
+    target_os = "linux",
+    any(
+        all(feature = "linux-native", feature = "linux-dbus"),
+        all(feature = "linux-native", feature = "linux-native-persistent"),
+        all(feature = "linux-dbus", feature = "linux-native-persistent")
+    )
+))]
+compile_error!(
+    "anytype: enable only one Linux keyring backend (\"linux-native\",\"linux-dbus\", or \"linux-native-persistent\")."
+);
+
 /// Type of keystore - builtin or external
 #[derive(Clone, PartialEq, Eq)]
 pub enum KeyStoreType {
@@ -464,7 +477,7 @@ mod tests {
         ));
         // Ensure clean start
         let _ = fs::remove_dir_all(&temp_dir);
-        let file_path = temp_dir.join(&format!("{DEFAULT_SERVICE_NAME}.test.key"));
+        let file_path = temp_dir.join(format!("{DEFAULT_SERVICE_NAME}.test.key"));
         let storage = KeyStoreFile::from_path(&file_path)?;
 
         // Initially no key
@@ -510,7 +523,7 @@ mod tests {
         ));
         // Ensure clean start
         let _ = fs::remove_dir_all(&temp_dir);
-        let file_path = temp_dir.join(&format!("{DEFAULT_SERVICE_NAME}.test.key"));
+        let file_path = temp_dir.join(format!("{DEFAULT_SERVICE_NAME}.test.key"));
         let storage = KeyStoreFile::from_path(&file_path)?;
 
         // Save a key

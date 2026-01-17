@@ -25,14 +25,13 @@ async fn ensure_list_object(
             Ok(views) => views,
             Err(_) => continue,
         };
-        if let Some(view) = views.items.first() {
-            if view_list_objects_with_retry(ctx, &obj.id, Some(&view.id), 1)
+        if let Some(view) = views.items.first()
+            && view_list_objects_with_retry(ctx, &obj.id, Some(&view.id), 1)
                 .await
                 .is_ok()
-            {
-                let fetched = ctx.client.object(&ctx.space_id, &obj.id).get().await?;
-                return Ok(fetched);
-            }
+        {
+            let fetched = ctx.client.object(&ctx.space_id, &obj.id).get().await?;
+            return Ok(fetched);
         }
     }
 

@@ -5,7 +5,7 @@ _default:
 check:
     cargo build
     cargo clippy -- -D warnings
-    rustfmt --edition 2024 --check src/*.rs 
+    fd -e rs | xargs rustfmt --edition 2024
 
 check-all: (check)
     cargo shear

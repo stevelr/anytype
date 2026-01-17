@@ -409,7 +409,7 @@ async fn test_create_duplicate_tag_name() {
             .await
             .expect("collect_all");
         assert_eq!(tags.len(), 2, "two tags");
-        let tag0 = tags.get(0).unwrap();
+        let tag0 = tags.first().unwrap();
         let tag1 = tags.get(1).unwrap();
         assert_eq!(tag0.name, tag1.name, "names equal");
         assert_ne!(tag0.id, tag1.id, "tag ids should be different");
