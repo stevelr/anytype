@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [0.2.4] - 2026-01-17
+## [0.2.4] - anyr-v0.2.4 (2026-01-17)
 
 ### Added
 
@@ -15,14 +15,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Fix: 'view objects' with query views found results in table output format only. Now gives result in table or json format. Property metadata resolved before output formatting, and removed get_type call from json output path.
 - removed undocumented --keyring-service arg
 
-## [0.2.3] - 2026-01-12
+## [0.2.3] - anyr-v0.2.3 (2026-01-12)
 
 ### Changed
 
 - Use rustls (native roots) for HTTP TLS to avoid OpenSSL install errors.
 - Uses anytype-v0.2.8.
 
-## [0.2.2] 2025-01-12
+## [0.2.2] - anyr-v0.2.2 (2025-01-12)
 
 ### Added
 

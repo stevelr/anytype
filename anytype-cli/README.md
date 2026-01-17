@@ -152,13 +152,15 @@ Table listing features for `view objects`:
 
 ## Install
 
-**Homebrew**
+Release binaries are on [github](https://github.com/stevelr/anytype/tags)
+
+**Macos via Homebrew**
 
 ```sh
 brew install stevelr/tap/anyr
 ```
 
-**Macos or Linux**
+**Linux (arm64/x86_64)**
 
 ```sh
 curl -fsSL https://github.com/stevelr/anytype/releases/latest/download/anyr-installer.sh | sh
@@ -181,7 +183,7 @@ cargo install -p anyr
 **Cargo**
 
 ```sh
-argo install -p anyr
+cargo install -p anyr
 ```
 
 **Nix**

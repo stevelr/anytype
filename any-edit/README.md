@@ -44,13 +44,15 @@ any-edit copy-link
 
 ## Install
 
-**Homebrew**
+Release binaries are on [github](https://github.com/stevelr/anytype/tags)
+
+**Macos Homebrew**
 
 ```sh
 brew install stevelr/tap/any-edit
 ```
 
-**Macos or Linux**
+**Linux (arm64/x86_64)**
 
 ```sh
 curl -fsSL https://github.com/stevelr/anytype/releases/latest/download/any-edit-installer.sh | sh
