@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased] - anytype-rpc
+
+### Changed
+
+- Apache-2.0 license
+
 ## [0.2.0] - anytype-rpc - 2025-01-17
 
 ### Added

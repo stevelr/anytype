@@ -1,3 +1,10 @@
+/*
+ * anyr - list, search, and manipulate anytype objects
+ * github.com/stevelr/anytype
+ *
+ * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+ * SPDX-License-Identifier: Apache-2.0
+ */
 mod cli;
 mod error;
 mod filter;

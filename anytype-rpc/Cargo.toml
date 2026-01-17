@@ -1,3 +1,8 @@
+# anytype-rpc
+#
+# SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+# SPDX-License-Identifier: Apache-2.0
+# 
 [package]
 name = "anytype-rpc"
 version = "0.2.0"
@@ -6,7 +11,7 @@ description = "Anytype gRPC client"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 repository = "https://github.com/stevelr/anytype"
 homepage = "https://github.com/stevelr/anytype"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 keywords = ["anytype", "client", "grpc"]
 categories = ["api-bindings"]
 readme = "README.md"

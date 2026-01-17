@@ -1,3 +1,10 @@
+/*
+ * Anytype rust api client
+ * github.com/stevelr/anytype
+ *
+ * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+ * SPDX-License-Identifier: Apache-2.0
+ */
 //! # Anytype Rust API Client
 //!
 //! An ergonomic Anytype API client in Rust.

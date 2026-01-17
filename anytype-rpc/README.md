@@ -15,4 +15,10 @@ A very limited cli can list spaces and import and export objects.
 
 ## Building
 
+Ensure you have 'protoc' from the protobuf package in your path. On macos, 'brew install protobuf'
+
 Uses [tonic-prost-build](https://crates.io/crates/tonic-prost-build)
+
+## License
+
+Apache License, Version 2.0

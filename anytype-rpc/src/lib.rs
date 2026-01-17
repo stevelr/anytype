@@ -1,3 +1,10 @@
+/*
+ * Anytype gRPC client
+ * github.com/stevelr/anytype
+ *
+ * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+ * SPDX-License-Identifier: Apache-2.0
+ */
 //! Anytype gRPC client
 //!
 //! The gRPC api is subject to change and isn't officially supported for third party clients.

@@ -1,3 +1,8 @@
+# any-edit
+#
+# SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+# SPDX-License-Identifier: Apache-2.0
+# 
 [package]
 name = "any-edit"
 version = "0.1.2"
@@ -6,7 +11,7 @@ description = "Edit Anytype documents in an external editor"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 repository = "https://github.com/stevelr/anytype"
 homepage = "https://github.com/stevelr/anytype"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 keywords = ["anytype", "raycast"]
 categories = ["command-line-utilities"]
 readme = "README.md"

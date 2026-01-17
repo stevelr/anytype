@@ -181,6 +181,7 @@ cargo install -p anyr
 ## Build from source
 
 **Cargo**
+Ensure you have 'protoc' from the protobuf package in your path. On macos, 'brew install protobuf'
 
 ```sh
 cargo install -p anyr
@@ -268,7 +269,4 @@ python tests/cli_commands.py
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 (`LICENSE-APACHE`)
-- MIT License (`LICENSE-MIT`)
+Apache License, Version 2.0

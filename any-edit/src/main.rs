@@ -1,3 +1,10 @@
+/*
+ * any-edit - edit anytype objects as markdown in external editor
+ * github.com/stevelr/anytype
+ *
+ * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+ * SPDX-License-Identifier: Apache-2.0
+ */
 use anyhow::Context;
 use anyhow::Result;
 use anytype::prelude::*;

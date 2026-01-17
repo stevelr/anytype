@@ -1,0 +1,9 @@
+
+_default:
+    just --list
+
+check:
+    cargo build
+    cargo clippy -- -D warnings
+    fd -e rs | xargs rustfmt --edition 2024 --check
+

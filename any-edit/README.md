@@ -73,6 +73,7 @@ cargo install -p any-edit
 ## Build from source
 
 **Cargo**
+Ensure you have 'protoc' from the protobuf package in your path. On macos, 'brew install protobuf'
 
 ```sh
 cargo install -p any-edit
@@ -118,6 +119,6 @@ The Raycast extension and hotkey to query the desktop app for the current page o
 
 `any-edit` needs permission to send keystrokes to the Anytype desktop application. You may see a system prompt that _PROGRAM_ would like to control this computer using accessibility features". Depending on how it is invoked, "_PROGRAM_" may be any-edit, Raycast, or your terminal program (such as WezTerm or Terminal). Permissions can be enabled in System Settings -> Privacy and Security -> Accessibility.
 
-```
+## License
 
-```
+Apache License, Version 2.0

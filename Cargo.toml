@@ -1,3 +1,8 @@
+# Anytype Rust Tools and Clients
+#
+# SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+# SPDX-License-Identifier: Apache-2.0
+#
 [workspace]
 members = ["anytype-api", "anyr", "anytype-rpc", "any-edit"]
 resolver = "3"

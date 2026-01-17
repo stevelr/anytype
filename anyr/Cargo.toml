@@ -1,9 +1,14 @@
+# anyr
+#
+# SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+# SPDX-License-Identifier: Apache-2.0
+# 
 [package]
 name = "anyr"
 version = "0.2.4"
 edition = "2024"
 description = "CLI for Anytype - list, search, and perform CRUD operations on Anytype objects."
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 repository = "https://github.com/stevelr/anytype"
 homepage = "https://github.com/stevelr/anytype"

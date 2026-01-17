@@ -88,6 +88,14 @@ The current version of the backend api does not provide access to some data stor
 
 Because of these limitations, it is not yet possible with this crate or with [anyr](../anyr) to export a complete space. We are investigating using the gRPC api backend to access some of these additional features.
 
+## Building
+
+Ensure you have 'protoc' from the protobuf package in your path. On macos, 'brew install protobuf'
+
+```sh
+cargo build
+```
+
 ## Known issues & Troubleshooting
 
 See [Troubleshooting](./Troubleshooting.md)
@@ -147,10 +155,7 @@ Integration tests require a running Anytype server and environment variables. Se
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 (`LICENSE-APACHE`)
-- MIT License (`LICENSE-MIT`)
+Apache License, Version 2.0
 
 ## Contributing
 
