@@ -27,9 +27,9 @@ const DEFAULT_TABLE_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 #[derive(Parser, Debug)]
 #[command(name = "anyr")]
-#[command(author, version, about = "Anytype CLI", long_about = None)]
+#[command(author, version, about = "anyr: list, search, and manipulate Anytype objects", long_about = None)]
 pub struct Cli {
-    /// API endpoint URL
+    /// API endpoint URL. Default: environment $ANYTYPE_URL or http://127.0.0.1:31009 (desktop app)
     #[arg(short = 'u', long, env = "ANYTYPE_URL")]
     pub url: Option<String>,
 

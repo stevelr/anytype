@@ -1,11 +1,193 @@
-# anytype-cli
+# anyr
 
-Command-line interface for the Anytype local API, built on [`anytype`](https://github.com/stevelr/anytype).
+List, search, and manipulate anytype objects from the command-line
+
+Homepage: https://github.com/stevelr/anytype
+
+```sh
+# show options
+anyr --help
+
+# check authentication status
+anyr auth status
+
+# List spaces your user is authorized to access
+anyr space list -t         # output as table (-t/--table)
+```
+
+## Common options
+
+<table>
+    <tbody>
+      <tr>
+        <td></td>
+        <td><code>--help</code></td>
+        <td>show context-specific help</td>
+      </tr>
+      <tr>
+        <td>Endpoint URL</td>
+        <td><code>--url URL</code></td>
+        <td>Anytype endpoint url</td>
+      </tr>
+      <tr>
+        <td rowspan="3">Key Storage</td>
+        <td><code>--keyfile</code></td>
+        <td>key stored in file in standard location</td>
+      </tr>
+      <tr>
+        <td><code>--keyfile-path PATH</code></td>
+        <td>key stored at PATH</td>
+      </tr>
+      <tr>
+        <td><code>--keyring</code></td>
+        <td>key stored in OS keyring</td>
+      </tr>
+      <tr>
+        <td rowspan="3">Output Format</td>
+        <td>[ <code>--json</code> ]</td>
+        <td>json formatted output (the default)</td>
+      </tr>
+      <tr>
+        <td><code>-t</code>, <code>--table</code></td>
+        <td>table format</td>
+      </tr>
+      <tr>
+        <td><code>--pretty</code></td>
+        <td>json indented</td>
+      </tr>
+      <tr>
+        <td rowspan="4">Filters</td>
+        <td><code>--filter KEY=VALUE</code></td>
+        <td>add filter condition(s)</td>
+      </tr>
+      <tr>
+        <td><code>--type TYPE</code></td>
+        <td>add type constraint(s)</td>
+      </tr>
+      <tr>
+        <td><code>--sort KEY</code></td>
+        <td>sort on key</td>
+      </tr>
+      <tr>
+        <td><code>--desc</code></td>
+        <td>sort descending</td>
+      </tr>
+    </tbody>
+  </table>
+
+## Examples
+
+**List objects in a space**
+
+```sh
+# List <ENTITY> in a space. (entities: object, member, property, template)
+# anyr <ENTITY> list <SPACE_ID_OR_NAME>
+
+# list objects in space 'Personal'
+anyr object list "Personal" -t
+
+# list types in space 'Personal'
+anyr type list "Personal" -t
+
+```
+
+**Search in space**
+
+```sh
+# search space "Work" for tasks containing the text "customer"
+anyr search --space "Work" --type Task --text customer -t
+```
+
+**List tasks in space**
+
+```sh
+space="Work" # specify space using name or id
+for task in `anyr search --type Task --space $space --json | jq -r '.items[] | .id`; do
+  data=$(anyr object get $space $task --json)
+  status=$(jq -r '.properties[] | select (.key=="status") .select.name' <<< "$data")
+  name=$(jq -r '.name' <<< "$data")
+  # get created_date as YYYY-MM-DD
+  created_date=$(jq -r '.properties[] | select (.key=="created_date") .date' <<< "$data" | sed 's/T.*$//')
+  # generate formatted table with date, status, and name
+  printf "%10s %-12s %s" $created_date $status $name
+done
+```
+
+**List items in query or collection**
+
+```sh
+# list queries in space. "$space" can be id ("bafy...") or name ("Projects")
+anyr search --type set --space $space -t
+# list collections in the space
+anyr search --type collection --space $space -t
+# from above, get id of query or collection of interest, then
+# list items in query or collection, in view "All"
+anyr view objects --view All $space $query_or_collection_id -t
+```
+
+**Get objects from a collection list or grid view**
+
+```sh
+# show names of all tasks in space "Work", using view 'All'
+anyr view objects --view All "Work" Task -t
+
+# show columns: Name, Created By, and Status (note: column names are specified by property_key)
+anyr view objects --view All "Work" Task --cols name,creator,status
+
+# get tasks from view ByProject in json, with all properties
+anyr view objects --view ByProject "Work" Task --json
+```
+
+If you have a list or grid formatted view, you can use `view objects` to list the view items by specifying the space name, list, and view.
+
+- Results are filtered and sorted by the criteria in the view.
+- View can be specified by the view id or view name.
+- The --json and --pretty format outputs include all properties of the objects.
+
+Table listing features for `view objects`:
+
+- Table listing defaults to name column only. Specify columns in table output with `--cols/--columns` and a comma-separated list of property keys. Example `--cols name,creator,created_date,status`
+- Format dates with strftime format: `--date-format` or `ANYTYPE_DATE_FORMAT`, defaults to `%Y-%m-%d %H:%M:%S`.
+- Members names are displayed instead of member id.
 
 ## Install
 
+**Homebrew**
+
 ```sh
-cargo install anyr
+brew install stevelr/tap/anyr
+```
+
+**Macos or Linux**
+
+```sh
+curl -fsSL https://github.com/stevelr/anytype/releases/latest/download/anyr-installer.sh | sh
+```
+
+**Windows Powershell**
+
+```sh
+irm https://github.com/stevelr/anytype/releases/latest/download/anyr-installer.ps1 | iex
+```
+
+**Cargo**
+
+```sh
+cargo install -p anyr
+```
+
+## Build from source
+
+**Cargo**
+
+```sh
+argo install -p anyr
+```
+
+**Nix**
+
+```sh
+nix build
 ```
 
 ## Configure
@@ -28,117 +210,9 @@ anyr ARGS ...
 
 ### Generate api key (first-time authentication)
 
-- **Desktop**: If the Anytype desktop app is running, type `anyr auth login` and the app will display a 4-digit code. Enter the code into the cli prompt, and a key is generated and stored in the KeyStore.
+- **Desktop**: If the Anytype desktop app is running, type `anyr auth login` and the app will display a 4-digit code. Enter the code into the anyr prompt, and a key is generated and stored in the KeyStore.
 
 - **Headless server**: If you are using the headless cli server, start the server, run `anytype auth apikey create anyr` to generate and display a key, save it in a file, and set the key file path as described in [Key storage](#key-storage).
-
-## Run
-
-```sh
-# show options
-anyr --help
-
-# check authentication status
-anyr auth status
-
-# List spaces your user is authorized to access
-anyr space list -t
-
-# List spaces with json output
-anyr space list            # default output is json
-anyr space list --json     # same as default
-anyr space list --pretty   # json formatted
-```
-
-## Common options
-
-- `--help` show context-specific help
-
-**Configuration**
-
-- `--url` anytype endpoint url
-- `--keyfile`, `--keyfile-path`, `--keyring`, `--keyring-service`: see [Key storage](#key-storage)
-
-**Output format**
-
-- `--json` (same as default).
-- `--pretty` (json pretty-print)
-- `-t/--table` (table format, easy to read in terminal)
-- `--quiet` (minimal output)
-
-**Filters**
-
-- `--filter` - add filters
-- `--type` - limit search results to type(s)
-- `--sort` - sort results by property key (ascending)
-- `--desc` - if used with `--sort`, sort descending
-
-- There are some apparent bugs in anytype-heart that limit the functionality of search filters, especially in 'list' commands. See [Troubleshooting](../anytype-api/Troubleshooting.md) for current known issues.
-
-## Examples
-
-### List objects in a space
-
-```sh
-# List <ENTITY> in a space. (entities: object, member, property, template)
-# anyr <ENTITY> list <SPACE_ID_OR_NAME>
-
-# list objects in space 'Personal'
-anyr object list "Personal" -t
-
-# list types in space 'Personal'
-anyr type list "Personal" -t
-
-```
-
-### Search in space
-
-```sh
-# search space "Work" for tasks containing the text "customer"
-anyr search --space "Work" --type Task --text customer -t
-```
-
-### List tasks in space
-
-```sh
-space_id="Work" # specify space using name or id
-for task in `anyr search --type Task --space $space_id --json | jq -r '.items[] | .id`; do
-  data=$(anyr object get $space_id $task --json)
-  status=$(jq -r '.properties[] | select (.key=="status") .select.name' <<< "$data")
-  name=$(jq -r '.name' <<< "$data")
-  # get created_date as YYYY-MM-DD
-  created_date=$(jq -r '.properties[] | select (.key=="created_date") .date' <<< "$data" | sed 's/T.*$//')
-  # generate formatted table with date, status, and name
-  printf "%10s %-12s %s" $created_date $status $name
-done
-```
-
-### Get objects from a collection list or grid view.
-
-If you have a list or grid formatted view, you can use `view objects` to list the view items by specifying the space name, list, and view.
-
-- Results are filtered and sorted by the criteria in the view.
-- View can be specified by the view id or view name.
-- The --json and --pretty format outputs include all properties of the objects.
-
-Table listing features for `view objects`:
-
-- Table listing defaults to name column only. Specify columns in table output with `--cols/--columns` and a comma-separated list of property keys. Example `--cols name,creator,created_date,status`
-- Format dates with strftime format: `--date-format` or `ANYTYPE_DATE_FORMAT`, defaults to `%Y-%m-%d %H:%M:%S`.
-- Members names are displayed instead of member id.
-
-Example: get all tasks in space "Work" from view "All"
-
-```sh
-# show names of all tasks in space "Work", using view 'All'
-anyr view objects --view All "Work" Task -t
-
-# show columns: Name, Created By, and Status (note: column names are specified by property_key)
-anyr view objects --view All "Work" Task --cols name,creator,status
-
-# get tasks from view ByProject in json, with all properties
-anyr view objects --view ByProject "Work" Task --json
-```
 
 ## Key storage
 
@@ -168,13 +242,13 @@ Key storage is determined in the following order of precedence:
 Debug logging
 
 ```sh
-RUST_LOG=debug anyr object list <SPACE_ID>
+RUST_LOG=debug anyr space list -t
 ```
 
 Log HTTP requests and responses:
 
 ```sh
-RUST_LOG=warn,anytype::http_json=trace anyr object list <SPACE_ID>
+RUST_LOG=warn,anytype::http_json=trace anyr space list -t
 ```
 
 ## Testing

@@ -4,11 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [0.2.4] - 2026-01-17
 
+### Added
+
+- Documentation (README.md): example command for listing items in query or collection
+
+### Changed
+
+- Fix: 'view objects' with query views found results in table output format only. Now gives result in table or json format. Property metadata resolved before output formatting, and removed get_type call from json output path.
 - removed undocumented --keyring-service arg
 
-## [0.2.3] 2026-01-12
+## [0.2.3] - 2026-01-12
 
 ### Changed
 

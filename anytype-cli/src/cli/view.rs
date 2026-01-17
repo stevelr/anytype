@@ -50,15 +50,12 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
                 .view(view_id.clone())
                 .limit(limit);
             let result = request.list().await?;
+            let property_names = load_property_names(ctx, &space_id).await?;
 
             match ctx.output.format() {
                 OutputFormat::Table => {
                     let columns = match columns {
-                        Some(value) => {
-                            let property_names =
-                                load_type_property_names(ctx, &space_id, &type_id).await?;
-                            override_columns(&property_names, &value)
-                        }
+                        Some(value) => override_columns(&property_names, &value),
                         None => base_columns.clone(),
                     };
                     let headers = columns
@@ -77,7 +74,6 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
                     ctx.output.emit_text(&table)
                 }
                 _ => {
-                    let property_names = load_type_property_names(ctx, &space_id, &type_id).await?;
                     let json_columns = columns_for_items(&result.items, &property_names);
                     let items = view_objects_rows(&json_columns, &result.items);
                     let output = ViewObjectsOutput {
@@ -98,14 +94,15 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
     }
 }
 
-async fn load_type_property_names(
-    ctx: &AppContext,
-    space_id: &str,
-    type_id: &str,
-) -> Result<HashMap<String, String>> {
-    let typ = ctx.client.get_type(space_id, type_id).get().await?;
-    Ok(typ
-        .properties
+async fn load_property_names(ctx: &AppContext, space_id: &str) -> Result<HashMap<String, String>> {
+    let properties = ctx
+        .client
+        .properties(space_id)
+        .list()
+        .await?
+        .collect_all()
+        .await?;
+    Ok(properties
         .into_iter()
         .map(|prop| (prop.key, prop.name))
         .collect())
