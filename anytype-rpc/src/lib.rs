@@ -33,5 +33,7 @@ pub mod auth;
 pub mod client;
 /// Helpers for headless config-based auth.
 pub mod config;
+/// Error types for gRPC operations.
+pub mod error;
 /// Helpers for dataview view metadata.
 pub mod views;

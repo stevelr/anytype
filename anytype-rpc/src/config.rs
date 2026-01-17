@@ -1,9 +1,10 @@
 use std::env;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+pub use crate::error::ConfigError;
 
 /// Headless CLI config.json fields relevant for gRPC auth.
 #[derive(Debug, Default, Deserialize)]
@@ -14,39 +15,8 @@ pub struct AnytypeHeadlessConfig {
     pub session_token: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum AnytypeConfigError {
-    Io(std::io::Error),
-    Parse(serde_json::Error),
-    MissingHome,
-}
-
-impl fmt::Display for AnytypeConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AnytypeConfigError::Io(err) => write!(f, "config io error: {err}"),
-            AnytypeConfigError::Parse(err) => write!(f, "config parse error: {err}"),
-            AnytypeConfigError::MissingHome => write!(f, "HOME environment variable not set"),
-        }
-    }
-}
-
-impl std::error::Error for AnytypeConfigError {}
-
-impl From<std::io::Error> for AnytypeConfigError {
-    fn from(err: std::io::Error) -> Self {
-        AnytypeConfigError::Io(err)
-    }
-}
-
-impl From<serde_json::Error> for AnytypeConfigError {
-    fn from(err: serde_json::Error) -> Self {
-        AnytypeConfigError::Parse(err)
-    }
-}
-
-pub fn default_headless_config_path() -> Result<PathBuf, AnytypeConfigError> {
-    let home = env::var("HOME").map_err(|_| AnytypeConfigError::MissingHome)?;
+pub fn default_headless_config_path() -> Result<PathBuf, ConfigError> {
+    let home = env::var("HOME").map_err(|_| ConfigError::MissingHome)?;
     Ok(PathBuf::from(home).join(".anytype").join("config.json"))
 }
 
@@ -54,7 +24,7 @@ pub fn default_headless_config_path() -> Result<PathBuf, AnytypeConfigError> {
 /// Data from this file can be used to generate a grpc auth token
 pub fn load_headless_config(
     path: Option<&Path>,
-) -> Result<Option<AnytypeHeadlessConfig>, AnytypeConfigError> {
+) -> Result<Option<AnytypeHeadlessConfig>, ConfigError> {
     let path = match path {
         Some(path) => path.to_path_buf(),
         None => default_headless_config_path()?,

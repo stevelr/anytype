@@ -2,15 +2,15 @@
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::fmt;
 
 use prost_types::value::Kind;
+use tonic::Request;
 use tonic::transport::Channel;
-use tonic::{Request, Status};
 
 use crate::anytype::ClientCommandsClient;
 use crate::anytype::rpc::object::show::Request as ObjectShowRequest;
 use crate::auth::with_token;
+pub use crate::error::ViewError;
 use crate::model;
 use crate::model::block::ContentValue;
 use crate::model::block::content::Dataview as BlockDataview;
@@ -36,45 +36,6 @@ pub struct GridViewInfo {
     pub columns: Vec<GridViewColumn>,
 }
 
-/// Errors returned when loading view metadata.
-#[derive(Debug)]
-pub enum ViewError {
-    Transport(Status),
-    Api { code: i32, description: String },
-    MissingObjectView,
-    MissingDataviewBlock { view_id: String },
-    MissingView { view_id: String },
-    NotSupportedView { view_id: String, actual: i32 },
-}
-
-impl fmt::Display for ViewError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ViewError::Transport(status) => write!(f, "transport error: {status}"),
-            ViewError::Api { code, description } => {
-                write!(f, "api error {code}: {description}")
-            }
-            ViewError::MissingObjectView => write!(f, "object view missing in response"),
-            ViewError::MissingDataviewBlock { view_id } => {
-                write!(f, "dataview block not found for view id {view_id}")
-            }
-            ViewError::MissingView { view_id } => write!(f, "view id {view_id} not found"),
-            ViewError::NotSupportedView { view_id, actual } => write!(
-                f,
-                "view id {view_id} is not a supported view (type {actual})"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ViewError {}
-
-impl From<Status> for ViewError {
-    fn from(status: Status) -> Self {
-        ViewError::Transport(status)
-    }
-}
-
 /// Fetch table/list view column metadata for a type object.
 pub async fn fetch_grid_view_columns(
     client: &mut ClientCommandsClient<Channel>,
@@ -89,16 +50,17 @@ pub async fn fetch_grid_view_columns(
         include_relations_as_dependent_objects: true,
         ..Default::default()
     };
-    let request = with_token(Request::new(request), token).map_err(|err| ViewError::Api {
-        code: 0,
-        description: err.to_string(),
-    })?;
+    let request =
+        with_token(Request::new(request), token).map_err(|err| ViewError::ApiResponse {
+            code: 0,
+            description: err.to_string(),
+        })?;
 
     let response = client.object_show(request).await?.into_inner();
     if let Some(error) = response.error
         && error.code != 0
     {
-        return Err(ViewError::Api {
+        return Err(ViewError::ApiResponse {
             code: error.code,
             description: error.description,
         });

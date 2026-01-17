@@ -1,10 +1,10 @@
 //! Authentication helpers for Anytype gRPC clients.
 
-use std::fmt;
-
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::{Request, Status, transport::Channel};
+
+pub use crate::error::AuthError;
 
 use crate::anytype::ClientCommandsClient;
 use crate::anytype::rpc::account::local_link::new_challenge::Request as LocalLinkChallengeRequest;
@@ -36,42 +36,6 @@ impl SessionAuth {
             SessionAuth::Token(value) => Auth::Token(value),
         };
         CreateSessionRequest { auth: Some(auth) }
-    }
-}
-
-/// Errors surfaced by auth helpers.
-#[derive(Debug)]
-pub enum AuthError {
-    Transport(Status),
-    Api { code: i32, description: String },
-    EmptyToken,
-    InvalidMetadata(tonic::metadata::errors::InvalidMetadataValue),
-}
-
-impl fmt::Display for AuthError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AuthError::Transport(status) => write!(f, "transport error: {status}"),
-            AuthError::Api { code, description } => {
-                write!(f, "api error {code}: {description}")
-            }
-            AuthError::EmptyToken => write!(f, "create session returned empty token"),
-            AuthError::InvalidMetadata(err) => write!(f, "invalid metadata value: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for AuthError {}
-
-impl From<Status> for AuthError {
-    fn from(status: Status) -> Self {
-        AuthError::Transport(status)
-    }
-}
-
-impl From<tonic::metadata::errors::InvalidMetadataValue> for AuthError {
-    fn from(err: tonic::metadata::errors::InvalidMetadataValue) -> Self {
-        AuthError::InvalidMetadata(err)
     }
 }
 

@@ -1,16 +1,31 @@
-use std::fmt;
-
 use tonic::transport::{Channel, Endpoint};
 
 use crate::anytype::ClientCommandsClient;
-use crate::auth::{
-    AuthError, create_session_token_from_account_key, create_session_token_from_app_key,
-};
+use crate::auth::{create_session_token_from_account_key, create_session_token_from_app_key};
+use crate::error::AnytypeGrpcError;
+
+// optional environment variable containing grpc endpoint
+const ANYTYPE_GRPC_ENDPOINT_ENV: &str = "ANYTYPE_GRPC_ENDPOINT";
+const ANYTYPE_GRPC_HEADLESS_URL: &str = "http://127.0.0.1:31010";
+
+/// checks environment variable "ANYTYPE_GRPC_ENDPOINT", then falls back to headless cli endpoint
+pub fn default_grpc_endpoint() -> String {
+    std::env::var(ANYTYPE_GRPC_ENDPOINT_ENV)
+        .unwrap_or_else(|_| ANYTYPE_GRPC_HEADLESS_URL.to_string())
+}
 
 /// Configuration for connecting to Anytype gRPC.
 #[derive(Debug, Clone)]
 pub struct AnytypeGrpcConfig {
     endpoint: String,
+}
+
+impl Default for AnytypeGrpcConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_grpc_endpoint(),
+        }
+    }
 }
 
 impl AnytypeGrpcConfig {
@@ -25,38 +40,6 @@ impl AnytypeGrpcConfig {
     }
 }
 
-/// Errors that can occur when creating a gRPC client.
-#[derive(Debug)]
-pub enum AnytypeGrpcClientError {
-    Transport(tonic::transport::Error),
-    Auth(AuthError),
-}
-
-impl fmt::Display for AnytypeGrpcClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AnytypeGrpcClientError::Transport(err) => {
-                write!(f, "grpc transport error: {err}")
-            }
-            AnytypeGrpcClientError::Auth(err) => write!(f, "grpc auth error: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for AnytypeGrpcClientError {}
-
-impl From<tonic::transport::Error> for AnytypeGrpcClientError {
-    fn from(err: tonic::transport::Error) -> Self {
-        AnytypeGrpcClientError::Transport(err)
-    }
-}
-
-impl From<AuthError> for AnytypeGrpcClientError {
-    fn from(err: AuthError) -> Self {
-        AnytypeGrpcClientError::Auth(err)
-    }
-}
-
 /// gRPC client wrapper holding the connection and session token.
 #[derive(Debug, Clone)]
 pub struct AnytypeGrpcClient {
@@ -65,9 +48,7 @@ pub struct AnytypeGrpcClient {
 }
 
 impl AnytypeGrpcClient {
-    pub async fn connect_channel(
-        config: &AnytypeGrpcConfig,
-    ) -> Result<Channel, AnytypeGrpcClientError> {
+    pub async fn connect_channel(config: &AnytypeGrpcConfig) -> Result<Channel, AnytypeGrpcError> {
         Ok(Endpoint::from_shared(config.endpoint.clone())?
             .connect()
             .await?)
@@ -78,7 +59,7 @@ impl AnytypeGrpcClient {
     pub async fn from_account_key(
         config: &AnytypeGrpcConfig,
         account_key: impl AsRef<str>,
-    ) -> Result<Self, AnytypeGrpcClientError> {
+    ) -> Result<Self, AnytypeGrpcError> {
         let channel = Self::connect_channel(config).await?;
         let token = create_session_token_from_account_key(channel.clone(), account_key).await?;
         Ok(Self { channel, token })
@@ -88,7 +69,7 @@ impl AnytypeGrpcClient {
     pub async fn from_app_key(
         config: &AnytypeGrpcConfig,
         app_key: impl AsRef<str>,
-    ) -> Result<Self, AnytypeGrpcClientError> {
+    ) -> Result<Self, AnytypeGrpcError> {
         let channel = Self::connect_channel(config).await?;
         let token = create_session_token_from_app_key(channel.clone(), app_key).await?;
         Ok(Self { channel, token })
@@ -97,7 +78,7 @@ impl AnytypeGrpcClient {
     pub async fn from_token(
         config: &AnytypeGrpcConfig,
         token: impl Into<String>,
-    ) -> Result<Self, AnytypeGrpcClientError> {
+    ) -> Result<Self, AnytypeGrpcError> {
         let channel = Self::connect_channel(config).await?;
         Ok(Self {
             channel,
