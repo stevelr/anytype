@@ -19,7 +19,7 @@ An ergonomic Anytype API client in Rust.
 - Parameter validation
 - Metrics
 - used in:
-  - [anyr](https://github.com/stevelr/anytype/tree/main/anytype-cli) - list, search, and manipulate anytype objects
+  - [anyr](https://github.com/stevelr/anytype/tree/main/anyr) - list, search, and manipulate anytype objects
   - [any-edit](https://github.com/stevelr/anytype/tree/main/any-edit) - edit anytype docs in markdown in external editor
 
 ## Quick start
@@ -86,7 +86,7 @@ The current version of the backend api does not provide access to some data stor
 - Relationships - only a subset of relation types are available in the REST api.
 - chats and messages
 
-Because of these limitations, it is not yet possible with this crate or with [anyr](../anytype-cli) to export a complete space. We are investigating using the gRPC api backend to access some of these additional features.
+Because of these limitations, it is not yet possible with this crate or with [anyr](../anyr) to export a complete space. We are investigating using the gRPC api backend to access some of these additional features.
 
 ## Known issues & Troubleshooting
 

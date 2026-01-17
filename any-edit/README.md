@@ -112,7 +112,7 @@ The headless cli doesn't support the copy link hotkeys so `--copy-url` or `--edi
 
 ### Platform compatibility
 
-The Raycast extension and hotkey to query the desktop app for the current page only work on macos. The other operations: exporting anytype object to markdown, and updating an object from a markdown file, should work on other platforms. However, if you just need a general export/import tool for anytype objects, check out [anyr](https://github.com/stevelr/anytype/tree/main/anytype-cli).
+The Raycast extension and hotkey to query the desktop app for the current page only work on macos. The other operations: exporting anytype object to markdown, and updating an object from a markdown file, should work on other platforms. However, if you just need a general export/import tool for anytype objects, check out [anyr](https://github.com/stevelr/anytype/tree/main/anyr).
 
 ## Accessibility Permissions
 

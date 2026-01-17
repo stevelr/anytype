@@ -936,7 +936,7 @@ fn resolve_table_date_format(cli: &Cli) -> String {
 }
 
 fn build_client(base_url: &str, keystore: &KeystoreConfig) -> Result<AnytypeClient> {
-    let mut config = ClientConfig::default().app_name("anytype-cli");
+    let mut config = ClientConfig::default().app_name("anyr");
     config.base_url = base_url.to_string();
 
     let client = AnytypeClient::with_config(config)?;

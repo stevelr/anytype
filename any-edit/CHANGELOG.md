@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [0.1.2] - any-edit-v0.1.2 (2025-01-17)
+## [0.1.2] - any-edit - 2025-01-17
 
 ### Added
 
@@ -16,7 +16,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - new command 'any-edit edit-current' replaces 'any-edit edit --current'
 - bump dependencies; anytype v0.2.9
 
-## [0.1.1] - any-edit-v0.1.1
+## [0.1.1] - any-edit
 
 ### Changed
 
