@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [0.2.1] - anytype-rpc - 2025-01-21
+## [0.2.1] - anytype-rpc - 2026-01-21
 
 ### Added
 
@@ -15,7 +15,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Apache-2.0 license
 
-## [0.2.0] - anytype-rpc - 2025-01-17
+## [0.2.0] - anytype-rpc - 2026-01-17
 
 ### Added
 
