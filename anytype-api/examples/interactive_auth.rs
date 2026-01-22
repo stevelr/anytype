@@ -7,8 +7,11 @@ use anytype::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), AnytypeError> {
-    let app_name = env!("CARGO_BIN_NAME");
-    let client = AnytypeClient::new(app_name)?.set_key_store(KeyStoreFile::new(app_name)?);
+    let client = AnytypeClient::with_config(ClientConfig {
+        app_name: "anytype-examples".into(),
+        keystore_service: Some("anyr".to_string()), // reuse "anyr"'s auth tokens
+        ..Default::default()
+    })?;
 
     client
         .authenticate_interactive(

@@ -577,6 +577,7 @@ async fn test_read_checkbox_property_value() -> TestResult<()> {
                 .await
         })
         .await?;
+        ctx.register_object(&obj);
 
         // Test checkbox getter
         let checked = obj.get_property_bool(&prop_key);

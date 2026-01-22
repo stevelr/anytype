@@ -31,14 +31,15 @@
 //! # async fn example() -> Result<(), AnytypeError> {
 //!
 //! // Initialize the client with file-based keystore.
-//! let client = AnytypeClient::new("my-app")?
-//!         .set_key_store(KeyStoreFile::new("my-app")?);
-//! if !client.load_key(false)? {
+//! let mut config = ClientConfig::default().app_name("my-app");
+//! config.keystore = Some("file".to_string());
+//! let client = AnytypeClient::with_config(config)?;
+//! if !client.auth_status()?.http.is_authenticated() {
 //!     println!("Not authenticated. Please log in.");
 //! }
 //!
 //! // List spaces
-//! let spaces = client.spaces().list().await?;
+//! let spaces: PagedResult<Space> = client.spaces().list().await?;
 //! for space in spaces.iter() {
 //!     println!("{}", &space.name);
 //! }
@@ -52,7 +53,7 @@
 //!     .create().await?;
 //!
 //! // Search, with filtering and sorting
-//! let results = client.search_in(&space1.id)
+//! let results: PagedResult<Object> = client.search_in(&space1.id)
 //!     .text("meeting notes")
 //!     .types(["page", "note"])
 //!     .sort_desc("last_modified_date")
@@ -137,6 +138,8 @@ pub mod auth;
 pub mod cache;
 pub mod client;
 pub mod error;
+#[cfg(feature = "grpc")]
+pub mod files;
 pub mod filters;
 mod http_client;
 pub mod keystore;
@@ -161,6 +164,7 @@ pub type Result<T, E = crate::error::AnytypeError> = std::result::Result<T, E>;
 /// Prelude module - import (nearly) all the things with `use anytype::prelude::*;`
 pub mod prelude {
     pub use super::{ANYTYPE_API_VERSION, ANYTYPE_DESKTOP_URL, ANYTYPE_HEADLESS_URL};
+
     // Error types
     pub use crate::error::*;
 
@@ -173,9 +177,7 @@ pub mod prelude {
         // HTTP server metrics
         http_client::HttpMetricsSnapshot,
         // Key storage
-        keystore::{
-            KeyStore, KeyStoreFile, KeyStoreKeyring, KeyStoreType, NoKeyStore, SecretApiKey,
-        },
+        keystore::{HttpCredentials, KeyStore, KeyStoreType},
         // Space members
         members::{Member, MemberRole, MemberStatus},
         // Objects
@@ -196,6 +198,12 @@ pub mod prelude {
         verify::VerifyConfig,
         // Views (Lists, Collections, Queries)
         views::{View, ViewLayout},
+    };
+
+    #[cfg(feature = "grpc")]
+    pub use crate::{
+        files::{FileObject, FileStyle, FileType, FilesClient},
+        keystore::GrpcCredentials,
     };
 }
 
@@ -221,12 +229,6 @@ pub(crate) mod config {
 
     /// Service name for keystore
     pub(crate) const DEFAULT_SERVICE_NAME: &str = "anytype_rust";
-
-    /// Environment variable for key file path (overrides config dir)
-    pub(crate) const ANYTYPE_KEY_FILE_ENV: &str = "ANYTYPE_KEY_FILE";
-
-    /// User name for keystore
-    pub(crate) const DEFAULT_KEY_USER: &str = "anytype_key";
 
     /// Warn when the rate-limit wait exceeds this duration (seconds).
     pub(crate) const RATE_LIMIT_WAIT_WARN_SECS: u64 = 5;

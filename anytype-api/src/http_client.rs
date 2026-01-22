@@ -206,14 +206,14 @@ impl HttpRequest {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub(crate) struct HttpClient {
     pub client: reqwest::Client,
 
     /// Base URL for API requests (e.g., "http://localhost:31009")
     pub base_url: String,
 
-    pub api_key: Arc<Mutex<Option<SecretApiKey>>>,
+    pub api_key: Arc<Mutex<HttpCredentials>>,
 
     limits: ValidationLimits,
 
@@ -224,18 +224,29 @@ pub(crate) struct HttpClient {
     pub metrics: Arc<HttpMetrics>,
 }
 
-impl Clone for HttpClient {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
-            limits: self.limits.clone(),
-            rate_limit_max_retries: self.rate_limit_max_retries,
-            metrics: self.metrics.clone(),
-        }
+impl fmt::Debug for HttpClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpClient")
+            .field("base_url", &self.base_url)
+            .field("api_key", &String::from("(MASKED)"))
+            .field("rate_limit_max_retries", &self.rate_limit_max_retries)
+            .field("metrics", &self.metrics)
+            .finish()
     }
 }
+
+// impl Clone for HttpClient {
+//     fn clone(&self) -> Self {
+//         Self {
+//             client: self.client.clone(),
+//             base_url: self.base_url.clone(),
+//             api_key: self.api_key.clone(),
+//             limits: self.limits.clone(),
+//             rate_limit_max_retries: self.rate_limit_max_retries,
+//             metrics: self.metrics.clone(),
+//         }
+//     }
+// }
 
 struct ParsedRetry {
     header: String,
@@ -273,6 +284,7 @@ impl HttpClient {
         base_url: String,
         limits: ValidationLimits,
         rate_limit_max_retries: u32,
+        http_creds: HttpCredentials,
     ) -> Result<Self> {
         let client = builder.build().context(HttpSnafu {
             method: "client-init",
@@ -281,7 +293,7 @@ impl HttpClient {
         Ok(HttpClient {
             client,
             base_url,
-            api_key: Arc::new(Mutex::new(None)),
+            api_key: Arc::new(Mutex::new(http_creds)),
             limits,
             rate_limit_max_retries,
             metrics: Arc::new(HttpMetrics::new()),
@@ -295,22 +307,23 @@ impl HttpClient {
 
     /// Returns true if api_key has been initialized.
     pub fn has_key(&self) -> bool {
-        self.api_key.lock().is_some()
+        self.api_key.lock().has_creds()
     }
 
     /// Sets the API key for authenticated requests.
-    pub fn set_api_key(&self, api_key: &SecretApiKey) {
+    pub fn set_api_key(&self, api_key: HttpCredentials) {
         let mut write_key = self.api_key.lock();
-        *write_key = Some(api_key.clone());
+        *write_key = api_key;
     }
 
-    /// Clears the api key if set.
+    /// Clears the api key if set. (in memory, does not change keystore)
     pub fn clear_api_key(&self) {
         let mut write_key = self.api_key.lock();
-        *write_key = None;
+        *write_key = HttpCredentials::default();
     }
 
-    pub(crate) fn get_api_key(&self) -> Option<SecretApiKey> {
+    /// Returns http token from memory (Does not refresh from keystore)
+    pub(crate) fn get_api_key(&self) -> HttpCredentials {
         self.api_key.lock().clone()
     }
 
@@ -410,7 +423,7 @@ impl HttpClient {
         deserialize_json(&data)
     }
 
-    /// This function handles all anytype rest api requests (http: get,post,patch,delete)
+    /// This function handles all authenticated anytype rest api requests (http: get,post,patch,delete)
     /// - handles 429 rate limit feedback
     /// - retries up to N(=3) times for connection failures or server timeout
     /// - maps http error codes into AnytypeErrors
@@ -430,20 +443,20 @@ impl HttpClient {
             self.limits
                 .validate_body(body, &format!("http {} {}", &req.method, &req.path))?;
         }
-
-        let api_key = {
-            let key = self.api_key.lock().clone();
-            key.ok_or_else(|| AnytypeError::Auth {
-                message: "API key not set. Call set_api_key() or load_key() first.".to_string(),
-            })?
-        };
+        let api_key = self.get_api_key();
+        if api_key.token().is_none() {
+            return Err(AnytypeError::Auth {
+                message: "HTTP credentials missing token. Client is not authenticated".to_string(),
+            });
+        }
         let full_url = format!("{}{}", self.base_url, req.path);
         let req_builder = self
             .client
             .request(req.method.clone(), &full_url)
             .query(&req.query)
-            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION);
-        let req_builder = api_key.set_auth_header(req_builder);
+            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+            // SAFETY: unwrap ok because we excluded token().is_none() above
+            .bearer_auth(api_key.token().unwrap());
 
         // debug log (if tracing enabled)
         log_request(&req_builder, &req.body);

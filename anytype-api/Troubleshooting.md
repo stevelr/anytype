@@ -1,5 +1,11 @@
 # Known issues & Troubleshooting
 
+## I keep getting prompted to authenticate
+
+- Every time the anyr binary (or other program using anytype-api) is recompiled, macos prompts the user to allow the app to access the keychain. If you click "Always Allow", you should get prompted at most twice, and after that, the OS should remember the setting and allow the app to read the keychain.
+- Note that each "example" is a separate "program", so if you run lots of examples, you'll get prompted many times.
+- To avoid getting inundated with permission prompts while doing builds, or running tests or examples, use a file-based keystore, instead of the default OS keyring-based keystore. You can do this by setting ANYTYPE_KEYSTORE=file (for default location) or ANYTYPE_KEYSTORE=file:path=/path/to/keystore.db
+
 ## Tracking issues in `anytype-heart`
 
 Issues in the `anytype` library should be filed in this repo.

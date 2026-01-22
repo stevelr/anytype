@@ -1245,7 +1245,7 @@ impl UpdatePropertyRequest {
 /// ```rust
 /// # use anytype::prelude::*;
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
 /// let properties = client.properties(&space_id)
 ///     .limit(50)
@@ -1479,7 +1479,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     /// let properties = client.properties(&space_id)
     ///     .limit(50)

@@ -16,7 +16,7 @@
 //! use anytype::prelude::*;
 //!
 //! # async fn example() -> Result<(), AnytypeError> {
-//! #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+//! #   let client = AnytypeClient::new("doc test")?;
 //! #   let space_id = anytype::test_util::example_space_id(&client).await?;
 //!
 //! // List all types
@@ -868,7 +868,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     /// #   let typ = client.lookup_type_by_key(&space_id, "page").await?;
     /// #   let type_id = &typ.id;
@@ -899,7 +899,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     ///
     /// let project = client.new_type(&space_id, "My Project")
@@ -935,7 +935,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     ///
     /// let project = client.new_type(&space_id, "My Project")
@@ -977,7 +977,7 @@ impl AnytypeClient {
     /// ```rust
     /// use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     ///
     /// let types = client.types(&space_id)
@@ -1007,7 +1007,7 @@ impl AnytypeClient {
     /// ```rust
     /// use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     ///
     /// let types = client.lookup_types(&space_id, "page").await?;
@@ -1050,7 +1050,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     ///
     /// let typ = client.lookup_type_by_key(&space_id, "page").await?;

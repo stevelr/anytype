@@ -15,7 +15,7 @@
 //! use anytype::prelude::*;
 //!
 //! # async fn example() -> Result<(), AnytypeError> {
-//! #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+//! #   let client = AnytypeClient::new("doc test")?;
 //! #   let space_id = anytype::test_util::example_space_id(&client).await?;
 //!
 //! // Create an object
@@ -483,7 +483,7 @@ struct UpdateObjectRequestBody {
 /// ```rust
 /// # use anytype::prelude::*;
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
 /// #   // get an object id we know exists
 /// #   let obj_id = client.lookup_property_by_key(&space_id, "page").await.unwrap().id;
@@ -580,7 +580,7 @@ impl ObjectRequest {
 /// ```rust
 /// use anytype::prelude::*;
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
 ///
 /// let obj = client.new_object(&space_id, "page")
@@ -783,7 +783,7 @@ impl SetProperty for NewObjectRequest {
 /// ```rust,no_run
 /// use anytype::prelude::*;
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
 /// # let obj = client.new_object(&space_id, "page")
 /// #     .name("My Document")
@@ -980,7 +980,7 @@ impl SetProperty for UpdateObjectRequest {
 /// ```rust
 /// # use anytype::prelude::*;
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
 /// let results = client.objects(&space_id)
 ///     .limit(50)
@@ -1206,7 +1206,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     /// let results = client.objects(&space_id)
     ///     .limit(50)

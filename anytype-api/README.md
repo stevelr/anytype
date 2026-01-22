@@ -6,13 +6,14 @@ An ergonomic Anytype API client in Rust.
 
 ## Overview
 
-`anytype` provides an ergonomic rust client for the [Anytype](https://anytype.io) REST API. It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, and Views, with optional key storage and caching.
+`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, and Views, with optional key storage and caching. gRPC extensions (enabled by default) add file operations (upload/download/list/search).
 
 ### Features
 
 - 100% coverage of Anytype API 2025-11-08
+- Optional gRPC back-end provides API extensions for features not available in the REST api (Files)
 - Paginated responses and async Streams
-- Integrates with OS Keyring for secure storage of api key (optional)
+- Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
 - Http middleware with debug logging, retries, and rate limit handling
 - Client-side caching (spaces, properties, types)
 - Nested filter expression builder
@@ -31,9 +32,31 @@ use anytype::prelude::*;
 async fn main() -> Result<(), AnytypeError> {
 
     // Create a client
-    let client = AnytypeClient::new("my-app")?
-        .set_key_store(KeyStoreFile::new("my-app")?);
-    client.load_key(false)?;
+    let mut config = ClientConfig::default().app_name("my-app");
+    // Optional: use file-based keystore instead of OS keyring
+    config.keystore = Some("file".to_string());
+    let client = AnytypeClient::with_config(config)?;
+    if !client.auth_status()?.http.is_authenticated() {
+        // prompt user for auth code if needed
+        client
+            .authenticate_interactive(
+                |challenge_id| {
+                    use std::io::{self, Write};
+                    println!("Challenge ID: {challenge_id}");
+                    print!("Enter 4-digit code: ");
+                    io::stdout().flush().map_err(|err| AnytypeError::Auth {
+                        message: err.to_string(),
+                    })?;
+                    let mut code = String::new();
+                    io::stdin().read_line(&mut code).map_err(|err| AnytypeError::Auth {
+                        message: err.to_string(),
+                    })?;
+                    Ok(code.trim().to_string())
+                },
+                false,
+            )
+            .await?;
+    }
 
     // List spaces
     let spaces = client.spaces().list().await?;
@@ -69,6 +92,29 @@ async fn main() -> Result<(), AnytypeError> {
 }
 ```
 
+## Files (gRPC)
+
+File operations require the `grpc` feature (enabled by default). The download API accepts either a destination directory or a destination file path:
+
+```rust
+let file_id = "file_object_id";
+let downloaded = client
+    .files()
+    .download(file_id)
+    .to_dir("/tmp")
+    .download()
+    .await?;
+println!("downloaded to {}", downloaded.display());
+
+let downloaded = client
+    .files()
+    .download(file_id)
+    .to_file("/tmp/example.pdf")
+    .download()
+    .await?;
+println!("downloaded to {}", downloaded.display());
+```
+
 ## Status and Compatibility
 
 The crate has 100% coverage of the Anytype REST api 2025-11-08.
@@ -77,20 +123,26 @@ Plus:
 
 - View Layouts (grid, kanban, calendar, gallery, graph) implemented in the desktop app but not in the api spec 2025-11-08.
 
+- gRPC back-end provides API extensions for features not available in the REST api:
+  - Files api for listings, search, upload, and download.
+
 ### What's missing?
 
-The current version of the backend api does not provide access to some data stored by the Anytype app. Data that is current inaccessible from the http api:
+The current version of the http backend api does not provide access to some data stored by the Anytype app. Data that is current inaccessible from the http api:
 
+- ~~Files~~ Files support now available with the gRPC back-end
 - Blocks. Pages and other document-like objects can be exported as markdown, but markdown export is somewhat lossy, for example, in tables, markdown export preserves table layout, with bold and italic styling, but foreground and background colors are lost.
-- Files (images, videos, etc.)
 - Relationships - only a subset of relation types are available in the REST api.
-- chats and messages
+- Chats and Messages
 
 Because of these limitations, it is not yet possible with this crate or with [anyr](../anyr) to export a complete space. We are investigating using the gRPC api backend to access some of these additional features.
 
 ## Building
 
-Ensure you have 'protoc' from the protobuf package in your path. On macos, 'brew install protobuf'
+Requirements:
+
+- protoc - (from the protobuf package. On macos, `brew install protobuf`)
+- libgit2
 
 ```sh
 cargo build
@@ -127,13 +179,15 @@ let obj = client.new_object("space_id", "page").name("Quicker note").no_verify()
 Set environment flags for unit and integration tests. You'll also need a running anytype server (cli or desktop).
 
 ```sh
-# headless cli uses port 31012. desktop port 31009
-export ANYTYPE_TEST_URL=http://127.0.0.1:31012
-# path to file containing api key
-export ANYTYPE_TEST_KEY_FILE=$HOME/.config/anytype/api.key
+# optional: HTTP endpoint. Default: http://127.0.0.1:31012
+#    Headless cli default port is 31012. Desktop app uses port 31009
+export ANYTYPE_TEST_URL=
+# optional: path to file-based keystore.
+#    Default: $XDG_STATE_HOME/anytype-test-keys.db or $HOME/.local/state/anytype-test-keys.db
+export ANYTYPE_TEST_KEY_FILE=
 # optional: set space id for testing. If not set, uses first space with "test" in the name
 export ANYTYPE_TEST_SPACE_ID=
-# optional: enable debug logging
+# optional: enable debug logging. Default "info"
 export RUST_LOG=
 # optional: disable rate limits. If not disabled, tests will take longer to run
 export ANYTYPE_DISABLE_RATE_LIMIT=1

@@ -3,6 +3,9 @@
 use snafu::prelude::*;
 use std::path::PathBuf;
 
+#[cfg(feature = "grpc")]
+use anytype_rpc::error::AnytypeGrpcError;
+
 /// Errors returned by anytype crate
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -79,6 +82,24 @@ pub enum AnytypeError {
     #[snafu(display("No configured keystore"))]
     NoKeyStore,
 
+    /// gRPC auth or transport error.
+    #[cfg(feature = "grpc")]
+    #[snafu(display("gRPC error: {source}"))]
+    Grpc {
+        source: anytype_rpc::error::AnytypeGrpcError,
+    },
+
+    // /// gRPC config parsing or IO error.
+    // #[cfg(feature = "grpc")]
+    // #[snafu(display("gRPC config error: {source}"))]
+    // GrpcConfig {
+    //     source: anytype_rpc::config::ConfigError,
+    // },
+    /// gRPC auth is unavailable (missing config or account key).
+    #[cfg(feature = "grpc")]
+    #[snafu(display("gRPC service unavailable: {message}"))]
+    GrpcUnavailable { message: String },
+
     /// Error encountered by the configured KeyStore.
     #[snafu(display("KeyStore: {source}"))]
     KeyStore { source: KeyStoreError },
@@ -118,11 +139,11 @@ pub enum KeyStoreError {
     },
 
     /// Problem accessing OS keyring
-    #[snafu(display("keystore keyring service:{service} user:{user} {source}"))]
+    #[snafu(display("keyring error {source}"))]
     Keyring {
-        service: String,
-        user: String,
-        source: keyring::Error,
+        //service: Option<String>,
+        //user: Option<String>,
+        source: keyring_core::Error,
     },
 
     /// Required environment variable undefined
@@ -132,13 +153,29 @@ pub enum KeyStoreError {
         source: std::env::VarError,
     },
 
+    #[snafu(display("keystore configuration error"))]
+    Config { message: String },
+
     /// Other error type - can be used by external implementations
     #[snafu(display("keystore {message}"))]
     External { message: String },
 }
 
+impl From<keyring_core::Error> for KeyStoreError {
+    fn from(source: keyring_core::Error) -> Self {
+        KeyStoreError::Keyring { source }
+    }
+}
+
 impl From<KeyStoreError> for AnytypeError {
     fn from(source: KeyStoreError) -> Self {
         AnytypeError::KeyStore { source }
+    }
+}
+
+#[cfg(feature = "grpc")]
+impl From<AnytypeGrpcError> for AnytypeError {
+    fn from(source: AnytypeGrpcError) -> Self {
+        AnytypeError::Grpc { source }
     }
 }

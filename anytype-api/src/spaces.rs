@@ -161,7 +161,7 @@ struct UpdateSpaceRequestBody {
 /// ```rust
 /// # use anytype::prelude::*;
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
 /// let space = client.space(&space_id).get().await?;
 /// println!("Space: {} ({})", space.name, space.id);
@@ -461,7 +461,7 @@ impl UpdateSpaceRequest {
 /// ```rust
 /// # use anytype::prelude::*;
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// // List all spaces
 /// let spaces = client.spaces().list().await?;
 ///
@@ -585,7 +585,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// #   let space_id = anytype::test_util::example_space_id(&client).await?;
     /// let space = client.space(&space_id).get().await?;
     /// println!("Space: {}", space.name);
@@ -643,7 +643,7 @@ impl AnytypeClient {
     /// ```rust
     /// # use anytype::prelude::*;
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// let spaces = client.spaces()
     ///     .limit(10)
     ///     .list().await?;

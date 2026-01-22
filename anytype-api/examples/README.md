@@ -46,3 +46,4 @@ cargo run --example list_spaces
 - `retry_eventual_consistency` - enable read-after-write verification.
 - `pagination_stream` - collect all pages or stream results.
 - `views_list_objects` - list views and objects in a collection/query.
+- `files` - list, upload, and download files (gRPC).

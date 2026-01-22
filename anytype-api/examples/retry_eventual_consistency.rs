@@ -6,7 +6,11 @@ use anytype::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), AnytypeError> {
-    let client = AnytypeClient::new(env!("CARGO_BIN_NAME"))?.env_key_store()?;
+    let client = AnytypeClient::with_config(ClientConfig {
+        app_name: "anytype-examples".into(),
+        keystore_service: Some("anyr".to_string()), // reuse "anyr"'s auth tokens
+        ..Default::default()
+    })?;
     let space_id = anytype::test_util::example_space_id(&client).await?;
 
     let verify = VerifyConfig {

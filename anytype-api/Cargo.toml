@@ -5,7 +5,7 @@
 # 
 [package]
 name = "anytype"
-version = "0.2.9"
+version = "0.3.0"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 description = "An ergonomic Anytype API client in rust"
 repository = "https://github.com/stevelr/anytype"
@@ -17,26 +17,22 @@ categories = ["api-bindings"]
 readme = "README.md"
 
 [features]
-default = ["linux-native"]
-# support for custom external keystore
-keystore-ext = []
-# linux kernel keyutils credential store. See https://docs.rs/keyring 
-linux-native = ["keyring/linux-native"]
-# linux dbus-based Secret Service storage. See https://docs.rs/keyring 
-linux-dbus = ["keyring/sync-secret-service", "keyring/crypto-rust"]
-# linux native sync persistent See https://docs.rs/keyring 
-linux-native-persistent = ["keyring/linux-native-sync-persistent", "keyring/crypto-rust"]
+default = ["grpc"]
+# gRPC support
+grpc = ["dep:anytype-rpc", "dep:tonic"]
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
+db-keystore = { version = "0.2.1" }
 bytes.workspace = true
 chrono.workspace = true
-dirs.workspace = true
 futures.workspace = true
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native"] }
+keyring = { version = "4.0.0-beta.3" }
+keyring-core = "0.7.2"
 parking_lot.workspace = true
+prost-types.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -46,7 +42,13 @@ strum.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+anytype-rpc = { version = "0.2.1", path = "../anytype-rpc", optional = true }
+tonic = { version = "0.14.2", optional = true }
 
 [dev-dependencies]
+png = "0.18"
 serial_test = "3.3.1"
 test-log.workspace = true
+tiny-skia = "0.11"
+markdown2pdf = "0.1.9"
+anyhow.workspace = true

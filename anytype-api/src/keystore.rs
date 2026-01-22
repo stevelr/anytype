@@ -4,26 +4,14 @@
 //! - **Keyring**: OS-native secure credential stores (Keychain/Secret Service/Credential Manager)
 //! - **File**: File-based storage in user config directory (less secure, for compatibility)
 
-use crate::{Result, config::DEFAULT_KEY_USER, prelude::*};
-use snafu::prelude::*;
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-};
-use tracing::{debug, error, warn};
-
-// ensure that not more than one linux keystore is selected
-#[cfg(all(
-    target_os = "linux",
-    any(
-        all(feature = "linux-native", feature = "linux-dbus"),
-        all(feature = "linux-native", feature = "linux-native-persistent"),
-        all(feature = "linux-dbus", feature = "linux-native-persistent")
-    )
-))]
-compile_error!(
-    "anytype: enable only one Linux keyring backend (\"linux-native\",\"linux-dbus\", or \"linux-native-persistent\")."
-);
+use crate::error::*;
+use db_keystore::DbKeyStore;
+use keyring_core::CredentialStore;
+#[cfg(feature = "grpc")]
+use std::path::PathBuf;
+use std::{collections::HashMap, fmt, sync::Arc};
+use tracing::{debug, error};
+use zeroize::Zeroize;
 
 /// Type of keystore - builtin or external
 #[derive(Clone, PartialEq, Eq)]
@@ -34,9 +22,6 @@ pub enum KeyStoreType {
     Keyring,
     /// No keystore. If this variant is used, keys are not persisted.
     None,
-    /// Other keystore - Implementation outside this crate.
-    #[cfg(feature = "keystore-ext")]
-    Other(String),
 }
 
 impl fmt::Display for KeyStoreType {
@@ -45,8 +30,6 @@ impl fmt::Display for KeyStoreType {
             KeyStoreType::File => "file",
             KeyStoreType::Keyring => "keyring",
             KeyStoreType::None => "none",
-            #[cfg(feature = "keystore-ext")]
-            KeyStoreType::Other(s) => s.as_str(),
         })
     }
 }
@@ -59,404 +42,453 @@ impl fmt::Debug for KeyStoreType {
                 KeyStoreType::File => "File",
                 KeyStoreType::Keyring => "Keyring",
                 KeyStoreType::None => "None",
-                #[cfg(feature = "keystore-ext")]
-                KeyStoreType::Other(s) => s.as_str(),
             }
         ))
     }
 }
 
-/// Safe wrapper for api key, used for passing key between AnytypeClient and KeyStore.
-/// Prevents logging secrets and implements zeroize on drop.
-#[derive(Clone)]
-pub struct SecretApiKey(String);
+#[cfg(feature = "grpc")]
+#[derive(Clone, Default)]
+pub struct GrpcCredentials {
+    account_id: Option<String>,
+    account_key: Option<String>,
+    session_token: Option<String>,
+}
 
-impl SecretApiKey {
-    /// Creates a wrapper for a secret key.
-    pub fn new(key: impl Into<String>) -> Self {
-        SecretApiKey(key.into())
+#[cfg(feature = "grpc")]
+impl GrpcCredentials {
+    // pub(crate) fn account_id(&self) -> Option<&str> {
+    //     self.account_id.as_deref()
+    // }
+    pub(crate) fn account_key(&self) -> Option<&str> {
+        self.account_key.as_deref()
     }
-
-    /// Retrieve the inner key.
-    ///
-    /// **SAFETY: To prevent accidentally leaking the secret api key,
-    /// applications should not use this method**.
-    /// If applications need the key at all (for example, to pass to a KeyStore,
-    /// they should use the SecretApiKey wrapper, which prevents accidental logging,
-    /// and implements zeroize on drop.
-    ///
-    /// For completeness of documentation of key security:
-    ///
-    /// - This is the only api method for directly obtaining the api key. Its purpose
-    ///   is to enable anytype users to provide alternate key storage (encrypted storage,
-    ///   KMS, etc.).
-    /// - Another way to get the key programmatically is to create a KeyStoreFile
-    ///   with an absolute path, save the key, and then read the file directly. KeyStoreFile
-    ///   stores the key in cleartext. On linux and macos, the file access is set to mode 0600
-    ///   (owner-only access) but it is not terribly secure.
-    #[cfg(feature = "keystore-ext")]
-    pub fn get_key(&self) -> &str {
-        &self.0
-    }
-
-    // helper function for http client to set bearer token header
-    pub(crate) fn set_auth_header(
-        &self,
-        request_builder: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder {
-        // don't log api key
-        //trace!("setting bearer token: {}..(MASKED)", &self.0[..2]);
-        request_builder.bearer_auth(&self.0)
-    }
-
-    #[cfg(test)]
-    #[doc(hidden)]
-    /// this method allows tests to confirm a key without revealing it
-    /// This may be overkill, since hopefully tests don't use real keys
-    pub fn check_key(&self, value: &str) -> bool {
-        self.0 == value
+    pub(crate) fn session_token(&self) -> Option<&str> {
+        self.session_token.as_deref()
     }
 }
 
-impl<S: Into<String>> From<S> for SecretApiKey {
-    /// Creates a wrapper for a secret key.
-    fn from(value: S) -> Self {
-        SecretApiKey::new(value)
+fn fmt_masked(val: &Option<String>) -> String {
+    match val {
+        Some(_) => "Some(MASKED)",
+        None => "None",
     }
+    .to_string()
 }
 
-impl Drop for SecretApiKey {
-    /// Implements zeroize on drop.
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.0.zeroize()
-    }
-}
-
-impl fmt::Display for SecretApiKey {
-    /// Display implementation to prevent accidental logging of secrets
+#[cfg(feature = "grpc")]
+impl fmt::Debug for GrpcCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&format!("SecretApiKey(REDACTED[len={}])", self.0.len()))
+        f.debug_struct("GrpcCredentials")
+            .field("account_id", &self.account_id)
+            .field("account_key", &fmt_masked(&self.account_key))
+            .field("session_token", &fmt_masked(&self.session_token))
+            .finish()
     }
 }
 
-impl fmt::Debug for SecretApiKey {
-    /// Debug implementation to prevent accidental logging of secrets
+#[derive(Clone, Default)]
+pub struct HttpCredentials {
+    token: Option<String>,
+}
+
+impl fmt::Debug for HttpCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&format!("SecretApiKey(REDACTED[len={}])", self.0.len()))
+        f.debug_struct("HttpCredentials")
+            .field("token", &fmt_masked(&self.token))
+            .finish()
     }
 }
 
-pub trait KeyStore: fmt::Debug + Send + Sync {
-    /// Load API key from storage
-    ///
-    /// Returns:
-    /// - SecretApiKey if key was retrieved. The Contents of SecretApiKey cannot be read
-    ///   by clients, but it can be passed to client.set_api_key(),
-    ///   or saved to a different keystore.
-    ///
-    /// Errors:
-    /// - AnytypeError::KeystoreEmpty: keystore contains no such key
-    /// - AnytypeError::Keyring: os keyring could not load key
-    /// - AnytypeError::KeystoreFile: file store could not be read
-    fn load_key(&self) -> std::result::Result<Option<SecretApiKey>, KeyStoreError>;
-
-    /// Saves api key to secure storage.
-    fn save_key(&self, api_key: &SecretApiKey) -> std::result::Result<(), KeyStoreError>;
-
-    /// Deletes key from key storage
-    fn remove_key(&self) -> std::result::Result<(), KeyStoreError>;
-
-    /// Returns true if the keystore is configured (in other words, is not type None)
-    fn is_configured(&self) -> bool {
-        self.store_type() != KeyStoreType::None
-    }
-
-    fn store_type(&self) -> KeyStoreType;
-}
-
-/// File-based key storage - stores key in plain text file.
-/// On Linux and MacOS, the file is protected with mode 600, but the file is not encrypted,
-/// and generally this method of key storage is far less secure than the OS-based keyring store.
-#[derive(Clone, Debug)]
-pub struct KeyStoreFile {
-    path: PathBuf,
-}
-
-/// OS-native secure credential store (Keychain/Secret Service/Credential Manager)
-/// Parameter is service name
-/// ```rust
-/// use anytype::prelude::*;
-///
-/// # fn create_keystore() -> Result<KeyStoreFile, AnytypeError> {
-/// // create keyring-based keystore
-/// let my_app = "my-app";
-/// let keystore = KeyStoreKeyring::new(my_app, None);
-///
-/// // create file-based keystore with absolute path
-/// use std::path::PathBuf;
-/// let path = PathBuf::from("/var/lib/anytype/secret.key");
-/// let keystore = KeyStoreFile::from_path(path)?;
-/// # Ok(keystore)
-/// # }
-/// ```
-#[derive(Clone, Debug)]
-pub struct KeyStoreKeyring {
-    service_name: String,
-    user_name: String,
-}
-
-impl KeyStoreFile {
-    /// Creates file-based key storage with path to configuration file.
-    ///
-    /// ```rust
-    /// use anytype::prelude::*;
-    /// # fn new_keystore() -> Result<KeyStoreFile, AnytypeError> {
-    /// let keystore = KeyStoreFile::from_path("/var/lib/anytype/secret.key")?;
-    /// # Ok(keystore)
-    /// # }
-    /// ```
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_owned();
-        // if the file doesn't exist, make sure there's a directory for storing it later
-        if !path.is_file()
-            && let Some(parent) = path.parent()
-        {
-            std::fs::create_dir_all(parent).context(FileSnafu { path: parent })?;
+impl HttpCredentials {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: Some(token.into()),
         }
-        Ok(Self {
-            path: path.to_owned(),
+    }
+
+    pub fn has_creds(&self) -> bool {
+        self.token
+            .as_ref()
+            .map(|token| !token.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+}
+
+#[cfg(feature = "grpc")]
+impl GrpcCredentials {
+    pub fn from_token(token: impl Into<String>) -> Self {
+        Self {
+            session_token: Some(token.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn from_account_key(account_key: impl Into<String>) -> Self {
+        Self {
+            account_key: Some(account_key.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
+        self.account_id = Some(account_id.into());
+        self
+    }
+
+    pub fn with_account_key(mut self, account_key: impl Into<String>) -> Self {
+        self.account_key = Some(account_key.into());
+        self
+    }
+
+    pub fn with_session_token(mut self, token: impl Into<String>) -> Self {
+        self.session_token = Some(token.into());
+        self
+    }
+
+    pub fn has_session_token(&self) -> bool {
+        self.session_token
+            .as_ref()
+            .map(|token| !token.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn has_account_key(&self) -> bool {
+        self.account_key
+            .as_ref()
+            .map(|key| !key.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn has_creds(&self) -> bool {
+        self.has_session_token() || self.has_account_key()
+    }
+}
+
+impl Zeroize for HttpCredentials {
+    fn zeroize(&mut self) {
+        if let Some(token) = self.token.as_mut() {
+            token.zeroize();
+        }
+    }
+}
+
+#[cfg(feature = "grpc")]
+impl Zeroize for GrpcCredentials {
+    fn zeroize(&mut self) {
+        if let Some(token) = self.session_token.as_mut() {
+            token.zeroize();
+        }
+        if let Some(key) = self.account_key.as_mut() {
+            key.zeroize();
+        }
+        if let Some(id) = self.account_id.as_mut() {
+            id.zeroize();
+        }
+    }
+}
+
+/// parse keystore to get name and modifiers
+/// from --keystore NAME:key=value
+/// or ANYTYPE_KEYSTORE=
+fn parse_keystore(input: &str) -> Result<(&str, HashMap<&str, &str>), String> {
+    // remove spaces and optional trailing colon
+    let input = input.trim().trim_end_matches(':');
+    if input.is_empty() {
+        error!("missing keystore type");
+        return Err("missing keystore type".to_string());
+    }
+
+    // Split at the first colon to separate the keystore from key=value pairs
+    let (keystore, remainder) = match input.split_once(':') {
+        Some((ks, r)) => (ks, Some(r)),
+        None => (input, None),
+    };
+
+    if keystore.is_empty() {
+        error!("missing keystore type");
+        return Err("missing keystore type".to_string());
+    }
+
+    let mut map = HashMap::new();
+
+    if let Some(modifiers) = remainder {
+        for part in modifiers.split(':') {
+            if let Some((key, value)) = part.split_once('=') {
+                if key.is_empty() {
+                    return Err("invalid syntax. Expecting keystore name, or with modifiers, for example: 'keystore:key1=val1:key2=val2'".to_string());
+                }
+                map.insert(key, value);
+            } else {
+                return Err("invalid syntax. Expecting keystore name, or with modifiers, for example: 'keystore:key1=val1:key2=val2'".to_string());
+            }
+        }
+    }
+
+    Ok((keystore, map))
+}
+
+pub fn default_platform_keyring() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "keychain"
+    } else if cfg!(target_os = "linux") {
+        "keyutils"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "file"
+    }
+}
+
+fn init_keystore(input: &str) -> Result<(&str, Arc<CredentialStore>), KeyStoreError> {
+    let (keystore, modifiers) =
+        parse_keystore(input).map_err(|message| KeyStoreError::Config { message })?;
+
+    match keystore {
+        "file" | "sqlite" => {
+            let file_store = DbKeyStore::new_with_modifiers(&modifiers)?;
+            keyring_core::set_default_store(Arc::new(file_store));
+        }
+        #[cfg(target_os = "macos")]
+        "keychain" => {
+            keyring::use_apple_keychain_store(&modifiers)?;
+        }
+        #[cfg(target_os = "linux")]
+        "keyutils" => {
+            keyring::use_linux_keyutils_store(&modifiers)?;
+        }
+        #[cfg(target_os = "linux")]
+        "secret-service" => {
+            keyring::use_dbus_secret_service_store(&modifiers)?;
+        }
+        #[cfg(target_os = "windows")]
+        "windows" => {
+            keyring::use_windows_native_store(&modifiers)?;
+        }
+        _ => {
+            return Err(keyring_core::Error::NotSupportedByStore(format!(
+                "keystore type {keystore} is not supported on this platform"
+            ))
+            .into());
+        }
+    }
+    // unwrap ok because every code path above sets default store
+    let store = keyring_core::get_default_store().unwrap();
+    Ok((keystore, store))
+}
+
+#[derive(Clone)]
+pub struct KeyStore {
+    service: String,
+    store: Arc<CredentialStore>,
+    spec: String,
+}
+
+impl fmt::Debug for KeyStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "KeyStore(id:{} service:{} spec:{})",
+            self.id(),
+            &self.service,
+            &self.spec
+        ))
+    }
+}
+
+impl KeyStore {
+    /// new keystore with default platform store
+    pub fn new_default_store(service: impl Into<String>) -> Result<Self, KeyStoreError> {
+        Self::new(service, "")
+    }
+
+    pub fn new(service: impl Into<String>, keystore_spec: &str) -> Result<Self, KeyStoreError> {
+        let keystore_spec = keystore_spec.trim().trim_end_matches(':');
+        // if keystore isn't specified here,
+        // try environment, otherwise default for platform
+        let spec = if keystore_spec.is_empty() {
+            std::env::var("ANYTYPE_KEYSTORE").unwrap_or(default_platform_keyring().to_string())
+        } else {
+            keystore_spec.to_string()
+        };
+        let (_name, store) = init_keystore(&spec)?;
+        Ok(KeyStore {
+            service: service.into(),
+            store,
+            spec,
         })
     }
 
-    /// Creates file-based keystore.
-    ///
-    /// If the environment variable 'ANYTYPE_KEY_FILE' is set, that path
-    /// is used for the key file, otherwise the path is determined from the
-    /// platform's config directory:
-    ///   `(config-dir)/(service-name)/anytype_key`
-    /// where config-dir is the default configuration dir for your platform
-    ///       (see [dirs::config_dir](https://docs.rs/dirs/latest/dirs/fn.config_dir.html))
-    /// and service_name is the parameter, or the default "anytype"
-    ///
-    ///
-    /// ```rust
-    /// use anytype::prelude::*;
-    /// # fn new_keystore() -> Result<KeyStoreFile, AnytypeError> {
-    /// let keystore = KeyStoreFile::new("my-app")?;
-    /// # Ok(keystore)
-    /// # }
-    /// ```
-    pub fn new(service_name: impl AsRef<str>) -> Result<Self> {
-        if let Ok(path) = std::env::var(crate::config::ANYTYPE_KEY_FILE_ENV) {
-            // if path is in environment var, overrides config dir and ignore parameter
-            return Self::from_path(path);
-        }
-
-        let config_dir = default_config_dir()?.join(service_name.as_ref());
-        std::fs::create_dir_all(&config_dir).context(FileSnafu {
-            path: config_dir.clone(),
-        })?;
-        let path = config_dir.join(DEFAULT_KEY_USER);
-        Ok(KeyStoreFile { path })
+    /// returns service name
+    pub fn service(&self) -> &str {
+        &self.service
     }
 
-    pub fn store_type(&self) -> KeyStoreType {
-        KeyStoreType::File
-    }
-}
-
-impl KeyStoreKeyring {
-    /// Creates key storage using OS keyring backend.
-    /// `service_name` defaults to "anytype" or the app_name configured in the anytype client.
-    /// `user_name` defaults to `anytype_key`.
-    pub fn new(service_name: impl AsRef<str>, user_name: Option<String>) -> Self {
-        let service_name = service_name.as_ref().to_string();
-        let user_name = user_name.unwrap_or_else(|| DEFAULT_KEY_USER.to_string());
-        KeyStoreKeyring {
-            service_name,
-            user_name,
-        }
-    }
-}
-
-impl KeyStore for KeyStoreFile {
-    /// Load API key from storage
-    ///
-    /// Returns:
-    /// - Some(SecretApiKey) if key was retrieved. The Contents of SecretApiKey cannot be read
-    ///   by clients, but it can be passed to client.set_api_key(),
-    ///   or saved to a different keystore.
-    /// - None if key is not defined in keystore
-    ///
-    /// Errors:
-    /// - KeyStoreError::ring: os keyring could not load key
-    /// - AnytypeError::KeystoreFile: file store could not be read
-    ///
-    fn load_key(&self) -> std::result::Result<Option<SecretApiKey>, KeyStoreError> {
-        if !self.path.exists() {
-            return Ok(None);
-        }
-        let api_key = std::fs::read_to_string(&self.path)
-            .context(FileSnafu {
-                path: self.path.clone(),
-            })?
-            .trim()
-            .to_string();
-        if api_key.is_empty() {
-            warn!("keystore file {:?} is empty", self.path.display());
-            return Ok(None);
-        }
-        debug!(path=?self.path, "load_key: key found in file");
-        Ok(Some(SecretApiKey::new(api_key)))
+    /// returns keystore id
+    pub fn id(&self) -> String {
+        self.store.id()
     }
 
-    fn save_key(&self, api_key: &SecretApiKey) -> std::result::Result<(), KeyStoreError> {
-        // Write the file
-        std::fs::write(&self.path, &api_key.0).context(FileSnafu { path: &self.path })?;
-
-        // Set file permissions to 0600 (owner read/write only)
-        #[cfg(target_family = "unix")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&self.path)
-                .context(FileSnafu { path: &self.path })?
-                .permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&self.path, perms).context(FileSnafu { path: &self.path })?;
-        }
-        debug!(path=?self.path, "key saved");
-        Ok(())
+    pub(crate) fn store(&self) -> Arc<CredentialStore> {
+        self.store.clone()
     }
 
-    fn remove_key(&self) -> std::result::Result<(), KeyStoreError> {
-        if self.path.exists() {
-            std::fs::remove_file(&self.path).context(FileSnafu { path: &self.path })?;
-        }
-        debug!(path=?self.path, "key removed");
-        Ok(())
-    }
-
-    fn store_type(&self) -> KeyStoreType {
-        KeyStoreType::File
-    }
-}
-
-impl KeyStore for KeyStoreKeyring {
-    /// Load API key from storage
-    ///
-    /// Returns:
-    /// - SecretApiKey if key was retrieved. The Contents of SecretApiKey cannot be read
-    ///   by clients, but it can be passed to client.set_api_key(),
-    ///   or saved to a different keystore.
-    ///
-    /// Errors:
-    /// - AnytypeError::KeystoreEmpty: keystore contains no such key
-    /// - AnytypeError::Keyring: os keyring could not load key
-    /// - AnytypeError::KeystoreFile: file store could not be read
-    ///
-    fn load_key(&self) -> std::result::Result<Option<SecretApiKey>, KeyStoreError> {
-        let entry =
-            keyring::Entry::new(&self.service_name, &self.user_name).context(KeyringSnafu {
-                service: &self.service_name,
-                user: &self.user_name,
-            })?;
-        match entry.get_password() {
-            Ok(password) => {
-                debug!("key loaded from keyring");
-                Ok(Some(SecretApiKey::new(password)))
+    fn get_key(&self, name: impl AsRef<str>) -> Result<Option<String>, KeyStoreError> {
+        let name = name.as_ref();
+        let mut map = HashMap::new();
+        map.insert("service", self.service.as_ref());
+        map.insert("user", name);
+        debug!(service = &self.service, user = name, "get_key");
+        match self.store.search(&map) {
+            Ok(entries) => {
+                debug!("get_key found {} entries", entries.len());
+                // search results are not ambiguous: there are 0 or 1 entries,
+                // because there is no way to insert multiple keys with same (service,user)
+                if let Some(entry) = entries.first() {
+                    match entry.get_password() {
+                        Ok(key) => Ok(Some(key)),
+                        Err(keyring_core::Error::NoEntry) => {
+                            debug!("get_key got entry with NoEntry !?!?");
+                            Ok(None)
+                        }
+                        Err(e) => {
+                            error!("get_key: {e}");
+                            Err(e.into())
+                        }
+                    }
+                } else {
+                    Ok(None)
+                }
             }
-            Err(keyring::Error::NoEntry) => {
-                debug!("key undefined in keyring");
+            Err(keyring_core::Error::NoEntry) => {
+                debug!(service = &self.service, user = name, "key lookup: no entry");
                 Ok(None)
             }
             Err(e) => {
-                error!("keyring {e:?}");
-                Err(KeyStoreError::Keyring {
-                    source: e,
-                    service: self.service_name.clone(),
-                    user: self.user_name.clone(),
-                })
+                error!(service = &self.service, user = name, "key lookup: {e}");
+                Err(e.into())
             }
         }
     }
 
-    fn save_key(&self, api_key: &SecretApiKey) -> std::result::Result<(), KeyStoreError> {
-        let entry =
-            keyring::Entry::new(&self.service_name, &self.user_name).context(KeyringSnafu {
-                service: self.service_name.clone(),
-                user: self.user_name.clone(),
+    fn put_key(&self, name: &str, value: impl AsRef<str>) -> Result<(), KeyStoreError> {
+        debug!(
+            service = &self.service,
+            user = name,
+            value = value.as_ref().len(),
+            "put_key"
+        );
+        let entry = self.store.build(&self.service, name, None)?;
+        entry.set_password(value.as_ref())?;
+        Ok(())
+    }
+
+    fn remove_key(&self, name: impl AsRef<str>) -> Result<(), KeyStoreError> {
+        debug!(service = &self.service, user = name.as_ref(), "remove_key");
+        let entry = self.store.build(&self.service, name.as_ref(), None)?;
+        entry.delete_credential()?;
+        Ok(())
+    }
+
+    /// Looks up http auth token.
+    /// If connection with keystore succeeded, returns Ok, even if no token exists
+    /// for the current service.
+    /// Check has_creds() or has_token() on HttpCredentials to determine whether a token is present.
+    /// Returns Err if keystore was not correctly configured or there was an error
+    /// connecting with the keystore (such as user biometric auth failure for os keyring,
+    /// or file permission error for file-based keystore)
+    pub fn get_http_credentials(&self) -> Result<HttpCredentials, KeyStoreError> {
+        Ok(HttpCredentials {
+            token: self.get_key("http_token")?,
+        })
+    }
+
+    /// Looks up grpc auth credentials.
+    /// If connection with keystore succeeded, returns Ok, even if no credentials exist
+    /// for the current service and credential type.
+    /// Check has_creds() on GrpcCredentials to determine whether a token is present.
+    /// Returns Err if keystore was not correctly configured or there was an error
+    /// connecting with the keystore (such as user biometric auth failure for os keyring,
+    /// or file permission error for file-based keystore)
+    #[cfg(feature = "grpc")]
+    pub fn get_grpc_credentials(&self) -> Result<GrpcCredentials, KeyStoreError> {
+        Ok(GrpcCredentials {
+            account_id: self.get_key("account_id")?,
+            account_key: self.get_key("account_key")?,
+            session_token: self.get_key("session_token")?,
+        })
+    }
+
+    /// Saves HTTP credentials (read-modify-write).
+    /// Fails if credentials are empty (use clear_* to remove).
+    pub fn update_http_credentials(&self, creds: &HttpCredentials) -> Result<(), KeyStoreError> {
+        if let Some(token) = &creds.token
+            && !token.is_empty()
+        {
+            self.put_key("http_token", token)?;
+        }
+        Ok(())
+    }
+
+    /// Saves gRPC credentials (read-modify-write).
+    /// Fails if credentials are empty (use clear_* to remove).
+    #[cfg(feature = "grpc")]
+    pub fn update_grpc_credentials(&self, creds: &GrpcCredentials) -> Result<(), KeyStoreError> {
+        if let Some(account_id) = &creds.account_id {
+            self.put_key("account_id", account_id)?;
+        }
+        if let Some(account_key) = &creds.account_key {
+            self.put_key("account_key", account_key)?;
+        }
+        if let Some(session_token) = &creds.session_token {
+            self.put_key("session_token", session_token)?;
+        }
+        Ok(())
+    }
+
+    /// Clear HTTP credentials.
+    pub fn clear_http_credentials(&self) -> Result<(), KeyStoreError> {
+        self.remove_key("http_token")?;
+        Ok(())
+    }
+
+    /// Clear gRPC credentials.
+    #[cfg(feature = "grpc")]
+    pub fn clear_grpc_credentials(&self) -> Result<(), KeyStoreError> {
+        self.remove_key("account_id")?;
+        self.remove_key("account_key")?;
+        self.remove_key("session_token")?;
+        Ok(())
+    }
+
+    /// Clear all credentials (for the service associated with this KeyStore).
+    pub fn clear_all_credentials(&self) -> Result<(), KeyStoreError> {
+        self.clear_http_credentials()?;
+        #[cfg(feature = "grpc")]
+        self.clear_grpc_credentials()?;
+        Ok(())
+    }
+
+    /// Update gRPC credentials from the headless CLI config.json.
+    #[cfg(feature = "grpc")]
+    pub fn update_grpc_from_cli_config(&self, path: Option<PathBuf>) -> Result<(), KeyStoreError> {
+        use anytype_rpc::config::load_headless_config;
+        let config =
+            load_headless_config(path.as_deref()).map_err(|err| KeyStoreError::External {
+                message: format!("failed to load headless config: {err}"),
             })?;
-        entry.set_password(&api_key.0).context(KeyringSnafu {
-            service: self.service_name.clone(),
-            user: self.user_name.clone(),
+        let config = config.ok_or_else(|| KeyStoreError::External {
+            message: "headless config not found".to_string(),
         })?;
-        debug!("key saved in keyring");
-        Ok(())
-    }
-
-    fn remove_key(&self) -> std::result::Result<(), KeyStoreError> {
-        let entry =
-            keyring::Entry::new(&self.service_name, &self.user_name).context(KeyringSnafu {
-                service: self.service_name.clone(),
-                user: self.user_name.clone(),
-            })?;
-        match entry.delete_credential() {
-            // NoEntry means it's already been deleted
-            Ok(()) | Err(keyring::Error::NoEntry) => {
-                debug!(service_name=?self.service_name, user_name=?self.user_name, "key removed from keyring");
-                Ok(())
-            }
-            Err(e) => {
-                error!(service_name=?self.service_name, user_name=?self.user_name, ?e, "key remove");
-                Err(KeyStoreError::Keyring {
-                    source: e,
-                    service: self.service_name.clone(),
-                    user: self.user_name.clone(),
-                })
-            }
-        }
-    }
-
-    fn store_type(&self) -> KeyStoreType {
-        KeyStoreType::Keyring
-    }
-}
-
-/// Gets the os-native configuration directory.
-/// (linux: "~/.config". macos: "~/Library/Application Support", etc.)
-fn default_config_dir() -> std::result::Result<PathBuf, KeyStoreError> {
-    use std::io;
-    match dirs::config_dir() {
-        Some(d) => Ok(d),
-        None => match dirs::home_dir() {
-            Some(d) => Ok(d.join(".config")),
-            None => Err(KeyStoreError::File {
-                source: io::Error::other("cannot determine config directory"),
-                path: PathBuf::new(),
-            }),
-        },
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct NoKeyStore {}
-
-impl KeyStore for NoKeyStore {
-    fn load_key(&self) -> std::result::Result<Option<SecretApiKey>, KeyStoreError> {
-        Ok(None)
-    }
-
-    fn save_key(&self, _api_key: &SecretApiKey) -> std::result::Result<(), KeyStoreError> {
-        Ok(())
-    }
-
-    fn remove_key(&self) -> std::result::Result<(), KeyStoreError> {
-        Ok(())
-    }
-
-    fn store_type(&self) -> KeyStoreType {
-        KeyStoreType::None
+        let creds = GrpcCredentials {
+            account_id: config.account_id,
+            account_key: config.account_key,
+            session_token: config.session_token,
+        };
+        self.update_grpc_credentials(&creds)
     }
 }
 
@@ -469,7 +501,7 @@ mod tests {
 
     // TODO: this test case checks too many things - should be split up
     #[test]
-    fn test_file_storage_save_and_load() -> Result<()> {
+    fn test_file_storage_save_and_load() -> Result<(), KeyStoreError> {
         // Use a unique temp dir based on process id to avoid cleanup issues
         let temp_dir = std::env::temp_dir().join(format!(
             "anytype_rust_api_test_storage_{}",
@@ -478,71 +510,42 @@ mod tests {
         // Ensure clean start
         let _ = fs::remove_dir_all(&temp_dir);
         let file_path = temp_dir.join(format!("{DEFAULT_SERVICE_NAME}.test.key"));
-        let storage = KeyStoreFile::from_path(&file_path)?;
+        let keystore_spec = format!("file:path={}", file_path.display());
+        let key_store = KeyStore::new("test_file_storage", &keystore_spec)?;
 
         // Initially no key
-        let no_exist = storage.load_key()?;
-        assert!(no_exist.is_none());
+        let no_exist = key_store.get_http_credentials()?;
+        assert!(!no_exist.has_creds());
 
         // Save a key
         let test_key = "test-key-123";
-        storage.save_key(&SecretApiKey::new(test_key))?;
+        key_store.update_http_credentials(&HttpCredentials::new(test_key))?;
 
         // Read the key from file directly to test save
-        let load_key = storage.load_key();
-
-        // check that return is Ok(Some(...))
-        assert!(matches!(load_key, Ok(Some(_))));
-        let load_key = load_key.unwrap().unwrap();
-
-        assert!(load_key.check_key(test_key), "save+load returns same key");
+        let load_key = key_store.get_http_credentials()?;
+        assert!(load_key.has_creds());
+        assert_eq!(
+            load_key.token,
+            Some(test_key.to_string()),
+            "save+load returns same key"
+        );
 
         // Remove the key
-        storage.remove_key()?;
-
-        assert!(!file_path.exists(), "file deleted");
+        key_store.clear_http_credentials()?;
 
         // Key should be gone
-        let check_file = storage.load_key();
-        assert!(matches!(check_file, Ok(None)), "expected file removed");
+        let check_file = key_store.get_http_credentials()?;
+        assert!(!check_file.has_creds(), "expected file removed");
 
         // Clean up
-        fs::remove_dir_all(&temp_dir).ok();
-        Ok(())
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_file_permissions() -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
-        // Use a unique temp dir based on process id to avoid cleanup issues
-        let temp_dir = std::env::temp_dir().join(format!(
-            "anytype_rust_api_test_perms_{}",
-            std::process::id()
-        ));
-        // Ensure clean start
-        let _ = fs::remove_dir_all(&temp_dir);
-        let file_path = temp_dir.join(format!("{DEFAULT_SERVICE_NAME}.test.key"));
-        let storage = KeyStoreFile::from_path(&file_path)?;
-
-        // Save a key
-        let test_key = "test-key-123";
-        storage.save_key(&SecretApiKey::new(test_key))?;
-
-        // Check file permissions
-        let metadata = fs::metadata(&file_path).unwrap();
-        let permissions = metadata.permissions();
-        assert_eq!(permissions.mode() & 0o777, 0o600);
-
-        // Clean up
+        key_store.clear_all_credentials()?;
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())
     }
 
     #[test]
     #[ignore] // Run with: cargo test -- --ignored
-    fn test_keyring_storage_end_to_end() -> Result<()> {
+    fn test_keyring_storage_end_to_end() -> Result<(), KeyStoreError> {
         // This test uses the actual OS keyring and may prompt for authentication
         // Run explicitly with: cargo test -- --ignored test_keyring_storage_end_to_end
         //
@@ -556,23 +559,26 @@ mod tests {
         // may just mean the keyring service isn't available in your test environment.
 
         let service_name = format!("{DEFAULT_SERVICE_NAME}.e2etest");
-        let user_name = "test_api_key";
-        let storage = KeyStoreKeyring::new(service_name, Some(user_name.to_string()));
+
+        let key_store = KeyStore::new_default_store(service_name)?;
 
         // Clean up any existing test data first
-        let _ = storage.remove_key();
+        let _ = key_store.clear_http_credentials()?;
 
         // Save a test key
         let test_key = "test-keyring-api-key-12345";
-        storage.save_key(&SecretApiKey::new(test_key))?;
-
-        // Add a small delay to ensure the keyring backend has time to persist
-        // (some backends may not immediately flush to disk/keychain)
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        key_store.update_http_credentials(&HttpCredentials {
+            token: Some(test_key.to_string()),
+        })?;
 
         // Load the key
-        let loaded_key = storage.load_key()?.expect("loaded key");
-        assert!(loaded_key.check_key(test_key), "load key from keyring");
+        let loaded_key = key_store.get_http_credentials()?;
+        assert!(loaded_key.has_creds(), "loaded key");
+        assert_eq!(
+            loaded_key.token,
+            Some(test_key.to_string()),
+            "load key from keyring"
+        );
 
         // if this fails, try:
         //   'auth login', 'auth status', 'auth logout'
@@ -581,15 +587,14 @@ mod tests {
         //   on Windows, may have UAC/permission issues
 
         // Remove the key
-        storage.remove_key().expect("Should remove from keyring");
+        key_store
+            .clear_http_credentials()
+            .expect("Should remove from keyring");
         println!("✓ Removed test key from keyring");
 
         // Verify it's gone
-        let after_delete = storage.load_key();
-        assert!(
-            matches!(after_delete, Ok(None)),
-            "after removal from keyring"
-        );
+        let after_delete = key_store.get_http_credentials()?;
+        assert!(!after_delete.has_creds(), "after removal from keyring");
         Ok(())
     }
 }

@@ -76,6 +76,14 @@ impl Default for AnytypeCache {
 }
 
 impl AnytypeCache {
+    /// creates a new cache, in the disabled state
+    pub fn new_disabled() -> Self {
+        Self {
+            enabled: Mutex::new(false),
+            ..Default::default()
+        }
+    }
+
     /// Clears the entire cache.
     pub fn clear(&self) {
         self.clear_spaces();

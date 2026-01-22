@@ -13,7 +13,7 @@ use std::{env::VarError, sync::atomic::AtomicUsize, time::Instant};
 use crate::filters::Filter;
 use crate::objects::DataModel;
 #[allow(unused_imports)]
-use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, KeyStoreFile, VerifyConfig};
+use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
 
 use chrono::Utc;
 use futures::FutureExt;
@@ -278,31 +278,30 @@ pub fn test_client() -> TestResult<AnytypeClient> {
 #[doc(hidden)]
 pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
     let base_url = std::env::var(crate::config::ANYTYPE_TEST_URL_ENV)
-        .unwrap_or_else(|_| crate::config::ANYTYPE_TEST_URL.to_string());
+        .unwrap_or(crate::config::ANYTYPE_TEST_URL.to_string());
 
-    let api_key_path = std::env::var("ANYTYPE_TEST_KEY_FILE").context(EnvSnafu {
-        name: "ANYTYPE_TEST_KEY_FILE",
-    })?;
-    ensure!(
-        std::path::PathBuf::from(&api_key_path).is_file(),
-        ConfigSnafu {
-            message: format!(
-                "Missing key file: {api_key_path}. Authenticate first to set the test api key"
-            )
-        }
-    );
-
+    let default_key_db = db_keystore::default_path()
+        .map_err(|e| TestError::Config {
+            message: e.to_string(),
+        })?
+        .parent()
+        .context(ConfigSnafu {
+            message: "invalid default path (check $XDG_STATE_HOME or $HOME)",
+        })?
+        .join("anytype-test-keys.db");
+    let api_key_path = std::env::var("ANYTYPE_TEST_KEY_FILE")
+        .map(PathBuf::from)
+        .unwrap_or(default_key_db);
+    let keystore_spec = format!("file:path={}", api_key_path.display());
     let config = ClientConfig {
-        base_url,
+        base_url: Some(base_url),
         app_name: app_name.to_string(),
         rate_limit_max_retries: 0, // Don't retry on rate limit
         verify: Some(VerifyConfig::default()),
+        keystore: Some(keystore_spec),
         ..Default::default()
     };
-
-    let client =
-        AnytypeClient::with_config(config)?.set_key_store(KeyStoreFile::from_path(&api_key_path)?);
-    client.load_key(false)?;
+    let client = AnytypeClient::with_config(config)?;
 
     Ok(client)
 }

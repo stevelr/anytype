@@ -34,7 +34,7 @@ use crate::{
 /// use futures::StreamExt;
 ///
 /// # async fn example() -> Result<(), AnytypeError> {
-/// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+/// #   let client = AnytypeClient::new("doc test")?;
 /// // Access first page directly via Deref
 /// let result = client.spaces().list().await?;
 /// println!("First page: {} items, total: {}", result.len(), result.pagination.total);
@@ -97,6 +97,12 @@ impl<T> PagedResult<T> {
                 total,
             },
         };
+        Self::single_page(response)
+    }
+
+    /// Creates a single-page paged result from an explicit response.
+    #[allow(dead_code)]
+    pub(crate) fn from_response(response: PaginatedResponse<T>) -> Self {
         Self::single_page(response)
     }
 
@@ -187,7 +193,7 @@ impl<T: DeserializeOwned + Send + 'static> PagedResult<T> {
     /// use futures::StreamExt;
     ///
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// #   let client = AnytypeClient::new("doc test")?;
     /// let mut stream = client.spaces().list().await?.into_stream();
     /// while let Some(space) = stream.next().await {
     ///     let space = space?;
@@ -261,11 +267,11 @@ impl<T: DeserializeOwned + Send + 'static> PagedResult<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use anytype::prelude::*;
     ///
     /// # async fn example() -> Result<(), AnytypeError> {
-    /// #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+    /// # let client = AnytypeClient::new("doc test")?;
     /// let all_spaces = client.spaces().list().await?.collect_all().await?;
     /// println!("Total spaces: {}", all_spaces.len());
     /// # Ok(())

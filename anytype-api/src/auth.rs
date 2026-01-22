@@ -7,26 +7,20 @@
 //! - [authenticate_interactive](AnytypeClient::authenticate_interactive) - all-in-one authenticate with desktop app (combines `create_auth_challenge` and `create_api_key`)
 //! - [create_auth_challenge](AnytypeClient::create_auth_challenge) - auth flow part 1
 //! - [create_api_key](AnytypeClient::create_api_key) - auth flow part 2
+//! - [auth_status](AnytypeClient::auth_status) - check current HTTP/gRPC auth state
 //! - [logout](AnytypeClient::logout) - discard api key
-//! - [is_authenticated](AnytypeClient::is_authenticated) - test whether client has a valid api key
 //!
 //! # KeyStore methods
 //!
-//! - [load_key](AnytypeClient::load_key)
-//! - [save_key](AnytypeClient::save_key)
 //! - [clear_api_key](AnytypeClient::clear_api_key)
 //! - [set_api_key](AnytypeClient::set_api_key)
-//! - [set_key_store](AnytypeClient::set_key_store)
 //! - [get_key_store](AnytypeClient::get_key_store)
 //!
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{Result, prelude::*};
-use snafu::prelude::*;
 
 /// Request to create an authentication challenge
 #[derive(Debug, Serialize)]
@@ -57,6 +51,62 @@ struct CreateApiKeyRequest {
 struct CreateApiKeyResponse {
     /// API key that can be used in the Authorization header for subsequent requests
     pub api_key: String,
+}
+
+/// Status response from auth_status()
+/// Contents subject to change
+#[doc(hidden)]
+#[derive(Clone, Debug, Serialize)]
+pub struct AuthStatus {
+    pub keystore: KeyStoreStatus,
+    pub http: HttpStatus,
+    #[cfg(feature = "grpc")]
+    pub grpc: GrpcStatus,
+}
+
+/// Http auth status
+/// Contents subject to change
+#[doc(hidden)]
+#[derive(Clone, Debug, Serialize)]
+pub struct HttpStatus {
+    pub url: String,
+    pub has_token: bool,
+}
+
+impl HttpStatus {
+    /// Returns true if the http client has an auth token
+    /// To check whether the credentials are valid, use `client.ping_http()`
+    pub fn is_authenticated(&self) -> bool {
+        self.has_token
+    }
+}
+
+/// gRPC auth status
+/// Contents subject to change
+#[cfg(feature = "grpc")]
+#[doc(hidden)]
+#[derive(Clone, Debug, Serialize)]
+pub struct GrpcStatus {
+    pub endpoint: String,
+    pub has_account_key: bool,
+    pub has_session_token: bool,
+}
+
+#[cfg(feature = "grpc")]
+impl GrpcStatus {
+    /// Returns true if the grpc client has either an account key or session token
+    /// To check whether the credentials are valid, use `client.ping_grpc()`
+    pub fn is_authenticated(&self) -> bool {
+        self.has_account_key || self.has_session_token
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct KeyStoreStatus {
+    pub id: String,
+    pub service: String,
+    /// path to file, if db-keystore (sqlite backend) is used
+    pub path: Option<std::path::PathBuf>,
 }
 
 impl AnytypeClient {
@@ -91,7 +141,8 @@ impl AnytypeClient {
     /// this method generates the api key.
     ///
     /// Your app should set this as the client api key with
-    /// `set_api_key` and save it to the keystore with `get_key_store().save_key(key)`
+    /// `set_api_key` and save it to the keystore with
+    /// `get_key_store().update_http_credentials(key)`
     ///
     /// Note: this is a low-level method: use `authenticate_interactive` for
     /// an all-in-one authentication.
@@ -100,12 +151,12 @@ impl AnytypeClient {
     ///   `challenge_id`: challenge id, example "67647f5ecda913e9a2e11b26"
     ///   `code`: 4-digit code from the desktop app, example `1234`
     /// Returns:
-    ///   `SecretApiKey`
+    ///   `Secret<HttpCredentials>`
     pub async fn create_api_key(
         &self,
         challenge_id: &str,
         code: impl Into<String>,
-    ) -> Result<SecretApiKey> {
+    ) -> Result<HttpCredentials> {
         let request = CreateApiKeyRequest {
             challenge_id: challenge_id.to_string(),
             code: code.into(),
@@ -114,7 +165,7 @@ impl AnytypeClient {
             .client
             .post_unauthenticated("/v1/auth/api_keys", &request)
             .await?;
-        Ok(SecretApiKey::new(response.api_key))
+        Ok(HttpCredentials::new(response.api_key))
     }
 
     /// Performs interactive authentication with Anytype app.
@@ -136,17 +187,28 @@ impl AnytypeClient {
     ///
     /// # use anytype::prelude::*;
     /// # async fn example() -> anytype::Result<()> {
-    /// let mut client = AnytypeClient::new("my-app")?
-    ///     .set_key_store(KeyStoreKeyring::new("my-app", None));
+    /// let mut config = ClientConfig::default().app_name("my-app");
+    /// config.keystore = Some("file".to_string());
+    /// let client = AnytypeClient::with_config(config)?;
     ///
-    /// client.authenticate_interactive(|challenge_id| {
-    ///     println!("Challenge ID: {}", challenge_id);
-    ///     // Prompt user to enter code
-    ///     print!("Enter 4-digit code displayed by app: ");
-    ///     let mut code = String::new();
-    ///     std::io::stdin().read_line(&mut code).map_err(|e| AnytypeError::Auth { message: e.to_string() })?;
-    ///     Ok(code.trim().to_string())
-    /// }, false).await?;
+    /// client
+    ///     .authenticate_interactive(
+    ///         |challenge_id| {
+    ///             use std::io::{self, Write};
+    ///             println!("Challenge ID: {}", challenge_id);
+    ///             print!("Enter 4-digit code displayed by app: ");
+    ///             io::stdout().flush().map_err(|e| AnytypeError::Auth {
+    ///                 message: e.to_string(),
+    ///             })?;
+    ///             let mut code = String::new();
+    ///             io::stdin().read_line(&mut code).map_err(|e| AnytypeError::Auth {
+    ///                 message: e.to_string(),
+    ///             })?;
+    ///             Ok(code.trim().to_string())
+    ///         },
+    ///         false,
+    ///     )
+    ///     .await?;
     ///
     /// // Client is now authenticated
     /// # Ok(())
@@ -163,12 +225,9 @@ impl AnytypeClient {
                 debug!("client already has key - no need to re-authenticate");
                 return Ok(());
             }
-
-            // if key is in keystore, no need to re-authenticate with Anytype Desktop/server
-            // (user may still be prompted to authenticate with keystore)
-            if self.get_key_store().is_configured()
-                && let Ok(true) = self.load_key(force_reauth)
-            {
+            let creds = self.keystore.get_http_credentials()?;
+            if creds.has_creds() {
+                self.client.set_api_key(creds);
                 return Ok(());
             }
         }
@@ -184,45 +243,13 @@ impl AnytypeClient {
         // Create API key
         let api_key = self.create_api_key(&challenge_id, code).await?;
 
-        // save key to client
-        self.set_api_key(&api_key);
+        // save to keystore
+        self.keystore.update_http_credentials(&api_key)?;
 
-        if self.keystore.is_configured() {
-            self.keystore.save_key(&api_key)?;
-        } else {
-            debug!(
-                "authentication completed, but key not persisted because no keystore is configured."
-            );
-        }
+        // save to client
+        self.set_api_key(api_key.clone());
+
         Ok(())
-    }
-
-    /// Configures the key storage. Must be called before using `authenticate_from_key_store`
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use anytype::prelude::*;
-    /// # fn create_client() -> Result<AnytypeClient, AnytypeError> {
-    /// let key_store = KeyStoreKeyring::new("my-app", None);
-    /// let client = AnytypeClient::new("my-app")?.set_key_store(key_store);
-    /// # Ok(client)
-    /// # }
-    /// ```
-    pub fn set_key_store<K: KeyStore + 'static>(mut self, keystore: K) -> Self {
-        self.keystore = Arc::new(Box::new(keystore));
-        self
-    }
-
-    /// Sets file-based keystore using ANYTYPE_KEY_FILE as path containing key file
-    /// and attempts to load the key.
-    /// Returns error if the environment variable is not set or if the path is not reachable.
-    /// Used in rustdoc examples
-    pub fn env_key_store(self) -> Result<Self> {
-        let var = crate::config::ANYTYPE_KEY_FILE_ENV;
-        let path = std::env::var(var).context(FileEnvSnafu { var })?;
-        let client = self.set_key_store(KeyStoreFile::from_path(path)?);
-        client.load_key(false)?;
-        Ok(client)
     }
 
     /// Returns the configured keystore.
@@ -231,15 +258,16 @@ impl AnytypeClient {
     /// ```rust,no_run
     /// use anytype::prelude::*;
     /// # fn example() -> Result<(), AnytypeError> {
-    /// let client = AnytypeClient::new("my-app")?
-    ///     .set_key_store(KeyStoreFile::new("my-app")?);
+    /// let mut config = ClientConfig::default().app_name("my-app");
+    /// config.keystore = Some("file".to_string());
+    /// let client = AnytypeClient::with_config(config)?;
     /// let keystore = client.get_key_store();
-    /// println!("keystore configured: {}", keystore.is_configured());
+    /// println!("keystore id: {}", keystore.id());
     /// # Ok(())
     /// # }
     /// ```
-    pub fn get_key_store(&self) -> Arc<Box<dyn KeyStore>> {
-        self.keystore.clone()
+    pub fn get_key_store(&self) -> &KeyStore {
+        &self.keystore
     }
 
     /// Clears the client's API key.
@@ -267,126 +295,63 @@ impl AnytypeClient {
     /// use anytype::prelude::*;
     /// # fn example() -> Result<(), AnytypeError> {
     /// let client = AnytypeClient::new("my-app")?;
-    /// let api_key = SecretApiKey::new("api_key_value".to_string());
-    /// client.set_api_key(&api_key);
+    /// let api_key = HttpCredentials::new("api_key_value");
+    /// client.set_api_key(api_key);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn set_api_key(&self, key: &SecretApiKey) {
+    pub fn set_api_key(&self, key: HttpCredentials) {
         self.client.set_api_key(key);
     }
 
     /// Clears client api key and removes key from configured key storage.
-    /// Equivalent to calling `clear_api_key()` followed by `get_key_store().remove_key()`
+    /// Equivalent to calling `clear_api_key()` followed by `get_key_store().clear_http_credentials()`
     ///
     /// # Example
     /// ```rust,no_run
     /// use anytype::prelude::*;
     /// # fn example() -> Result<(), AnytypeError> {
-    /// let client = AnytypeClient::new("my-app")?
-    ///     .set_key_store(KeyStoreFile::new("my-app")?);
+    /// let mut config = ClientConfig::default().app_name("my-app");
+    /// config.keystore = Some("file".to_string());
+    /// let client = AnytypeClient::with_config(config)?;
     /// client.logout()?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn logout(&self) -> Result<()> {
         self.clear_api_key();
-        if self.keystore.is_configured() {
-            self.keystore.remove_key()?;
-        }
+        self.keystore.clear_http_credentials()?;
         Ok(())
     }
 
-    /// Returns true if the client has a key, either because it authenticated this session,
-    /// or because it loaded the key from the keystore.
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use anytype::prelude::*;
-    /// # fn example() -> Result<(), AnytypeError> {
-    /// let client = AnytypeClient::new("my-app")?;
-    /// if !client.is_authenticated() {
-    ///     println!("Not authenticated yet.");
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn is_authenticated(&self) -> bool {
-        self.client.has_key()
-    }
+    /// Returns information about connection configuration and keystore status
+    pub fn auth_status(&self) -> Result<AuthStatus, AnytypeError> {
+        let keystore = self.get_key_store();
+        let http_creds = keystore.get_http_credentials()?;
+        #[cfg(feature = "grpc")]
+        let grpc_creds = keystore.get_grpc_credentials()?;
+        let path = keystore
+            .store()
+            .as_any()
+            .downcast_ref::<db_keystore::DbKeyStore>()
+            .map(|store| store.path().to_owned());
 
-    /// Attempts to load client's api key from keystore: file or keyring.
-    /// For keyring keystores, the user may be prompted to give the app permission.
-    ///
-    /// # Parameters
-    /// * `force_reload` - If true, always ask keystore for key. if false, and client
-    ///   has the key already (from a previous `load_key` or `authenticate_interactive`),
-    ///   returns true without checking keystore.
-    ///
-    /// # Returns
-    /// * `Ok(true)`: key is available and client is authenticated
-    /// * `Ok(false)`: keystore does not contain key
-    ///
-    /// # Errors
-    /// * `NoKeyStore` - no Keystore is configured: client should initialize a KeyStore implementation
-    /// * `KeyStore` - error loading key
-    ///
-    /// For keyring keystores, the most likely error causes are user failed biometric auth or
-    /// entered wrong password.
-    /// For file keystore, file may have been deleted.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use anytype::{prelude::*, Result};
-    /// # async fn example() -> Result<()> {
-    /// let client = AnytypeClient::new("my-app")?
-    ///     .set_key_store(KeyStoreFile::new("my-app")?);
-    /// if !client.load_key(false)? {
-    ///     println!("Not authenticated. Please log in.");
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn load_key(&self, force_reload: bool) -> Result<bool> {
-        // fast return if we already have the key
-        if !force_reload && self.is_authenticated() {
-            return Ok(true);
-        }
-        if !self.keystore.is_configured() {
-            return Err(AnytypeError::NoKeyStore);
-        }
-        let key = self.keystore.load_key()?;
-        if let Some(ref api_key) = key {
-            self.set_api_key(api_key);
-        } else {
-            info!("key store: key not found");
-        }
-        Ok(key.is_some())
-    }
-
-    /// Saves current API key to configured key store
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use anytype::prelude::*;
-    /// # fn example() -> Result<(), AnytypeError> {
-    /// let client = AnytypeClient::new("my-app")?
-    ///     .set_key_store(KeyStoreFile::new("my-app")?);
-    /// let api_key = SecretApiKey::new("api_key_value".to_string());
-    /// client.set_api_key(&api_key);
-    /// client.save_key()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn save_key(&self) -> Result<()> {
-        if !self.keystore.is_configured() {
-            return Err(AnytypeError::NoKeyStore);
-        }
-        match self.client.get_api_key() {
-            Some(key) => self.keystore.save_key(&key).map_err(AnytypeError::from),
-            None => Err(AnytypeError::Auth {
-                message: "No API key set on client".to_string(),
-            }),
-        }
+        Ok(AuthStatus {
+            keystore: KeyStoreStatus {
+                id: keystore.id(),
+                service: keystore.service().to_string(),
+                path,
+            },
+            http: HttpStatus {
+                url: self.get_http_endpoint().to_string(),
+                has_token: http_creds.has_creds(),
+            },
+            #[cfg(feature = "grpc")]
+            grpc: GrpcStatus {
+                endpoint: self.get_grpc_endpoint().to_string(),
+                has_account_key: grpc_creds.has_account_key(),
+                has_session_token: grpc_creds.has_session_token(),
+            },
+        })
     }
 }

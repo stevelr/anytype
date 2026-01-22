@@ -8,7 +8,7 @@
 //! use anytype::prelude::*;
 //!
 //! # async fn example() -> Result<(), AnytypeError> {
-//! #   let client = AnytypeClient::new("doc test")?.env_key_store()?;
+//! #   let client = AnytypeClient::new("doc test")?;
 //! #   let space_id = anytype::test_util::example_space_id(&client).await?;
 //!
 //! // Global search across all spaces

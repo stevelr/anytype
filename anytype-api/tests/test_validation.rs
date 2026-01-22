@@ -550,7 +550,9 @@ async fn test_invalid_api_key() {
         };
 
         let bad_client = AnytypeClient::with_config(config).expect("Failed to create client");
-        bad_client.set_api_key(&SecretApiKey::new("invalid_api_key_12345".to_string()));
+        bad_client.set_api_key(&Secret::new(HttpCredentials::new(
+            "invalid_api_key_12345".to_string(),
+        )));
 
         // Try to make a request with invalid key
         let result = bad_client.spaces().list().await;
