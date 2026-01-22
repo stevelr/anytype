@@ -122,6 +122,25 @@ impl TableRow for Type {
     }
 }
 
+impl TableRow for FileObject {
+    fn headers() -> &'static [&'static str] {
+        &["id", "name", "size", "mime", "type"]
+    }
+
+    fn row(&self) -> Vec<String> {
+        let name = self.name.clone().unwrap_or_default();
+        let size = self.size.map(|val| val.to_string()).unwrap_or_default();
+        let mime = self.mime.clone().unwrap_or_default();
+        vec![
+            self.id.clone(),
+            name,
+            size,
+            mime,
+            self.file_type.to_string(),
+        ]
+    }
+}
+
 impl TableRow for Property {
     fn headers() -> &'static [&'static str] {
         &["id", "key", "name", "format"]

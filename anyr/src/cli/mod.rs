@@ -8,12 +8,13 @@
 use crate::output::{Output, OutputFormat};
 use anyhow::{Result, bail};
 use anytype::prelude::*;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use tracing::warn;
 
 pub mod auth;
 pub mod common;
+pub mod file;
 pub mod list;
 pub mod member;
 pub mod object;
@@ -26,7 +27,7 @@ pub mod types;
 pub mod view;
 
 // default keyring service and default config subdir for storing key file
-const DEFAULT_KEYRING_SERVICE: &str = env!("CARGO_BIN_NAME");
+const DEFAULT_KEYRING_SERVICE: &str = "anyr"; // env!("CARGO_BIN_NAME");
 
 /// date strftime-inspired format
 /// Defined in https://docs.rs/chrono/latest/chrono/format/strftime/index.html
@@ -40,8 +41,12 @@ pub struct Cli {
     #[arg(short = 'u', long, env = "ANYTYPE_URL")]
     pub url: Option<String>,
 
+    /// gRPC endpoint URL (overrides defaults)
+    #[arg(long, env = "ANYTYPE_GRPC_ENDPOINT")]
+    pub grpc: Option<String>,
+
     /// Write output to file (default: stdout)
-    #[arg(short, long, value_name = "FILE", global = true)]
+    #[arg(short = 'o', long, value_name = "FILE", global = true)]
     pub output: Option<PathBuf>,
 
     /// JSON output (default)
@@ -68,79 +73,32 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global=true)]
     pub verbose: u8,
 
-    /// API Key storage
-    #[command(flatten)]
-    pub keystore: KeystoreArgs,
+    /// keystore type or configuraion
+    #[arg(long, env = "ANYTYPE_KEYSTORE")]
+    pub keystore: Option<String>,
+
+    /// Override service name (default "anyr")
+    #[arg(long, env = "ANYTYPE_KEYSTORE_SERVICE")]
+    pub keystore_service: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,
 }
 
-#[derive(Args, Debug)]
-#[group(multiple = false)]
-pub struct KeystoreArgs {
-    /// Use file-based key storage with default path.
-    #[arg(long)]
-    pub keyfile: bool,
+// #[derive(Debug, Clone)]
+// pub enum KeystoreConfig {
+//     File(PathBuf),
+//     Keyring(String),
+// }
 
-    /// Use keyfile at specified path
-    #[arg(long, value_name = "PATH")]
-    pub keyfile_path: Option<PathBuf>,
-
-    /// Use OS keyring with default service ("anytype_rust")
-    #[arg(long)]
-    pub keyring: bool,
-}
-
-impl KeystoreArgs {
-    pub fn resolve(&self) -> KeystoreConfig {
-        let env_keyfile = !std::env::var("ANYTYPE_KEYSTORE_FILE")
-            .unwrap_or_default()
-            .is_empty();
-        let env_keyring = !std::env::var("ANYTYPE_KEYSTORE_KEYRING")
-            .unwrap_or_default()
-            .is_empty();
-
-        if self.keyfile || env_keyfile {
-            return KeystoreConfig::File(default_keyfile_path());
-        }
-        if let Some(path) = &self.keyfile_path {
-            return KeystoreConfig::File(path.clone());
-        }
-        if let Ok(val) = std::env::var("ANYTYPE_KEY_FILE")
-            && !val.is_empty()
-        {
-            return KeystoreConfig::File(PathBuf::from(val));
-        }
-
-        if self.keyring || env_keyring {
-            return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
-        }
-
-        // no setting in command line or environment
-        // for macos and windows, default to os keyring
-        if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
-            return KeystoreConfig::Keyring(DEFAULT_KEYRING_SERVICE.to_string());
-        }
-        // for linux, default to file
-        KeystoreConfig::File(default_keyfile_path())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum KeystoreConfig {
-    File(PathBuf),
-    Keyring(String),
-}
-
-impl KeystoreConfig {
-    pub fn description(&self) -> String {
-        match self {
-            KeystoreConfig::File(path) => format!("file ({})", path.display()),
-            KeystoreConfig::Keyring(service) => format!("keyring ({service})"),
-        }
-    }
-}
+// impl KeystoreConfig {
+//     pub fn description(&self) -> String {
+//         match self {
+//             KeystoreConfig::File(path) => format!("file ({})", path.display()),
+//             KeystoreConfig::Keyring(service) => format!("keyring ({service})"),
+//         }
+//     }
+// }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -154,6 +112,10 @@ pub enum Commands {
     /// Object list and CRUD operations
     #[command(alias = "objects")]
     Object(ObjectArgs),
+
+    /// File list and operations
+    #[command(alias = "files")]
+    File(FileArgs),
 
     /// Type list and CRUD operations
     #[command(alias = "types")]
@@ -206,6 +168,24 @@ pub enum AuthCommands {
 
     /// Display authentication status
     Status,
+
+    /// Set HTTP API token (read from stdin)
+    SetHttp,
+
+    /// Set gRPC credentials
+    SetGrpc {
+        /// Import gRPC credentials from headless config.json
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+
+        /// Provide gRPC account key via stdin
+        #[arg(long)]
+        account_key: bool,
+
+        /// Provide gRPC session token via stdin
+        #[arg(long)]
+        token: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -253,6 +233,110 @@ pub enum SpaceCommands {
 pub struct ObjectArgs {
     #[command(subcommand)]
     pub command: ObjectCommands,
+}
+
+#[derive(Args, Debug)]
+pub struct FileArgs {
+    #[command(subcommand)]
+    pub command: FileCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FileCommands {
+    List {
+        /// space id or name
+        space: String,
+
+        #[command(flatten)]
+        pagination: PaginationArgs,
+
+        #[command(flatten)]
+        filters: FileFilterArgs,
+
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+    Search {
+        /// space id or name
+        space: String,
+
+        /// search text (optional)
+        #[arg(long)]
+        text: Option<String>,
+
+        #[command(flatten)]
+        pagination: PaginationArgs,
+
+        #[command(flatten)]
+        filters: FileFilterArgs,
+
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+    Get {
+        /// space id or name
+        space: String,
+
+        /// id of file object to get
+        object_id: String,
+    },
+    Update {
+        /// space id or name
+        space: String,
+
+        /// id of file object to update
+        object_id: String,
+
+        /// new file name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Set property (format: key=value)
+        #[arg(short = 'p', long = "prop", value_name = "KEY=VALUE")]
+        properties: Vec<String>,
+
+        /// Set property (format: key=value)
+        #[arg(value_name = "KEY=VALUE")]
+        property_args: Vec<String>,
+    },
+    Delete {
+        /// space id or name
+        space: String,
+
+        /// id of file object to delete
+        object_id: String,
+    },
+    #[command(
+        alias = "down",
+        group = ArgGroup::new("download_destination")
+            .args(["dir", "file"])
+            .multiple(false)
+    )]
+    Download {
+        /// id of file object to download
+        object_id: String,
+
+        /// output directory (optional)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// output file path (optional)
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: Option<PathBuf>,
+    },
+    #[command(alias = "up")]
+    Upload {
+        /// space id or name
+        space: String,
+
+        /// input file path
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: PathBuf,
+
+        /// file type hint
+        #[arg(long, value_enum)]
+        file_type: Option<FileTypeArg>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -471,6 +555,15 @@ pub enum TypeLayoutArg {
     Action,
     /// simplified note layout
     Note,
+}
+
+#[derive(Clone, ValueEnum, Debug)]
+pub enum FileTypeArg {
+    File,
+    Image,
+    Video,
+    Audio,
+    Pdf,
 }
 
 #[derive(Args, Debug)]
@@ -867,6 +960,53 @@ pub struct FilterArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct FileFilterArgs {
+    /// filter by name substring
+    #[arg(long)]
+    pub name_contains: Option<String>,
+
+    /// filter by file type
+    #[arg(long, value_enum)]
+    pub file_type: Option<FileTypeArg>,
+
+    /// filter by file extension
+    #[arg(long, value_name = "EXT")]
+    pub ext: Option<String>,
+
+    /// filter by file extension list
+    #[arg(long, value_name = "EXT", value_delimiter = ',')]
+    pub ext_in: Vec<String>,
+
+    /// filter by excluding file extension list
+    #[arg(long, value_name = "EXT", value_delimiter = ',')]
+    pub ext_nin: Vec<String>,
+
+    /// filter by size equals (bytes)
+    #[arg(long, value_name = "BYTES")]
+    pub size_eq: Option<i64>,
+
+    /// filter by size not equals (bytes)
+    #[arg(long, value_name = "BYTES")]
+    pub size_neq: Option<i64>,
+
+    /// filter by size less than (bytes)
+    #[arg(long, value_name = "BYTES")]
+    pub size_lt: Option<i64>,
+
+    /// filter by size less than or equal (bytes)
+    #[arg(long, value_name = "BYTES")]
+    pub size_lte: Option<i64>,
+
+    /// filter by size greater than (bytes)
+    #[arg(long, value_name = "BYTES")]
+    pub size_gt: Option<i64>,
+
+    /// filter by size greater than or equal (bytes)
+    #[arg(long, value_name = "BYTES")]
+    pub size_gte: Option<i64>,
+}
+
+#[derive(Args, Debug)]
 pub struct SortArgs {
     /// sort results by property key
     #[arg(long, value_name = "property_key")]
@@ -880,8 +1020,7 @@ pub struct SortArgs {
 pub struct AppContext {
     pub client: AnytypeClient,
     pub output: Output,
-    pub base_url: String,
-    pub keystore: KeystoreConfig,
+    //pub base_url: String,
     pub date_format: String,
 }
 
@@ -889,15 +1028,12 @@ pub async fn run(cli: Cli) -> Result<()> {
     let output = Output::new(resolve_output_format(&cli), cli.output.clone());
     let date_format = resolve_table_date_format(&cli);
 
-    let base_url = cli.url.unwrap_or_else(|| ANYTYPE_DESKTOP_URL.to_string());
+    let client = build_client(&cli)?;
 
-    let keystore = cli.keystore.resolve();
-    let client = build_client(&base_url, &keystore)?;
     let ctx = AppContext {
+        //base_url: client.get_http_endpoint().to_string(),
         client,
         output,
-        base_url,
-        keystore,
         date_format,
     };
 
@@ -905,6 +1041,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Auth(args) => auth::handle(&ctx, args).await,
         Commands::Space(args) => space::handle(&ctx, args).await,
         Commands::Object(args) => object::handle(&ctx, args).await,
+        Commands::File(args) => file::handle(&ctx, args).await,
         Commands::Type(args) => types::handle(&ctx, args).await,
         Commands::Property(args) => property::handle(&ctx, args).await,
         Commands::Member(args) => member::handle(&ctx, args).await,
@@ -942,37 +1079,39 @@ fn resolve_table_date_format(cli: &Cli) -> String {
         .unwrap_or_else(|| DEFAULT_TABLE_DATE_FORMAT.to_string())
 }
 
-fn build_client(base_url: &str, keystore: &KeystoreConfig) -> Result<AnytypeClient> {
-    let mut config = ClientConfig::default().app_name("anyr");
-    config.base_url = base_url.to_string();
-
-    let client = AnytypeClient::with_config(config)?;
-    let client = match keystore {
-        KeystoreConfig::File(path) => {
-            let store = KeyStoreFile::from_path(path)?;
-            client.set_key_store(store)
-        }
-        KeystoreConfig::Keyring(service) => {
-            client.set_key_store(KeyStoreKeyring::new(service, None))
-        }
+fn build_client(cli: &Cli) -> Result<AnytypeClient> {
+    let config = ClientConfig {
+        base_url: cli.url.clone(),
+        keystore: cli.keystore.clone(),
+        keystore_service: Some(
+            cli.keystore_service
+                .as_deref()
+                .unwrap_or(DEFAULT_KEYRING_SERVICE)
+                .into(),
+        ),
+        grpc_endpoint: cli.grpc.clone(),
+        app_name: "anyr".into(), // env!("CARGO_BIN_NAME"),
+        ..Default::default()
     };
-
+    let client = AnytypeClient::with_config(config)?;
     Ok(client)
 }
 
-pub fn ensure_authenticated(client: &AnytypeClient) -> Result<()> {
-    if client.load_key(false)? {
-        return Ok(());
-    }
-    Err(AnytypeError::Unauthorized.into())
+pub fn ensure_authenticated(_client: &AnytypeClient) -> Result<()> {
+    // TODO: do we need this method anymore?
+    // if client.load_key(false)? {
+    //     return Ok(());
+    // }
+    // Err(AnytypeError::Unauthorized.into())
+    Ok(())
 }
 
-fn default_keyfile_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(DEFAULT_KEYRING_SERVICE)
-        .join("api.key")
-}
+// fn default_keyfile_path() -> PathBuf {
+//     dirs::config_dir()
+//         .unwrap_or_else(|| PathBuf::from("."))
+//         .join(DEFAULT_KEYRING_SERVICE)
+//         .join("api.key")
+// }
 
 impl TypeLayoutArg {
     pub fn to_layout(&self) -> TypeLayout {

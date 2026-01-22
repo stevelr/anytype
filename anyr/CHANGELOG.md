@@ -6,9 +6,29 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased] - anyr
 
+### Added
+
+- File commands: list/search/get/update/delete, plus `file download` and `file upload` for raw bytes.
+- File list/search filters for name, type, extension, and size.
+- Auth commands now support `set-http` and `set-grpc` to update credentials in the keystore.
+  - Example: `anyr auth set-grpc [ --account-key | --session-token ]` to store a gRPC account key or session token.
+- `--grpc` flag to override the gRPC endpoint url.
+
 ### Changed
 
+- protoc and libgit2 must be installed for build from source or cargo install
+- Auth status now reports HTTP vs gRPC credential status with ping checks.
+- file-based keystore uses sqlite (turso native rust implementation)
 - Apache-2.0 license
+
+### BREAKING
+
+- authentication-related environment variables and flags have changed
+  - `--keyfile`, `--keyfile-path`, and `--keyring` now replaced by `--keystore`.
+  - omit to use platform default keystore
+  - `--keystore file` to use file-based keystore in default path (~/.local/state/keystore.db)
+  - `--keystore file:path=/path/to/keystore.db` to use file keystore in custom path
+  - `--keystore secret-store` to use dbus secret store on linux (default kernel 'keyutils')
 
 ## [0.2.4] - anyr - 2026-01-17
 

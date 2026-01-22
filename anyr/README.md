@@ -8,11 +8,27 @@ Homepage: https://github.com/stevelr/anytype
 # show options
 anyr --help
 
-# check authentication status
+# check authentication status (HTTP + gRPC)
 anyr auth status
 
+# set HTTP token (reads from stdin)
+anyr auth set-http
+
+# set gRPC credentials
+anyr auth set-grpc --config PATH
+anyr auth set-grpc --account-key
+anyr auth set-grpc --token
+
 # List spaces your user is authorized to access
-anyr space list -t         # output as table (-t/--table)
+anyr space list -t     # output as table (-t/--table)
+
+# List files in a space (requires gRPC credentials)
+anyr file list "Personal" -t
+
+# Download/upload file bytes
+anyr file download <FILE_OBJECT_ID> --dir /tmp
+anyr file download <FILE_OBJECT_ID> -f /tmp/file.bin
+anyr file upload "Personal" -f ./path/to/file.png
 ```
 
 ## Common options
@@ -30,17 +46,18 @@ anyr space list -t         # output as table (-t/--table)
         <td>Anytype endpoint url</td>
       </tr>
       <tr>
-        <td rowspan="3">Key Storage</td>
-        <td><code>--keyfile</code></td>
-        <td>key stored in file in standard location</td>
+        <td>gRPC URL</td>
+        <td><code>--grpc URL</code></td>
+        <td>Anytype gRPC endpoint url</td>
       </tr>
       <tr>
-        <td><code>--keyfile-path PATH</code></td>
-        <td>key stored at PATH</td>
+        <td rowspan="2">Key Storage</td>
+        <td><code>--keystore SPEC</code></td>
+        <td>keystore spec, e.g., "file"</td>
       </tr>
       <tr>
-        <td><code>--keyring</code></td>
-        <td>key stored in OS keyring</td>
+        <td><code>--keystore-service SERVICE</code></td>
+        <td>service name, usually the app name</td>
       </tr>
       <tr>
         <td rowspan="3">Output Format</td>
@@ -100,7 +117,7 @@ anyr search --space "Work" --type Task --text customer -t
 
 **List tasks in space**
 
-```sh
+````sh
 space="Work" # specify space using name or id
 for task in `anyr search --type Task --space $space --json | jq -r '.items[] | .id`; do
   data=$(anyr object get $space $task --json)
@@ -111,7 +128,18 @@ for task in `anyr search --type Task --space $space --json | jq -r '.items[] | .
   # generate formatted table with date, status, and name
   printf "%10s %-12s %s" $created_date $status $name
 done
-```
+
+**Filter files**
+
+```sh
+# list images larger than 1MB with a name containing "report"
+anyr file list "Personal" --type image --size-gte 1048576 --name-contains report -t
+
+# list pdf or docx files
+anyr file list "Personal" --ext-in pdf,docx -t
+````
+
+````
 
 **List items in query or collection**
 
@@ -123,7 +151,7 @@ anyr search --type collection --space $space -t
 # from above, get id of query or collection of interest, then
 # list items in query or collection, in view "All"
 anyr view objects --view All $space $query_or_collection_id -t
-```
+````
 
 **Get objects from a collection list or grid view**
 
@@ -181,7 +209,10 @@ cargo install -p anyr
 ## Build from source
 
 **Cargo**
-Ensure you have 'protoc' from the protobuf package in your path. On macos, 'brew install protobuf'
+Requirements:
+
+- protoc - (from the protobuf package. On macos, `brew install protobuf`)
+- libgit2
 
 ```sh
 cargo install -p anyr
@@ -203,42 +234,40 @@ Configuration can be set with command-line parameters or environment variables.
 
 ```sh
 # use headless server and custom key path
-anyr --url "http://127.0.0.1:31012" --keyfile-path "$HOME/.config/anytype/api.key" ARGS ...`
+anyr --url "http://127.0.0.1:31012" --keystore "file:path=$HOME/.config/anytype/apikeys.db" ARGS ...`
 
-# custom url and key path in environment
+# custom endpoint url and key path in environment
 export ANYTYPE_URL=http://127.0.0.1:31012
-export ANYTYPE_KEY_FILE="$HOME/.config/anytype/api.key"
+export ANYTYPE_KEYSTORE="file:path=$HOME/.config/anytype/apikeys.db"
 anyr ARGS ...
 ```
 
-### Generate api key (first-time authentication)
+### Generating credentials
 
 - **Desktop**: If the Anytype desktop app is running, type `anyr auth login` and the app will display a 4-digit code. Enter the code into the anyr prompt, and a key is generated and stored in the KeyStore.
 
-- **Headless server**: If you are using the headless cli server, start the server, run `anytype auth apikey create anyr` to generate and display a key, save it in a file, and set the key file path as described in [Key storage](#key-storage).
+- **Headless server**: If you are using the headless cli server, start the server, run `anytype auth apikey create anyr` to generate and display a key, then either:
+  - paste it into `anyr auth set-http` (reads from stdin), or
+  - save it in a file and set the key file path as described in [Key storage](#key-storage).
 
-## Key storage
+To store gRPC credentials from a headless server, use `anyr auth set-grpc --config PATH` or paste a session token with `anyr auth set-grpc --token`.
 
-`anyr` requires an api key to access Anytype documents, which is obtained with a one-time authentication step.
+See [anytype README.md](../anytype-api/README.md#keystore) for more info, and the helper script [init-cli-keys.sh](../scripts/init-cli-keys.sh) for generating and saving http and gRPC credentials.
 
-First, decide which of two methods will be used for storing the key. The key should be kept secret like other passwords, as it can allow access to unencrypted anytype documents. Preferably, the api key is stored in the secure OS Keyring, which requires biometric or password authentication. Alternately, the key can be saved in a file on your drive, which is less secure.
+## Keystore args
 
-Key storage is determined in the following order of precedence:
+The keystore can be set on the command line with `--keystore` or in the environment with `ANYTYPE_KEYSTORE`. The format of the parameter and the environment variable is the keystore name ('file', 'secret-service', etc.) followed by zero or more ':key-value' to set "modifiers" for the service.
 
-1. If flag `--keyfile` is present, or environment variable `ANYTYPE_KEYSTORE_FILE` is `1`, api keys are stored in a file in a config folder.
+Examples:
 
-| Platform | Value                                 | Example                                               |
-| -------- | ------------------------------------- | ----------------------------------------------------- |
-| Linux    | `$XDG_CONFIG_HOME` or `$HOME`/.config | /home/alice/.config/anyr/api.key                      |
-| macOS    | `$HOME`/Library/Application Support   | /Users/Alice/Library/Application Support/anyr/api.key |
-| Windows  | `{FOLDERID_RoamingAppData}`           | C:\Users\Alice\AppData\Roaming\anyr\api.key           |
-| (other)  |                                       | ./anyr/api.key                                        |
+- (no `--keystore`) if omitted, the default keystore for the platform is used. Usually the OS keyring.
+- `--keystore file` to use file-based keystore in default path (~/.local/state/keystore.db)
+- `--keystore file:path=/path/to/keystore.db` to use file keystore in custom path
+- `--keystore secret-service` to use dbus secret service on linux (default kernel 'keyutils')
 
-2. If arg `--keyfile-path` is set, or environment variable `ANYTYPE_KEY_FILE` is set, api keys are stored in a file with that path.
+The set of valid strings for OS keystores is [in the keyring crate](https://github.com/open-source-cooperative/keyring-rs/blob/main/src/lib.rs)
 
-3. If flag `--keyring` is present, or `ANYTYPE_KEYSTORE_KEYRING` is `1`, the OS keyring is used and prompts user with service name "anyr".
-
-4. If none of the above overrides are present, key storage defaults to the OS keyring for MacOS and Windows, and the default file path for Linux and other platforms.
+Available modifiers for the "file" keystore may be found in the README for [db-keystore](https://docs.rs/db-keystore/latest/db_keystore/).
 
 ## Logging
 

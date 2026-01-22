@@ -80,6 +80,8 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("auth", "login")
         self.assert_help_ok("auth", "logout")
         self.assert_help_ok("auth", "status")
+        self.assert_help_ok("auth", "set-http")
+        self.assert_help_ok("auth", "set-grpc")
 
     def test_space(self) -> None:
         self.assert_help_ok("space")
@@ -95,6 +97,16 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("object", "create")
         self.assert_help_ok("object", "update")
         self.assert_help_ok("object", "delete")
+
+    def test_file(self) -> None:
+        self.assert_help_ok("file")
+        self.assert_help_ok("file", "list")
+        self.assert_help_ok("file", "search")
+        self.assert_help_ok("file", "get")
+        self.assert_help_ok("file", "update")
+        self.assert_help_ok("file", "delete")
+        self.assert_help_ok("file", "download")
+        self.assert_help_ok("file", "upload")
 
     def test_type(self) -> None:
         self.assert_help_ok("type")
