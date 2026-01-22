@@ -9,10 +9,14 @@ pub use crate::error::ConfigError;
 /// Headless CLI config.json fields relevant for gRPC auth.
 #[derive(Debug, Default, Deserialize)]
 pub struct AnytypeHeadlessConfig {
-    #[serde(rename = "accountKey")]
+    #[serde(default, rename = "accountKey")]
     pub account_key: Option<String>,
-    #[serde(rename = "sessionToken")]
+
+    #[serde(default, rename = "sessionToken")]
     pub session_token: Option<String>,
+
+    #[serde(default, rename = "accountId")]
+    pub account_id: Option<String>,
 }
 
 pub fn default_headless_config_path() -> Result<PathBuf, ConfigError> {

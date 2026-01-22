@@ -4,7 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased] - anytype-rpc
+## [0.2.1] - anytype-rpc - 2025-01-21
+
+### Added
+
+- get_endpoint() to AnytypeGrpcClient
+- optional account_id field to AnytypeHeadlessConfig
 
 ### Changed
 

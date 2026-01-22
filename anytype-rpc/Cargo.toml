@@ -5,7 +5,7 @@
 # 
 [package]
 name = "anytype-rpc"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Anytype gRPC client"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
@@ -18,7 +18,7 @@ readme = "README.md"
 
 [dependencies]
 clap.workspace = true
-prost-types = "0.14.3"
+prost-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
@@ -36,3 +36,6 @@ tonic-prost-build = "0.14.2"
 [[bin]]
 name = "anytype-rpc"
 path = "src/bin/anytype-rpc.rs"
+
+[package.metadata.cargo-shear]
+ignored = ["prost", "tonic-prost"]

@@ -6,12 +6,11 @@ use crate::error::AnytypeGrpcError;
 
 // optional environment variable containing grpc endpoint
 const ANYTYPE_GRPC_ENDPOINT_ENV: &str = "ANYTYPE_GRPC_ENDPOINT";
-const ANYTYPE_GRPC_HEADLESS_URL: &str = "http://127.0.0.1:31010";
+const ANYTYPE_GRPC_ENDPOINT: &str = "http://127.0.0.1:31010"; // headless server
 
 /// checks environment variable "ANYTYPE_GRPC_ENDPOINT", then falls back to headless cli endpoint
 pub fn default_grpc_endpoint() -> String {
-    std::env::var(ANYTYPE_GRPC_ENDPOINT_ENV)
-        .unwrap_or_else(|_| ANYTYPE_GRPC_HEADLESS_URL.to_string())
+    std::env::var(ANYTYPE_GRPC_ENDPOINT_ENV).unwrap_or_else(|_| ANYTYPE_GRPC_ENDPOINT.to_string())
 }
 
 /// Configuration for connecting to Anytype gRPC.
@@ -45,9 +44,15 @@ impl AnytypeGrpcConfig {
 pub struct AnytypeGrpcClient {
     channel: Channel,
     token: String,
+    endpoint: String,
 }
 
 impl AnytypeGrpcClient {
+    /// returns the endpoint
+    pub fn get_endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
     pub async fn connect_channel(config: &AnytypeGrpcConfig) -> Result<Channel, AnytypeGrpcError> {
         Ok(Endpoint::from_shared(config.endpoint.clone())?
             .connect()
@@ -62,7 +67,11 @@ impl AnytypeGrpcClient {
     ) -> Result<Self, AnytypeGrpcError> {
         let channel = Self::connect_channel(config).await?;
         let token = create_session_token_from_account_key(channel.clone(), account_key).await?;
-        Ok(Self { channel, token })
+        Ok(Self {
+            channel,
+            token,
+            endpoint: config.endpoint.clone(),
+        })
     }
 
     // this may not work: the api may not have sufficient scope to create a grpc token
@@ -72,7 +81,11 @@ impl AnytypeGrpcClient {
     ) -> Result<Self, AnytypeGrpcError> {
         let channel = Self::connect_channel(config).await?;
         let token = create_session_token_from_app_key(channel.clone(), app_key).await?;
-        Ok(Self { channel, token })
+        Ok(Self {
+            channel,
+            token,
+            endpoint: config.endpoint.clone(),
+        })
     }
 
     pub async fn from_token(
@@ -83,6 +96,7 @@ impl AnytypeGrpcClient {
         Ok(Self {
             channel,
             token: token.into(),
+            endpoint: config.endpoint.clone(),
         })
     }
 
