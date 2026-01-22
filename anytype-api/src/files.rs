@@ -517,10 +517,7 @@ impl FileDownloadRequest<'_> {
             Some(FileDownloadDestination::File(path)) => {
                 if path.is_dir() {
                     return Err(AnytypeError::Validation {
-                        message: format!(
-                            "download destination is a directory: {}",
-                            path.display()
-                        ),
+                        message: format!("download destination is a directory: {}", path.display()),
                     });
                 }
                 let parent = path
@@ -530,10 +527,7 @@ impl FileDownloadRequest<'_> {
                     .unwrap_or_else(|| PathBuf::from("."));
                 if let Err(err) = std::fs::create_dir_all(&parent) {
                     return Err(AnytypeError::Other {
-                        message: format!(
-                            "create download directory {}: {err}",
-                            parent.display()
-                        ),
+                        message: format!("create download directory {}: {err}", parent.display()),
                     });
                 }
                 (parent, Some(path))

@@ -569,20 +569,14 @@ mod cache_disabled {
             std::env::var("ANYTYPE_TEST_KEY_FILE").expect("ANYTYPE_TEST_KEY_FILE required");
 
         let config = ClientConfig {
-            base_url,
+            base_url: Some(base_url),
             app_name: "anytype-cache-test".to_string(),
             rate_limit_max_retries: 0,
             disable_cache: true, // Disable cache
+            keystore: Some(format!("file:path={api_key_path}")),
             ..Default::default()
         };
-
-        let client = AnytypeClient::with_config(config)
-            .expect("Failed to create client")
-            .set_key_store(
-                KeyStoreFile::from_path(&api_key_path).expect("Failed to create keystore"),
-            );
-
-        client.load_key(false).expect("Failed to load key");
+        let client = AnytypeClient::with_config(config).expect("Failed to create client");
 
         // Verify cache is initially empty
         assert_eq!(client.cache().num_properties(), 0);

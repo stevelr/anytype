@@ -19,6 +19,7 @@
 		"didip",
 		"etest",
 		"from_xywh",
+		"hexkey",
 		"imageops",
 		"justfile",
 		"keyutils",

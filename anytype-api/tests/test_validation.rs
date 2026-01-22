@@ -550,9 +550,7 @@ async fn test_invalid_api_key() {
         };
 
         let bad_client = AnytypeClient::with_config(config).expect("Failed to create client");
-        bad_client.set_api_key(&Secret::new(HttpCredentials::new(
-            "invalid_api_key_12345".to_string(),
-        )));
+        bad_client.set_api_key(HttpCredentials::new("invalid_api_key_12345".to_string()));
 
         // Try to make a request with invalid key
         let result = bad_client.spaces().list().await;
@@ -770,8 +768,10 @@ async fn test_auth_error() {
     // This is tested in test_request_without_api_key and test_invalid_api_key
     // Here we verify the error type is Auth/Unauthorized
     let config = ClientConfig {
-        base_url: std::env::var("ANYTYPE_TEST_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:31012".to_string()),
+        base_url: Some(
+            std::env::var("ANYTYPE_TEST_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:31012".to_string()),
+        ),
         app_name: "test-auth-error".to_string(),
         rate_limit_max_retries: 0,
         ..Default::default()

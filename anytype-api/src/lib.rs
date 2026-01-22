@@ -277,7 +277,6 @@ pub(crate) mod config {
 
 /// Assert helper that returns a TestError instead of panicking
 #[doc(hidden)]
-//#[cfg(test)]
 #[macro_export]
 macro_rules! test_assert {
     ($cond:expr, $msg:expr) => {

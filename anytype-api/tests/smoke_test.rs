@@ -55,8 +55,9 @@ async fn smoke_test() {
     };
 
     println!("Configuration:");
-    println!("  URL: {}", ctx.client.get_config().base_url);
+    println!("  URL: {}", ctx.client.get_http_endpoint());
     println!("  Space ID: {}", ctx.space_id);
+    println!("  Keystore: {:?}", ctx.client.get_key_store());
     println!();
 
     // Create timeout guard

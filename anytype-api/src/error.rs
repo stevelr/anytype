@@ -89,12 +89,6 @@ pub enum AnytypeError {
         source: anytype_rpc::error::AnytypeGrpcError,
     },
 
-    // /// gRPC config parsing or IO error.
-    // #[cfg(feature = "grpc")]
-    // #[snafu(display("gRPC config error: {source}"))]
-    // GrpcConfig {
-    //     source: anytype_rpc::config::ConfigError,
-    // },
     /// gRPC auth is unavailable (missing config or account key).
     #[cfg(feature = "grpc")]
     #[snafu(display("gRPC service unavailable: {message}"))]

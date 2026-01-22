@@ -235,19 +235,6 @@ impl fmt::Debug for HttpClient {
     }
 }
 
-// impl Clone for HttpClient {
-//     fn clone(&self) -> Self {
-//         Self {
-//             client: self.client.clone(),
-//             base_url: self.base_url.clone(),
-//             api_key: self.api_key.clone(),
-//             limits: self.limits.clone(),
-//             rate_limit_max_retries: self.rate_limit_max_retries,
-//             metrics: self.metrics.clone(),
-//         }
-//     }
-// }
-
 struct ParsedRetry {
     header: String,
     duration: Duration,

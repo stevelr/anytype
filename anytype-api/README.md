@@ -32,9 +32,7 @@ use anytype::prelude::*;
 async fn main() -> Result<(), AnytypeError> {
 
     // Create a client
-    let mut config = ClientConfig::default().app_name("my-app");
-    // Optional: use file-based keystore instead of OS keyring
-    config.keystore = Some("file".to_string());
+    let config = ClientConfig::default().app_name("my-app");
     let client = AnytypeClient::with_config(config)?;
     if !client.auth_status()?.http.is_authenticated() {
         // prompt user for auth code if needed
@@ -92,27 +90,21 @@ async fn main() -> Result<(), AnytypeError> {
 }
 ```
 
+See the [Examples](./examples/README.md) folder for more code samples.
+
 ## Files (gRPC)
 
-File operations require the `grpc` feature (enabled by default). The download API accepts either a destination directory or a destination file path:
+File operations require the `grpc` feature (enabled by default).
 
 ```rust
 let file_id = "file_object_id";
-let downloaded = client
+let path = client
     .files()
     .download(file_id)
     .to_dir("/tmp")
     .download()
     .await?;
-println!("downloaded to {}", downloaded.display());
-
-let downloaded = client
-    .files()
-    .download(file_id)
-    .to_file("/tmp/example.pdf")
-    .download()
-    .await?;
-println!("downloaded to {}", downloaded.display());
+println!("downloaded to {}", path.display());
 ```
 
 ## Status and Compatibility
@@ -130,23 +122,67 @@ Plus:
 
 The current version of the http backend api does not provide access to some data stored by the Anytype app. Data that is current inaccessible from the http api:
 
-- ~~Files~~ Files support now available with the gRPC back-end
+- ~~Files~~ _Update:_ Files support now available with the gRPC back-end
 - Blocks. Pages and other document-like objects can be exported as markdown, but markdown export is somewhat lossy, for example, in tables, markdown export preserves table layout, with bold and italic styling, but foreground and background colors are lost.
 - Relationships - only a subset of relation types are available in the REST api.
 - Chats and Messages
 
-Because of these limitations, it is not yet possible with this crate or with [anyr](../anyr) to export a complete space. We are investigating using the gRPC api backend to access some of these additional features.
+## Keystore (Advanced topic)
 
-## Building
+You don't need to read all this to use `anytype`, but it needs to be documented somewhere.
 
-Requirements:
+> **TL;DR**:
+> (1) First, try the defaults - it should "just work".
+> (2). If you're doing development and/or don't want to deal with pop-up approval prompts, set
+>
+> ```
+> export ANYTYPE_KEYSTORE=file
+> export ANYTYPE_KEYSTORE_SERVICE=anyr
+> ```
+>
+> (3) If you're using the gRPC backend, use the headless cli server and [init-cli-keys.sh](../scripts/init-cli-keys.sh)
 
-- protoc - (from the protobuf package. On macos, `brew install protobuf`)
-- libgit2
+Authentication tokens for http and gRPC are stored in a KeyStore, which can be an OS-managed keyring or a file-based keystore. The file-based keystore is an sqlite file (via turso, a rust-native sqlite implementation), with optional encryption. The keystore is selected in `ClientConfig::keystore`, when constructing an `AnytypeClient`, or in the environment variable `ANYTYPE_KEYSTORE`. These both use the same string format to specify the implementation and settings:
 
-```sh
-cargo build
-```
+- If not specified, in config or the environment, the platform default keystore is used (usually the secure OS keyring). On linux, the default is kernel keyutils.
+- The first word of the keystore spec is the name of the implementation, either "file", or one of the OS keystores [in the keyring crate](https://github.com/open-source-cooperative/keyring-rs/blob/main/src/lib.rs).
+- The name may be followed by a ':' (colon) and one or more key=value settings (called 'modifiers'), separated by colons.
+
+The "file" keystore modifiers are documented in the README for [db-keystore](https://docs.rs/db-keystore/latest/db_keystore/). The most common option is "path" which sets the path to the db file. File keystore supports on-disk encryption by setting `cipher` and `hexkey`.
+
+Examples:
+
+- `--keystore file` use file (sqlite) keystore in the default location
+- `--keystore file:path=/path/to/my/file.db"` use file (sqlite) keystore in custom location
+- `--keystore file:path=/path/to/my/file.db:cipher=aegis256:hexkey=HEX_KEY` file keystore in custom location with 256-bit encryption with the hex key (64 hex digits)
+- `--keystore secret-service` on linux, use the dbus-based secret service keystore
+- `--keystore keyutils` linux kernel keyutils keystore (default on linux)
+- `--keystore keyring` macos user keyring (default on macos)
+- `--keystore windows` Windows Credential Store (default on windows)
+
+### Key schema and service scope
+
+All keystore implementations (file, macos keychain, linux keyutils, etc.) store keys as a triple (service, user, secret), using the terminology of the [keyring](https://crates.io/crates/keyring) crate. "service" is usually used for the application name, such as "anyr" or "any-edit". It's displayed to the user in permission prompts when requesting access. The "user" field is used to store the name of the key: "http_token", "account_key", or "session_token". "secret" is the actual key, stored as bytes, although all secrets used by `anytype` are valid utf8 strings.
+
+In some of the example programs in the `anytype` crate, the service name is set to `anyr`, so it can use the same http token that anyr does. `anyr` makes it easy to generate an http token with (`anyr auth login`), which is saved to the keystore. The "service" name used to retrieve keys from the keystore is, by default, derived from `ClientConfig::app_name` to make it unique for every app, but it can be customized by setting `ClientConfig::keystore_service`, or by setting the environment variable `ANYTYPE_KEYSTORE_SERVICE`. A developer can choose to let a collection of app share auth tokens, as we did in the examples, by using a common service name.
+
+### Adding keys to the keystore
+
+For authenticating with the desktop app, call `authenticate_interactive`, which causes the app to display a 4-digit code that the the user must enter in the console to generate an http token, which is then stored in the keystore.
+
+For gRPC authentication, it is recommended to use the headless cli server. To add a key to a keystore for use with the cli, use the `anyr` tool. (`anyr auth set-http`, `anyr auth set-grpc`, etc.) See [anyr](https://github.com/stevelr/anytype/tree/main/anyr) for details.
+
+See the script ../scripts/init-cli-keys.sh for help initializing the cli and saving gRPC and http authentication tokens to the keystore.
+
+### Encryption
+
+Enable encryption on the file keystore in one of the following ways:
+
+- (in code) set `EncryptionOpts::cipher` and `EncryptionOpts::hexkey`
+- (with anyr cli) use `--keystore file:cipher=aegis256:hexkey=HEXKEY`
+- (in environment) `ANYTYPE_KEYSTORE=file:cipher=aegis256:hexkey=HEXKEY`
+
+Supported ciphers include `aegis256` (recommended for most uses) and `aes256gcm`. See [Turso Database Encryption](https://docs.turso.tech/tursodb/encryption) for more info and options. For a 256-bit key, hexkey is 64 hex digits. A key can be generated with `openssl rand -hex 32`
 
 ## Known issues & Troubleshooting
 
@@ -172,6 +208,17 @@ To enable verification for _all_ new objects, types, and properties, add `.ensur
 
 ```rust,no_run
 let obj = client.new_object("space_id", "page").name("Quicker note").no_verify().create().await?;
+```
+
+## Building
+
+Requirements:
+
+- protoc - (from the protobuf package. On macos, `brew install protobuf`)
+- libgit2
+
+```sh
+cargo build
 ```
 
 ## Testing

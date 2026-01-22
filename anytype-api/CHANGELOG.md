@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [0.3.0] - anytype - 2026-01-21
+## [0.3.0] - anytype
 
 ### Added
 
@@ -23,6 +23,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Build changes
   - protoc and libgit2 must be installed for build from source or cargo install
+- ClientConfig::base_url changed from String to Option<String>
 - Changes to authentication apis
   - is_authenticated() replaced with auth_status().http.is_authenticated() and auth_status().grpc.is_authenticated().
   - keystore is now configured in ClientConfig. set_key_store() and load_key() no longer needed.

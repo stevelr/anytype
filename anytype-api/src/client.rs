@@ -170,7 +170,6 @@ impl ClientConfig {
 }
 
 /// An ergonomic Anytype API client in Rust.
-//#[derive(Clone)]
 pub struct AnytypeClient {
     pub(crate) client: Arc<HttpClient>,
     pub(crate) config: ClientConfig,

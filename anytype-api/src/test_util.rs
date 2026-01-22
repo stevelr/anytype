@@ -289,10 +289,10 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
             message: "invalid default path (check $XDG_STATE_HOME or $HOME)",
         })?
         .join("anytype-test-keys.db");
-    let api_key_path = std::env::var("ANYTYPE_TEST_KEY_FILE")
-        .map(PathBuf::from)
-        .unwrap_or(default_key_db);
-    let keystore_spec = format!("file:path={}", api_key_path.display());
+    // let api_key_path = std::env::var("ANYTYPE_TEST_KEY_FILE")
+    //     .map(PathBuf::from)
+    //     .unwrap_or(default_key_db);
+    let keystore_spec = format!("file:path={}", default_key_db.display());
     let config = ClientConfig {
         base_url: Some(base_url),
         app_name: app_name.to_string(),

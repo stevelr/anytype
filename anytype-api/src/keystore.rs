@@ -57,9 +57,6 @@ pub struct GrpcCredentials {
 
 #[cfg(feature = "grpc")]
 impl GrpcCredentials {
-    // pub(crate) fn account_id(&self) -> Option<&str> {
-    //     self.account_id.as_deref()
-    // }
     pub(crate) fn account_key(&self) -> Option<&str> {
         self.account_key.as_deref()
     }
