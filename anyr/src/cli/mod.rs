@@ -5,6 +5,7 @@
  * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
  * SPDX-License-Identifier: Apache-2.0
  */
+use crate::cli::chat::{ChatReadTypeArg, MessageStyleArg};
 use crate::output::{Output, OutputFormat};
 use anyhow::{Result, bail};
 use anytype::prelude::*;
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 pub mod auth;
+pub mod chat;
 pub mod common;
 pub mod file;
 pub mod list;
@@ -104,6 +106,10 @@ pub struct Cli {
 pub enum Commands {
     /// Authentication commands
     Auth(AuthArgs),
+
+    /// Chat commands (gRPC)
+    #[command(alias = "chats")]
+    Chat(ChatArgs),
 
     /// Space list and CRUD operations
     #[command(alias = "spaces")]
@@ -363,6 +369,21 @@ pub enum ObjectCommands {
         /// id of object to get
         object_id: String,
     },
+    Link {
+        /// space id or name
+        space: String,
+
+        /// id of object to link
+        object_id: String,
+
+        /// invite cid (must be used with --key)
+        #[arg(long)]
+        cid: Option<String>,
+
+        /// invite key (must be used with --cid)
+        #[arg(long)]
+        key: Option<String>,
+    },
     Create {
         /// space id or name
         space: String,
@@ -535,6 +556,10 @@ pub enum TypeCommands {
         /// change type layout
         #[arg(long, value_enum)]
         layout: Option<TypeLayoutArg>,
+
+        /// add property to type by name, key, or id
+        #[arg(long = "add-property", value_name = "PROP_NAME_OR_ID")]
+        add_properties: Vec<String>,
     },
     Delete {
         /// space id or name
@@ -885,6 +910,243 @@ pub struct ListArgs {
     pub command: ListCommands,
 }
 
+#[derive(Args, Debug)]
+pub struct ChatArgs {
+    #[command(subcommand)]
+    pub command: ChatCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChatCommands {
+    /// List chats
+    List {
+        /// space id or name (optional)
+        #[arg(long)]
+        space: Option<String>,
+
+        /// search text (name/title)
+        #[arg(long)]
+        text: Option<String>,
+
+        #[command(flatten)]
+        pagination: PaginationArgs,
+    },
+
+    /// Get chat object
+    Get {
+        /// chat id or name/title
+        chat: String,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+    },
+
+    /// Message operations
+    #[command(alias = "msg", alias = "m")]
+    Messages(ChatMessagesArgs),
+
+    /// Mark messages as read
+    Read {
+        /// chat id or name/title
+        chat: String,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+
+        /// read type (messages or mentions)
+        #[arg(long, value_enum)]
+        read_type: Option<ChatReadTypeArg>,
+
+        /// mark read after order id
+        #[arg(long)]
+        after: Option<String>,
+
+        /// mark read before order id
+        #[arg(long)]
+        before: Option<String>,
+
+        /// last chat state id
+        #[arg(long)]
+        last_state_id: Option<String>,
+    },
+
+    /// Mark messages as unread
+    Unread {
+        /// chat id or name/title
+        chat: String,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+
+        /// unread type (messages or mentions)
+        #[arg(long, value_enum)]
+        read_type: Option<ChatReadTypeArg>,
+
+        /// mark unread after order id
+        #[arg(long)]
+        after: Option<String>,
+    },
+
+    /// Listen for new chat messages
+    Listen {
+        /// chat id or name/title (repeatable)
+        #[arg(long = "chat")]
+        chats: Vec<String>,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+
+        /// preload last N messages per chat before streaming
+        #[arg(long)]
+        include_history: Option<usize>,
+
+        /// start watermark for preload/listing
+        #[arg(long)]
+        after: Option<String>,
+
+        /// include stream lifecycle events in output
+        #[arg(long)]
+        show_events: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ChatMessagesArgs {
+    #[command(subcommand)]
+    pub command: ChatMessagesCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChatMessagesCommands {
+    /// List messages for a chat
+    List {
+        /// chat id or name/title
+        chat: String,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+
+        /// show messages after order id
+        #[arg(long)]
+        after: Option<String>,
+
+        /// show messages before order id
+        #[arg(long)]
+        before: Option<String>,
+
+        /// include boundary order id
+        #[arg(long)]
+        include_boundary: bool,
+
+        /// limit messages (default 100)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+
+        /// list unread-only messages or mentions
+        #[arg(long, value_enum)]
+        unread_only: Option<ChatReadTypeArg>,
+    },
+
+    /// Get messages by id
+    Get {
+        /// chat id or name/title
+        chat: String,
+
+        /// message ids or order ids
+        #[arg(required = true)]
+        message_ids: Vec<String>,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+    },
+
+    /// Send a message
+    Send {
+        /// chat id or name/title
+        chat: String,
+
+        /// message text (overrides positional TEXT)
+        #[arg(long)]
+        text: Option<String>,
+
+        /// message style
+        #[arg(long, value_enum, default_value = "paragraph")]
+        style: Option<MessageStyleArg>,
+
+        /// message marks (format type[:from:to[:param]])
+        #[arg(long = "mark", value_name = "SPEC")]
+        mark: Vec<String>,
+
+        /// attachments (format type:target_id)
+        #[arg(long = "attachment", value_name = "SPEC")]
+        attachment: Vec<String>,
+
+        /// raw JSON MessageContent (@file, @-, or -)
+        #[arg(long)]
+        content_json: Option<String>,
+
+        /// plain text message (@file, @-, or -)
+        #[arg(long)]
+        content_text: Option<String>,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+
+        /// message text if --text is not provided
+        #[arg(value_name = "TEXT", trailing_var_arg = true)]
+        text_args: Vec<String>,
+    },
+
+    /// Edit a message
+    Edit {
+        /// chat id or name/title
+        chat: String,
+
+        /// message id or order id
+        message_id: String,
+
+        /// message text
+        #[arg(long)]
+        text: Option<String>,
+
+        /// message style
+        #[arg(long, value_enum, default_value = "paragraph")]
+        style: Option<MessageStyleArg>,
+
+        /// message marks (format type[:from:to[:param]])
+        #[arg(long = "mark", value_name = "SPEC")]
+        mark: Vec<String>,
+
+        /// raw JSON MessageContent (@file, @-, or -)
+        #[arg(long)]
+        content_json: Option<String>,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+    },
+
+    /// Delete a message
+    Delete {
+        /// chat id or name/title
+        chat: String,
+
+        /// message id or order id
+        message_id: String,
+
+        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        #[arg(long)]
+        space: Option<String>,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 pub enum ListCommands {
     Objects {
@@ -1039,6 +1301,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Auth(args) => auth::handle(&ctx, args).await,
+        Commands::Chat(args) => chat::handle(&ctx, args).await,
         Commands::Space(args) => space::handle(&ctx, args).await,
         Commands::Object(args) => object::handle(&ctx, args).await,
         Commands::File(args) => file::handle(&ctx, args).await,

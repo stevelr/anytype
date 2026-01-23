@@ -17,6 +17,8 @@
 //! - [get_key_store](AnytypeClient::get_key_store)
 //!
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -320,7 +322,7 @@ impl AnytypeClient {
     /// ```
     pub fn logout(&self) -> Result<()> {
         self.clear_api_key();
-        self.keystore.clear_http_credentials()?;
+        self.keystore.clear_all_credentials()?;
         Ok(())
     }
 
@@ -334,7 +336,7 @@ impl AnytypeClient {
             .store()
             .as_any()
             .downcast_ref::<db_keystore::DbKeyStore>()
-            .map(|store| store.path().to_owned());
+            .map(|store| PathBuf::from(&store.path()));
 
         Ok(AuthStatus {
             keystore: KeyStoreStatus {

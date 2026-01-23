@@ -7,7 +7,11 @@
 //! or collect them into a vector, with [`collect_all()`](PagedResult::collect_all).
 //!
 //!
-use std::{fmt, ops::Deref, sync::Arc};
+use std::{
+    fmt, mem,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use futures::{
     StreamExt,
@@ -117,6 +121,12 @@ impl<T> Deref for PagedResult<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.response
+    }
+}
+
+impl<T> DerefMut for PagedResult<T> {
+    fn deref_mut(&mut self) -> &mut PaginatedResponse<T> {
+        &mut self.response
     }
 }
 
@@ -335,6 +345,11 @@ impl<T> PaginatedResponse<T> {
     /// Creates a mutable iterator over items in this response.
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
         self.items.iter_mut()
+    }
+
+    /// Takes ownership of the items, replacing them with an empty Vec.
+    pub fn take_items(&mut self) -> Vec<T> {
+        mem::take(&mut self.items)
     }
 }
 

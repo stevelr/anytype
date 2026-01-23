@@ -47,3 +47,5 @@ cargo run --example list_spaces
 - `pagination_stream` - collect all pages or stream results.
 - `views_list_objects` - list views and objects in a collection/query.
 - `files` - list, upload, and download files (gRPC).
+- `chat_messages` - list messages, filter, and send a chat message (gRPC).
+- `chat_listener` - stream chat messages and updates (gRPC).

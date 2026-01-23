@@ -1,11 +1,15 @@
 //! common functions for cli
 //!
 
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow};
 use anytype::prelude::*;
 use anytype::validation::looks_like_object_id;
 
 use crate::cli::AppContext;
+
+const DEFAULT_CHAT_NAME: &str = "General";
 
 /// resolve space name or id into space id
 pub(crate) async fn resolve_space_id(ctx: &AppContext, space_id_or_name: &str) -> Result<String> {
@@ -24,6 +28,127 @@ pub(crate) async fn resolve_space_id(ctx: &AppContext, space_id_or_name: &str) -
         0 => Err(anyhow!("space not found: {}", space_id_or_name)),
         1 => Ok(matches[0].id.clone()),
         _ => Err(anyhow!("space name is ambiguous: {}", space_id_or_name)),
+    }
+}
+
+pub(crate) async fn resolve_chat_target(
+    ctx: &AppContext,
+    space_id: Option<&str>,
+    chat_id_or_name: &str,
+) -> Result<(Option<String>, String)> {
+    if let Some(space_id) = space_id {
+        let chat_id = if looks_like_object_id(chat_id_or_name) {
+            chat_id_or_name.to_string()
+        } else {
+            resolve_chat_id_in_space(ctx, space_id, chat_id_or_name).await?
+        };
+        return Ok((Some(space_id.to_string()), chat_id));
+    }
+
+    if looks_like_object_id(chat_id_or_name) {
+        if chat_exists(ctx, chat_id_or_name).await? {
+            return Ok((None, chat_id_or_name.to_string()));
+        }
+        if let Some(space_id) = find_space_id_by_id(ctx, chat_id_or_name).await? {
+            let chat_id = resolve_chat_id_in_space(ctx, &space_id, DEFAULT_CHAT_NAME).await?;
+            return Ok((Some(space_id), chat_id));
+        }
+        return Ok((None, chat_id_or_name.to_string()));
+    }
+
+    if let Some(space_id) = find_space_id_by_name(ctx, chat_id_or_name).await? {
+        let chat_id = resolve_chat_id_in_space(ctx, &space_id, DEFAULT_CHAT_NAME).await?;
+        return Ok((Some(space_id), chat_id));
+    }
+
+    Err(anyhow!(
+        "chat name requires --space (or a space name/id) to resolve: {}",
+        chat_id_or_name
+    ))
+}
+
+pub(crate) async fn resolve_chat_ids(
+    ctx: &AppContext,
+    space_id: Option<&str>,
+    chats: &[String],
+) -> Result<Vec<String>> {
+    let mut resolved = Vec::with_capacity(chats.len());
+    for chat in chats {
+        let (_, chat_id) = resolve_chat_target(ctx, space_id, chat).await?;
+        resolved.push(chat_id);
+    }
+    Ok(resolved)
+}
+
+pub(crate) async fn resolve_chat_name(
+    ctx: &AppContext,
+    space_id: Option<&str>,
+    chat_id: &str,
+) -> Result<String> {
+    if let Some(space_id) = space_id {
+        let chat = ctx.client.chats().get_chat(space_id, chat_id).get().await?;
+        return Ok(chat.name.unwrap_or_else(|| chat_id.to_string()));
+    }
+
+    let chats = ctx.client.chats().list_chats().list().await?;
+    let chat = chats
+        .items
+        .into_iter()
+        .find(|chat| chat.id == chat_id)
+        .ok_or_else(|| anyhow!("chat not found: {}", chat_id))?;
+    Ok(chat.name.unwrap_or_else(|| chat_id.to_string()))
+}
+
+async fn resolve_chat_id_in_space(
+    ctx: &AppContext,
+    space_id: &str,
+    chat_id_or_name: &str,
+) -> Result<String> {
+    let result = ctx
+        .client
+        .chats()
+        .search_chats_in(space_id)
+        .text(chat_id_or_name)
+        .search()
+        .await?;
+    let needle = chat_id_or_name.to_lowercase();
+    let matches: Vec<_> = result
+        .items
+        .into_iter()
+        .filter(|chat| chat.name.as_deref().unwrap_or("").to_lowercase() == needle)
+        .collect();
+
+    match matches.len() {
+        0 => Err(anyhow!("chat not found: {}", chat_id_or_name)),
+        1 => Ok(matches[0].id.clone()),
+        _ => Err(anyhow!("chat name is ambiguous: {}", chat_id_or_name)),
+    }
+}
+
+async fn find_space_id_by_id(ctx: &AppContext, space_id: &str) -> Result<Option<String>> {
+    let spaces = ctx.client.spaces().list().await?.collect_all().await?;
+    Ok(spaces
+        .into_iter()
+        .find(|space| space.id == space_id)
+        .map(|space| space.id))
+}
+
+async fn chat_exists(ctx: &AppContext, chat_id: &str) -> Result<bool> {
+    let chats = ctx.client.chats().list_chats().list().await?;
+    Ok(chats.items.iter().any(|chat| chat.id == chat_id))
+}
+
+async fn find_space_id_by_name(ctx: &AppContext, space_name: &str) -> Result<Option<String>> {
+    let spaces = ctx.client.spaces().list().await?.collect_all().await?;
+    let needle = space_name.to_lowercase();
+    let matches: Vec<_> = spaces
+        .into_iter()
+        .filter(|space| space.name.to_lowercase() == needle)
+        .collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches[0].id.clone())),
+        _ => Err(anyhow!("space name is ambiguous: {}", space_name)),
     }
 }
 
@@ -129,6 +254,63 @@ fn starts_with_uppercase(value: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+pub(crate) struct MemberCache {
+    identities: HashMap<String, String>,
+}
+
+pub(crate) async fn load_member_cache(ctx: &AppContext, space_id: &str) -> Result<MemberCache> {
+    let members = ctx
+        .client
+        .members(space_id)
+        .list()
+        .await?
+        .collect_all()
+        .await?;
+    Ok(MemberCache {
+        identities: build_member_identity_map(&members),
+    })
+}
+
+pub(crate) fn resolve_member_name(
+    space_id: &str,
+    member_cache: &MemberCache,
+    value: &str,
+) -> String {
+    if let Some(name) = member_cache.identities.get(value) {
+        return name.clone();
+    }
+    let Some(identity) = parse_member_identity(space_id, value) else {
+        return value.to_string();
+    };
+
+    if let Some(name) = member_cache.identities.get(identity) {
+        return name.clone();
+    }
+
+    identity.chars().take(8).collect()
+}
+
+fn build_member_identity_map(members: &[Member]) -> HashMap<String, String> {
+    let mut identities = HashMap::new();
+    for member in members {
+        if let Some(identity) = member.identity.as_deref() {
+            identities.insert(identity.to_string(), member.display_name().to_string());
+        }
+    }
+    identities
+}
+
+fn parse_member_identity<'a>(space_id: &str, value: &'a str) -> Option<&'a str> {
+    let space_fragment = space_id.replace('.', "_");
+    let prefix = format!("_participant_{space_fragment}_");
+    let identity = value.strip_prefix(&prefix)?;
+    if identity.len() == 48 {
+        Some(identity)
+    } else {
+        None
+    }
 }
 
 /// resolve view name or id into view id for a list/type

@@ -68,7 +68,7 @@ impl TestContext {
     ///
     /// Required environment variables:
     /// - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
-    /// - `ANYTYPE_TEST_KEY_FILE` - Path to file containing API key
+    /// - `ANYTYPE_KEYSTORE=file` - Path to file containing API key
     /// - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
     ///
     pub async fn new() -> TestResult<Self> {
@@ -289,9 +289,6 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
             message: "invalid default path (check $XDG_STATE_HOME or $HOME)",
         })?
         .join("anytype-test-keys.db");
-    // let api_key_path = std::env::var("ANYTYPE_TEST_KEY_FILE")
-    //     .map(PathBuf::from)
-    //     .unwrap_or(default_key_db);
     let keystore_spec = format!("file:path={}", default_key_db.display());
     let config = ClientConfig {
         base_url: Some(base_url),
@@ -299,6 +296,7 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
         rate_limit_max_retries: 0, // Don't retry on rate limit
         verify: Some(VerifyConfig::default()),
         keystore: Some(keystore_spec),
+        keystore_service: Some("anyr".into()), // TODO: temporary fix
         ..Default::default()
     };
     let client = AnytypeClient::with_config(config)?;
