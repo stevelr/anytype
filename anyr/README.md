@@ -10,87 +10,115 @@ anyr --help
 
 # check authentication status (HTTP + gRPC)
 anyr auth status
-
-# set HTTP token (reads from stdin)
-anyr auth set-http
-
-# set gRPC credentials
-anyr auth set-grpc --config PATH
-anyr auth set-grpc --account-key
-anyr auth set-grpc --token
+# authenticate with desktop and http endpoint
+anyr auth login
 
 # List spaces your user is authorized to access
 anyr space list -t     # output as table (-t/--table)
 
-# List files in a space (requires gRPC credentials)
+# List Pages in space "Work"
+anyr object list "Work" --type page -t
+
+# List Files in a space (requires gRPC credentials)
 anyr file list "Personal" -t
 
 # Download/upload file bytes
+# use `--dir DIR`  to set download dir, or `--file PATH` for destination file path
 anyr file download <FILE_OBJECT_ID> --dir /tmp
-anyr file download <FILE_OBJECT_ID> -f /tmp/file.bin
 anyr file upload "Personal" -f ./path/to/file.png
+
+# Get chat messages from space "Chat"
+anyr chat messages list "Chat" -t
+# Post message
+anyr chat messages send "Chat-" --text "hello world?"
 ```
 
 ## Common options
 
+These options apply to most commands.
+
+<small>
 <table>
-    <tbody>
-      <tr>
-        <td></td>
-        <td><code>--help</code></td>
-        <td>show context-specific help</td>
-      </tr>
-      <tr>
-        <td>Endpoint URL</td>
-        <td><code>--url URL</code></td>
-        <td>Anytype endpoint url</td>
-      </tr>
-      <tr>
-        <td>gRPC URL</td>
-        <td><code>--grpc URL</code></td>
-        <td>Anytype gRPC endpoint url</td>
-      </tr>
-      <tr>
-        <td rowspan="2">Key Storage</td>
-        <td><code>--keystore SPEC</code></td>
-        <td>keystore spec, e.g., "file"</td>
-      </tr>
-      <tr>
-        <td><code>--keystore-service SERVICE</code></td>
-        <td>service name, usually the app name</td>
-      </tr>
-      <tr>
-        <td rowspan="3">Output Format</td>
-        <td>[ <code>--json</code> ]</td>
-        <td>json formatted output (the default)</td>
-      </tr>
-      <tr>
-        <td><code>-t</code>, <code>--table</code></td>
-        <td>table format</td>
-      </tr>
-      <tr>
-        <td><code>--pretty</code></td>
-        <td>json indented</td>
-      </tr>
-      <tr>
-        <td rowspan="4">Filters</td>
-        <td><code>--filter KEY=VALUE</code></td>
-        <td>add filter condition(s)</td>
-      </tr>
-      <tr>
-        <td><code>--type TYPE</code></td>
-        <td>add type constraint(s)</td>
-      </tr>
-      <tr>
-        <td><code>--sort KEY</code></td>
-        <td>sort on key</td>
-      </tr>
-      <tr>
-        <td><code>--desc</code></td>
-        <td>sort descending</td>
-      </tr>
-    </tbody>
-  </table>
+  <tbody>
+  <tr>
+    <td><b>Category</b></td>
+    <td><b>Args</b></td>
+    <td><b>Description</b></td>
+    <td><b>Environment default</b></td>
+  </tr>
+    <tr>
+      <td></td>
+      <td><code>-h</code>, <code>--help</code></td>
+      <td>show context-specific help</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td rowspan="2">Server endpoints</td>
+      <td><code>--url URL</code></td>
+      <td>HTTP endpoint. Default: <code>http://127.0.0.1:31009</code></td>
+      <td>ANYTYPE_URL</td>
+    </tr>
+    <tr>
+      <td><code>--grpc URL</code></td>
+      <td>gRPC endpoint. Default: <code>http://127.0.0.1:31010</code></td>
+      <td>ANYTYPE_GRPC_ENDPOINT</td>
+    </tr>
+    <tr>
+      <td rowspan="2">Key storage</td>
+      <td><code>--keystore SPEC</code></td>
+      <td>keystore spec, e.g., "file"</td>
+      <td>ANYTYPE_KEYSTORE</td>
+    </tr>
+    <tr>
+      <td><code>--keystore-service SVC</code></td>
+      <td>service name, usually the app name</td>
+      <td>ANYTYPE_KEYSTORE_SERVICE</td>
+    </tr>
+    <tr>
+      <td rowspan="4">Output formatting</td>
+      <td><code>--json</code></td>
+      <td>json formatted output (the default)</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>--pretty</code></td>
+      <td>json pretty-printed output</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>-t</code>, <code>--table</code></td>
+      <td>table format</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>--date-format</code></td>
+      <td>format for date columns (<em>strftime</em>)<br/>Default "%Y-%m-%d %H:%M:%S"</td>
+      <td>ANYTYPE_DATE_FORMAT</td>
+    </tr>
+    <tr>
+      <td rowspan="4">Search and list filters</td>
+      <td><code>--filter KEY=VALUE</code></td>
+      <td>apply filter condition(s)</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>--type TYPE</code></td>
+      <td>apply type constraint(s)</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>--sort KEY</code></td>
+      <td>sort on key</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>--desc</code></td>
+      <td>sort descending</td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
+</small>
 
 ## Examples
 
@@ -105,7 +133,6 @@ anyr object list "Personal" -t
 
 # list types in space 'Personal'
 anyr type list "Personal" -t
-
 ```
 
 **Search in space**
@@ -117,7 +144,7 @@ anyr search --space "Work" --type Task --text customer -t
 
 **List tasks in space**
 
-````sh
+```sh
 space="Work" # specify space using name or id
 for task in `anyr search --type Task --space $space --json | jq -r '.items[] | .id`; do
   data=$(anyr object get $space $task --json)
@@ -128,18 +155,17 @@ for task in `anyr search --type Task --space $space --json | jq -r '.items[] | .
   # generate formatted table with date, status, and name
   printf "%10s %-12s %s" $created_date $status $name
 done
+```
 
-**Filter files**
+**Find files**
 
 ```sh
-# list images larger than 1MB with a name containing "report"
+# list images in space Personal, larger than 1MB with a name containing "report"
 anyr file list "Personal" --type image --size-gte 1048576 --name-contains report -t
 
-# list pdf or docx files
+# list pdf or docx files in space Personal
 anyr file list "Personal" --ext-in pdf,docx -t
-````
-
-````
+```
 
 **List items in query or collection**
 
@@ -151,7 +177,7 @@ anyr search --type collection --space $space -t
 # from above, get id of query or collection of interest, then
 # list items in query or collection, in view "All"
 anyr view objects --view All $space $query_or_collection_id -t
-````
+```
 
 **Get objects from a collection list or grid view**
 
@@ -177,6 +203,10 @@ Table listing features for `view objects`:
 - Table listing defaults to name column only. Specify columns in table output with `--cols/--columns` and a comma-separated list of property keys. Example `--cols name,creator,created_date,status`
 - Format dates with strftime format: `--date-format` or `ANYTYPE_DATE_FORMAT`, defaults to `%Y-%m-%d %H:%M:%S`.
 - Members names are displayed instead of member id.
+
+**Chat order ids**
+
+Chat message order ids are converted to lowercase hex before display in table-format output, to make them easier to read and type, while preserving lexicographic order. Any argument that accepts an order id also accepts the hex form. Example: the order id `!!@,` is displayed as `2121402c`, and you can pass `2121402c` back to commands that accept an order id.
 
 ## Install
 
@@ -209,10 +239,11 @@ cargo install -p anyr
 ## Build from source
 
 **Cargo**
+
 Requirements:
 
-- protoc - (from the protobuf package. On macos, `brew install protobuf`)
-- libgit2
+- protoc (from the protobuf package) in your PATH. On macos, `brew install protobuf`
+- libgit2 in your library path.
 
 ```sh
 cargo install -p anyr
@@ -242,7 +273,7 @@ export ANYTYPE_KEYSTORE="file:path=$HOME/.config/anytype/apikeys.db"
 anyr ARGS ...
 ```
 
-### Generating credentials
+### Generating and saving credentials
 
 - **Desktop**: If the Anytype desktop app is running, type `anyr auth login` and the app will display a 4-digit code. Enter the code into the anyr prompt, and a key is generated and stored in the KeyStore.
 
@@ -250,24 +281,7 @@ anyr ARGS ...
   - paste it into `anyr auth set-http` (reads from stdin), or
   - save it in a file and set the key file path as described in [Key storage](#key-storage).
 
-To store gRPC credentials from a headless server, use `anyr auth set-grpc --config PATH` or paste a session token with `anyr auth set-grpc --token`.
-
 See [anytype README.md](../anytype-api/README.md#keystore) for more info, and the helper script [init-cli-keys.sh](../scripts/init-cli-keys.sh) for generating and saving http and gRPC credentials.
-
-## Keystore args
-
-The keystore can be set on the command line with `--keystore` or in the environment with `ANYTYPE_KEYSTORE`. The format of the parameter and the environment variable is the keystore name ('file', 'secret-service', etc.) followed by zero or more ':key-value' to set "modifiers" for the service.
-
-Examples:
-
-- (no `--keystore`) if omitted, the default keystore for the platform is used. Usually the OS keyring.
-- `--keystore file` to use file-based keystore in default path (~/.local/state/keystore.db)
-- `--keystore file:path=/path/to/keystore.db` to use file keystore in custom path
-- `--keystore secret-service` to use dbus secret service on linux (default kernel 'keyutils')
-
-The set of valid strings for OS keystores is [in the keyring crate](https://github.com/open-source-cooperative/keyring-rs/blob/main/src/lib.rs)
-
-Available modifiers for the "file" keystore may be found in the README for [db-keystore](https://docs.rs/db-keystore/latest/db_keystore/).
 
 ## Logging
 

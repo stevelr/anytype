@@ -565,15 +565,21 @@ mod cache_disabled {
             .unwrap_or_else(|_| "http://127.0.0.1:31012".to_string());
         let space_id =
             std::env::var("ANYTYPE_TEST_SPACE_ID").expect("ANYTYPE_TEST_SPACE_ID required");
-        let api_key_path =
-            std::env::var("ANYTYPE_TEST_KEY_FILE").expect("ANYTYPE_TEST_KEY_FILE required");
+        let keystore = if let Ok(key_file) = std::env::var("ANYTYPE_TEST_KEY_FILE") {
+            format!("file:path={key_file}")
+        } else if let Ok(store) = std::env::var("ANYTYPE_KEYSTORE") {
+            store
+        } else {
+            panic!("set ANYTYPE_TEST_KEY_FILE or ANYTYPE_KEYSTORE");
+        };
 
         let config = ClientConfig {
             base_url: Some(base_url),
             app_name: "anytype-cache-test".to_string(),
             rate_limit_max_retries: 0,
             disable_cache: true, // Disable cache
-            keystore: Some(format!("file:path={api_key_path}")),
+            keystore: Some(keystore),
+            keystore_service: Some("anyr".into()),
             ..Default::default()
         };
         let client = AnytypeClient::with_config(config).expect("Failed to create client");

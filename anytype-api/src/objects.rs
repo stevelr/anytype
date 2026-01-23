@@ -63,6 +63,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use snafu::prelude::*;
 
+#[cfg(feature = "grpc")]
+use anytype_rpc::{anytype::rpc::object::share_by_link, auth::with_token};
+#[cfg(feature = "grpc")]
+use tonic::Request;
+
 use crate::{
     Result,
     client::AnytypeClient,
@@ -71,6 +76,16 @@ use crate::{
     prelude::*,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
 };
+
+/// returns web url to object
+pub fn object_link(space_id: &str, object_id: &str) -> String {
+    format!("https://object.any.coop/{object_id}?spaceId={space_id}")
+}
+
+/// returns web url to object with invite
+pub fn object_link_shared(space_id: &str, object_id: &str, cid: &str, key: &str) -> String {
+    format!("https://object.any.coop/{object_id}?spaceId={space_id}&inviteId={cid}#{key}")
+}
 
 /// Layout variants for objects.
 ///
@@ -232,7 +247,7 @@ impl Icon {
 // Implementation note:
 // - In the anytype api, this struct is only received, never sent.
 //   Why do we derive Serialize? So the cli can generate json output.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Object {
     /// Whether the object is archived (soft-deleted)
     pub archived: bool,
@@ -414,6 +429,22 @@ impl Object {
     /// The select values, or None if property not found or not MultiSelect type
     pub fn get_property_multi_select(&self, key: &str) -> Option<&[Tag]> {
         self.get_property(key).and_then(|prop| prop.value.as_tags())
+    }
+
+    /// Returns web link to object
+    pub fn get_link(&self) -> String {
+        object_link(&self.space_id, &self.id)
+    }
+
+    /// Returns web link to object with share invite
+    pub fn get_link_shared(&self, cid: &str, key: &str) -> Result<String> {
+        ensure!(
+            !cid.is_empty() && !key.is_empty(),
+            ValidationSnafu {
+                message: "Invalid share link".to_string()
+            }
+        );
+        Ok(object_link_shared(&self.space_id, &self.id, cid, key))
     }
 }
 
@@ -1220,6 +1251,52 @@ impl AnytypeClient {
     /// ```
     pub fn objects(&self, space_id: impl Into<String>) -> ListObjectsRequest {
         ListObjectsRequest::new(self.client.clone(), self.config.limits.clone(), space_id)
+    }
+
+    /// Get a share link for an object by id.
+    #[cfg(feature = "grpc")]
+    pub async fn get_share_link(&self, object_id: impl AsRef<str>) -> Result<String> {
+        let object_id = object_id.as_ref();
+        self.config.limits.validate_id(object_id, "object_id")?;
+
+        let grpc = self.grpc_client().await?;
+        let mut commands = grpc.client_commands();
+        let request = share_by_link::Request {
+            object_id: object_id.to_string(),
+        };
+        let request = with_token_request(Request::new(request), grpc.token())?;
+        let response = commands
+            .object_share_by_link(request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+
+        if let Some(error) = response.error
+            && error.code != 0
+        {
+            return Err(AnytypeError::Other {
+                message: format!(
+                    "grpc share by link failed: {} (code {})",
+                    error.description, error.code
+                ),
+            });
+        }
+
+        Ok(response.link)
+    }
+}
+
+#[cfg(feature = "grpc")]
+fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>> {
+    with_token(request, token).map_err(|err| AnytypeError::Auth {
+        message: err.to_string(),
+    })
+}
+
+#[cfg(feature = "grpc")]
+fn grpc_status(status: tonic::Status) -> AnytypeError {
+    AnytypeError::Other {
+        message: format!("gRPC request failed: {status}"),
     }
 }
 

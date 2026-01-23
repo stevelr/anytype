@@ -4,7 +4,18 @@ use crate::cli::{
 };
 use crate::filter::{parse_filters, parse_type_property};
 use crate::output::OutputFormat;
-use anyhow::Result;
+use anyhow::{Result, bail};
+use anytype::validation::looks_like_object_id;
+use std::collections::HashSet;
+
+const EXCLUDED_TYPE_RELATION_KEYS: [&str; 6] = [
+    "type",
+    "tag",
+    "backlinks",
+    "last_modified_date",
+    "last_modified_by",
+    "last_opened_date",
+];
 
 pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
     ensure_authenticated(&ctx.client)?;
@@ -80,10 +91,11 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             plural,
             icon_emoji,
             layout,
+            add_properties,
         } => {
             let space_id = resolve_space_id(ctx, &space).await?;
             let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
-            let mut request = ctx.client.update_type(space_id, type_id);
+            let mut request = ctx.client.update_type(&space_id, &type_id);
 
             if let Some(key) = key {
                 request = request.key(key);
@@ -99,6 +111,49 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             }
             if let Some(layout) = layout {
                 request = request.layout(layout.to_layout());
+            }
+
+            if !add_properties.is_empty() {
+                let current_type = ctx.client.get_type(&space_id, &type_id).get().await?;
+                let mut seen_keys = HashSet::new();
+                let mut all_properties = Vec::new();
+
+                for prop in current_type.properties.iter() {
+                    if EXCLUDED_TYPE_RELATION_KEYS.contains(&prop.key.as_str()) {
+                        continue;
+                    }
+                    if seen_keys.insert(prop.key.clone()) {
+                        all_properties.push(anytype::types::CreateTypeProperty {
+                            name: prop.name.clone(),
+                            key: prop.key.clone(),
+                            format: prop.format(),
+                        });
+                    }
+                }
+
+                for prop_ref in add_properties {
+                    let prop = if looks_like_object_id(&prop_ref) {
+                        ctx.client.property(&space_id, &prop_ref).get().await?
+                    } else {
+                        let mut matches =
+                            ctx.client.lookup_properties(&space_id, &prop_ref).await?;
+                        if matches.len() != 1 {
+                            bail!("property is ambiguous: {}", prop_ref);
+                        }
+                        matches.remove(0)
+                    };
+                    if seen_keys.insert(prop.key.clone()) {
+                        all_properties.push(anytype::types::CreateTypeProperty {
+                            name: prop.name.clone(),
+                            key: prop.key.clone(),
+                            format: prop.format(),
+                        });
+                    }
+                }
+
+                for prop in all_properties {
+                    request = request.property(prop.name, prop.key, prop.format);
+                }
             }
 
             let item = request.update().await?;

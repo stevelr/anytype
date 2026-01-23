@@ -207,6 +207,18 @@ impl AnytypeCache {
         }
     }
 
+    /// Searches for cached space by name.
+    pub fn lookup_space_by_name(&self, name: impl AsRef<str>) -> Option<Space> {
+        let name = name.as_ref();
+        if self.is_enabled()
+            && let Some(spaces) = self.spaces.lock().as_ref()
+        {
+            spaces.iter().find(|sp| sp.name == name).cloned()
+        } else {
+            None
+        }
+    }
+
     /// Returns an unsorted/unfiltered clone of all properties from a space in the cache.
     pub(crate) fn properties_for_space(&self, space_id: &str) -> Option<Vec<Property>> {
         if self.is_enabled() {

@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased] - anyr
+## [0.3.0] - anyr - 2026-01-28
 
 ### Added
 
@@ -13,6 +13,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Auth commands now support `set-http` and `set-grpc` to update credentials in the keystore.
   - Example: `anyr auth set-grpc [ --account-key | --session-token ]` to store a gRPC account key or session token.
 - `--grpc` flag to override the gRPC endpoint url.
+- Chat commands (gRPC): `anyr chat list/get/messages list/get/send/edit/delete/read/unread/listen`
+- `anyr object link` generates web link for an object
 
 ### Changed
 
@@ -48,7 +50,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Use rustls (native roots) for HTTP TLS to avoid OpenSSL install errors.
 - Uses anytype-v0.2.8.
 
-## [0.2.2] - anyr - 2025-01-12
+## [0.2.2] - anyr - 2026-01-12
 
 ### Added
 

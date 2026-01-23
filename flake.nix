@@ -46,6 +46,7 @@
             ];
             PROTOC = "${pkgs.protobuf}/bin/protoc";
             PROTOC_INCLUDE = "${pkgs.protobuf}/include";
+            NIX_ENFORCE_PURITY = 0;
           };
         }
       );

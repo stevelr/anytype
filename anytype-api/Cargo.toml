@@ -19,17 +19,18 @@ readme = "README.md"
 [features]
 default = ["grpc"]
 # gRPC support
-grpc = ["dep:anytype-rpc", "dep:tonic"]
+grpc = ["dep:anytype-rpc", "dep:tonic", "dep:tonic-prost"]
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-db-keystore = { version = "0.2.1" }
+anytype-rpc = { version = "0.2.1", path = "../anytype-rpc", optional = true }
 bytes.workspace = true
 chrono.workspace = true
+db-keystore = "0.3.1"
 futures.workspace = true
-keyring = { version = "4.0.0-beta.3" }
+keyring = "4.0.0-beta.3"
 keyring-core = "0.7.2"
 parking_lot.workspace = true
 prost-types.workspace = true
@@ -40,15 +41,16 @@ serde_path_to_error.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
+tonic = { version = "0.14.2", optional = true }
+tonic-prost = { version = "0.14.2", optional = true }
 tracing.workspace = true
 zeroize.workspace = true
-anytype-rpc = { version = "0.2.1", path = "../anytype-rpc", optional = true }
-tonic = { version = "0.14.2", optional = true }
 
 [dev-dependencies]
+clap.workspace = true
 png = "0.18"
 serial_test = "3.3.1"
 test-log.workspace = true
 tiny-skia = "0.11"
-markdown2pdf = "0.1.9"
+markdown2pdf = "0.2.1"
 anyhow.workspace = true

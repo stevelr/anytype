@@ -13,6 +13,11 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use tracing::{debug, error};
 use zeroize::Zeroize;
 
+const KEY_HTTP_TOKEN: &str = "http_token";
+const KEY_ACCOUNT_ID: &str = "account_id";
+const KEY_ACCOUNT_KEY: &str = "account_key";
+const KEY_SESSION_TOKEN: &str = "session_token";
+
 /// Type of keystore - builtin or external
 #[derive(Clone, PartialEq, Eq)]
 pub enum KeyStoreType {
@@ -57,10 +62,27 @@ pub struct GrpcCredentials {
 
 #[cfg(feature = "grpc")]
 impl GrpcCredentials {
-    pub(crate) fn account_key(&self) -> Option<&str> {
+    pub fn new(
+        account_id: Option<String>,
+        account_key: Option<String>,
+        session_token: Option<String>,
+    ) -> Self {
+        Self {
+            account_id,
+            account_key,
+            session_token,
+        }
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+
+    pub fn account_key(&self) -> Option<&str> {
         self.account_key.as_deref()
     }
-    pub(crate) fn session_token(&self) -> Option<&str> {
+
+    pub fn session_token(&self) -> Option<&str> {
         self.session_token.as_deref()
     }
 }
@@ -77,9 +99,9 @@ fn fmt_masked(val: &Option<String>) -> String {
 impl fmt::Debug for GrpcCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrpcCredentials")
-            .field("account_id", &self.account_id)
-            .field("account_key", &fmt_masked(&self.account_key))
-            .field("session_token", &fmt_masked(&self.session_token))
+            .field(KEY_ACCOUNT_ID, &self.account_id)
+            .field(KEY_ACCOUNT_KEY, &fmt_masked(&self.account_key))
+            .field(KEY_SESSION_TOKEN, &fmt_masked(&self.session_token))
             .finish()
     }
 }
@@ -241,14 +263,53 @@ pub fn default_platform_keyring() -> &'static str {
     }
 }
 
-fn init_keystore(input: &str) -> Result<(&str, Arc<CredentialStore>), KeyStoreError> {
+/// create in-memory hashmap store populated from environment variables
+/// This may be useful in environments where keys can be set in environment, e.g., AWS, github actions, etc.
+fn store_from_env(service: &str) -> std::result::Result<Arc<CredentialStore>, KeyStoreError> {
+    use keyring_core::api::CredentialStoreApi;
+
+    let sample = keyring_core::sample::Store::new().map_err(|_| KeyStoreError::Config {
+        message: "cannot create default sample store".to_string(),
+    })?;
+
+    if let Ok(http_token) = std::env::var("ANYTYPE_KEY_HTTP_TOKEN") {
+        let entry = sample.build(service, KEY_HTTP_TOKEN, None)?;
+        entry.set_password(&http_token)?;
+    }
+
+    if let Ok(account_id) = std::env::var("ANYTYPE_KEY_ACCOUNT_ID") {
+        let entry = sample.build(service, KEY_ACCOUNT_ID, None)?;
+        entry.set_password(&account_id)?;
+    }
+
+    if let Ok(account_key) = std::env::var("ANYTYPE_KEY_ACCOUNT_KEY") {
+        let entry = sample.build(service, KEY_ACCOUNT_KEY, None)?;
+        entry.set_password(&account_key)?;
+    }
+
+    if let Ok(session_token) = std::env::var("ANYTYPE_KEY_SESSION_TOKEN") {
+        let entry = sample.build(service, KEY_SESSION_TOKEN, None)?;
+        entry.set_password(&session_token)?;
+    }
+
+    Ok(sample)
+}
+
+fn init_keystore<'a>(
+    input: &'a str,
+    service: &str,
+) -> Result<(&'a str, Arc<CredentialStore>), KeyStoreError> {
     let (keystore, modifiers) =
         parse_keystore(input).map_err(|message| KeyStoreError::Config { message })?;
 
     match keystore {
         "file" | "sqlite" => {
             let file_store = DbKeyStore::new_with_modifiers(&modifiers)?;
-            keyring_core::set_default_store(Arc::new(file_store));
+            keyring_core::set_default_store(file_store);
+        }
+        "env" => {
+            let env_store = store_from_env(service)?;
+            keyring_core::set_default_store(env_store);
         }
         #[cfg(target_os = "macos")]
         "keychain" => {
@@ -303,6 +364,7 @@ impl KeyStore {
     }
 
     pub fn new(service: impl Into<String>, keystore_spec: &str) -> Result<Self, KeyStoreError> {
+        let service = service.into();
         let keystore_spec = keystore_spec.trim().trim_end_matches(':');
         // if keystore isn't specified here,
         // try environment, otherwise default for platform
@@ -311,9 +373,9 @@ impl KeyStore {
         } else {
             keystore_spec.to_string()
         };
-        let (_name, store) = init_keystore(&spec)?;
+        let (_name, store) = init_keystore(&spec, &service)?;
         Ok(KeyStore {
-            service: service.into(),
+            service,
             store,
             spec,
         })
@@ -398,9 +460,15 @@ impl KeyStore {
     /// connecting with the keystore (such as user biometric auth failure for os keyring,
     /// or file permission error for file-based keystore)
     pub fn get_http_credentials(&self) -> Result<HttpCredentials, KeyStoreError> {
-        Ok(HttpCredentials {
-            token: self.get_key("http_token")?,
-        })
+        let token = self.get_key(KEY_HTTP_TOKEN)?;
+        if token.is_none() {
+            debug!(
+                service = &self.service,
+                id = &self.id(),
+                "get_http_creds: no token",
+            )
+        }
+        Ok(HttpCredentials { token })
     }
 
     /// Looks up grpc auth credentials.
@@ -413,9 +481,9 @@ impl KeyStore {
     #[cfg(feature = "grpc")]
     pub fn get_grpc_credentials(&self) -> Result<GrpcCredentials, KeyStoreError> {
         Ok(GrpcCredentials {
-            account_id: self.get_key("account_id")?,
-            account_key: self.get_key("account_key")?,
-            session_token: self.get_key("session_token")?,
+            account_id: self.get_key(KEY_ACCOUNT_ID)?,
+            account_key: self.get_key(KEY_ACCOUNT_KEY)?,
+            session_token: self.get_key(KEY_SESSION_TOKEN)?,
         })
     }
 
@@ -425,7 +493,7 @@ impl KeyStore {
         if let Some(token) = &creds.token
             && !token.is_empty()
         {
-            self.put_key("http_token", token)?;
+            self.put_key(KEY_HTTP_TOKEN, token)?;
         }
         Ok(())
     }
@@ -435,29 +503,29 @@ impl KeyStore {
     #[cfg(feature = "grpc")]
     pub fn update_grpc_credentials(&self, creds: &GrpcCredentials) -> Result<(), KeyStoreError> {
         if let Some(account_id) = &creds.account_id {
-            self.put_key("account_id", account_id)?;
+            self.put_key(KEY_ACCOUNT_ID, account_id)?;
         }
         if let Some(account_key) = &creds.account_key {
-            self.put_key("account_key", account_key)?;
+            self.put_key(KEY_ACCOUNT_KEY, account_key)?;
         }
         if let Some(session_token) = &creds.session_token {
-            self.put_key("session_token", session_token)?;
+            self.put_key(KEY_SESSION_TOKEN, session_token)?;
         }
         Ok(())
     }
 
     /// Clear HTTP credentials.
     pub fn clear_http_credentials(&self) -> Result<(), KeyStoreError> {
-        self.remove_key("http_token")?;
+        self.remove_key(KEY_HTTP_TOKEN)?;
         Ok(())
     }
 
     /// Clear gRPC credentials.
     #[cfg(feature = "grpc")]
     pub fn clear_grpc_credentials(&self) -> Result<(), KeyStoreError> {
-        self.remove_key("account_id")?;
-        self.remove_key("account_key")?;
-        self.remove_key("session_token")?;
+        self.remove_key(KEY_ACCOUNT_ID)?;
+        self.remove_key(KEY_ACCOUNT_KEY)?;
+        self.remove_key(KEY_SESSION_TOKEN)?;
         Ok(())
     }
 
