@@ -45,6 +45,7 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
@@ -203,14 +204,7 @@ impl SpaceRequest {
                 return Ok(space);
             }
             if !self.cache.has_spaces() {
-                let query = Query::default().add_filters(&[]);
-                let spaces = self
-                    .client
-                    .get_request_paged("/v1/spaces", query)
-                    .await?
-                    .collect_all()
-                    .await?;
-                self.cache.set_spaces(spaces);
+                prime_cache_spaces(&self.client, &self.cache).await?;
                 if let Some(space) = self.cache.get_space(&self.space_id) {
                     return Ok(space);
                 }
@@ -553,14 +547,8 @@ impl ListSpacesRequest {
             if let Some(spaces) = self.cache.spaces() {
                 return Ok(PagedResult::from_items(spaces));
             }
-            let query = Query::default().add_filters(&[]);
-            let spaces = self
-                .client
-                .get_request_paged("/v1/spaces", query)
-                .await?
-                .collect_all()
-                .await?;
-            self.cache.set_spaces(spaces.clone());
+            prime_cache_spaces(&self.client, &self.cache).await?;
+            let spaces = self.cache.spaces().unwrap_or_default();
             return Ok(PagedResult::from_items(spaces));
         }
 
@@ -571,6 +559,18 @@ impl ListSpacesRequest {
 
         self.client.get_request_paged("/v1/spaces", query).await
     }
+}
+
+/// Load all spaces into cache.
+async fn prime_cache_spaces(client: &Arc<HttpClient>, cache: &Arc<AnytypeCache>) -> Result<()> {
+    let query = Query::default().add_filters(&[]);
+    let spaces = client
+        .get_request_paged("/v1/spaces", query)
+        .await?
+        .collect_all()
+        .await?;
+    cache.set_spaces(spaces);
+    Ok(())
 }
 
 // ============================================================================
@@ -617,6 +617,39 @@ impl AnytypeClient {
     /// ```
     pub fn new_space(&self, name: impl Into<String>) -> NewSpaceRequest {
         NewSpaceRequest::new(self.client.clone(), name, self.config.verify.clone())
+    }
+
+    /// Searches for a space by name.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::NotFound`] if no space of that name was found
+    ///
+    pub async fn lookup_space_by_name(&self, name: impl AsRef<str>) -> Result<Space> {
+        let name = name.as_ref();
+        if self.cache.is_enabled() {
+            if !self.cache.has_spaces() {
+                prime_cache_spaces(&self.client, &self.cache).await?;
+            }
+            return self
+                .cache
+                .lookup_space_by_name(name)
+                .ok_or(AnytypeError::NotFound {
+                    obj_type: "Space".to_string(),
+                    key: name.to_string(),
+                });
+        }
+        let mut stream = self.spaces().list().await?.into_stream();
+        while let Some(space) = stream.next().await {
+            let space = space?;
+            if space.name == name {
+                return Ok(space);
+            }
+        }
+        NotFoundSnafu {
+            obj_type: "Space".to_string(),
+            key: name.to_string(),
+        }
+        .fail()
     }
 
     /// Creates a request builder for updating an existing space.

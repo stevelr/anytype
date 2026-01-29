@@ -136,6 +136,10 @@
 
 pub mod auth;
 pub mod cache;
+#[cfg(feature = "grpc")]
+pub mod chat_stream;
+#[cfg(feature = "grpc")]
+pub mod chats;
 pub mod client;
 pub mod error;
 #[cfg(feature = "grpc")]
@@ -144,6 +148,9 @@ pub mod filters;
 mod http_client;
 pub mod keystore;
 pub mod members;
+#[cfg(feature = "grpc")]
+#[doc(hidden)]
+pub mod mock;
 pub mod objects;
 pub mod paged;
 pub mod properties;
@@ -181,7 +188,7 @@ pub mod prelude {
         // Space members
         members::{Member, MemberRole, MemberStatus},
         // Objects
-        objects::{Color, DataModel, Icon, Object, ObjectLayout},
+        objects::{Color, DataModel, Icon, Object, ObjectLayout, object_link, object_link_shared},
         // Pagination
         paged::{PagedResult, PaginatedResponse, PaginationMeta},
         // Properties
@@ -202,6 +209,17 @@ pub mod prelude {
 
     #[cfg(feature = "grpc")]
     pub use crate::{
+        chat_stream::{
+            BackoffPolicy, ChatEvent, ChatEventStream, ChatStreamBuilder, ChatStreamControl,
+            ChatStreamHandle,
+        },
+        chats::{
+            ChatClient, ChatGetRequest, ChatListRequest, ChatListResult, ChatMessage,
+            ChatMessagesPage, ChatReadAllRequest, ChatReadType, ChatResolveRequest,
+            ChatSearchRequest, ChatSpaceRequest, ChatState, ChatToggleReactionRequest,
+            MessageAttachment, MessageAttachmentType, MessageContent, MessageReaction,
+            MessageTextMark, MessageTextMarkType, MessageTextRange, MessageTextStyle,
+        },
         files::{FileObject, FileStyle, FileType, FilesClient},
         keystore::GrpcCredentials,
     };

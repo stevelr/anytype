@@ -433,7 +433,10 @@ impl HttpClient {
         let api_key = self.get_api_key();
         if api_key.token().is_none() {
             return Err(AnytypeError::Auth {
-                message: "HTTP credentials missing token. Client is not authenticated".to_string(),
+                message: format!(
+                    "HTTP credentials missing token. Client is not authenticated. url={}",
+                    &self.base_url,
+                ),
             });
         }
         let full_url = format!("{}{}", self.base_url, req.path);

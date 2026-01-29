@@ -24,18 +24,22 @@ const CLI_KEY_SERVICE_NAME: &str = "any-edit";
 
 #[derive(Debug, Parser)]
 #[command(name = "any-edit")]
-#[command(about = "Edit Anytype objects as markdown in external editor", long_about = None)]
+#[command(author, version, about = "Edit Anytype objects as markdown in external editor", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// path to key file
-    #[arg(long, value_name = "PATH", global = true)]
-    keyfile_path: Option<PathBuf>,
-
     /// API endpoint URL. Default: environment $ANYTYPE_URL or http://127.0.0.1:31009 (desktop app)
     #[arg(short, long)]
     url: Option<String>,
+
+    /// keystore specifier
+    #[arg(long)]
+    keystore: Option<String>,
+
+    /// service name, default "any-edit"
+    #[arg(long)]
+    keystore_service: Option<String>,
 
     /// increase verbosity
     #[arg(short, long)]
@@ -142,19 +146,15 @@ async fn main() -> Result<()> {
 
     init_logging(cli.debug, cli.verbose)?;
 
-    let keystore = if let Some(path) = cli.keyfile_path {
-        KeyStoreFile::from_path(path)
-    } else {
-        KeyStoreFile::new(CLI_KEY_SERVICE_NAME)
-    }?;
-    let base_url = cli.url.unwrap_or_else(|| ANYTYPE_DESKTOP_URL.to_string());
+    let base_url = Some(cli.url.unwrap_or_else(|| ANYTYPE_DESKTOP_URL.to_string()));
 
     let client = AnytypeClient::with_config(ClientConfig {
         base_url,
         app_name: CLI_KEY_SERVICE_NAME.into(),
+        keystore: cli.keystore,
+        keystore_service: cli.keystore_service,
         ..Default::default()
-    })?
-    .set_key_store(keystore);
+    })?;
 
     match cli.command {
         Commands::Auth { command } => match command {
@@ -273,15 +273,11 @@ async fn auth_logout(client: AnytypeClient) -> Result<(), AnytypeError> {
     Ok(())
 }
 async fn check_auth_status(client: AnytypeClient) -> Result<()> {
-    client.load_key(false)?;
-    let auth = if client.is_authenticated() {
-        "yes"
-    } else {
-        "no"
-    };
-
-    println!("Authenticated: {auth}");
-    println!("Keystore:      {:?}", client.get_key_store());
+    let status = client.auth_status()?;
+    let is_authenticated = status.http.is_authenticated();
+    println!("Authenticated: {is_authenticated}");
+    println!("Service:       {}", &status.keystore.service);
+    println!("Keystore:      {:?}", &status.keystore.id);
     Ok(())
 }
 
@@ -292,8 +288,9 @@ async fn get_command(
     object_id: &str,
     output_file: Option<&Path>,
 ) -> Result<()> {
-    client.load_key(false)?;
-    if !client.is_authenticated() {
+    let status = client.auth_status()?;
+    let is_authenticated = status.http.is_authenticated();
+    if !is_authenticated {
         eprintln!("Not logged in - run 'any-edit auth login' first");
         return Err(AnytypeError::Auth {
             message: "Not logged in".to_string(),
@@ -354,8 +351,9 @@ async fn get_command(
 
 /// Update command: read markdown file with YAML header and update object
 async fn update_command(client: &AnytypeClient, input_file: Option<&Path>) -> Result<()> {
-    client.load_key(false)?;
-    if !client.is_authenticated() {
+    let status = client.auth_status()?;
+    let is_authenticated = status.http.is_authenticated();
+    if !is_authenticated {
         eprintln!("Not logged in - run 'any-edit auth login' first");
         return Err(AnytypeError::Auth {
             message: "Not logged in".to_string(),

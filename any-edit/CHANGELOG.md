@@ -4,13 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased] - any-edit
+## [0.1.3] - any-edit - 2026-01-28
 
 ### Changed
 
+- added `-V/--version`
 - Apache-2.0 license
 
-## [0.1.2] - any-edit - 2025-01-17
+## [0.1.2] - any-edit - 2026-01-17
 
 ### Added
 

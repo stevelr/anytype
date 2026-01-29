@@ -22,6 +22,7 @@
 
 set -euo pipefail
 
+ set -x
 #################
 #   SETUP
 #################
@@ -30,7 +31,7 @@ set -euo pipefail
 #    to the space (Settings, Members, Invite link. click to enable Editor access, Copy)
 # 2. Paste the invite link below to set "space_invite=""
 #    The value should look like "https://invite.any.coop/bafybei...#..."
-#space_invite=""
+space_invite="${space_invite:=""}"
 
 # 3. If running cargo tests anytype-api folder, uncomment these two lines:
 #    They use a different service name and db path to isolate tests and prevent overwriting non-test data
@@ -45,13 +46,20 @@ export ANYTYPE_GRPC_ENDPOINT=http://127.0.0.1:31010
 # export ANYTYPE_URL="http://127.0.0.1:31009"
 # export ANYTYPE_GRPC_ENDPOINT=http://127.0.0.1:xxxxx
 
-# 5. Make sure the endpoint urls ANYTYPE_URL and ANYTYPE_GRPC_ENDPOINT,
+# 5 (optional) set name for the bot. This will be used for the user id for chat messages.
+#   If not defined here, account will be named "bot_NNNN" where NNNN is a numeric timestamp.
+#export ANY_USER="polly"
+ 
+# 6. Make sure the endpoint urls ANYTYPE_URL and ANYTYPE_GRPC_ENDPOINT,
 #    and keystore are the same in this script and in the environment where
 #    you'll run tools like anyr and any-edit.
 #    (or use args `--url`, `--grpc`, and `--keystore`, respectively)
  
-# 6. Make sure `any` (headless cli server) and `anyr` are in your PATH
-# 
+# 7. Make sure your path contains
+#  - `any` (aka `anytype`) (headless cli server)
+#  - `anyr` (`https://github.com/stevelr/anytype/tree/main/anyr#install`)
+#  - `jq`, `sed`
+  
 
 #################
 #   END SETUP
@@ -61,7 +69,6 @@ if [ -z "$space_invite" ]; then
   echo "set space_invite in the script"
   exit 1
 fi
-
  
 # it would be convenient if the cli auth commands supported json output, or even text output,
 # but it doesn't, so we need to strip out the ascii art (box around the key)
@@ -74,10 +81,19 @@ extract_http_token() {
 }
 
 init_cli_and_keystore() {
-
-    tstamp=$(date '+%s')
     
-    account_key=$(any auth create "bot_${tstamp}" 2>/dev/null | extract_account_key)
+    # # if ~/.anytype/config.json has accountKey and sessionToken, we can import from there. Those creds are in config.json only if the server didn't use the os keyring
+    # if [ "$(jq -r '.accountKey' <"$HOME"/.anytype/config.json)" != "null" ]; then
+    #     anyr auth set-grpc  --config ~/.anytype/config.json
+    #     any auth apikey create http  | extract_http_token | anyr auth set-http
+    #     return
+    # fi
+
+    # if user name not set, generate a unique bot name with timestamp
+    tstamp=$(date '+%s')
+    ANY_USER=${ANY_USER:-"bot_${tstamp}"}
+
+    account_key=$(any auth create "$ANY_USER" 2>/dev/null | extract_account_key)
     if [ -z "$account_key" ]; then
       echo "acctount_key failed. exiting. Make sure headless server is running ('any service start' or 'any serve')"
       exit 1

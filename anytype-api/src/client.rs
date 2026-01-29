@@ -18,18 +18,16 @@ use anytype_rpc::client::default_grpc_endpoint;
 #[cfg(feature = "grpc")]
 use snafu::prelude::*;
 use std::sync::Arc;
+use tracing::debug;
 
 use crate::{
-    ANYTYPE_DESKTOP_URL,
-    Result,
-    //cache::AnytypeCache,
+    ANYTYPE_DESKTOP_URL, Result,
     config::{
         ANYTYPE_URL_ENV, DEFAULT_SERVICE_NAME, RATE_LIMIT_MAX_RETRIES_DEFAULT,
         RATE_LIMIT_MAX_RETRIES_ENV,
     },
     http_client::HttpClient,
     prelude::*,
-    //verify::VerifyConfig,
 };
 #[cfg(feature = "grpc")]
 use anytype_rpc::client::{AnytypeGrpcClient, AnytypeGrpcConfig};
@@ -170,13 +168,14 @@ impl ClientConfig {
 }
 
 /// An ergonomic Anytype API client in Rust.
+#[derive(Clone)]
 pub struct AnytypeClient {
     pub(crate) client: Arc<HttpClient>,
     pub(crate) config: ClientConfig,
     pub(crate) keystore: KeyStore,
     pub(crate) cache: Arc<AnytypeCache>,
     #[cfg(feature = "grpc")]
-    pub(crate) grpc: Mutex<Option<AnytypeGrpcClient>>,
+    pub(crate) grpc: Arc<Mutex<Option<AnytypeGrpcClient>>>,
 }
 
 impl std::fmt::Debug for AnytypeClient {
@@ -262,6 +261,14 @@ impl AnytypeClient {
             AnytypeCache::default()
         };
 
+        debug!(
+            base_url,
+            keystore = &keystore.id(),
+            keystore_service,
+            grpc_endpoint,
+            "new http client"
+        );
+
         Ok(Self {
             client: Arc::new(http_client),
             // update config with _actual_ values so get_config() will give correct values
@@ -278,7 +285,7 @@ impl AnytypeClient {
             keystore,
             cache: Arc::new(cache),
             #[cfg(feature = "grpc")]
-            grpc: Mutex::new(None),
+            grpc: Arc::new(Mutex::new(None)),
         })
     }
 
