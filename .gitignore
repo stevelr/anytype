@@ -3,3 +3,5 @@ target/
 result
 anyproto/
 docs/
+.claude
+tmp/

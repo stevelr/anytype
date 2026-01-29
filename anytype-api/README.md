@@ -6,12 +6,14 @@ An ergonomic Anytype API client in Rust.
 
 ## Overview
 
-`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, and Views, with optional key storage and caching. gRPC extensions (enabled by default) add file operations (upload/download/list/search).
+`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, and Views, with optional key storage and caching. gRPC extensions (enabled by default) add file operations and chat streaming.
+
+Applications authenticate with Anytype servers using access tokens. One token is required for http apis, and if gRPC apis are used (for files or chats), an additional gRPC token is required. The `anytype` library helps generate tokens and store them in a KeyStore.
 
 ### Features
 
 - 100% coverage of Anytype API 2025-11-08
-- Optional gRPC back-end provides API extensions for features not available in the REST api (Files)
+- Optional gRPC back-end provides API extensions for features not available in the REST api (Files and Chats)
 - Paginated responses and async Streams
 - Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
 - Http middleware with debug logging, retries, and rate limit handling
@@ -28,64 +30,81 @@ An ergonomic Anytype API client in Rust.
 ```rust
 use anytype::prelude::*;
 
+const PROJECT_SPACE: &str = "Projects";
+const CHAT_SPACE: &str = "Chat";
+
+//! Agenda automation:
+//! - list top 10 tasks sorted by priority
+//! - list 10 most recent documents containing the text "meeting notes"
+//! - send the lists in a rich-text chat message with colors and hyperlinks
 #[tokio::main]
 async fn main() -> Result<(), AnytypeError> {
-
-    // Create a client
-    let config = ClientConfig::default().app_name("my-app");
+    let config = ClientConfig {
+        app_name: "agenda".to_string(),
+        keystore_service: Some("anyr".to_string()),
+        ..Default::default()
+    };
     let client = AnytypeClient::with_config(config)?;
-    if !client.auth_status()?.http.is_authenticated() {
-        // prompt user for auth code if needed
-        client
-            .authenticate_interactive(
-                |challenge_id| {
-                    use std::io::{self, Write};
-                    println!("Challenge ID: {challenge_id}");
-                    print!("Enter 4-digit code: ");
-                    io::stdout().flush().map_err(|err| AnytypeError::Auth {
-                        message: err.to_string(),
-                    })?;
-                    let mut code = String::new();
-                    io::stdin().read_line(&mut code).map_err(|err| AnytypeError::Auth {
-                        message: err.to_string(),
-                    })?;
-                    Ok(code.trim().to_string())
-                },
-                false,
-            )
-            .await?;
-    }
+    let space = client.lookup_space_by_name(PROJECT_SPACE).await?;
 
-    // List spaces
-    let spaces = client.spaces().list().await?;
-    for space in spaces.iter() {
-        println!("{}", &space.name);
-    }
+    // List 10 tasks sorted by priority
+    let mut tasks = client
+        .search_in(&space.id)
+        .types(vec!["task"])
+        .sort_desc("last_modified_date")
+        .limit(40)
+        .execute()
+        .await?
+        .into_response()
+        .take_items();
+    tasks.sort_by_key(|t| t.get_property_u64("priority").unwrap_or_default());
 
-    // get the first space
-    let space1 = spaces.iter().next().unwrap();
-    // Create an object
-    let obj = client.new_object(&space1.id, "page")
-        .name("My Document")
-        .body("# Hello World")
-        .create().await?;
-    println!("Created object: {}", obj.id);
-
-    // Search, with filtering and sorting
-    let results = client.search_in(&space1.id)
+    // Get 10 most recent pages or notes containing the text "meeting notes"
+    // sort most recent on top
+    let recent_note_docs = client
+        .search_in(&space.id)
         .text("meeting notes")
         .types(["page", "note"])
         .sort_desc("last_modified_date")
         .limit(10)
-        .execute().await?;
-    for doc in results.iter() {
-        println!("{} {}",
-            doc.get_property_date("last_modified_date").unwrap_or_default(),
-            doc.name.as_deref().unwrap_or("(unnamed)"));
+        .execute()
+        .await?;
+
+    // Build the message with colored status indicators
+    let mut message = MessageContent::new()
+        .text("Good morning Jim,\n")
+        .bold("Here are your tasks\n");
+    for task in tasks.iter().take(10) {
+        let priority = task.get_property_u64("priority").unwrap_or_default();
+        let name = task.name.as_deref().unwrap_or("(unnamed)");
+        message = message.text(&format!("{priority} "));
+        message = status_color(message, task);
+        message = message.text(&format!(" {name}\n"));
     }
 
-    // delete object
-    client.object(&space1.id, &obj.id).delete().await?;
+    // add list of docs with hyperlinks
+    message = message.bold("\nand recent notes:\n");
+    for doc in &recent_note_docs {
+        let date = doc
+            .get_property_date("last_modified_date")
+            .unwrap_or_default()
+            .format("%Y-%m-%d %H:%M");
+        let name = doc.name.as_deref().unwrap_or("(unnamed)");
+        message = message
+            .text(&format!("{date} "))
+            .link(name, doc.get_link())
+            .nl();
+    }
+
+    // Send it over chat message
+    let chat = client.chats().space_chat(CHAT_SPACE).get().await?;
+    client
+        .chats()
+        .add_message(chat.id)
+        .content(message)
+        .send()
+        .await?;
+
     Ok(())
 }
 ```
@@ -107,6 +126,30 @@ let path = client
 println!("downloaded to {}", path.display());
 ```
 
+## Chat Streaming (gRPC)
+
+Streaming chat updates requires the `grpc` feature (enabled by default).
+
+```rust
+use anytype::prelude::*;
+use futures::StreamExt;
+
+// print chat messages as they arrive
+async fn follow_chat(client: AnytypeClient, chat__obj_id: &str) -> Result<(), AnytypeError> {
+    let ChatStreamHandle { mut events, .. } = client
+        .chat_stream()
+        .subscribe_chat(chat_obj_id)
+        .build();
+
+    while let Some(event) = events.next().await {
+        if let ChatEvent::MessageAdded { chat_id, message } = event {
+            println!("[{chat_id}] {}: {}", message.creator, message.content.text);
+        }
+    }
+    Ok(())
+}
+```
+
 ## Status and Compatibility
 
 The crate has 100% coverage of the Anytype REST api 2025-11-08.
@@ -117,76 +160,28 @@ Plus:
 
 - gRPC back-end provides API extensions for features not available in the REST api:
   - Files api for listings, search, upload, and download.
+  - Chat message operations and streaming subscriptions.
 
-### What's missing?
+### Apis not covered
 
-The current version of the http backend api does not provide access to some data stored by the Anytype app. Data that is current inaccessible from the http api:
+The current Anytype http backend api does not provide access to some data in Anytype vaults.
 
-- ~~Files~~ _Update:_ Files support now available with the gRPC back-end
+- ~~Files~~ _Update (as of v0.3.0):_ Files support now available with the gRPC back-end
+- ~~Chats and Messages~~ _Update (as of v0.3.0):_ Chat operations and streaming now available with the gRPC back-end
 - Blocks. Pages and other document-like objects can be exported as markdown, but markdown export is somewhat lossy, for example, in tables, markdown export preserves table layout, with bold and italic styling, but foreground and background colors are lost.
 - Relationships - only a subset of relation types are available in the REST api.
-- Chats and Messages
 
-## Keystore (Advanced topic)
+## Keystore
 
-You don't need to read all this to use `anytype`, but it needs to be documented somewhere.
+A Keystore stores authentication tokens for http and grpc endpoints. Various implementations store keys in memory, on disk, or in the OS Keyring
 
-> **TL;DR**:
-> (1) First, try the defaults - it should "just work".
-> (2). If you're doing development and/or don't want to deal with pop-up approval prompts, set
->
-> ```
-> export ANYTYPE_KEYSTORE=file
-> export ANYTYPE_KEYSTORE_SERVICE=anyr
-> ```
->
-> (3) If you're using the gRPC backend, use the headless cli server and [init-cli-keys.sh](../scripts/init-cli-keys.sh)
-
-Authentication tokens for http and gRPC are stored in a KeyStore, which can be an OS-managed keyring or a file-based keystore. The file-based keystore is an sqlite file (via turso, a rust-native sqlite implementation), with optional encryption. The keystore is selected in `ClientConfig::keystore`, when constructing an `AnytypeClient`, or in the environment variable `ANYTYPE_KEYSTORE`. These both use the same string format to specify the implementation and settings:
-
-- If not specified, in config or the environment, the platform default keystore is used (usually the secure OS keyring). On linux, the default is kernel keyutils.
-- The first word of the keystore spec is the name of the implementation, either "file", or one of the OS keystores [in the keyring crate](https://github.com/open-source-cooperative/keyring-rs/blob/main/src/lib.rs).
-- The name may be followed by a ':' (colon) and one or more key=value settings (called 'modifiers'), separated by colons.
-
-The "file" keystore modifiers are documented in the README for [db-keystore](https://docs.rs/db-keystore/latest/db_keystore/). The most common option is "path" which sets the path to the db file. File keystore supports on-disk encryption by setting `cipher` and `hexkey`.
-
-Examples:
-
-- `--keystore file` use file (sqlite) keystore in the default location
-- `--keystore file:path=/path/to/my/file.db"` use file (sqlite) keystore in custom location
-- `--keystore file:path=/path/to/my/file.db:cipher=aegis256:hexkey=HEX_KEY` file keystore in custom location with 256-bit encryption with the hex key (64 hex digits)
-- `--keystore secret-service` on linux, use the dbus-based secret service keystore
-- `--keystore keyutils` linux kernel keyutils keystore (default on linux)
-- `--keystore keyring` macos user keyring (default on macos)
-- `--keystore windows` Windows Credential Store (default on windows)
-
-### Key schema and service scope
-
-All keystore implementations (file, macos keychain, linux keyutils, etc.) store keys as a triple (service, user, secret), using the terminology of the [keyring](https://crates.io/crates/keyring) crate. "service" is usually used for the application name, such as "anyr" or "any-edit". It's displayed to the user in permission prompts when requesting access. The "user" field is used to store the name of the key: "http_token", "account_key", or "session_token". "secret" is the actual key, stored as bytes, although all secrets used by `anytype` are valid utf8 strings.
-
-In some of the example programs in the `anytype` crate, the service name is set to `anyr`, so it can use the same http token that anyr does. `anyr` makes it easy to generate an http token with (`anyr auth login`), which is saved to the keystore. The "service" name used to retrieve keys from the keystore is, by default, derived from `ClientConfig::app_name` to make it unique for every app, but it can be customized by setting `ClientConfig::keystore_service`, or by setting the environment variable `ANYTYPE_KEYSTORE_SERVICE`. A developer can choose to let a collection of app share auth tokens, as we did in the examples, by using a common service name.
-
-### Adding keys to the keystore
-
-For authenticating with the desktop app, call `authenticate_interactive`, which causes the app to display a 4-digit code that the the user must enter in the console to generate an http token, which is then stored in the keystore.
-
-For gRPC authentication, it is recommended to use the headless cli server. To add a key to a keystore for use with the cli, use the `anyr` tool. (`anyr auth set-http`, `anyr auth set-grpc`, etc.) See [anyr](https://github.com/stevelr/anytype/tree/main/anyr) for details.
-
-See the script ../scripts/init-cli-keys.sh for help initializing the cli and saving gRPC and http authentication tokens to the keystore.
-
-### Encryption
-
-Enable encryption on the file keystore in one of the following ways:
-
-- (in code) set `EncryptionOpts::cipher` and `EncryptionOpts::hexkey`
-- (with anyr cli) use `--keystore file:cipher=aegis256:hexkey=HEXKEY`
-- (in environment) `ANYTYPE_KEYSTORE=file:cipher=aegis256:hexkey=HEXKEY`
-
-Supported ciphers include `aegis256` (recommended for most uses) and `aes256gcm`. See [Turso Database Encryption](https://docs.turso.tech/tursodb/encryption) for more info and options. For a 256-bit key, hexkey is 64 hex digits. A key can be generated with `openssl rand -hex 32`
+More info about using and configuring keystores is in [Keystores](./Keystores.md)
 
 ## Known issues & Troubleshooting
 
 See [Troubleshooting](./Troubleshooting.md)
+
+For keystore-related issues, see [Keystores](./Keystores.md)
 
 ## Eventual Consistency
 
@@ -214,8 +209,8 @@ let obj = client.new_object("space_id", "page").name("Quicker note").no_verify()
 
 Requirements:
 
-- protoc - (from the protobuf package. On macos, `brew install protobuf`)
-- libgit2
+- protoc (from the protobuf package) in your PATH. On macos, `brew install protobuf`
+- libgit2 in your library path.
 
 ```sh
 cargo build
@@ -226,12 +221,13 @@ cargo build
 Set environment flags for unit and integration tests. You'll also need a running anytype server (cli or desktop).
 
 ```sh
-# optional: HTTP endpoint. Default: http://127.0.0.1:31012
+# HTTP endpoint. Default: http://127.0.0.1:31012
 #    Headless cli default port is 31012. Desktop app uses port 31009
-export ANYTYPE_TEST_URL=
-# optional: path to file-based keystore.
-#    Default: $XDG_STATE_HOME/anytype-test-keys.db or $HOME/.local/state/anytype-test-keys.db
-export ANYTYPE_TEST_KEY_FILE=
+export ANYTYPE_URL=http://127.0.0.1:31012
+# Set the same for ANYTYPE_TEST_URL
+export ANYTYPE_TEST_URL=$ANYTYPE_URL
+# optional: set keystore to custom path
+export ANYTYPE_KEYSTORE=file:path=$HOME/.local/state/anytype-test-keys.db
 # optional: set space id for testing. If not set, uses first space with "test" in the name
 export ANYTYPE_TEST_SPACE_ID=
 # optional: enable debug logging. Default "info"

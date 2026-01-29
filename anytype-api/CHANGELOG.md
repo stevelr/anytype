@@ -4,13 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [0.3.0] - anytype
+## [0.3.0] - anytype - 2026-01-28
+
+Major update:
+
+- adds gRPC backend for Files and Chats.
+- Refactored keystore to use db-keystore (sqlite) for file-based keystore
 
 ### Added
 
+- `take_items()` on `PaginatedResult<T>`
 - gRPC files module with list/search/get/upload/download/preload support.
 - gRPC file list/search filters for name, extension, size, and file type.
 - gRPC file downloads now support explicit destination file paths via `to_file()` (and `to_dir()` alias).
+- gRPC chat streaming API with subscription control, reconnect, and preview support.
+- chat message send with helpers for text marks
+- functions to generate web links: `Object::get_link`, `Object::get_link_shared`, and `objects::object_link`, `objects::object_link_shared`
+- new example: [agenda](./examples/agenda.rs) - Collect top-10 tasks (sorted by date modified and priority) and recent documents, and send in a chat message.
 
 ### Changed
 
@@ -18,6 +28,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - KeyStoreFile replaced by db-keystore::DbKeyStore. Uses local sqlite file (turso rust-native implementation), with optional encryption. Default key store is still OS keyring.
 - gRPC feature is enabled by default; disable with `default-features = false` if you only need REST.
 - Apache-2.0 license
+- bumped dependencies (markdown2pdf -> 0.2.1)
 
 ### BREAKING
 

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 // Generate PDF file from the project README.md
 // Returns the path to the generated file
+#[allow(dead_code)]
 pub fn create_pdf(dir: &Path) -> Result<PathBuf, anyhow::Error> {
     let pdf_path = dir.join("my_pdf.pdf");
 

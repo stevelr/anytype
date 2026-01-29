@@ -56,6 +56,20 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             let object = ctx.client.object(space_id, object_id).get().await?;
             ctx.output.emit_json(&object)
         }
+        super::ObjectCommands::Link {
+            space,
+            object_id,
+            cid,
+            key,
+        } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let link = match (cid, key) {
+                (Some(cid), Some(key)) => object_link_shared(&space_id, &object_id, &cid, &key),
+                (None, None) => object_link(&space_id, &object_id),
+                _ => anyhow::bail!("--cid and --key must both be provided, or neither"),
+            };
+            ctx.output.emit_text(&link)
+        }
         super::ObjectCommands::Create {
             space,
             type_key,
