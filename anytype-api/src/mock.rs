@@ -1223,6 +1223,8 @@ impl tonic::server::UnaryService<workspace_open::Request> for WorkspaceOpenSvc {
                     space_chat_id: chat_id,
                     ..Default::default()
                 }),
+                // backup paths for corrupted space storage
+                corrupted_backup_paths: Default::default(),
             }))
         })
     }

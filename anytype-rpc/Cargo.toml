@@ -5,7 +5,7 @@
 # 
 [package]
 name = "anytype-rpc"
-version = "0.2.1"
+version = "0.3.0-beta.1"
 edition = "2024"
 description = "Anytype gRPC client"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
@@ -30,12 +30,6 @@ prost = "0.14.3"
 tonic = "0.14.2"
 tonic-prost = "0.14.2"
 
-[build-dependencies]
-tonic-prost-build = "0.14.2"
-
 [[bin]]
 name = "anytype-rpc"
 path = "src/bin/anytype-rpc.rs"
-
-[package.metadata.cargo-shear]
-ignored = ["prost", "tonic-prost"]

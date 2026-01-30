@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased] - anytype-rpc
+
+### Changes
+
+- protobuf definitions no longer included in this repo. The build is now faster and doesn't require `protoc`.
+- Generated source is in `src/gen`. Instructions for regenerating `src/gen/*.rs` from protobuf definitions in github:anytype-heart are in the README.
+
+- **Breaking**
+  - Updated proto files to 0.48-rc.2 [commit 0549459](https://github.com/anyproto/anytype-heart/commit/0549459b595c40d4b85d88943510659352554b4d)
+
+### Added
+
+- new storage package anytype.storage
+  - `anytype_rpc::storage::FileInfo`
+  - `anytype_rpc::storage::FileKeys`
+  - `anytype_rpc::storage::ImageResizeSchema`
+  - `anytype_rpc::storage::Link`
+  - `anytype_rpc::storage::Step`
+
+- added compatibility table to README
+
 ## [0.2.1] - anytype-rpc - 2026-01-28
 
 ### Added
