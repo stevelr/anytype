@@ -48,12 +48,7 @@ pub fn looks_like_object_id(s: &str) -> bool {
     false
 }
 
-/// Validation limits for safety & sanity checking.
-/// The objective is to catch requests that might cause resource exhaustion
-/// such as server running out of memory. Regardless of whether the cause is
-/// unintentional programming error, or intentional attack, sanity checks can be helpful.
-/// A too-strict limit may cause the program to fail with legitimate inputs, so
-/// it may be preferable to err on the side of looser limits.
+/// Validation limits for safety & sanity checking, to help prevent resource exhaustion.
 /// All limits can be adjusted at client creation time
 #[derive(Debug, Clone)]
 pub struct ValidationLimits {
@@ -61,27 +56,27 @@ pub struct ValidationLimits {
     pub markdown_max_len: u64,
 
     /// max length of an object name in bytes
-    pub name_max_len: u64,
+    pub name_max_len: u32,
 
     /// max number of tags
-    pub tag_max_count: u64,
+    pub tag_max_count: u32,
 
     /// max length of a tag
-    pub tag_max_len: u64,
+    pub tag_max_len: u32,
 
     /// minimum length of object id
-    pub oid_min_len: u64,
+    pub oid_min_len: u32,
 
     /// max length of object id
-    pub oid_max_len: u64,
+    pub oid_max_len: u32,
 
     /// max size of a query (total length of key=value params)
-    pub max_query_len: u64,
+    pub max_query_len: u32,
 }
 
 impl Default for ValidationLimits {
     fn default() -> Self {
-        ValidationLimits {
+        Self {
             // max size of markdown (body) (default: 10 MiB)
             markdown_max_len: VALIDATION_MARKDOWN_MAX_LEN,
             // max length of object name (default: 4096 bytes)
@@ -145,7 +140,7 @@ impl ValidationLimits {
     #[doc(hidden)]
     pub fn validate_markdown(&self, md: &str, description: &str) -> Result<()> {
         ensure!(
-            md.len() <= self.markdown_max_len as usize,
+            md.len() as u64 <= self.markdown_max_len,
             ValidationSnafu {
                 message: format!(
                     "{description} markdown too long: {} bytes (max: {})",
@@ -160,7 +155,7 @@ impl ValidationLimits {
     #[doc(hidden)]
     pub fn validate_body(&self, bytes: &bytes::Bytes, description: &str) -> Result<()> {
         ensure!(
-            bytes.len() <= self.markdown_max_len as usize,
+            bytes.len() as u64 <= self.markdown_max_len,
             ValidationSnafu {
                 message: format!(
                     "{description} body too long: {} bytes (max: {})",
@@ -220,7 +215,7 @@ impl ValidationLimits {
     #[doc(hidden)]
     pub fn validate_query(&self, query: &[(String, String)]) -> Result<()> {
         let mut query_size = 0;
-        for (key, val) in query.iter() {
+        for (key, val) in query {
             query_size += key.len() + val.len() + 1;
         }
         ensure!(

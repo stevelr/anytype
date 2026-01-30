@@ -1,5 +1,4 @@
-use std::net::SocketAddr;
-use std::str::FromStr;
+use std::{net::SocketAddr, str::FromStr};
 
 use anytype::mock::MockChatServer;
 
@@ -9,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:31010".to_string());
     let addr = SocketAddr::from_str(&addr)?;
-    let handle = MockChatServer::start(addr).await?;
+    let handle = MockChatServer::start(addr)?;
     println!(
         "mock chat server listening on {addr} (tokens: token-alice, token-bob, token-carol, token-dash, token-ernie)"
     );

@@ -5,13 +5,17 @@
  * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
  * SPDX-License-Identifier: Apache-2.0
  */
-use crate::cli::chat::{ChatReadTypeArg, MessageStyleArg};
-use crate::output::{Output, OutputFormat};
+use std::path::{Path, PathBuf};
+
 use anyhow::{Result, bail};
 use anytype::prelude::*;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
 use tracing::warn;
+
+use crate::{
+    cli::chat::{ChatReadTypeArg, MessageStyleArg},
+    output::{Output, OutputFormat},
+};
 
 pub mod auth;
 pub mod chat;
@@ -32,14 +36,15 @@ pub mod view;
 const DEFAULT_KEYRING_SERVICE: &str = "anyr"; // env!("CARGO_BIN_NAME");
 
 /// date strftime-inspired format
-/// Defined in https://docs.rs/chrono/latest/chrono/format/strftime/index.html
+/// Defined in <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>
 const DEFAULT_TABLE_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 #[derive(Parser, Debug)]
 #[command(name = "anyr")]
 #[command(author, version, about = "anyr: list, search, and manipulate Anytype objects", long_about = None)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
-    /// API endpoint URL. Default: environment $ANYTYPE_URL or http://127.0.0.1:31009 (desktop app)
+    /// API endpoint URL. Default: environment `ANYTYPE_URL` or <http://127.0.0.1:31009> (desktop app)
     #[arg(short = 'u', long, env = "ANYTYPE_URL")]
     pub url: Option<String>,
 
@@ -407,9 +412,9 @@ pub enum ObjectCommands {
         #[arg(long)]
         icon_emoji: Option<String>,
 
-        /// set object's icon from file
+        /// set object's icon from file (path must be utf8 string)
         #[arg(long)]
-        icon_file: Option<PathBuf>,
+        icon_file: Option<String>,
 
         /// use template
         #[arg(long)]
@@ -456,7 +461,7 @@ pub enum ObjectCommands {
 
         /// new icon from file
         #[arg(long)]
-        icon_file: Option<PathBuf>,
+        icon_file: Option<String>,
 
         /// change object's type
         #[arg(long = "type")]
@@ -629,7 +634,7 @@ pub enum PropertyCommands {
         #[arg(value_enum)]
         format: PropertyFormatArg,
 
-        /// property key (recommended), snake_case
+        /// property key (recommended), `snake_case`
         #[arg(long)]
         key: Option<String>,
 
@@ -773,7 +778,7 @@ pub enum TagCommands {
         #[arg(value_enum)]
         color: TagColorArg,
 
-        /// tag key (recommended), snake_case
+        /// tag key (recommended), `snake_case`
         #[arg(long)]
         key: Option<String>,
     },
@@ -851,7 +856,7 @@ pub enum ViewCommands {
         type_id: String,
         /// Limit number of items
         #[arg(long, default_value = "100")]
-        limit: usize,
+        limit: u32,
     },
 }
 
@@ -890,7 +895,7 @@ pub struct SearchArgs {
     #[arg(long)]
     pub text: Option<String>,
 
-    /// Limit search to types (type_key). Repeat to include multiple types
+    /// Limit search to types (`type_key`). Repeat to include multiple types
     #[arg(long = "type", value_name = "type")]
     pub types: Vec<String>,
 
@@ -1083,11 +1088,11 @@ pub enum ChatMessagesCommands {
         #[arg(long = "mark", value_name = "SPEC")]
         mark: Vec<String>,
 
-        /// attachments (format type:target_id)
+        /// attachments (format `type:target_id`)
         #[arg(long = "attachment", value_name = "SPEC")]
         attachment: Vec<String>,
 
-        /// raw JSON MessageContent (@file, @-, or -)
+        /// raw JSON `MessageContent` (@file, @-, or -)
         #[arg(long)]
         content_json: Option<String>,
 
@@ -1124,7 +1129,7 @@ pub enum ChatMessagesCommands {
         #[arg(long = "mark", value_name = "SPEC")]
         mark: Vec<String>,
 
-        /// raw JSON MessageContent (@file, @-, or -)
+        /// raw JSON `MessageContent` (@file, @-, or -)
         #[arg(long)]
         content_json: Option<String>,
 
@@ -1203,11 +1208,11 @@ pub enum ListCommands {
 pub struct PaginationArgs {
     /// limit results to n items (default 100, max 1000)
     #[arg(long, default_value = "100")]
-    pub limit: usize,
+    pub limit: u32,
 
     /// return results starting with offset (for continuation of previous search)
     #[arg(long, default_value = "0")]
-    pub offset: usize,
+    pub offset: u32,
 
     /// collect all results from all pages
     #[arg(long)]
@@ -1360,29 +1365,13 @@ fn build_client(cli: &Cli) -> Result<AnytypeClient> {
     Ok(client)
 }
 
-pub fn ensure_authenticated(_client: &AnytypeClient) -> Result<()> {
-    // TODO: do we need this method anymore?
-    // if client.load_key(false)? {
-    //     return Ok(());
-    // }
-    // Err(AnytypeError::Unauthorized.into())
-    Ok(())
-}
-
-// fn default_keyfile_path() -> PathBuf {
-//     dirs::config_dir()
-//         .unwrap_or_else(|| PathBuf::from("."))
-//         .join(DEFAULT_KEYRING_SERVICE)
-//         .join("api.key")
-// }
-
 impl TypeLayoutArg {
     pub fn to_layout(&self) -> TypeLayout {
         match self {
-            TypeLayoutArg::Basic => TypeLayout::Basic,
-            TypeLayoutArg::Profile => TypeLayout::Profile,
-            TypeLayoutArg::Action => TypeLayout::Action,
-            TypeLayoutArg::Note => TypeLayout::Note,
+            Self::Basic => TypeLayout::Basic,
+            Self::Profile => TypeLayout::Profile,
+            Self::Action => TypeLayout::Action,
+            Self::Note => TypeLayout::Note,
         }
     }
 }
@@ -1390,17 +1379,17 @@ impl TypeLayoutArg {
 impl PropertyFormatArg {
     pub fn to_format(&self) -> PropertyFormat {
         match self {
-            PropertyFormatArg::Text => PropertyFormat::Text,
-            PropertyFormatArg::Number => PropertyFormat::Number,
-            PropertyFormatArg::Select => PropertyFormat::Select,
-            PropertyFormatArg::MultiSelect => PropertyFormat::MultiSelect,
-            PropertyFormatArg::Date => PropertyFormat::Date,
-            PropertyFormatArg::Files => PropertyFormat::Files,
-            PropertyFormatArg::Checkbox => PropertyFormat::Checkbox,
-            PropertyFormatArg::Url => PropertyFormat::Url,
-            PropertyFormatArg::Email => PropertyFormat::Email,
-            PropertyFormatArg::Phone => PropertyFormat::Phone,
-            PropertyFormatArg::Objects => PropertyFormat::Objects,
+            Self::Text => PropertyFormat::Text,
+            Self::Number => PropertyFormat::Number,
+            Self::Select => PropertyFormat::Select,
+            Self::MultiSelect => PropertyFormat::MultiSelect,
+            Self::Date => PropertyFormat::Date,
+            Self::Files => PropertyFormat::Files,
+            Self::Checkbox => PropertyFormat::Checkbox,
+            Self::Url => PropertyFormat::Url,
+            Self::Email => PropertyFormat::Email,
+            Self::Phone => PropertyFormat::Phone,
+            Self::Objects => PropertyFormat::Objects,
         }
     }
 }
@@ -1408,9 +1397,9 @@ impl PropertyFormatArg {
 impl MemberRoleArg {
     pub fn to_role(&self) -> MemberRole {
         match self {
-            MemberRoleArg::Viewer => MemberRole::Viewer,
-            MemberRoleArg::Editor => MemberRole::Editor,
-            MemberRoleArg::Owner => MemberRole::Owner,
+            Self::Viewer => MemberRole::Viewer,
+            Self::Editor => MemberRole::Editor,
+            Self::Owner => MemberRole::Owner,
         }
     }
 }
@@ -1418,12 +1407,12 @@ impl MemberRoleArg {
 impl MemberStatusArg {
     pub fn to_status(&self) -> MemberStatus {
         match self {
-            MemberStatusArg::Joining => MemberStatus::Joining,
-            MemberStatusArg::Active => MemberStatus::Active,
-            MemberStatusArg::Removed => MemberStatus::Removed,
-            MemberStatusArg::Declined => MemberStatus::Declined,
-            MemberStatusArg::Removing => MemberStatus::Removing,
-            MemberStatusArg::Canceled => MemberStatus::Canceled,
+            Self::Joining => MemberStatus::Joining,
+            Self::Active => MemberStatus::Active,
+            Self::Removed => MemberStatus::Removed,
+            Self::Declined => MemberStatus::Declined,
+            Self::Removing => MemberStatus::Removing,
+            Self::Canceled => MemberStatus::Canceled,
         }
     }
 }
@@ -1431,21 +1420,21 @@ impl MemberStatusArg {
 impl TagColorArg {
     pub fn to_color(&self) -> Color {
         match self {
-            TagColorArg::Grey => Color::Grey,
-            TagColorArg::Yellow => Color::Yellow,
-            TagColorArg::Orange => Color::Orange,
-            TagColorArg::Red => Color::Red,
-            TagColorArg::Pink => Color::Pink,
-            TagColorArg::Purple => Color::Purple,
-            TagColorArg::Blue => Color::Blue,
-            TagColorArg::Ice => Color::Ice,
-            TagColorArg::Teal => Color::Teal,
-            TagColorArg::Lime => Color::Lime,
+            Self::Grey => Color::Grey,
+            Self::Yellow => Color::Yellow,
+            Self::Orange => Color::Orange,
+            Self::Red => Color::Red,
+            Self::Pink => Color::Pink,
+            Self::Purple => Color::Purple,
+            Self::Blue => Color::Blue,
+            Self::Ice => Color::Ice,
+            Self::Teal => Color::Teal,
+            Self::Lime => Color::Lime,
         }
     }
 }
 
-pub fn pagination_limit(pagination: &PaginationArgs) -> usize {
+pub fn pagination_limit(pagination: &PaginationArgs) -> u32 {
     if pagination.all {
         1000
     } else {
@@ -1453,21 +1442,22 @@ pub fn pagination_limit(pagination: &PaginationArgs) -> usize {
     }
 }
 
-pub fn pagination_offset(pagination: &PaginationArgs) -> usize {
+pub fn pagination_offset(pagination: &PaginationArgs) -> u32 {
     pagination.offset
 }
 
 pub fn must_have_body(
-    body: &Option<String>,
-    body_file: &Option<PathBuf>,
+    body: Option<impl Into<String>>,
+    body_file: Option<impl AsRef<Path>>,
 ) -> Result<Option<String>> {
     if body.is_some() && body_file.is_some() {
         bail!("--body and --body-file are mutually exclusive");
     }
     if let Some(body) = body {
-        return Ok(Some(body.clone()));
+        return Ok(Some(body.into()));
     }
     if let Some(path) = body_file {
+        let path = path.as_ref();
         let content = std::fs::read_to_string(path)
             .map_err(|err| anyhow::anyhow!("read {}: {err}", path.display()))?;
         return Ok(Some(content));
@@ -1475,19 +1465,23 @@ pub fn must_have_body(
     Ok(None)
 }
 
-pub fn resolve_icon(emoji: &Option<String>, file: &Option<PathBuf>) -> Result<Option<Icon>> {
+pub fn resolve_icon_exists(
+    emoji: Option<impl Into<String>>,
+    file: Option<String>,
+) -> Result<Option<Icon>> {
     if emoji.is_some() && file.is_some() {
         bail!("--icon-emoji and --icon-file are mutually exclusive");
     }
     if let Some(emoji) = emoji {
         return Ok(Some(Icon::Emoji {
-            emoji: emoji.clone(),
+            emoji: emoji.into(),
         }));
     }
     if let Some(path) = file {
-        return Ok(Some(Icon::File {
-            file: path.display().to_string(),
-        }));
+        if !PathBuf::from(&path).is_file() {
+            bail!("icon file does not exist:{path}");
+        }
+        return Ok(Some(Icon::File { file: path }));
     }
     Ok(None)
 }

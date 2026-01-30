@@ -4,17 +4,17 @@
 //!
 //! # Authentication Flow methods
 //!
-//! - [authenticate_interactive](AnytypeClient::authenticate_interactive) - all-in-one authenticate with desktop app (combines `create_auth_challenge` and `create_api_key`)
-//! - [create_auth_challenge](AnytypeClient::create_auth_challenge) - auth flow part 1
-//! - [create_api_key](AnytypeClient::create_api_key) - auth flow part 2
-//! - [auth_status](AnytypeClient::auth_status) - check current HTTP/gRPC auth state
-//! - [logout](AnytypeClient::logout) - discard api key
+//! - [`authenticate_interactive`](AnytypeClient::authenticate_interactive) - all-in-one authenticate with desktop app (combines `create_auth_challenge` and `create_api_key`)
+//! - [`create_auth_challenge`](AnytypeClient::create_auth_challenge) - auth flow part 1
+//! - [`create_api_key`](AnytypeClient::create_api_key) - auth flow part 2
+//! - [`auth_status`](AnytypeClient::auth_status) - check current HTTP/gRPC auth state
+//! - [`logout`](AnytypeClient::logout) - discard api key
 //!
-//! # KeyStore methods
+//! # `KeyStore` methods
 //!
-//! - [clear_api_key](AnytypeClient::clear_api_key)
-//! - [set_api_key](AnytypeClient::set_api_key)
-//! - [get_key_store](AnytypeClient::get_key_store)
+//! - [`clear_api_key`](AnytypeClient::clear_api_key)
+//! - [`set_api_key`](AnytypeClient::set_api_key)
+//! - [`get_key_store`](AnytypeClient::get_key_store)
 //!
 
 use std::path::PathBuf;
@@ -47,7 +47,7 @@ struct CreateApiKeyRequest {
     pub code: String,
 }
 
-/// Response from create_api_key
+/// Response from `create_api_key`
 /// Example: `zhSG/zQRmgADyilWPtgdnfo1qD60oK02/SVgi1GaFt6=`
 #[derive(Debug, Deserialize)]
 struct CreateApiKeyResponse {
@@ -78,6 +78,7 @@ pub struct HttpStatus {
 impl HttpStatus {
     /// Returns true if the http client has an auth token
     /// To check whether the credentials are valid, use `client.ping_http()`
+    #[must_use]
     pub fn is_authenticated(&self) -> bool {
         self.has_token
     }
@@ -89,7 +90,7 @@ impl HttpStatus {
 #[doc(hidden)]
 #[derive(Clone, Debug, Serialize)]
 pub struct GrpcStatus {
-    pub endpoint: String,
+    pub endpoint: Option<String>,
     pub has_account_key: bool,
     pub has_session_token: bool,
 }
@@ -98,6 +99,7 @@ pub struct GrpcStatus {
 impl GrpcStatus {
     /// Returns true if the grpc client has either an account key or session token
     /// To check whether the credentials are valid, use `client.ping_grpc()`
+    #[must_use]
     pub fn is_authenticated(&self) -> bool {
         self.has_account_key || self.has_session_token
     }
@@ -122,6 +124,12 @@ impl AnytypeClient {
     ///
     /// Note: this is a low-level method: use `authenticate_interactive` for
     /// an all-in-one authentication.
+    ///
+    /// # Errors
+    ///
+    /// `AnytypeError::Http` for communication error
+    /// `AnytypeError::ApiError` for malformed api request
+    ///
     pub async fn create_auth_challenge(&self) -> Result<String> {
         let request = CreateChallengeRequest {
             app_name: self.config.app_name.clone(),
@@ -137,7 +145,7 @@ impl AnytypeClient {
 
     /// Exchanges the challenge response for an API key.
     ///
-    /// Invoke with the challenge_id returned by `create_auth_challenge`,
+    /// Invoke with the `challenge_id` returned by `create_auth_challenge`,
     /// and the 4-digit code from the user
     /// (displayed by the desktop app). If the challenge solution is correct,
     /// this method generates the api key.
@@ -149,11 +157,17 @@ impl AnytypeClient {
     /// Note: this is a low-level method: use `authenticate_interactive` for
     /// an all-in-one authentication.
     ///
-    /// Parameters:
+    /// # Parameters:
     ///   `challenge_id`: challenge id, example "67647f5ecda913e9a2e11b26"
     ///   `code`: 4-digit code from the desktop app, example `1234`
-    /// Returns:
-    ///   `Secret<HttpCredentials>`
+    ///
+    /// # Returns:
+    ///   `HttpCredentials`
+    ///
+    /// # Errors
+    ///  `AnytypeError::Http` for communication error
+    ///  `AnytypeError::ApiError` for malformed api request
+    ///
     pub async fn create_api_key(
         &self,
         challenge_id: &str,
@@ -176,8 +190,8 @@ impl AnytypeClient {
     /// 1. Creates a challenge
     /// 2. Calls the provided closure to prompt the user for a code
     /// 3. Exchanges the code for an API key
-    /// 4. Saves the api_key for this client
-    /// 5. If KeyStore is configured, saves the key in the keystore
+    /// 4. Saves the `api_key` for this client
+    /// 5. If `KeyStore` is configured, saves the key in the keystore
     ///
     /// # Arguments
     /// * `get_code` - Callback to obtain the 4-digit code from the user
@@ -249,7 +263,7 @@ impl AnytypeClient {
         self.keystore.update_http_credentials(&api_key)?;
 
         // save to client
-        self.set_api_key(api_key.clone());
+        self.set_api_key(api_key);
 
         Ok(())
     }
@@ -268,6 +282,7 @@ impl AnytypeClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn get_key_store(&self) -> &KeyStore {
         &self.keystore
     }
@@ -350,7 +365,7 @@ impl AnytypeClient {
             },
             #[cfg(feature = "grpc")]
             grpc: GrpcStatus {
-                endpoint: self.get_grpc_endpoint().to_string(),
+                endpoint: self.get_grpc_endpoint(),
                 has_account_key: grpc_creds.has_account_key(),
                 has_session_token: grpc_creds.has_session_token(),
             },

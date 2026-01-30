@@ -825,7 +825,7 @@ async fn try_object_search(
     Ok(())
 }
 
-fn to_status(err: anytype_rpc::auth::AuthError) -> Status {
+fn to_status(err: anytype_rpc::error::AuthError) -> Status {
     Status::unknown(err.to_string())
 }
 

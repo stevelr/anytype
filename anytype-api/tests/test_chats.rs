@@ -4,8 +4,10 @@ use std::net::SocketAddr;
 
 use anytype::prelude::*;
 use chrono::Utc;
-use tokio::net::TcpStream;
-use tokio::time::{Duration, sleep};
+use tokio::{
+    net::TcpStream,
+    time::{Duration, sleep},
+};
 
 #[tokio::test]
 async fn test_chat_message_crud() -> anyhow::Result<()> {
@@ -17,7 +19,7 @@ async fn test_chat_message_crud() -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     drop(listener);
 
-    let handle = anytype::mock::MockChatServer::start(addr).await?;
+    let handle = anytype::mock::MockChatServer::start(addr)?;
     wait_for_server(addr).await?;
 
     let mut config = ClientConfig::default().app_name("anytype-chat-test");

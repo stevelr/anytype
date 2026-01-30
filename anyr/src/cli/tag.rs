@@ -1,13 +1,18 @@
-use crate::cli::common::{resolve_property_id, resolve_space_id};
-use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
-use crate::filter::parse_filters;
-use crate::output::OutputFormat;
 use anyhow::Result;
-use anytype::error::AnytypeError;
-use anytype::validation::looks_like_object_id;
+use anytype::{error::AnytypeError, validation::looks_like_object_id};
 
+use crate::{
+    cli::{
+        AppContext,
+        common::{resolve_property_id, resolve_space_id},
+        pagination_limit, pagination_offset,
+    },
+    filter::parse_filters,
+    output::OutputFormat,
+};
+
+#[allow(clippy::too_many_lines)]
 pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
-    ensure_authenticated(&ctx.client)?;
     match args.command {
         super::TagCommands::List {
             space,

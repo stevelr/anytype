@@ -5,22 +5,13 @@
 //! The stream is backed by `ListenSessionEvents` and chat subscription RPCs.
 //! It supports reconnect with per-chat watermarks to reduce missed messages.
 
-use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
-use std::time::Duration;
-
-use futures::Stream;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::sleep;
-use tonic::Request;
-
-use crate::chats::{
-    ChatMessage, ChatState, MessageReaction, chat_message_from_grpc, chat_state_from_grpc,
-    message_reactions_from_grpc,
+use std::{
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    task::{Context, Poll},
+    time::Duration,
 };
-use crate::{Result, client::AnytypeClient, error::AnytypeError};
 
 #[cfg(feature = "grpc")]
 use anytype_rpc::{
@@ -32,9 +23,25 @@ use anytype_rpc::{
     auth::with_token,
     client::{AnytypeGrpcClient, AnytypeGrpcConfig},
 };
+use futures::Stream;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
+use tonic::Request;
+
+use crate::{
+    Result,
+    chats::{
+        ChatMessage, ChatState, MessageReaction, chat_message_from_grpc, chat_state_from_grpc,
+        message_reactions_from_grpc,
+    },
+    client::AnytypeClient,
+    error::AnytypeError,
+};
 
 const DEFAULT_BUFFER_CAPACITY: usize = 256;
-const DEFAULT_LAST_MESSAGES_LIMIT: usize = 1;
+const DEFAULT_LAST_MESSAGES_LIMIT: u32 = 1;
 
 static SUBSCRIPTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -46,7 +53,7 @@ pub struct ChatStreamBuilder {
     previews: bool,
     buffer: usize,
     backoff: BackoffPolicy,
-    last_messages_limit: usize,
+    last_messages_limit: u32,
 }
 
 impl AnytypeClient {
@@ -68,6 +75,7 @@ impl AnytypeClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn chat_stream(&self) -> ChatStreamBuilder {
         ChatStreamBuilder::new(self.clone())
     }
@@ -86,30 +94,35 @@ impl ChatStreamBuilder {
     }
 
     /// Subscribe to a chat by object id.
+    #[must_use]
     pub fn subscribe_chat(mut self, chat_id: impl Into<String>) -> Self {
         self.chat_ids.push(chat_id.into());
         self
     }
 
     /// Subscribe to message previews for all chats.
+    #[must_use]
     pub fn subscribe_previews(mut self) -> Self {
         self.previews = true;
         self
     }
 
     /// Set the event buffer capacity.
+    #[must_use]
     pub fn buffer(mut self, capacity: usize) -> Self {
         self.buffer = capacity;
         self
     }
 
     /// Set the reconnect backoff policy.
+    #[must_use]
     pub fn backoff(mut self, policy: BackoffPolicy) -> Self {
         self.backoff = policy;
         self
     }
 
     /// Build and start the chat stream worker.
+    #[must_use]
     pub fn build(self) -> ChatStreamHandle {
         let (event_tx, event_rx) = mpsc::channel(self.buffer);
         let (control_tx, control_rx) = mpsc::channel(self.buffer);
@@ -154,12 +167,14 @@ impl Default for BackoffPolicy {
 }
 
 impl BackoffPolicy {
+    #[allow(clippy::cast_precision_loss)]
     fn delay(&self, attempt: u32) -> Duration {
         let initial_ms = self.initial.as_millis() as f64;
         let max_ms = self.max.as_millis() as f64;
         let factor = self.factor.max(1.0);
-        let exp = factor.powi(attempt as i32);
-        let millis = (initial_ms * exp).min(max_ms).max(initial_ms);
+        let exp = factor.powi(attempt.cast_signed());
+        let millis = (initial_ms * exp).min(max_ms).max(initial_ms).round();
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         Duration::from_millis(millis.round() as u64)
     }
 }
@@ -285,6 +300,7 @@ enum ControlMessage {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
 struct ChatSubscription {
     chat_id: String,
     sub_id: String,
@@ -296,7 +312,7 @@ struct ChatStreamWorker {
     client: AnytypeClient,
     backoff: BackoffPolicy,
     previews: bool,
-    last_messages_limit: usize,
+    last_messages_limit: u32,
     subscriptions: HashMap<String, ChatSubscription>,
     preview_sub_id: Option<String>,
     control_rx: mpsc::Receiver<ControlMessage>,
@@ -310,7 +326,7 @@ impl ChatStreamWorker {
         chat_ids: Vec<String>,
         previews: bool,
         backoff: BackoffPolicy,
-        last_messages_limit: usize,
+        last_messages_limit: u32,
         event_tx: mpsc::Sender<ChatEvent>,
         control_rx: mpsc::Receiver<ControlMessage>,
     ) -> Self {
@@ -402,7 +418,7 @@ impl ChatStreamWorker {
     async fn wait_backoff(&mut self, attempt: u32) {
         let delay = self.backoff.delay(attempt);
         tokio::select! {
-            _ = sleep(delay) => {},
+            () = sleep(delay) => {},
             message = self.control_rx.recv() => {
                 if let Some(message) = message {
                     self.handle_control_message(message, None).await;
@@ -456,7 +472,7 @@ impl ChatStreamWorker {
             return;
         }
 
-        let events = chat_events_from_event(chat_id.clone(), event, &active_sub_ids);
+        let events = chat_events_from_event(&chat_id, event, &active_sub_ids);
         for chat_event in events {
             self.update_watermark(&chat_event);
             if self.event_tx.send(chat_event).await.is_err() {
@@ -523,8 +539,7 @@ impl ChatStreamWorker {
                 let should_emit = subscription
                     .last_state_id
                     .as_deref()
-                    .map(|current| current != state.last_state_id)
-                    .unwrap_or(true);
+                    .is_none_or(|current| current != state.last_state_id);
                 subscription.last_state_id = Some(state.last_state_id.clone());
                 if should_emit {
                     let _ = self
@@ -619,9 +634,8 @@ impl ChatStreamWorker {
         chat_id: &str,
         grpc: Option<&AnytypeGrpcClient>,
     ) -> Result<()> {
-        let subscription = match self.subscriptions.remove(chat_id) {
-            Some(subscription) => subscription,
-            None => return Ok(()),
+        let Some(subscription) = self.subscriptions.remove(chat_id) else {
+            return Ok(());
         };
 
         if let Some(grpc) = grpc {
@@ -686,10 +700,7 @@ impl ChatStreamWorker {
         Ok(())
     }
 
-    async fn emit_preview(
-        &mut self,
-        preview: subscribe_to_message_previews::response::ChatPreview,
-    ) {
+    async fn emit_preview(&self, preview: subscribe_to_message_previews::response::ChatPreview) {
         if let Some(message) = preview.message {
             let message = chat_message_from_grpc(message);
             let _ = self
@@ -729,8 +740,7 @@ impl ChatStreamWorker {
                 let should_update = subscription
                     .last_order_id
                     .as_ref()
-                    .map(|current| order_id > current)
-                    .unwrap_or(true);
+                    .is_none_or(|current| order_id > current);
                 if should_update {
                     subscription.last_order_id = Some(order_id.clone());
                 }
@@ -782,7 +792,7 @@ fn next_sub_id(prefix: &str) -> String {
 }
 
 fn chat_events_from_event(
-    chat_id: String,
+    chat_id: &str,
     event: Event,
     active_sub_ids: &HashSet<String>,
 ) -> Vec<ChatEvent> {
@@ -797,7 +807,7 @@ fn chat_events_from_event(
                     && let Some(message) = add.message
                 {
                     events.push(ChatEvent::MessageAdded {
-                        chat_id: chat_id.clone(),
+                        chat_id: chat_id.to_string(),
                         message: chat_message_from_grpc(message),
                     });
                 }
@@ -807,7 +817,7 @@ fn chat_events_from_event(
                     && let Some(message) = update.message
                 {
                     events.push(ChatEvent::MessageUpdated {
-                        chat_id: chat_id.clone(),
+                        chat_id: chat_id.to_string(),
                         message: chat_message_from_grpc(message),
                     });
                 }
@@ -815,7 +825,7 @@ fn chat_events_from_event(
             EventValue::ChatDelete(delete) => {
                 if should_emit(&delete.sub_ids, active_sub_ids) {
                     events.push(ChatEvent::MessageDeleted {
-                        chat_id: chat_id.clone(),
+                        chat_id: chat_id.to_string(),
                         message_id: delete.id,
                     });
                 }
@@ -828,7 +838,7 @@ fn chat_events_from_event(
                         .map(message_reactions_from_grpc)
                         .unwrap_or_default();
                     events.push(ChatEvent::ReactionsUpdated {
-                        chat_id: chat_id.clone(),
+                        chat_id: chat_id.to_string(),
                         message_id: update.id,
                         reactions,
                     });
@@ -839,7 +849,7 @@ fn chat_events_from_event(
                     && let Some(state) = update.state.as_ref()
                 {
                     events.push(ChatEvent::ChatStateUpdated {
-                        chat_id: chat_id.clone(),
+                        chat_id: chat_id.to_string(),
                         state: chat_state_from_grpc(state),
                     });
                 }
@@ -875,11 +885,11 @@ async fn call_subscribe_last_messages(
     grpc: &AnytypeGrpcClient,
     chat_id: &str,
     sub_id: &str,
-    limit: usize,
+    limit: u32,
 ) -> Result<subscribe_last_messages::Response> {
     let request = subscribe_last_messages::Request {
         chat_object_id: chat_id.to_string(),
-        limit: limit as i32,
+        limit: limit.cast_signed(),
         sub_id: sub_id.to_string(),
     };
     let request = with_token_request(Request::new(request), grpc.token())?;
@@ -971,6 +981,7 @@ fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>>
     })
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn grpc_status(status: tonic::Status) -> AnytypeError {
     AnytypeError::Other {
         message: format!("gRPC request failed: {status}"),
@@ -1049,9 +1060,9 @@ fn ensure_error_ok<T: GrpcError>(error: Option<&T>, action: &str) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+    use anytype_rpc::{anytype::event::Message as EventMessage, model};
+
     use super::*;
-    use anytype_rpc::anytype::event::Message as EventMessage;
-    use anytype_rpc::model;
 
     #[test]
     fn chat_events_respect_sub_ids() {
@@ -1083,8 +1094,8 @@ mod tests {
         };
 
         let mut active = HashSet::new();
-        active.insert(sub_id.clone());
-        let events = chat_events_from_event(chat_id.clone(), event.clone(), &active);
+        active.insert(sub_id);
+        let events = chat_events_from_event(&chat_id, event.clone(), &active);
         assert!(matches!(
             events.as_slice(),
             [ChatEvent::MessageAdded { chat_id: id, .. }] if id == &chat_id
@@ -1092,7 +1103,7 @@ mod tests {
 
         let mut inactive = HashSet::new();
         inactive.insert("other".to_string());
-        let events = chat_events_from_event(chat_id, event, &inactive);
+        let events = chat_events_from_event(&chat_id, event, &inactive);
         assert!(events.is_empty());
     }
 }
