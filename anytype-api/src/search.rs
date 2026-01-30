@@ -69,8 +69,8 @@ struct SearchRequestBody {
 #[derive(Debug)]
 pub struct SearchRequest {
     client: Arc<HttpClient>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     body: SearchRequestBody,
     limits: ValidationLimits,
     space_id: Option<String>,
@@ -93,48 +93,56 @@ impl SearchRequest {
     }
 
     /// Sets the search text (searches in name and content).
+    #[must_use]
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.body.query = Some(text.into());
         self
     }
 
     /// Sets the pagination limit.
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
     /// Sets the pagination offset.
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
 
     /// Limits results to specific types.
+    #[must_use]
     pub fn types<S: Into<String>>(mut self, types: impl IntoIterator<Item = S>) -> Self {
         self.body.types = types.into_iter().map(Into::into).collect();
         self
     }
 
     /// Sorts results ascending by property.
+    #[must_use]
     pub fn sort_asc(mut self, property: impl Into<String>) -> Self {
         self.body.sort = Some(Sort::asc(property));
         self
     }
 
     /// Sorts results descending by property.
+    #[must_use]
     pub fn sort_desc(mut self, property: impl Into<String>) -> Self {
         self.body.sort = Some(Sort::desc(property));
         self
     }
 
     /// Adds a filter condition.
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.body.filters = FilterExpression::from(vec![filter]);
         self
     }
 
     /// Sets the filter expression.
+    #[must_use]
     pub fn filters(mut self, filters: FilterExpression) -> Self {
         self.body.filters = filters;
         self
@@ -147,8 +155,8 @@ impl SearchRequest {
     ///
     pub async fn execute(self) -> Result<PagedResult<Object>> {
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset);
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset);
 
         if let Some(space_id) = self.space_id {
             self.limits.validate_id(&space_id, "space_id")?;

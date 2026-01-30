@@ -5,7 +5,7 @@
 # 
 [package]
 name = "anytype"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 description = "An ergonomic Anytype API client in rust"
 repository = "https://github.com/stevelr/anytype"
@@ -25,7 +25,7 @@ grpc = ["dep:anytype-rpc", "dep:tonic", "dep:tonic-prost"]
 path = "src/lib.rs"
 
 [dependencies]
-anytype-rpc = { version = "0.2.1", path = "../anytype-rpc", optional = true }
+anytype-rpc = { version = "0.3.0-beta.1", path = "../anytype-rpc", optional = true }
 bytes.workspace = true
 chrono.workspace = true
 db-keystore = "0.3.1"

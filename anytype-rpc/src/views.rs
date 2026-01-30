@@ -10,6 +10,7 @@ use tonic::transport::Channel;
 use crate::anytype::ClientCommandsClient;
 use crate::anytype::rpc::object::show::Request as ObjectShowRequest;
 use crate::auth::with_token;
+use crate::error::AuthError;
 pub use crate::error::ViewError;
 use crate::model;
 use crate::model::block::ContentValue;
@@ -50,11 +51,12 @@ pub async fn fetch_grid_view_columns(
         include_relations_as_dependent_objects: true,
         ..Default::default()
     };
-    let request =
-        with_token(Request::new(request), token).map_err(|err| ViewError::ApiResponse {
+    let request = with_token(Request::new(request), token).map_err(|err: AuthError| {
+        ViewError::ApiResponse {
             code: 0,
             description: err.to_string(),
-        })?;
+        }
+    })?;
 
     let response = client.object_show(request).await?.into_inner();
     if let Some(error) = response.error

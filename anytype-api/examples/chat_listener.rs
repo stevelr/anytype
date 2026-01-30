@@ -28,8 +28,8 @@ async fn main() -> Result<(), AnytypeError> {
     let ChatStreamHandle { mut events, .. } = builder.build();
 
     println!(
-        "{:<20} | {:<20} | {:<16} | {}",
-        "timestamp", "chat", "sender", "message"
+        "{:<20} | {:<20} | {:<16} | message",
+        "timestamp", "chat", "sender"
     );
     // Chat names are printed as chat ids; map ids to names with the objects API if desired.
     while let Some(event) = events.next().await {

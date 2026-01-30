@@ -24,10 +24,13 @@
 
 mod common;
 
-use crate::common::{create_object_with_retry, lookup_property_tag_with_retry};
-use anytype::prelude::*;
-use anytype::test_util::{TestError, TestResult, unique_suffix, with_test_context};
+use anytype::{
+    prelude::*,
+    test_util::{TestError, TestResult, unique_suffix, with_test_context},
+};
 use tracing::debug;
+
+use crate::common::{create_object_with_retry, lookup_property_tag_with_retry};
 
 // =============================================================================
 // Type Listing Tests
@@ -68,7 +71,7 @@ async fn test_types_list_with_limit() -> TestResult<()> {
 
         // Verify we got at most the requested limit
         assert!(
-            types.len() <= limit,
+            types.len() <= limit as usize,
             "Expected at most {} types, got {}",
             limit,
             types.len()
@@ -100,7 +103,7 @@ async fn test_types_list_with_offset() -> TestResult<()> {
         ctx.increment_calls(2);
 
         // Verify offset worked if we have enough types
-        if all_types.len() > offset {
+        if all_types.len() > offset as usize {
             assert!(
                 !offset_types.is_empty(),
                 "Expected types after offset {}",

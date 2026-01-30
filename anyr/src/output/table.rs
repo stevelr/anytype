@@ -7,12 +7,12 @@ pub trait TableRow {
 
 pub fn render_table<T: TableRow>(items: &[T]) -> String {
     let headers = T::headers();
-    let rows: Vec<Vec<String>> = items.iter().map(|item| item.row()).collect();
+    let rows: Vec<Vec<String>> = items.iter().map(TableRow::row).collect();
     let widths = column_widths(headers, &rows);
 
     let mut out = String::new();
     out.push_str(&format_row(
-        &headers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        &headers.iter().map(ToString::to_string).collect::<Vec<_>>(),
         &widths,
     ));
     out.push('\n');
@@ -58,13 +58,14 @@ fn column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
 }
 
 fn format_row(row: &[String], widths: &[usize]) -> String {
+    use std::fmt::Write as _;
     let mut out = String::new();
     for (idx, cell) in row.iter().enumerate() {
         if idx > 0 {
             out.push_str("  ");
         }
         let width = widths.get(idx).copied().unwrap_or(0);
-        out.push_str(&format!("{cell:<width$}"));
+        let _ = write!(out, "{cell:<width$}");
     }
     out
 }

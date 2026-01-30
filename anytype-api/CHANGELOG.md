@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- bumped anytype-rpc to 0.3.0-beta.1
+
 ## [0.3.0] - anytype - 2026-01-28
 
 Major update:

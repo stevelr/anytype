@@ -6,8 +6,10 @@ use anyhow::Result;
 use anytype::prelude::*;
 use chrono::Utc;
 use futures::StreamExt;
-use tokio::net::TcpStream;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::{
+    net::TcpStream,
+    time::{Duration, sleep, timeout},
+};
 
 async fn setup_client() -> Result<(AnytypeClient, anytype::mock::MockChatServerHandle)> {
     let temp_path = std::env::temp_dir().join(format!(
@@ -18,7 +20,7 @@ async fn setup_client() -> Result<(AnytypeClient, anytype::mock::MockChatServerH
     let addr = listener.local_addr()?;
     drop(listener);
 
-    let handle = anytype::mock::MockChatServer::start(addr).await?;
+    let handle = anytype::mock::MockChatServer::start(addr)?;
     wait_for_server(addr).await?;
 
     let mut config = ClientConfig::default().app_name("anytype-chat-stream-test");

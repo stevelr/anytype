@@ -2,13 +2,13 @@
 //!
 //! This module provides a fluent builder API for working with Anytype object types.
 //!
-//! ## Type methods on AnytypeClient
+//! ## Type methods on `AnytypeClient`
 //!
-//! - [types](AnytypeClient::types) - list types in the space
-//! - [get_type](AnytypeClient::get_type) - get type for retrieval or deletion
-//! - [new_type](AnytypeClient::new_type) - create a new type
-//! - [update_type](AnytypeClient::update_type) - update type properties
-//! - [lookup_type_by_key](AnytypeClient::lookup_type_by_key) - find type using key
+//! - [`types`](AnytypeClient::types) - list types in the space
+//! - [`get_type`](AnytypeClient::get_type) - get type for retrieval or deletion
+//! - [`new_type`](AnytypeClient::new_type) - create a new type
+//! - [`update_type`](AnytypeClient::update_type) - update type properties
+//! - [`lookup_type_by_key`](AnytypeClient::lookup_type_by_key) - find type using key
 //!
 //! ## Quick Start
 //!
@@ -64,8 +64,8 @@ use crate::{
     Result,
     cache::AnytypeCache,
     client::AnytypeClient,
-    error::*,
-    filters::Query,
+    error::{CacheDisabledSnafu, NotFoundSnafu, ValidationSnafu},
+    filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
@@ -242,7 +242,7 @@ pub struct TypeRequest {
 }
 
 impl TypeRequest {
-    /// Creates a new TypeRequest.
+    /// Creates a new `TypeRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -292,7 +292,7 @@ impl TypeRequest {
             .client
             .get_request(
                 &format!("/v1/spaces/{}/types/{}", self.space_id, self.type_id),
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
         Ok(response.type_)
@@ -346,7 +346,7 @@ pub struct NewTypeRequest {
 }
 
 impl NewTypeRequest {
-    /// Creates a new NewTypeRequest. You must specify the name and plural_name.
+    /// Creates a new `NewTypeRequest`. You must specify the name and `plural_name`.
     /// Defaults to Basic Layout
     pub(crate) fn new(
         client: Arc<HttpClient>,
@@ -379,6 +379,7 @@ impl NewTypeRequest {
     ///
     /// # Arguments
     /// * `plural_name` - plural display name for the type
+    #[must_use]
     pub fn plural_name(mut self, plural_name: impl Into<String>) -> Self {
         self.plural_name = plural_name.into();
         self
@@ -387,10 +388,11 @@ impl NewTypeRequest {
     /// Sets the type key.
     ///
     /// The key is a unique identifier for the type, typically lowercase
-    /// with underscores (e.g., "project", "meeting_note").
+    /// with underscores (e.g., `project`, `meeting_note`).
     ///
     /// # Arguments
     /// * `key` - Unique key for the type
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
@@ -400,6 +402,7 @@ impl NewTypeRequest {
     ///
     /// # Arguments
     /// * `icon` - Icon for the type
+    #[must_use]
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
         self
@@ -409,18 +412,21 @@ impl NewTypeRequest {
     ///
     /// # Arguments
     /// * `layout` - Default layout for new objects
+    #[must_use]
     pub fn layout(mut self, layout: TypeLayout) -> Self {
         self.layout = layout;
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -428,6 +434,7 @@ impl NewTypeRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -439,6 +446,7 @@ impl NewTypeRequest {
     /// * `name` - name of property to add
     /// * `key` - property key
     /// * `format` - property format
+    #[must_use]
     pub fn property(
         mut self,
         name: impl Into<String>,
@@ -459,6 +467,7 @@ impl NewTypeRequest {
     ///
     /// # Arguments
     /// * `properties` - Iterator of property definitions
+    #[must_use]
     pub fn properties(mut self, properties: impl IntoIterator<Item = CreateTypeProperty>) -> Self {
         self.properties.extend(properties);
         self
@@ -489,7 +498,7 @@ impl NewTypeRequest {
             .post_request(
                 &format!("/v1/spaces/{}/types", self.space_id),
                 &request_body,
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
 
@@ -497,13 +506,13 @@ impl NewTypeRequest {
             self.cache.set_type(&self.space_id, response.type_.clone());
         }
         let typ = response.type_;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Type", &typ.id, || async {
                 let response: TypeResponse = self
                     .client
                     .get_request(
                         &format!("/v1/spaces/{}/types/{}", self.space_id, typ.id),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.type_)
@@ -536,7 +545,7 @@ pub struct UpdateTypeRequest {
 }
 
 impl UpdateTypeRequest {
-    /// Creates a new UpdateTypeRequest.
+    /// Creates a new `UpdateTypeRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -566,6 +575,7 @@ impl UpdateTypeRequest {
     ///
     /// # Arguments
     /// * `name` - New display name for the type
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -575,6 +585,7 @@ impl UpdateTypeRequest {
     ///
     /// # Arguments
     /// * `key` - New key for the type
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
@@ -584,6 +595,7 @@ impl UpdateTypeRequest {
     ///
     /// # Arguments
     /// * `plural_name` - New plural form of the type name
+    #[must_use]
     pub fn plural_name(mut self, plural_name: impl Into<String>) -> Self {
         self.plural_name = Some(plural_name.into());
         self
@@ -593,6 +605,7 @@ impl UpdateTypeRequest {
     ///
     /// # Arguments
     /// * `icon` - New icon for the type
+    #[must_use]
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
         self
@@ -602,18 +615,21 @@ impl UpdateTypeRequest {
     ///
     /// # Arguments
     /// * `layout` - New default layout for objects of this type
+    #[must_use]
     pub fn layout(mut self, layout: TypeLayout) -> Self {
         self.layout = Some(layout);
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -621,6 +637,7 @@ impl UpdateTypeRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -632,6 +649,7 @@ impl UpdateTypeRequest {
     /// * `name` - name of property to add
     /// * `key` - property key
     /// * `format` - property format
+    #[must_use]
     pub fn property(
         mut self,
         name: impl Into<String>,
@@ -695,17 +713,17 @@ impl UpdateTypeRequest {
             .await?;
 
         if self.cache.has_types(&self.space_id) {
-            self.cache.set_type(&self.space_id, response.type_.clone())
+            self.cache.set_type(&self.space_id, response.type_.clone());
         }
 
         let typ = response.type_;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Type", &typ.id, || async {
                 let response: TypeResponse = self
                     .client
                     .get_request(
                         &format!("/v1/spaces/{}/types/{}", self.space_id, typ.id),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.type_)
@@ -725,14 +743,14 @@ pub struct ListTypesRequest {
     client: Arc<HttpClient>,
     limits: ValidationLimits,
     space_id: String,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
     cache: Arc<AnytypeCache>,
 }
 
 impl ListTypesRequest {
-    /// Creates a new ListTypesRequest.
+    /// Creates a new `ListTypesRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -756,7 +774,8 @@ impl ListTypesRequest {
     ///
     /// # Arguments
     /// * `limit` - Number of items to return per page
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
@@ -765,7 +784,8 @@ impl ListTypesRequest {
     ///
     /// # Arguments
     /// * `offset` - Number of items to skip
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -776,6 +796,7 @@ impl ListTypesRequest {
     ///
     /// # Arguments
     /// * `filter` - Filter condition to add
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -785,6 +806,7 @@ impl ListTypesRequest {
     ///
     /// # Arguments
     /// * `filters` - Iterator of filters to add
+    #[must_use]
     pub fn filters(mut self, filters: impl IntoIterator<Item = Filter>) -> Self {
         self.filters.extend(filters);
         self
@@ -803,7 +825,7 @@ impl ListTypesRequest {
     /// To exclude, filter returned values with `.filter(|typ| !typ.archived)`
     ///
     /// # Errors
-    /// - [`AnytypeError::Validation`] if space_id is invalid
+    /// - [`AnytypeError::Validation`] if `space_id` is invalid
     pub async fn list(self) -> Result<PagedResult<Type>> {
         self.limits.validate_id(&self.space_id, "space_id")?;
 
@@ -825,8 +847,8 @@ impl ListTypesRequest {
 
         // cache disabled, or query has limits or filters that need to be evaluated on the server
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         self.client
@@ -842,7 +864,10 @@ async fn prime_cache_types(
     space_id: &str,
 ) -> Result<()> {
     let types: Vec<Type> = client
-        .get_request_paged(&format!("/v1/spaces/{space_id}/types"), Default::default())
+        .get_request_paged(
+            &format!("/v1/spaces/{space_id}/types"),
+            QueryWithFilters::default(),
+        )
         .await?
         .collect_all()
         .await?
@@ -859,7 +884,7 @@ async fn prime_cache_types(
 
 impl AnytypeClient {
     /// Creates a request builder for getting or deleting a single type by id.
-    /// To get by key, use [lookup_type_by_key](AnytypeClient::lookup_type_by_key)
+    /// To get by key, use [`lookup_type_by_key`](AnytypeClient::lookup_type_by_key)
     ///
     /// # Arguments
     /// * `space_id` - ID of the space containing the type
@@ -889,8 +914,8 @@ impl AnytypeClient {
     }
 
     /// Creates a request builder for creating a new type.
-    /// - default plural name is name + 's'. Override with ".plural_name()"
-    /// - default layout is Basic. Override with '.layout()"
+    /// - default plural name is name + 's'. Override with .`plural_name()`
+    /// - default layout is Basic. Override with `.layout(`)
     ///
     /// # Arguments
     /// * `space_id` - ID of the space to create the type in
@@ -1021,9 +1046,9 @@ impl AnytypeClient {
     /// ```
     ///
     /// Errors:
-    /// - AnytypeError::NotFound if no type in the space matched
-    /// - AnytypeError::CacheDisabled if cache is disabled
-    /// - AnytypeError::* any other error
+    /// - `AnytypeError::NotFound` if no type in the space matched
+    /// - `AnytypeError::CacheDisabled` if cache is disabled
+    /// - `AnytypeError::*` any other error (likely server connection error)
     pub async fn lookup_types(&self, space_id: &str, text: impl AsRef<str>) -> Result<Vec<Type>> {
         ensure!(self.cache.is_enabled(), CacheDisabledSnafu);
         // see note on locking design in cache.rs
@@ -1060,9 +1085,9 @@ impl AnytypeClient {
     /// # }
     /// ```
     /// Errors:
-    /// - AnytypeError::NotFound if no type in the space matched
-    /// - AnytypeError::CacheDisabled if cache is disabled
-    /// - AnytypeError::* any other error
+    /// - `AnytypeError::NotFound` if no type in the space matched
+    /// - `AnytypeError::CacheDisabled` if cache is disabled
+    /// - `AnytypeError::*` any other error (likely server connection error)
     ///
     pub async fn lookup_type_by_key(&self, space_id: &str, text: impl AsRef<str>) -> Result<Type> {
         ensure!(self.cache.is_enabled(), CacheDisabledSnafu);
@@ -1070,14 +1095,18 @@ impl AnytypeClient {
         if !self.cache.has_types(space_id) {
             prime_cache_types(&self.client, &self.cache, space_id).await?;
         }
-        match self.cache.lookup_type_by_key(space_id, text.as_ref()) {
-            Some(typ) => Ok((*typ).clone()),
-            None => NotFoundSnafu {
-                obj_type: "Type".to_string(),
-                key: text.as_ref().to_string(),
-            }
-            .fail(),
-        }
+        self.cache
+            .lookup_type_by_key(space_id, text.as_ref())
+            .map_or_else(
+                || {
+                    NotFoundSnafu {
+                        obj_type: "Type".to_string(),
+                        key: text.as_ref().to_string(),
+                    }
+                    .fail()
+                },
+                |typ| Ok((*typ).clone()),
+            )
     }
 }
 
@@ -1091,7 +1120,7 @@ mod tests {
 
     #[test]
     fn test_type_layout_default() {
-        let layout: TypeLayout = Default::default();
+        let layout = TypeLayout::default();
         assert_eq!(layout, TypeLayout::Basic);
     }
 

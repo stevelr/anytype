@@ -22,9 +22,9 @@ mod common;
 // =============================================================================
 
 mod property_formats {
+    use anytype::{prelude::*, test_util::*};
+
     use super::common::{unique_test_name /*with_test_context_unit*/};
-    use anytype::prelude::*;
-    use anytype::test_util::*;
 
     /// Test creating objects with various property formats
     #[tokio::test]
@@ -142,8 +142,9 @@ mod property_formats {
 // =============================================================================
 
 mod object_crud {
-    use super::common::unique_test_name;
     use anytype::test_util::*;
+
+    use super::common::unique_test_name;
 
     /// Test full object lifecycle: create, read, update, delete
     #[tokio::test]
@@ -306,9 +307,9 @@ mod object_crud {
 // =============================================================================
 
 mod search_and_filters {
-    use anytype::prelude::*;
-    use anytype::test_util::*;
     use std::time::Duration;
+
+    use anytype::{prelude::*, test_util::*};
 
     /// Test global search functionality
     #[tokio::test]
@@ -470,8 +471,7 @@ mod search_and_filters {
 // =============================================================================
 
 mod error_handling {
-    use anytype::prelude::*;
-    use anytype::test_util::*;
+    use anytype::{prelude::*, test_util::*};
 
     /// Test that invalid space ID returns appropriate error
     #[tokio::test]
@@ -661,10 +661,10 @@ mod error_handling {
 // =============================================================================
 
 mod custom_properties {
-    use anytype::prelude::*;
-    use anytype::test_util::*;
-    use common::unique_test_name;
     use std::collections::HashMap;
+
+    use anytype::{prelude::*, test_util::*};
+    use common::unique_test_name;
 
     use super::*;
 
@@ -790,7 +790,7 @@ mod pagination {
                 .expect("Failed to list with limit");
 
             assert!(
-                results.len() <= limit,
+                results.len() <= limit as usize,
                 "Results should respect limit: got {} for limit {}",
                 results.len(),
                 limit

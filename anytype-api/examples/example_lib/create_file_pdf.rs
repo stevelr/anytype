@@ -1,5 +1,6 @@
-use markdown2pdf::{config::ConfigSource, parse_into_file};
 use std::path::{Path, PathBuf};
+
+use markdown2pdf::{config::ConfigSource, parse_into_file};
 
 // Generate PDF file from the project README.md
 // Returns the path to the generated file

@@ -1,7 +1,8 @@
+use std::str::FromStr;
+
 use anyhow::{Result, bail};
 use anytype::prelude::*;
 use serde_json::Number;
-use std::str::FromStr;
 
 pub fn parse_filters(filters: &[String]) -> Result<Vec<Filter>> {
     filters.iter().map(|f| parse_filter(f)).collect()
@@ -156,8 +157,8 @@ fn split_list(value: &str) -> Vec<String> {
     }
     value
         .split(',')
-        .map(|item| item.trim())
+        .map(str::trim)
         .filter(|item| !item.is_empty())
-        .map(|item| item.to_string())
+        .map(ToString::to_string)
         .collect()
 }

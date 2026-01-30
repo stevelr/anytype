@@ -3,13 +3,13 @@
 //! This module provides a fluent builder API for working with property tags.
 //! Tags are used for select and multi-select properties.
 //!
-//! ## Tag methods on AnytypeClient
+//! ## Tag methods on `AnytypeClient`
 //!
-//! - [tags](AnytypeClient::tags) - list tags for a property
-//! - [tag](AnytypeClient::tag) - get a property tag
-//! - [new_tag](AnytypeClient::new_tag) - create a property tag
-//! - [update_tag](AnytypeClient::update_tag) - update property tag
-//! - [lookup_property_tag](AnytypeClient::lookup_property_tag) - find tag for property using keys or ids
+//! - [`tags`](AnytypeClient::tags) - list tags for a property
+//! - [`tag`](AnytypeClient::tag) - get a property tag
+//! - [`new_tag`](AnytypeClient::new_tag) - create a property tag
+//! - [`update_tag`](AnytypeClient::update_tag) - update property tag
+//! - [`lookup_property_tag`](AnytypeClient::lookup_property_tag) - find tag for property using keys or ids
 //!
 //! ## Quick Start
 //!
@@ -44,7 +44,7 @@ use crate::{
     Result,
     cache::AnytypeCache,
     client::AnytypeClient,
-    filters::Query,
+    filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
     properties::set_property_tags,
@@ -58,7 +58,7 @@ pub struct Tag {
     pub id: String,
     /// Display name of the tag
     pub name: String,
-    /// Key for the tag (snake_case)
+    /// Key for the tag (`snake_case`)
     pub key: String,
     /// Tag color
     pub color: Color,
@@ -166,7 +166,7 @@ impl TagRequest {
                     "/v1/spaces/{}/properties/{}/tags/{}",
                     self.space_id, self.property_id, self.tag_id
                 ),
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
         Ok(response.tag)
@@ -236,30 +236,35 @@ impl NewTagRequest {
     }
 
     /// Sets the tag name.
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
     /// Sets the tag key.
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
     }
 
     /// Sets the tag color.
+    #[must_use]
     pub fn color(mut self, color: Color) -> Self {
         self.color = color;
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -267,6 +272,7 @@ impl NewTagRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -297,7 +303,7 @@ impl NewTagRequest {
                     self.space_id, self.property_id
                 ),
                 &request,
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
         let tag = response.tag;
@@ -309,7 +315,7 @@ impl NewTagRequest {
             &self.property_id,
         )
         .await?;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Tag", &tag.id, || async {
                 let response: TagResponse = self
                     .client
@@ -318,7 +324,7 @@ impl NewTagRequest {
                             "/v1/spaces/{}/properties/{}/tags/{}",
                             self.space_id, self.property_id, tag.id
                         ),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.tag)
@@ -371,30 +377,35 @@ impl UpdateTagRequest {
     }
 
     /// Updates the tag name.
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
     /// Updates the tag key.
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
     }
 
     /// Updates the tag color.
+    #[must_use]
     pub fn color(mut self, color: Color) -> Self {
         self.color = Some(color);
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -402,6 +413,7 @@ impl UpdateTagRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -449,7 +461,7 @@ impl UpdateTagRequest {
             &self.property_id,
         )
         .await?;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Tag", &tag.id, || async {
                 let response: TagResponse = self
                     .client
@@ -458,7 +470,7 @@ impl UpdateTagRequest {
                             "/v1/spaces/{}/properties/{}/tags/{}",
                             self.space_id, self.property_id, tag.id
                         ),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.tag)
@@ -476,8 +488,8 @@ pub struct ListTagsRequest {
     limits: ValidationLimits,
     space_id: String,
     property_id: String,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
 }
 
@@ -500,18 +512,21 @@ impl ListTagsRequest {
     }
 
     /// Sets the pagination limit.
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
     /// Sets the pagination offset.
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
 
     /// Adds a filter condition.
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -523,8 +538,8 @@ impl ListTagsRequest {
         self.limits.validate_id(&self.property_id, "property_id")?;
 
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         self.client

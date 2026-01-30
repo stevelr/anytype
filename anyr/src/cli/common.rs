@@ -4,15 +4,14 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
-use anytype::prelude::*;
-use anytype::validation::looks_like_object_id;
+use anytype::{prelude::*, validation::looks_like_object_id};
 
 use crate::cli::AppContext;
 
 const DEFAULT_CHAT_NAME: &str = "General";
 
 /// resolve space name or id into space id
-pub(crate) async fn resolve_space_id(ctx: &AppContext, space_id_or_name: &str) -> Result<String> {
+pub async fn resolve_space_id(ctx: &AppContext, space_id_or_name: &str) -> Result<String> {
     if looks_like_object_id(space_id_or_name) {
         return Ok(space_id_or_name.to_string());
     }
@@ -25,13 +24,13 @@ pub(crate) async fn resolve_space_id(ctx: &AppContext, space_id_or_name: &str) -
         .collect();
 
     match matches.len() {
-        0 => Err(anyhow!("space not found: {}", space_id_or_name)),
+        0 => Err(anyhow!("space not found: {space_id_or_name}")),
         1 => Ok(matches[0].id.clone()),
-        _ => Err(anyhow!("space name is ambiguous: {}", space_id_or_name)),
+        _ => Err(anyhow!("space name is ambiguous: {space_id_or_name}")),
     }
 }
 
-pub(crate) async fn resolve_chat_target(
+pub async fn resolve_chat_target(
     ctx: &AppContext,
     space_id: Option<&str>,
     chat_id_or_name: &str,
@@ -62,12 +61,11 @@ pub(crate) async fn resolve_chat_target(
     }
 
     Err(anyhow!(
-        "chat name requires --space (or a space name/id) to resolve: {}",
-        chat_id_or_name
+        "chat name requires --space (or a space name/id) to resolve: {chat_id_or_name}"
     ))
 }
 
-pub(crate) async fn resolve_chat_ids(
+pub async fn resolve_chat_ids(
     ctx: &AppContext,
     space_id: Option<&str>,
     chats: &[String],
@@ -80,7 +78,7 @@ pub(crate) async fn resolve_chat_ids(
     Ok(resolved)
 }
 
-pub(crate) async fn resolve_chat_name(
+pub async fn resolve_chat_name(
     ctx: &AppContext,
     space_id: Option<&str>,
     chat_id: &str,
@@ -95,7 +93,7 @@ pub(crate) async fn resolve_chat_name(
         .items
         .into_iter()
         .find(|chat| chat.id == chat_id)
-        .ok_or_else(|| anyhow!("chat not found: {}", chat_id))?;
+        .ok_or_else(|| anyhow!("chat not found: {chat_id}"))?;
     Ok(chat.name.unwrap_or_else(|| chat_id.to_string()))
 }
 
@@ -119,9 +117,9 @@ async fn resolve_chat_id_in_space(
         .collect();
 
     match matches.len() {
-        0 => Err(anyhow!("chat not found: {}", chat_id_or_name)),
+        0 => Err(anyhow!("chat not found: {chat_id_or_name}")),
         1 => Ok(matches[0].id.clone()),
-        _ => Err(anyhow!("chat name is ambiguous: {}", chat_id_or_name)),
+        _ => Err(anyhow!("chat name is ambiguous: {chat_id_or_name}")),
     }
 }
 
@@ -148,16 +146,12 @@ async fn find_space_id_by_name(ctx: &AppContext, space_name: &str) -> Result<Opt
     match matches.len() {
         0 => Ok(None),
         1 => Ok(Some(matches[0].id.clone())),
-        _ => Err(anyhow!("space name is ambiguous: {}", space_name)),
+        _ => Err(anyhow!("space name is ambiguous: {space_name}")),
     }
 }
 
 /// get type by key or id
-pub(crate) async fn resolve_type(
-    ctx: &AppContext,
-    space_id: &str,
-    type_key_or_id: &str,
-) -> Result<Type> {
+pub async fn resolve_type(ctx: &AppContext, space_id: &str, type_key_or_id: &str) -> Result<Type> {
     if let Some(stripped) = type_key_or_id.strip_prefix('@') {
         return Ok(ctx.client.lookup_type_by_key(space_id, stripped).await?);
     }
@@ -170,12 +164,12 @@ pub(crate) async fn resolve_type(
     let matches = ctx.client.lookup_types(space_id, type_key_or_id).await?;
     match matches.len() {
         1 => Ok(matches[0].clone()),
-        _ => Err(anyhow!("type name is ambiguous: {}", type_key_or_id)),
+        _ => Err(anyhow!("type name is ambiguous: {type_key_or_id}")),
     }
 }
 
 /// resolve array of types (ids or keys) into array of type ids
-pub(crate) async fn resolve_type_ids(
+pub async fn resolve_type_ids(
     ctx: &AppContext,
     space_id: &str,
     types: &[String],
@@ -188,7 +182,7 @@ pub(crate) async fn resolve_type_ids(
 }
 
 /// resolve array of types (ids or keys) into array of type ids
-pub(crate) async fn resolve_type_id(
+pub async fn resolve_type_id(
     ctx: &AppContext,
     space_id: &str,
     key_or_id: impl Into<String>,
@@ -207,12 +201,12 @@ pub(crate) async fn resolve_type_id(
     let matches = ctx.client.lookup_types(space_id, &key_or_id).await?;
     match matches.len() {
         1 => Ok(matches[0].id.clone()),
-        _ => Err(anyhow!("type name is ambiguous: {}", key_or_id)),
+        _ => Err(anyhow!("type name is ambiguous: {key_or_id}")),
     }
 }
 
 /// resolve type name, key, or id into type key
-pub(crate) async fn resolve_type_key(
+pub async fn resolve_type_key(
     ctx: &AppContext,
     space_id: &str,
     key_or_name: impl Into<String>,
@@ -231,7 +225,7 @@ pub(crate) async fn resolve_type_key(
     let matches = ctx.client.lookup_types(space_id, &key_or_name).await?;
     match matches.len() {
         1 => Ok(matches[0].key.clone()),
-        _ => Err(anyhow!("type name is ambiguous: {}", key_or_name)),
+        _ => Err(anyhow!("type name is ambiguous: {key_or_name}")),
     }
 }
 
@@ -243,9 +237,9 @@ async fn resolve_type_by_name(ctx: &AppContext, space_id: &str, name: &str) -> R
         .filter(|typ| typ.name.as_deref().unwrap_or("").to_lowercase() == needle)
         .collect();
     match filtered.len() {
-        0 => Err(anyhow!("type not found: {}", name)),
+        0 => Err(anyhow!("type not found: {name}")),
         1 => Ok(filtered[0].clone()),
-        _ => Err(anyhow!("type name is ambiguous: {}", name)),
+        _ => Err(anyhow!("type name is ambiguous: {name}")),
     }
 }
 
@@ -256,11 +250,11 @@ fn starts_with_uppercase(value: &str) -> bool {
         .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
-pub(crate) struct MemberCache {
+pub struct MemberCache {
     identities: HashMap<String, String>,
 }
 
-pub(crate) async fn load_member_cache(ctx: &AppContext, space_id: &str) -> Result<MemberCache> {
+pub async fn load_member_cache(ctx: &AppContext, space_id: &str) -> Result<MemberCache> {
     let members = ctx
         .client
         .members(space_id)
@@ -273,11 +267,7 @@ pub(crate) async fn load_member_cache(ctx: &AppContext, space_id: &str) -> Resul
     })
 }
 
-pub(crate) fn resolve_member_name(
-    space_id: &str,
-    member_cache: &MemberCache,
-    value: &str,
-) -> String {
+pub fn resolve_member_name(space_id: &str, member_cache: &MemberCache, value: &str) -> String {
     if let Some(name) = member_cache.identities.get(value) {
         return name.clone();
     }
@@ -314,7 +304,7 @@ fn parse_member_identity<'a>(space_id: &str, value: &'a str) -> Option<&'a str> 
 }
 
 /// resolve view name or id into view id for a list/type
-pub(crate) async fn resolve_view_id(
+pub async fn resolve_view_id(
     ctx: &AppContext,
     space_id: &str,
     list_id: &str,
@@ -341,7 +331,7 @@ pub(crate) async fn resolve_view_id(
         return Ok(exact[0].id.clone());
     }
     if exact.len() > 1 {
-        return Err(anyhow!("view name is ambiguous: {}", view_id_or_name));
+        return Err(anyhow!("view name is ambiguous: {view_id_or_name}"));
     }
 
     let needle = view_id_or_name.to_lowercase();
@@ -351,13 +341,13 @@ pub(crate) async fn resolve_view_id(
         .collect();
     match matches.len() {
         1 => Ok(matches[0].id.clone()),
-        0 => Err(anyhow!("view not found: {}", view_id_or_name)),
-        _ => Err(anyhow!("view name is ambiguous: {}", view_id_or_name)),
+        0 => Err(anyhow!("view not found: {view_id_or_name}")),
+        _ => Err(anyhow!("view name is ambiguous: {view_id_or_name}")),
     }
 }
 
 /// turn property key or id into id
-pub(crate) async fn resolve_property_id(
+pub async fn resolve_property_id(
     ctx: &AppContext,
     space_id: &str,
     key_or_id: impl Into<String>,

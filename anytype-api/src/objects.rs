@@ -2,12 +2,12 @@
 //!
 //! This module provides a fluent builder API for working with Anytype objects.
 //!
-//! ## Object methods on AnytypeClient
+//! ## Object methods on `AnytypeClient`
 //!
-//! - [objects](AnytypeClient::objects) - list objects in the space
-//! - [object](AnytypeClient::object) - get or delete object
-//! - [new_object](AnytypeClient::new_object) - create a new object
-//! - [update_object](AnytypeClient::object) - update object properties
+//! - [`objects`](AnytypeClient::objects) - list objects in the space
+//! - [`object`](AnytypeClient::object) - get or delete object
+//! - [`new_object`](AnytypeClient::new_object) - create a new object
+//! - [`update_object`](AnytypeClient::object) - update object properties
 //!
 //! ## Quick Start
 //!
@@ -58,20 +58,19 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "grpc")]
+use anytype_rpc::{anytype::rpc::object::share_by_link, auth::with_token};
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use snafu::prelude::*;
-
-#[cfg(feature = "grpc")]
-use anytype_rpc::{anytype::rpc::object::share_by_link, auth::with_token};
 #[cfg(feature = "grpc")]
 use tonic::Request;
 
 use crate::{
     Result,
     client::AnytypeClient,
-    filters::Query,
+    filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
@@ -175,7 +174,7 @@ pub enum Color {
 }
 
 /// Icon type
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "format", rename_all = "lowercase")]
 pub enum Icon {
     /// icon emoji
@@ -183,6 +182,7 @@ pub enum Icon {
         emoji: String,
     },
 
+    /// Icon file path (must be utf8 string)
     File {
         file: String,
     },
@@ -196,7 +196,7 @@ pub enum Icon {
 impl Icon {
     /// Returns icon emoji
     pub fn as_emoji(&self) -> Option<&str> {
-        if let Icon::Emoji { emoji } = self {
+        if let Self::Emoji { emoji } = self {
             Some(emoji.as_str())
         } else {
             None
@@ -205,7 +205,7 @@ impl Icon {
 
     /// Returns icon file path
     pub fn as_file(&self) -> Option<&str> {
-        if let Icon::File { file } = self {
+        if let Self::File { file } = self {
             Some(file.as_str())
         } else {
             None
@@ -214,7 +214,7 @@ impl Icon {
 
     /// Returns (Name, Color) if icon is type Icon.
     pub fn as_icon(&self) -> Option<(&str, Color)> {
-        if let Icon::Icon { name, color } = self {
+        if let Self::Icon { name, color } = self {
             Some((name.as_str(), color.clone()))
         } else {
             None
@@ -226,7 +226,7 @@ impl Icon {
 /// properties, and optional markdown body content.
 ///
 /// This structure represents Objects returned from various api functions.
-/// Objects are created with [AnytypeClient::new_object()].
+/// Objects are created with `AnytypeClient::new_object()`.
 ///
 /// ## Markdown (Object body)
 ///
@@ -238,10 +238,10 @@ impl Icon {
 ///    
 /// - When a function returns a list of objects, the `Object`s do not
 ///   include the body (`markdown` is `None`):
-///   - object list(), search_global.execute(), search_in.execute().
+///   - `object list()`, `search_global.execute()`, `search_in.execute()`.
 ///
 /// If you get a list of objects and need markdown, you'll need to
-/// make an extra call per object_id:
+/// make an extra call per `object_id`:
 ///    `client::object(space_id,object_id).get().await`
 //
 // Implementation note:
@@ -322,9 +322,9 @@ impl Object {
 
     /// Returns a numeric property value as a JSON Number.
     /// See also
-    ///  - [get_property_u64](Object::get_property_u64)
-    ///  - [get_property_i64](Object::get_property_i64)
-    ///  - [get_property_f64](Object::get_property_f64)
+    ///  - [`get_property_u64`](Object::get_property_u64)
+    ///  - [`get_property_i64`](Object::get_property_i64)
+    ///  - [`get_property_f64`](Object::get_property_f64)
     ///
     /// # Arguments
     /// * `key` - The property key
@@ -336,7 +336,7 @@ impl Object {
             .and_then(|prop| prop.value.as_number())
     }
 
-    /// Returns the property as a chrono::DateTime, in the stored time zone.
+    /// Returns the property as a `chrono::DateTime`, in the stored time zone.
     /// If the property is not defined, or is not a Date, returns None.
     pub fn get_property_date(&self, key: &str) -> Option<DateTime<FixedOffset>> {
         self.get_property(key).and_then(|prop| prop.value.as_date())
@@ -350,7 +350,7 @@ impl Object {
     /// # Returns
     /// The f64 value, or None if property was not found or cannot be converted
     pub fn get_property_f64(&self, key: &str) -> Option<f64> {
-        self.get_property_number(key).and_then(|num| num.as_f64())
+        self.get_property_number(key).and_then(Number::as_f64)
     }
 
     /// Returns a numeric property value as u64.
@@ -361,7 +361,7 @@ impl Object {
     /// # Returns
     /// The u64 value, or None if property was not found or cannot be converted
     pub fn get_property_u64(&self, key: &str) -> Option<u64> {
-        self.get_property_number(key).and_then(|num| num.as_u64())
+        self.get_property_number(key).and_then(Number::as_u64)
     }
 
     /// Returns a numeric property value as u64.
@@ -372,7 +372,7 @@ impl Object {
     /// # Returns
     /// The i64 value, or None if property was not found or cannot be converted
     pub fn get_property_i64(&self, key: &str) -> Option<i64> {
-        self.get_property_number(key).and_then(|num| num.as_i64())
+        self.get_property_number(key).and_then(Number::as_i64)
     }
 
     /// Returns a checkbox (boolean) property value.
@@ -386,7 +386,7 @@ impl Object {
         self.get_property(key).and_then(|prop| prop.value.as_bool())
     }
 
-    /// Returns an array property value (multi_select, files, objects).
+    /// Returns an array property value (`multi_select`, files, objects).
     ///
     /// # Arguments
     /// * `key` - The property key
@@ -426,7 +426,7 @@ impl Object {
     /// * `key` - The property key
     ///
     /// # Returns
-    /// The select values, or None if property not found or not MultiSelect type
+    /// The select values, or None if property not found or not `MultiSelect` type
     pub fn get_property_multi_select(&self, key: &str) -> Option<&[Tag]> {
         self.get_property(key).and_then(|prop| prop.value.as_tags())
     }
@@ -541,7 +541,7 @@ pub struct ObjectRequest {
 }
 
 impl ObjectRequest {
-    /// Creates a new ObjectRequest.
+    /// Creates a new `ObjectRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -572,7 +572,7 @@ impl ObjectRequest {
             .client
             .get_request(
                 &format!("/v1/spaces/{}/objects/{}", self.space_id, self.object_id),
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
         Ok(response.object)
@@ -641,7 +641,7 @@ pub struct NewObjectRequest {
 }
 
 impl NewObjectRequest {
-    /// Creates a new NewObjectRequest.
+    /// Creates a new `NewObjectRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -664,7 +664,7 @@ impl NewObjectRequest {
         }
     }
 
-    /// Returns the type_key for this request
+    /// Returns the `type_key` for this request
     pub fn get_type_key(&self) -> &str {
         &self.type_key
     }
@@ -674,6 +674,7 @@ impl NewObjectRequest {
     ///
     /// # Arguments
     /// * `name` - Display name for the object
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -683,6 +684,7 @@ impl NewObjectRequest {
     ///
     /// # Arguments
     /// * `body` - Markdown content for the object body
+    #[must_use]
     pub fn body(mut self, body: impl Into<String>) -> Self {
         self.body = Some(body.into());
         self
@@ -692,6 +694,7 @@ impl NewObjectRequest {
     ///
     /// # Arguments
     /// * `icon` - Icon for the object (emoji, file, or colored icon)
+    #[must_use]
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
         self
@@ -701,18 +704,21 @@ impl NewObjectRequest {
     ///
     /// # Arguments
     /// * `template_id` - ID of the template to apply
+    #[must_use]
     pub fn template(mut self, template_id: impl Into<String>) -> Self {
         self.template_id = Some(template_id.into());
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -720,6 +726,7 @@ impl NewObjectRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -731,6 +738,7 @@ impl NewObjectRequest {
     ///
     /// # Arguments
     /// * `description` - Description text
+    #[must_use]
     pub fn description(self, description: impl Into<String>) -> Self {
         self.set_text("description", description)
     }
@@ -739,6 +747,7 @@ impl NewObjectRequest {
     ///
     /// # Arguments
     /// * `url` - URL for the bookmark
+    #[must_use]
     pub fn url(self, url: impl Into<String>) -> Self {
         self.set_url("url", url)
     }
@@ -774,18 +783,18 @@ impl NewObjectRequest {
             .post_request(
                 &format!("/v1/spaces/{}/objects", self.space_id),
                 &request_body,
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
 
         let object = response.object;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Object", &object.id, || async {
                 let response: ObjectResponse = self
                     .client
                     .get_request(
                         &format!("/v1/spaces/{}/objects/{}", self.space_id, object.id),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.object)
@@ -847,7 +856,7 @@ pub struct UpdateObjectRequest {
 }
 
 impl UpdateObjectRequest {
-    /// Creates a new UpdateObjectRequest.
+    /// Creates a new `UpdateObjectRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -870,15 +879,16 @@ impl UpdateObjectRequest {
         }
     }
 
-    /// Returns the update type_key for this request, if defined
+    /// Returns the update `type_key` for this request, if defined
     pub fn get_type_key(&self) -> Option<String> {
-        self.type_key.to_owned()
+        self.type_key.clone()
     }
 
     /// Updates the object name.
     ///
     /// # Arguments
     /// * `name` - New display name for the object
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -888,6 +898,7 @@ impl UpdateObjectRequest {
     ///
     /// # Arguments
     /// * `body` - New markdown content for the object body
+    #[must_use]
     pub fn body(mut self, body: impl Into<String>) -> Self {
         self.body = Some(body.into());
         self
@@ -897,6 +908,7 @@ impl UpdateObjectRequest {
     ///
     /// # Arguments
     /// * `icon` - New icon for the object
+    #[must_use]
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
         self
@@ -906,18 +918,21 @@ impl UpdateObjectRequest {
     ///
     /// # Arguments
     /// * `type_key` - Key of the new type (e.g., "page", "task")
+    #[must_use]
     pub fn type_key(mut self, type_key: impl Into<String>) -> Self {
         self.type_key = Some(type_key.into());
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -925,6 +940,7 @@ impl UpdateObjectRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -979,13 +995,13 @@ impl UpdateObjectRequest {
             .await?;
 
         let object = response.object;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Object", &object.id, || async {
                 let response: ObjectResponse = self
                     .client
                     .get_request(
                         &format!("/v1/spaces/{}/objects/{}", self.space_id, object.id),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.object)
@@ -1029,13 +1045,13 @@ pub struct ListObjectsRequest {
     client: Arc<HttpClient>,
     limits: ValidationLimits,
     space_id: String,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
 }
 
 impl ListObjectsRequest {
-    /// Creates a new ListObjectsRequest.
+    /// Creates a new `ListObjectsRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -1057,7 +1073,8 @@ impl ListObjectsRequest {
     ///
     /// # Arguments
     /// * `limit` - Number of items to return per page
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
@@ -1066,7 +1083,8 @@ impl ListObjectsRequest {
     ///
     /// # Arguments
     /// * `offset` - Number of items to skip
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -1090,6 +1108,7 @@ impl ListObjectsRequest {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -1099,6 +1118,7 @@ impl ListObjectsRequest {
     ///
     /// # Arguments
     /// * `filters` - Iterator of filters to add
+    #[must_use]
     pub fn filters(mut self, filters: impl IntoIterator<Item = Filter>) -> Self {
         self.filters.extend(filters);
         self
@@ -1113,13 +1133,13 @@ impl ListObjectsRequest {
     /// To exclude, filter returned values with `.filter(|obj| !obj.archived)`
     ///
     /// # Errors
-    /// - [`AnytypeError::Validation`] if space_id is invalid
+    /// - [`AnytypeError::Validation`] if `space_id` is invalid
     pub async fn list(self) -> Result<PagedResult<Object>> {
         self.limits.validate_id(&self.space_id, "space_id")?;
 
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         self.client
@@ -1294,6 +1314,7 @@ fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>>
 }
 
 #[cfg(feature = "grpc")]
+#[allow(clippy::needless_pass_by_value)]
 fn grpc_status(status: tonic::Status) -> AnytypeError {
     AnytypeError::Other {
         message: format!("gRPC request failed: {status}"),
@@ -1310,7 +1331,7 @@ mod tests {
 
     #[test]
     fn test_object_layout_default() {
-        let layout: ObjectLayout = Default::default();
+        let layout: ObjectLayout = ObjectLayout::default();
         assert_eq!(layout, ObjectLayout::Basic);
     }
 

@@ -113,7 +113,7 @@
 //! ### Notes on API Design
 //!
 //! - Similar structs are combined to keep the API surface small and consistent.
-//!   Example: Object and ObjectWithBody are unified as `Object { markdown: Option<String>, ... }`.
+//!   Example: Object and `ObjectWithBody` are unified as `Object { markdown: Option<String>, ... }`.
 //! - All methods use a consistent builder flow:
 //!   `things(..)`, `thing(..)`, `new_thing(..)`, `update_thing(..)` + optional setters +
 //!   terminal verbs like `list()`, `get()`, `create()`, `update()`, or `delete()`.
@@ -133,6 +133,27 @@
 //!   - View-related APIs use `view_*` to disambiguate list/collection/query objects
 //!     (`list_views`, `view_list_objects`, `view_add_objects`, `view_remove_object`).
 //!
+//#![warn(clippy::pedantic)] // experimental
+//#![warn(clippy::nursery)] // experimental
+#![allow(clippy::missing_errors_doc)] // pedantic
+#![allow(clippy::missing_const_for_fn)] //  nursery function
+#![allow(clippy::must_use_candidate)] // pedantic
+#![warn(clippy::default_trait_access)]
+#![warn(clippy::doc_markdown)]
+#![warn(clippy::explicit_iter_loop)]
+#![warn(clippy::future_not_send)]
+#![warn(clippy::implicit_clone)]
+#![warn(clippy::literal_string_with_formatting_args)]
+#![warn(clippy::match_same_arms)]
+#![warn(clippy::min_ident_chars)]
+#![warn(clippy::needless_raw_strings)]
+#![warn(clippy::option_if_let_else)]
+#![warn(clippy::redundant_clone)]
+#![warn(clippy::ref_option)]
+#![warn(clippy::redundant_closure)]
+#![warn(clippy::uninlined_format_args)]
+#![warn(clippy::unnecessary_wraps)]
+#![warn(clippy::unused_async)]
 
 pub mod auth;
 pub mod cache;
@@ -165,16 +186,14 @@ pub mod views;
 
 pub mod test_util;
 
-/// Result type alias using AnytypeError as the default error.
+/// Result type alias using `AnytypeError` as the default error.
 pub type Result<T, E = crate::error::AnytypeError> = std::result::Result<T, E>;
 
 /// Prelude module - import (nearly) all the things with `use anytype::prelude::*;`
 pub mod prelude {
     pub use super::{ANYTYPE_API_VERSION, ANYTYPE_DESKTOP_URL, ANYTYPE_HEADLESS_URL};
-
     // Error types
     pub use crate::error::*;
-
     pub use crate::{
         // HTTP metrics
         cache::AnytypeCache,
@@ -206,7 +225,6 @@ pub mod prelude {
         // Views (Lists, Collections, Queries)
         views::{View, ViewLayout},
     };
-
     #[cfg(feature = "grpc")]
     pub use crate::{
         chat_stream::{
@@ -240,53 +258,53 @@ pub const ANYTYPE_HEADLESS_URL: &str = "http://127.0.0.1:31012";
 
 pub(crate) mod config {
     /// Environment variable for default endpoint URL
-    pub(crate) const ANYTYPE_URL_ENV: &str = "ANYTYPE_URL";
+    pub const ANYTYPE_URL_ENV: &str = "ANYTYPE_URL";
 
     /// API version header
-    pub(crate) const ANYTYPE_API_HEADER: &str = "Anytype-Version";
+    pub const ANYTYPE_API_HEADER: &str = "Anytype-Version";
 
     /// Service name for keystore
-    pub(crate) const DEFAULT_SERVICE_NAME: &str = "anytype_rust";
+    pub const DEFAULT_SERVICE_NAME: &str = "anytype_rust";
 
     /// Warn when the rate-limit wait exceeds this duration (seconds).
-    pub(crate) const RATE_LIMIT_WAIT_WARN_SECS: u64 = 5;
+    pub const RATE_LIMIT_WAIT_WARN_SECS: u64 = 5;
 
     /// Fail when the rate-limit wait exceeds this duration (seconds).
-    pub(crate) const RATE_LIMIT_WAIT_MAX_SECS: u64 = 30;
+    pub const RATE_LIMIT_WAIT_MAX_SECS: u64 = 30;
 
     /// Environment variable to override rate-limit retry cap (0 disables the cap).
-    pub(crate) const RATE_LIMIT_MAX_RETRIES_ENV: &str = "ANYTYPE_RATE_LIMIT_MAX_RETRIES";
+    pub const RATE_LIMIT_MAX_RETRIES_ENV: &str = "ANYTYPE_RATE_LIMIT_MAX_RETRIES";
 
     /// Maximum consecutive 429 retries before failing.
-    pub(crate) const RATE_LIMIT_MAX_RETRIES_DEFAULT: u32 = 5;
+    pub const RATE_LIMIT_MAX_RETRIES_DEFAULT: u32 = 5;
 
     /// Maximum pagination limit (API spec: 1000)
-    pub(crate) const MAX_PAGINATION_LIMIT: usize = 1000;
+    pub const MAX_PAGINATION_LIMIT: u32 = 1000;
 
     /// Default pagination limit (API spec: 100)
-    pub(crate) const DEFAULT_PAGINATION_LIMIT: usize = 100;
+    pub const DEFAULT_PAGINATION_LIMIT: u32 = 100;
 
     /// Max retries for HTTP client
-    pub(crate) const MAX_RETRIES: u32 = 3;
+    pub const MAX_RETRIES: u32 = 3;
 
     // Validation limits
-    pub(crate) const VALIDATION_MARKDOWN_MAX_LEN: u64 = 10 * 1024 * 1024;
-    pub(crate) const VALIDATION_NAME_MAX_LEN: u64 = 4096;
-    pub(crate) const VALIDATION_TAG_MAX_COUNT: u64 = 4096;
-    pub(crate) const VALIDATION_TAG_MAX_LEN: u64 = 1024;
-    pub(crate) const VALIDATION_OID_MIN_LEN: u64 = 20;
-    pub(crate) const VALIDATION_OID_MAX_LEN: u64 = 200;
-    pub(crate) const VALIDATION_MAX_QUERY_LEN: u64 = 4000;
+    pub const VALIDATION_MARKDOWN_MAX_LEN: u64 = 10 * 1024 * 1024;
+    pub const VALIDATION_NAME_MAX_LEN: u32 = 4096;
+    pub const VALIDATION_TAG_MAX_COUNT: u32 = 4096;
+    pub const VALIDATION_TAG_MAX_LEN: u32 = 1024;
+    pub const VALIDATION_OID_MIN_LEN: u32 = 20;
+    pub const VALIDATION_OID_MAX_LEN: u32 = 200;
+    pub const VALIDATION_MAX_QUERY_LEN: u32 = 4000;
 
     #[doc(hidden)]
-    pub(crate) const ANYTYPE_TEST_URL_ENV: &str = "ANYTYPE_TEST_URL";
+    pub const ANYTYPE_TEST_URL_ENV: &str = "ANYTYPE_TEST_URL";
 
     #[doc(hidden)]
-    pub(crate) const ANYTYPE_TEST_URL: &str = super::ANYTYPE_HEADLESS_URL;
+    pub const ANYTYPE_TEST_URL: &str = super::ANYTYPE_HEADLESS_URL;
 
     #[doc(hidden)]
     #[allow(dead_code)]
-    pub(crate) const ANYTYPE_TEST_KEY_SERVICE: &str = "anytype_test";
+    pub const ANYTYPE_TEST_KEY_SERVICE: &str = "anytype_test";
 }
 
 // =============================================================================

@@ -1,0 +1,23 @@
+{
+	"version": "0.2",
+	"language": "en",
+	"dictionaries": ["rust"],
+	"ignorePaths": ["src/gen", "Cargo.lock", "tools/gen-protos/target", "target"],
+	"ignoreRegExpList": [],
+	"words": [
+		"anyproto",
+		"anyr",
+		"anytype",
+		"dataview",
+		"esac",
+		"impls",
+		"justfile",
+		"lhash",
+		"localstore",
+		"mktemp",
+		"pipefail",
+		"prost",
+		"Schoettler",
+		"stevelr"
+	]
+}

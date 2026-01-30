@@ -1,21 +1,22 @@
-use crate::cli::AppContext;
-use crate::output::OutputFormat;
+use std::io::{self, Write};
+
 use anyhow::Result;
 use anytype::prelude::*;
 use serde_json::json;
-use std::io::{self, Write};
+
+use crate::{cli::AppContext, output::OutputFormat};
 
 pub async fn handle(ctx: &AppContext, args: super::AuthArgs) -> Result<()> {
     match args.command {
         super::AuthCommands::Login { force } => login(ctx, force).await,
-        super::AuthCommands::Logout => logout(ctx).await,
+        super::AuthCommands::Logout => logout(ctx),
         super::AuthCommands::Status => status(ctx).await,
-        super::AuthCommands::SetHttp => set_http(ctx).await,
+        super::AuthCommands::SetHttp => set_http(ctx),
         super::AuthCommands::SetGrpc {
             config,
             account_key,
             token,
-        } => set_grpc(ctx, config, account_key, token).await,
+        } => set_grpc(ctx, config, account_key, token),
     }
 }
 
@@ -48,7 +49,7 @@ async fn login(ctx: &AppContext, force: bool) -> Result<()> {
     ctx.output.emit_json(&response)
 }
 
-async fn logout(ctx: &AppContext) -> Result<()> {
+fn logout(ctx: &AppContext) -> Result<()> {
     ctx.client.logout()?;
 
     if ctx.output.format() == OutputFormat::Quiet {
@@ -86,7 +87,7 @@ async fn status(ctx: &AppContext) -> Result<()> {
     }))
 }
 
-async fn set_http(ctx: &AppContext) -> Result<()> {
+fn set_http(ctx: &AppContext) -> Result<()> {
     print!("Enter HTTP API token: ");
     io::stdout().flush()?;
     let mut token = String::new();
@@ -115,7 +116,7 @@ struct HeadlessConfig {
     session_token: Option<String>,
 }
 
-async fn set_grpc(
+fn set_grpc(
     ctx: &AppContext,
     config: Option<std::path::PathBuf>,
     account_key: bool,

@@ -1,23 +1,52 @@
 # Anytype gRPC client
 
-The gRPC api is subject to change and isn't officially supported for third party clients.
+The gRPC api isn't officially supported (by Anytype) for third party clients. However, it's used heavily by Anytype applications, including the desktop app and headless cli, and it's the only way for applications to access certain functionality that is not available over the HTTP api, such as Files, Chats, Blocks, and Relations.
 
-This crate is experimental. If you need to use gRPC because some functionality isn't available in the
-[anytype](https://crates.io/crates/anytype) REST api, this crate may help.
+## Status and plan
 
-A very limited cli can list spaces and import and export objects.
+- This crate is a dependency of [anytype](https://crates.io/crates/anytype), which requires that this crate is maintained and kept up to date.
 
-## Recommended
+- We will try to follow semver versioning policy, but if you plan to use this crate directly for a production release, we recommend you pin the version of this crate in Cargo.toml and check for updates periodically with `cargo outdated`.
 
-- [anytype](https://crates.io/crates/anytype) a supported Anytype client that uses Anytype's official REST API.
+- This crate includes some limited cli examples to list spaces and import and export objects.
 
-- [anyr](https://crates.io/crates/anyr) a CLI tool for listing, searching, and performing CRUD operations on anytype objects.
+## Compatibility
+
+| anytype-rpc version       | anytype-heart version |
+| ------------------------- | --------------------- |
+| 0.3.0-beta.1 (unreleased) | 0.48.0-rc.2           |
+| 0.2.1                     | 0.44                  |
+
+## Related projects
+
+- [anytype](https://crates.io/crates/anytype) An ergonomic Anytype API client in Rust. Includes http rest api plus gRPC backend using this crate, for access to Files and Chats.
+
+- [anyr](https://crates.io/crates/anyr) a CLI tool for listing, searching, and performing CRUD operations on anytype objects. via `anytype`, also includes operations on Files and Chats.
 
 ## Building
 
-Ensure you have 'protoc' from the protobuf package in your path. On macos, 'brew install protobuf'
+For normal builds, you need a rust toolchain. `protoc` is not required, as the crate ships with generated Rust sources in `src/gen`.
 
-Uses [tonic-prost-build](https://crates.io/crates/tonic-prost-build)
+```
+cargo build
+```
+
+To regenerate `src/gen` from anytype-heart's protobuf files, you need
+
+- `protoc` (from the protobuf package)
+- `just` (to run the justfile recipe)
+- `curl`, `tar` and `bash`
+
+```
+just gen-protos
+```
+
+By default, this uses the `develop` branch. You can also pull from a specific git branch, tag, or commit:
+
+```
+just gen-protos ref=develop
+just gen-protos ref=abcdef123
+```
 
 ## License
 

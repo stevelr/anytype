@@ -15,7 +15,7 @@ async fn test_collect_all_matches_total() -> TestResult<()> {
         let first_page = ctx.client.types(&ctx.space_id).limit(limit).list().await?;
         let total = first_page.pagination.total;
 
-        if total <= limit {
+        if total <= limit as usize {
             println!("Skipping collect_all test: total={} limit={}", total, limit);
             return Ok(());
         }

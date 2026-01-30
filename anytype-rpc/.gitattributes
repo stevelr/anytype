@@ -1,0 +1,2 @@
+# Mark generated Rust sources so they are folded/ignored in GitHub linguist stats.
+src/gen/* linguist-generated

@@ -3,9 +3,8 @@
 use anyhow::{Context, Result};
 
 mod example_lib;
-use example_lib::{create_file_image::create_png, create_file_pdf::create_pdf};
-
 use anytype::prelude::*;
+use example_lib::{create_file_image::create_png, create_file_pdf::create_pdf};
 
 const NUM_FILES: usize = 2;
 

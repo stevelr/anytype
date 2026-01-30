@@ -1,7 +1,7 @@
 //! Agenda - example app:
 //!
 //! - list top 10 tasks sorted by priority
-//!    (requires that your Task object has a priority field)
+//!   (requires that your Task object has a priority field)
 //! - list 10 most recent documents containing the text "meeting notes"
 //! - send the lists in a rich-text chat message with colors and hyperlinks
 //!
@@ -53,9 +53,9 @@ async fn main() -> Result<(), AnytypeError> {
     for task in tasks.iter().take(10) {
         let priority = task.get_property_u64("priority").unwrap_or_default();
         let name = task.name.as_deref().unwrap_or("(unnamed)");
-        message = message.text(&format!("{priority} "));
+        message = message.text(format!("{priority} "));
         message = status_color(message, task);
-        message = message.text(&format!(" {name}\n"));
+        message = message.text(format!(" {name}\n"));
     }
 
     message = message.bold("\nand recent notes:\n");
@@ -66,7 +66,7 @@ async fn main() -> Result<(), AnytypeError> {
             .format("%Y-%m-%d %H:%M");
         let name = doc.name.as_deref().unwrap_or("(unnamed)");
         message = message
-            .text(&format!("{date} "))
+            .text(format!("{date} "))
             .link(name, doc.get_link())
             .nl();
     }
@@ -87,7 +87,7 @@ async fn main() -> Result<(), AnytypeError> {
 /// If status is undefined, shows "New" in yellow.
 fn status_color(message: MessageContent, obj: &Object) -> MessageContent {
     match obj.get_property_select("status") {
-        Some(tag) => message.text_color(&tag.name, tag.color.clone()),
-        None => message.text_color("New", Color::Yellow),
+        Some(tag) => message.text_color(&tag.name, &tag.color),
+        None => message.text_color("New", &Color::Yellow),
     }
 }
