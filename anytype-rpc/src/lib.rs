@@ -7,29 +7,39 @@
  */
 //! Anytype gRPC client
 //!
-//! The gRPC api is subject to change and isn't officially supported for third party clients.
-//!
-//! This crate is experimental. If you need to use gRPC because some functionality isn't available in the
-//! [anytype](https://crates.io/crates/anytype) REST api, this crate may help.
-//!
-//! A very limited cli can list spaces and import and export objects.
+//! The gRPC api isn't officially supported (by Anytype) for third party clients. However, it's used heavily
+//! by the Anytype applications, including the desktop app and headless cli, and it's the only way
+//! for applications to access certain functionality that is not available over the HTTP api,
+//! such as Files, Chats, Blocks, and Relations.
 //!
 //! # See also
-//! - [anytype](https://crates.io/crates/anytype) a supported Anytype client that uses Anytype's official REST API.
-//! - [anyr](https://crates.io/crates/anyr) a CLI tool for listing, searching, and performing CRUD operations on anytype objects.
+//!
+//! - [anytype](https://crates.io/crates/anytype) An ergonomic Anytype API client in Rust.
+//!   Includes http rest api plus gRPC backend using this crate, for access to Files and Chats.
+//!
+//! - [anyr](https://crates.io/crates/anyr) a CLI tool for listing, searching, and performing
+//!   CRUD operations on anytype objects. Via `anytype`, also includes operations on Files and Chats.
 //!
 //!
 // some protoc files after parsing have comment formatting that clippy doesn't like
-#![allow(clippy::doc_lazy_continuation)]
+//   #![allow(clippy::doc_lazy_continuation)]
 
 /// Model types from anytype.model proto package
+#[allow(clippy::style)]
 pub mod model {
-    tonic::include_proto!("anytype.model");
+    include!("gen/anytype.model.rs");
+}
+
+/// Storage types from anytype.storage proto package
+#[allow(clippy::style)]
+pub mod storage {
+    include!("gen/anytype.storage.rs");
 }
 
 /// Anytype service, events, and RPC types
+#[allow(clippy::style)]
 pub mod anytype {
-    tonic::include_proto!("anytype");
+    include!("gen/anytype.rs");
 
     pub use client_commands_client::ClientCommandsClient;
 }

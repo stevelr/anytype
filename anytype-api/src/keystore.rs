@@ -4,13 +4,15 @@
 //! - **Keyring**: OS-native secure credential stores (Keychain/Secret Service/Credential Manager)
 //! - **File**: File-based storage in user config directory (less secure, for compatibility)
 
-use crate::error::*;
-use keyring_core::CredentialStore;
 #[cfg(feature = "grpc")]
-use std::path::PathBuf;
+use std::path::Path;
 use std::{collections::HashMap, fmt, sync::Arc};
+
+use keyring_core::CredentialStore;
 use tracing::{debug, error};
 use zeroize::Zeroize;
+
+use crate::error::KeyStoreError;
 
 const KEY_HTTP_TOKEN: &str = "http_token";
 const KEY_ACCOUNT_ID: &str = "account_id";
@@ -31,9 +33,9 @@ pub enum KeyStoreType {
 impl fmt::Display for KeyStoreType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            KeyStoreType::File => "file",
-            KeyStoreType::Keyring => "keyring",
-            KeyStoreType::None => "none",
+            Self::File => "file",
+            Self::Keyring => "keyring",
+            Self::None => "none",
         })
     }
 }
@@ -43,9 +45,9 @@ impl fmt::Debug for KeyStoreType {
         f.write_fmt(format_args!(
             "KeyStoreType({})",
             match self {
-                KeyStoreType::File => "File",
-                KeyStoreType::Keyring => "Keyring",
-                KeyStoreType::None => "None",
+                Self::File => "File",
+                Self::Keyring => "Keyring",
+                Self::None => "None",
             }
         ))
     }
@@ -86,7 +88,7 @@ impl GrpcCredentials {
     }
 }
 
-fn fmt_masked(val: &Option<String>) -> String {
+fn fmt_masked(val: Option<&String>) -> String {
     match val {
         Some(_) => "Some(MASKED)",
         None => "None",
@@ -99,8 +101,8 @@ impl fmt::Debug for GrpcCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrpcCredentials")
             .field(KEY_ACCOUNT_ID, &self.account_id)
-            .field(KEY_ACCOUNT_KEY, &fmt_masked(&self.account_key))
-            .field(KEY_SESSION_TOKEN, &fmt_masked(&self.session_token))
+            .field(KEY_ACCOUNT_KEY, &fmt_masked(self.account_key.as_ref()))
+            .field(KEY_SESSION_TOKEN, &fmt_masked(self.session_token.as_ref()))
             .finish()
     }
 }
@@ -113,7 +115,7 @@ pub struct HttpCredentials {
 impl fmt::Debug for HttpCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpCredentials")
-            .field("token", &fmt_masked(&self.token))
+            .field("token", &fmt_masked(self.token.as_ref()))
             .finish()
     }
 }
@@ -126,10 +128,7 @@ impl HttpCredentials {
     }
 
     pub fn has_creds(&self) -> bool {
-        self.token
-            .as_ref()
-            .map(|token| !token.is_empty())
-            .unwrap_or(false)
+        self.token.as_ref().is_some_and(|token| !token.is_empty())
     }
 
     pub(crate) fn token(&self) -> Option<&str> {
@@ -153,16 +152,19 @@ impl GrpcCredentials {
         }
     }
 
+    #[must_use]
     pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
         self.account_id = Some(account_id.into());
         self
     }
 
+    #[must_use]
     pub fn with_account_key(mut self, account_key: impl Into<String>) -> Self {
         self.account_key = Some(account_key.into());
         self
     }
 
+    #[must_use]
     pub fn with_session_token(mut self, token: impl Into<String>) -> Self {
         self.session_token = Some(token.into());
         self
@@ -171,15 +173,11 @@ impl GrpcCredentials {
     pub fn has_session_token(&self) -> bool {
         self.session_token
             .as_ref()
-            .map(|token| !token.is_empty())
-            .unwrap_or(false)
+            .is_some_and(|token| !token.is_empty())
     }
 
     pub fn has_account_key(&self) -> bool {
-        self.account_key
-            .as_ref()
-            .map(|key| !key.is_empty())
-            .unwrap_or(false)
+        self.account_key.as_ref().is_some_and(|key| !key.is_empty())
     }
 
     pub fn has_creds(&self) -> bool {
@@ -212,7 +210,7 @@ impl Zeroize for GrpcCredentials {
 
 /// parse keystore to get name and modifiers
 /// from --keystore NAME:key=value
-/// or ANYTYPE_KEYSTORE=
+/// or `ANYTYPE_KEYSTORE`=
 fn parse_keystore(input: &str) -> Result<(&str, HashMap<&str, &str>), String> {
     // remove spaces and optional trailing colon
     let input = input.trim().trim_end_matches(':');
@@ -346,12 +344,13 @@ impl KeyStore {
         // if keystore isn't specified here,
         // try environment, otherwise default for platform
         let spec = if keystore_spec.is_empty() {
-            std::env::var("ANYTYPE_KEYSTORE").unwrap_or(default_platform_keyring().to_string())
+            std::env::var("ANYTYPE_KEYSTORE")
+                .unwrap_or_else(|_| default_platform_keyring().to_string())
         } else {
             keystore_spec.to_string()
         };
         let store = init_keystore(&spec, &service)?;
-        Ok(KeyStore {
+        Ok(Self {
             service,
             store,
             spec,
@@ -383,8 +382,9 @@ impl KeyStore {
                 debug!("get_key found {} entries", entries.len());
                 // search results are not ambiguous: there are 0 or 1 entries,
                 // because there is no way to insert multiple keys with same (service,user)
-                if let Some(entry) = entries.first() {
-                    match entry.get_password() {
+                entries.first().map_or_else(
+                    || Ok(None),
+                    |entry| match entry.get_password() {
                         Ok(key) => Ok(Some(key)),
                         Err(keyring_core::Error::NoEntry) => {
                             debug!("get_key got entry with NoEntry !?!?");
@@ -394,10 +394,8 @@ impl KeyStore {
                             error!("get_key: {e}");
                             Err(e.into())
                         }
-                    }
-                } else {
-                    Ok(None)
-                }
+                    },
+                )
             }
             Err(keyring_core::Error::NoEntry) => {
                 debug!(service = &self.service, user = name, "key lookup: no entry");
@@ -432,7 +430,7 @@ impl KeyStore {
     /// Looks up http auth token.
     /// If connection with keystore succeeded, returns Ok, even if no token exists
     /// for the current service.
-    /// Check has_creds() or has_token() on HttpCredentials to determine whether a token is present.
+    /// Check `has_creds()` or `has_token()` on `HttpCredentials` to determine whether a token is present.
     /// Returns Err if keystore was not correctly configured or there was an error
     /// connecting with the keystore (such as user biometric auth failure for os keyring,
     /// or file permission error for file-based keystore)
@@ -443,7 +441,7 @@ impl KeyStore {
                 service = &self.service,
                 id = &self.id(),
                 "get_http_creds: no token",
-            )
+            );
         }
         Ok(HttpCredentials { token })
     }
@@ -451,7 +449,7 @@ impl KeyStore {
     /// Looks up grpc auth credentials.
     /// If connection with keystore succeeded, returns Ok, even if no credentials exist
     /// for the current service and credential type.
-    /// Check has_creds() on GrpcCredentials to determine whether a token is present.
+    /// Check `has_creds()` on `GrpcCredentials` to determine whether a token is present.
     /// Returns Err if keystore was not correctly configured or there was an error
     /// connecting with the keystore (such as user biometric auth failure for os keyring,
     /// or file permission error for file-based keystore)
@@ -506,7 +504,7 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Clear all credentials (for the service associated with this KeyStore).
+    /// Clear all credentials (for the service associated with this `KeyStore`).
     pub fn clear_all_credentials(&self) -> Result<(), KeyStoreError> {
         self.clear_http_credentials()?;
         #[cfg(feature = "grpc")]
@@ -516,12 +514,11 @@ impl KeyStore {
 
     /// Update gRPC credentials from the headless CLI config.json.
     #[cfg(feature = "grpc")]
-    pub fn update_grpc_from_cli_config(&self, path: Option<PathBuf>) -> Result<(), KeyStoreError> {
+    pub fn update_grpc_from_cli_config(&self, path: Option<&Path>) -> Result<(), KeyStoreError> {
         use anytype_rpc::config::load_headless_config;
-        let config =
-            load_headless_config(path.as_deref()).map_err(|err| KeyStoreError::External {
-                message: format!("failed to load headless config: {err}"),
-            })?;
+        let config = load_headless_config(path).map_err(|err| KeyStoreError::External {
+            message: format!("failed to load headless config: {err}"),
+        })?;
         let config = config.ok_or_else(|| KeyStoreError::External {
             message: "headless config not found".to_string(),
         })?;
@@ -586,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Run with: cargo test -- --ignored
+    //#[ignore] // Run with: cargo test -- --ignored
     fn test_keyring_storage_end_to_end() -> Result<(), KeyStoreError> {
         // This test uses the actual OS keyring and may prompt for authentication
         // Run explicitly with: cargo test -- --ignored test_keyring_storage_end_to_end

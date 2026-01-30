@@ -1,18 +1,25 @@
 //! Authentication helpers for Anytype gRPC clients.
 
-use tonic::metadata::{Ascii, MetadataValue};
-use tonic::service::Interceptor;
-use tonic::{Request, Status, transport::Channel};
-
-pub use crate::error::AuthError;
-
-use crate::anytype::ClientCommandsClient;
-use crate::anytype::rpc::account::local_link::new_challenge::Request as LocalLinkChallengeRequest;
-use crate::anytype::rpc::account::local_link::solve_challenge::Request as LocalLinkSolveRequest;
-use crate::anytype::rpc::wallet::create_session::{
-    Request as CreateSessionRequest, Response as CreateSessionResponse, request::Auth,
+use tonic::{
+    metadata::{Ascii, MetadataValue},
+    service::Interceptor,
+    {Request, Status, transport::Channel},
 };
-use crate::model::account::auth::LocalApiScope;
+
+use crate::error::AuthError;
+use crate::{
+    anytype::ClientCommandsClient,
+    anytype::rpc::account::local_link::{
+        new_challenge::Request as LocalLinkChallengeRequest,
+        new_challenge::Response as LocalLinkChallengeResponse,
+        solve_challenge::Request as LocalLinkSolveRequest,
+        solve_challenge::Response as LocalLinkSolveResponse,
+    },
+    anytype::rpc::wallet::create_session::{
+        Request as CreateSessionRequest, Response as CreateSessionResponse, request::Auth,
+    },
+    model::account::auth::LocalApiScope,
+};
 
 /// Authentication options for `WalletCreateSession`.
 #[derive(Debug, Clone)]
@@ -46,7 +53,8 @@ pub async fn create_session(
 ) -> Result<CreateSessionResponse, AuthError> {
     let mut client = ClientCommandsClient::new(channel);
     let request = auth.into_request();
-    let response = client.wallet_create_session(request).await?;
+    let response: tonic::Response<CreateSessionResponse> =
+        client.wallet_create_session(request).await?;
     let response = response.into_inner();
 
     if let Some(error) = response.error.as_ref()
@@ -111,7 +119,8 @@ pub async fn create_local_link_challenge(
         app_name: app_name.into(),
         scope: scope as i32,
     };
-    let response = client.account_local_link_new_challenge(request).await?;
+    let response: tonic::Response<LocalLinkChallengeResponse> =
+        client.account_local_link_new_challenge(request).await?;
     let response = response.into_inner();
     if let Some(error) = response.error.as_ref()
         && error.code != 0
@@ -135,7 +144,8 @@ pub async fn solve_local_link_challenge(
         challenge_id: challenge_id.into(),
         answer: answer.into(),
     };
-    let response = client.account_local_link_solve_challenge(request).await?;
+    let response: tonic::Response<LocalLinkSolveResponse> =
+        client.account_local_link_solve_challenge(request).await?;
     let response = response.into_inner();
     if let Some(error) = response.error.as_ref()
         && error.code != 0

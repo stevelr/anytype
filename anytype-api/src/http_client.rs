@@ -1,4 +1,4 @@
-//! HttpClient middleware used by AnytypeClient
+//! `HttpClient` middleware used by `AnytypeClient`
 //!
 //! Responsible for
 //!  - handing all HTTP api requests
@@ -144,13 +144,14 @@ impl std::fmt::Display for HttpMetricsSnapshot {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
-        format!("{}B", bytes)
+        format!("{bytes}B")
     } else if bytes < 1024 * 1024 {
         format!("{:.1}KB", bytes as f64 / 1024.0)
     } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+        format!("{:.1}MB", (bytes / (1024 * 1024)) as f64)
     }
 }
 
@@ -165,7 +166,7 @@ fn retry_for_status(code: StatusCode) -> bool {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct HttpRequest {
+pub struct HttpRequest {
     pub method: Method,
     pub path: String,
     pub query: Vec<(String, String)>,
@@ -178,7 +179,7 @@ impl fmt::Debug for HttpRequest {
             .field("method", &self.method)
             .field("path", &self.path)
             .field("query", &self.query)
-            .field("body", &self.body.as_ref().map(|b| b.len()).unwrap_or(0))
+            .field("body", &self.body.as_ref().map_or(0, Bytes::len))
             .finish()
     }
 }
@@ -186,7 +187,7 @@ impl fmt::Debug for HttpRequest {
 impl HttpRequest {
     /// Create a new request with updated pagination parameters.
     /// This replaces any existing limit/offset query parameters.
-    pub(crate) fn with_pagination(&self, offset: usize, limit: usize) -> Self {
+    pub(crate) fn with_pagination(&self, offset: u32, limit: u32) -> Self {
         let mut new_query: Vec<(String, String)> = self
             .query
             .iter()
@@ -197,7 +198,7 @@ impl HttpRequest {
         new_query.push(("limit".to_string(), limit.to_string()));
         new_query.push(("offset".to_string(), offset.to_string()));
 
-        HttpRequest {
+        Self {
             method: self.method.clone(),
             path: self.path.clone(),
             query: new_query,
@@ -207,10 +208,10 @@ impl HttpRequest {
 }
 
 #[derive(Clone)]
-pub(crate) struct HttpClient {
+pub struct HttpClient {
     pub client: reqwest::Client,
 
-    /// Base URL for API requests (e.g., "http://localhost:31009")
+    /// Base URL for API requests (e.g., "<http://localhost:31009>")
     pub base_url: String,
 
     pub api_key: Arc<Mutex<HttpCredentials>>,
@@ -231,7 +232,7 @@ impl fmt::Debug for HttpClient {
             .field("api_key", &String::from("(MASKED)"))
             .field("rate_limit_max_retries", &self.rate_limit_max_retries)
             .field("metrics", &self.metrics)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -277,7 +278,7 @@ impl HttpClient {
             method: "client-init",
             url: "",
         })?;
-        Ok(HttpClient {
+        Ok(Self {
             client,
             base_url,
             api_key: Arc::new(Mutex::new(http_creds)),
@@ -292,7 +293,7 @@ impl HttpClient {
         self.metrics.snapshot()
     }
 
-    /// Returns true if api_key has been initialized.
+    /// Returns true if `api_key` has been initialized.
     pub fn has_key(&self) -> bool {
         self.api_key.lock().has_creds()
     }
@@ -319,8 +320,8 @@ impl HttpClient {
         let req = HttpRequest {
             method: Method::DELETE,
             path: path.into(),
-            query: Default::default(),
-            body: Default::default(),
+            query: Vec::default(),
+            body: None,
         };
         self.send(req).await
     }
@@ -343,7 +344,7 @@ impl HttpClient {
     }
 
     /// Makes an authenticated PATCH request with JSON body.
-    pub(crate) async fn patch_request<T: DeserializeOwned, B: Serialize>(
+    pub(crate) async fn patch_request<T: DeserializeOwned, B: Serialize + Sync>(
         &self,
         path: &str,
         body: &B,
@@ -351,7 +352,7 @@ impl HttpClient {
         let req = HttpRequest {
             method: Method::PATCH,
             path: path.into(),
-            query: Default::default(),
+            query: Vec::default(),
             body: Some(Bytes::from(
                 serde_json::to_vec(body).context(SerializationSnafu)?,
             )),
@@ -359,7 +360,7 @@ impl HttpClient {
         self.send(req).await
     }
 
-    pub(crate) async fn post_request<T: DeserializeOwned, B: Serialize>(
+    pub(crate) async fn post_request<T: DeserializeOwned, B: Serialize + Sync>(
         &self,
         path: &str,
         body: &B,
@@ -377,7 +378,7 @@ impl HttpClient {
     }
 
     /// Makes an unauthenticated POST request (for auth endpoints).
-    pub(crate) async fn post_unauthenticated<Resp: DeserializeOwned, Req: Serialize>(
+    pub(crate) async fn post_unauthenticated<Resp: DeserializeOwned, Req: Serialize + Sync>(
         &self,
         path: &str,
         body: &Req,
@@ -413,8 +414,9 @@ impl HttpClient {
     /// This function handles all authenticated anytype rest api requests (http: get,post,patch,delete)
     /// - handles 429 rate limit feedback
     /// - retries up to N(=3) times for connection failures or server timeout
-    /// - maps http error codes into AnytypeErrors
+    /// - maps http error codes into `AnytypeErrors`
     /// - deserializes json response body into return type T
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn send<T: DeserializeOwned>(&self, req: HttpRequest) -> Result<T> {
         // attempt counter is for server busy and connection drop errors
         // counter is reset to 0 whenever we wait based on 429 rate limit response
@@ -449,7 +451,7 @@ impl HttpClient {
             .bearer_auth(api_key.token().unwrap());
 
         // debug log (if tracing enabled)
-        log_request(&req_builder, &req.body);
+        log_request(&req_builder, req.body.as_ref());
 
         // Track bytes to be sent (body size)
         let body_size = req.body.as_ref().map_or(0, |b| b.len() as u64);
@@ -552,13 +554,13 @@ impl HttpClient {
                                     self.metrics.increment_retries();
                                     self.metrics.add_rate_limit_delay(duration.as_secs());
                                     retry_wait = Some(duration);
-                                    continue;
+                                    // continue to try again
                                 }
                             }
                         }
                         StatusCode::BAD_REQUEST /* 400 */ => {
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or("BadRequest".into());
+                            let message = response.text().await.unwrap_or_else(|_| "BadRequest".into());
                             error!(?code, ?message, ?req, "http");
                             return Err(AnytypeError::Validation { message })
                         }
@@ -566,26 +568,26 @@ impl HttpClient {
                         StatusCode::GONE /* 410 */
                          => {
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or("NotFound".into());
+                            let message = response.text().await.unwrap_or_else(|_| "NotFound".into());
                             error!(?code, ?message, ?req, "http");
                             return Err(AnytypeError::NotFound{
                                 // too generic here - we don't know whether the query
                                 // needs to be reported at higher level
                                 obj_type: "Object".into(),
-                                key: "".into()
+                                key: String::default()
                             })
                         },
                         StatusCode::UNAUTHORIZED /* 401 */ => {
                             // client is not authenticated
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or("Unauthorized".into());
+                            let message = response.text().await.unwrap_or_else(|_| "Unauthorized".into());
                             error!(?code, ?message, ?req, "http");
                             return Err(AnytypeError::Unauthorized)
                         }
                         StatusCode::FORBIDDEN /* 403 */ => {
                             // client is authenticated, but does not have permission to access the object
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or("Forbidden".into());
+                            let message = response.text().await.unwrap_or_else(|_| "Forbidden".into());
                             error!(?code, ?message, ?req, "http");
                             return Err(AnytypeError::Forbidden)
                         }
@@ -607,7 +609,7 @@ impl HttpClient {
                                 message,
                             });
                         },
-                    };
+                    }
                 }
                 Err(e) => {
                     error!(source=?e, ?req, "http");
@@ -626,15 +628,14 @@ impl HttpClient {
                             url: req.path,
                             source: e,
                         });
-                    } else {
-                        // Other non-recoverable errors (e.g., DNS error, invalid URL, etc.)
-                        self.metrics.increment_errors();
-                        return Err(AnytypeError::Http {
-                            method: req.method.to_string(),
-                            url: req.path,
-                            source: e,
-                        });
                     }
+                    // Other non-recoverable errors (e.g., DNS error, invalid URL, etc.)
+                    self.metrics.increment_errors();
+                    return Err(AnytypeError::Http {
+                        method: req.method.to_string(),
+                        url: req.path,
+                        source: e,
+                    });
                 }
             }
         }
@@ -642,14 +643,14 @@ impl HttpClient {
 }
 
 // The purpose of this trait is to define methods for Arc<HttpClient>
-pub(crate) trait GetPaged {
+pub trait GetPaged {
     async fn get_request_paged<T: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
         query: QueryWithFilters,
     ) -> Result<super::paged::PagedResult<T>>;
 
-    async fn post_request_paged<T: DeserializeOwned + Send + 'static, B: Serialize>(
+    async fn post_request_paged<T: DeserializeOwned + Send + 'static, B: Serialize + Sync>(
         &self,
         path: &str,
         body: &B,
@@ -658,7 +659,7 @@ pub(crate) trait GetPaged {
 }
 
 impl GetPaged for Arc<HttpClient> {
-    /// Makes an authenticated GET request that returns a PagedResult for pagination support.
+    /// Makes an authenticated GET request that returns a `PagedResult` for pagination support.
     async fn get_request_paged<T: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
@@ -677,8 +678,8 @@ impl GetPaged for Arc<HttpClient> {
         Ok(super::paged::PagedResult::new(response, self.clone(), req))
     }
 
-    /// Makes an authenticated POST request that returns a PagedResult for pagination support.
-    async fn post_request_paged<T: DeserializeOwned + Send + 'static, B: Serialize>(
+    /// Makes an authenticated POST request that returns a `PagedResult` for pagination support.
+    async fn post_request_paged<T: DeserializeOwned + Send + 'static, B: Serialize + Sync>(
         &self,
         path: &str,
         body: &B,
@@ -702,7 +703,7 @@ impl GetPaged for Arc<HttpClient> {
 
 // dump request
 // requires RUST_LOG=anytype::http_json=trace
-fn log_request(builder: &reqwest::RequestBuilder, body: &Option<Bytes>) {
+fn log_request(builder: &reqwest::RequestBuilder, body: Option<&Bytes>) {
     if tracing::enabled!(target: "anytype::http_json", tracing::Level::TRACE)
         && let Some(req) = builder.try_clone().and_then(|b| b.build().ok())
     {
@@ -745,13 +746,16 @@ fn deserialize_json<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
 // log attempt and sleep for exponential backoff
 async fn log_and_backoff(attempt: u32, err: String) {
     // exponential backoff: 1s, 2s, 4s, with jitter
-    let base_delay = 2u64.pow(attempt);
-    let jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as f64
-        / 1_000_000_000.0;
-    let jittered_delay = ((base_delay as f64) * (0.5 + jitter)).round() as u64;
+    #[allow(clippy::cast_precision_loss)]
+    let base_delay = 2u64.pow(attempt) as f64;
+    let jitter = f64::from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos(),
+    ) / 1_000_000_000.0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let jittered_delay = (base_delay * (0.5 + jitter)).round() as u64;
     let delay = if jittered_delay == 0 {
         1
     } else {
@@ -770,9 +774,12 @@ fn is_idempotent_method(method: &Method) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::{
+        StatusCode,
+        header::{HeaderMap, HeaderValue},
+    };
+
     use super::parse_retry_after;
-    use reqwest::StatusCode;
-    use reqwest::header::{HeaderMap, HeaderValue};
 
     #[test]
     fn test_retry_for_status() {

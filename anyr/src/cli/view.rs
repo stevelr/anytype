@@ -1,18 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
+use anytype::prelude::Object;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    cli::common::{
-        MemberCache, load_member_cache, resolve_member_name, resolve_space_id, resolve_type_id,
-        resolve_view_id,
+    cli::{
+        AppContext,
+        common::{
+            MemberCache, load_member_cache, resolve_member_name, resolve_space_id, resolve_type_id,
+            resolve_view_id,
+        },
     },
-    cli::{AppContext, ensure_authenticated},
     output::{OutputFormat, render_table_dynamic},
 };
-use anytype::prelude::Object;
 
 #[derive(Debug, Clone)]
 struct ViewColumn {
@@ -34,7 +36,6 @@ struct ViewObjectsOutput {
 }
 
 pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
-    ensure_authenticated(&ctx.client)?;
     match args.command {
         super::ViewCommands::Objects {
             view,
@@ -55,43 +56,40 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
             let result = request.list().await?;
             let property_names = load_property_names(ctx, &space_id).await?;
 
-            match ctx.output.format() {
-                OutputFormat::Table => {
-                    let columns = match columns {
-                        Some(value) => override_columns(&property_names, &value),
-                        None => base_columns.clone(),
-                    };
-                    let headers = columns
+            if ctx.output.format() == OutputFormat::Table {
+                let columns = columns.map_or_else(
+                    || base_columns.clone(),
+                    |value| override_columns(&property_names, &value),
+                );
+                let headers = columns
+                    .iter()
+                    .map(|col| col.name.clone())
+                    .collect::<Vec<_>>();
+                let member_cache = load_member_cache(ctx, &space_id).await?;
+                let rows = view_objects_table_rows(
+                    &columns,
+                    &result.items,
+                    &space_id,
+                    &member_cache,
+                    &ctx.date_format,
+                );
+                let table = render_table_dynamic(&headers, &rows);
+                ctx.output.emit_text(&table)
+            } else {
+                let json_columns = columns_for_items(&result.items, &property_names);
+                let items = view_objects_rows(&json_columns, &result.items);
+                let output = ViewObjectsOutput {
+                    view_id,
+                    columns: json_columns
                         .iter()
-                        .map(|col| col.name.clone())
-                        .collect::<Vec<_>>();
-                    let member_cache = load_member_cache(ctx, &space_id).await?;
-                    let rows = view_objects_table_rows(
-                        &columns,
-                        &result.items,
-                        &space_id,
-                        &member_cache,
-                        &ctx.date_format,
-                    );
-                    let table = render_table_dynamic(&headers, &rows);
-                    ctx.output.emit_text(&table)
-                }
-                _ => {
-                    let json_columns = columns_for_items(&result.items, &property_names);
-                    let items = view_objects_rows(&json_columns, &result.items);
-                    let output = ViewObjectsOutput {
-                        view_id,
-                        columns: json_columns
-                            .iter()
-                            .map(|col| ViewColumnOutput {
-                                key: col.relation_key.clone(),
-                                name: col.name.clone(),
-                            })
-                            .collect(),
-                        items,
-                    };
-                    ctx.output.emit_json(&output)
-                }
+                        .map(|col| ViewColumnOutput {
+                            key: col.relation_key.clone(),
+                            name: col.name.clone(),
+                        })
+                        .collect(),
+                    items,
+                };
+                ctx.output.emit_json(&output)
             }
         }
     }
@@ -121,7 +119,7 @@ fn default_columns() -> Vec<ViewColumn> {
 fn override_columns(property_names: &HashMap<String, String>, columns: &str) -> Vec<ViewColumn> {
     columns
         .split(',')
-        .map(|key| key.trim())
+        .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(|key| match key {
             "id" => ViewColumn {
@@ -282,10 +280,12 @@ fn table_cell_for_relation(
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join(", "),
-        anytype::properties::PropertyValue::Date { date } => object
-            .get_property_date(relation_key)
-            .map(|value| value.format(date_format).to_string())
-            .unwrap_or_else(|| date.clone()),
+        anytype::properties::PropertyValue::Date { date } => {
+            object.get_property_date(relation_key).map_or_else(
+                || date.clone(),
+                |value| value.format(date_format).to_string(),
+            )
+        }
         anytype::properties::PropertyValue::Files { files } => files
             .iter()
             .map(|value| resolve_member_name(space_id, member_cache, value))

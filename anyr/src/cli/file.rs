@@ -1,16 +1,19 @@
-use crate::cli::common::{resolve_space_id, resolve_type};
-use crate::cli::{
-    AppContext, FileArgs, FileCommands, FileFilterArgs, FileTypeArg, ensure_authenticated,
-    pagination_limit, pagination_offset,
-};
-use crate::filter::{parse_filters, parse_property};
-use crate::output::OutputFormat;
 use anyhow::Result;
 use anytype::prelude::*;
 use serde_json::json;
 
+use crate::{
+    cli::{
+        AppContext, FileArgs, FileCommands, FileFilterArgs, FileTypeArg,
+        common::{resolve_space_id, resolve_type},
+        pagination_limit, pagination_offset,
+    },
+    filter::{parse_filters, parse_property},
+    output::OutputFormat,
+};
+
+#[allow(clippy::too_many_lines)]
 pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
-    ensure_authenticated(&ctx.client)?;
     match args.command {
         FileCommands::List {
             space,
@@ -179,7 +182,7 @@ fn apply_file_filters_list<'a>(
         request = request.name_contains(value.clone());
     }
     if let Some(value) = filters.file_type.clone() {
-        request = request.file_type(value.into());
+        request = request.file_type(&value.into());
     }
     if let Some(value) = &filters.ext {
         request = request.extension(value.clone());
@@ -219,7 +222,7 @@ fn apply_file_filters_search<'a>(
         request = request.name_contains(value.clone());
     }
     if let Some(value) = filters.file_type.clone() {
-        request = request.file_type(value.into());
+        request = request.file_type(&value.into());
     }
     if let Some(value) = &filters.ext {
         request = request.extension(value.clone());
@@ -263,11 +266,11 @@ fn parse_properties(props: &[String]) -> Result<Vec<(String, String)>> {
 impl From<FileTypeArg> for FileType {
     fn from(value: FileTypeArg) -> Self {
         match value {
-            FileTypeArg::File => FileType::File,
-            FileTypeArg::Image => FileType::Image,
-            FileTypeArg::Video => FileType::Video,
-            FileTypeArg::Audio => FileType::Audio,
-            FileTypeArg::Pdf => FileType::Pdf,
+            FileTypeArg::File => Self::File,
+            FileTypeArg::Image => Self::Image,
+            FileTypeArg::Video => Self::Video,
+            FileTypeArg::Audio => Self::Audio,
+            FileTypeArg::Pdf => Self::Pdf,
         }
     }
 }

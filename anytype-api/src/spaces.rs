@@ -2,12 +2,12 @@
 //!
 //! This module provides a fluent builder API for working with Anytype spaces.
 //!
-//! ## Space methods on AnytypeClient
+//! ## Space methods on `AnytypeClient`
 //!
-//! - [spaces](AnytypeClient::spaces) - list spaces the authenticated user can access
-//! - [space](AnytypeClient::space) - get space
-//! - [new_space](AnytypeClient::new_space) - create a new space
-//! - [update_space](AnytypeClient::space) - update space properties
+//! - [`spaces`](AnytypeClient::spaces) - list spaces the authenticated user can access
+//! - [`space`](AnytypeClient::space) - get space
+//! - [`new_space`](AnytypeClient::new_space) - create a new space
+//! - [`update_space`](AnytypeClient::space) - update space properties
 //!
 //! ## Quick Start
 //!
@@ -53,7 +53,7 @@ use crate::{
     Result,
     cache::AnytypeCache,
     client::AnytypeClient,
-    filters::Query,
+    filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
@@ -97,11 +97,11 @@ pub struct Space {
     pub icon: Option<Icon>,
 
     /// Gateway URL for serving files and media
-    /// Example: "http://127.0.0.1:31006"
+    /// Example: "<http://127.0.0.1:31006>"
     pub gateway_url: Option<String>,
 
     /// Network ID of the space
-    /// Example: "N83gJpVd9MuNRZAuJLZ7LiMntTThhPc6DtzWWVjb1M3PouVU"
+    /// Example: `N83gJpVd9MuNRZAuJLZ7LiMntTThhPc6DtzWWVjb1M3PouVU`
     pub network_id: Option<String>,
 }
 
@@ -178,7 +178,7 @@ pub struct SpaceRequest {
 }
 
 impl SpaceRequest {
-    /// Creates a new SpaceRequest.
+    /// Creates a new `SpaceRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         space_id: impl Into<String>,
@@ -218,7 +218,10 @@ impl SpaceRequest {
 
         let response: SpaceResponse = self
             .client
-            .get_request(&format!("/v1/spaces/{}", self.space_id), Default::default())
+            .get_request(
+                &format!("/v1/spaces/{}", self.space_id),
+                QueryWithFilters::default(),
+            )
             .await?;
         Ok(response.space)
     }
@@ -249,7 +252,7 @@ pub struct NewSpaceRequest {
 }
 
 impl NewSpaceRequest {
-    /// Creates a new NewSpaceRequest.
+    /// Creates a new `NewSpaceRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         name: impl Into<String>,
@@ -268,18 +271,21 @@ impl NewSpaceRequest {
     ///
     /// # Arguments
     /// * `description` - Description text for the space
+    #[must_use]
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -287,6 +293,7 @@ impl NewSpaceRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -307,15 +314,18 @@ impl NewSpaceRequest {
 
         let response: SpaceResponse = self
             .client
-            .post_request("/v1/spaces", &request_body, Default::default())
+            .post_request("/v1/spaces", &request_body, QueryWithFilters::default())
             .await?;
 
         let space = response.space;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Space", &space.id, || async {
                 let response: SpaceResponse = self
                     .client
-                    .get_request(&format!("/v1/spaces/{}", space.id), Default::default())
+                    .get_request(
+                        &format!("/v1/spaces/{}", space.id),
+                        QueryWithFilters::default(),
+                    )
                     .await?;
                 Ok(response.space)
             })
@@ -352,7 +362,7 @@ pub struct UpdateSpaceRequest {
 }
 
 impl UpdateSpaceRequest {
-    /// Creates a new UpdateSpaceRequest.
+    /// Creates a new `UpdateSpaceRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         space_id: impl Into<String>,
@@ -372,6 +382,7 @@ impl UpdateSpaceRequest {
     ///
     /// # Arguments
     /// * `name` - New display name for the space
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -381,18 +392,21 @@ impl UpdateSpaceRequest {
     ///
     /// # Arguments
     /// * `description` - New description text for the space
+    #[must_use]
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -400,6 +414,7 @@ impl UpdateSpaceRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -435,11 +450,14 @@ impl UpdateSpaceRequest {
             .await?;
 
         let space = response.space;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Space", &space.id, || async {
                 let response: SpaceResponse = self
                     .client
-                    .get_request(&format!("/v1/spaces/{}", space.id), Default::default())
+                    .get_request(
+                        &format!("/v1/spaces/{}", space.id),
+                        QueryWithFilters::default(),
+                    )
                     .await?;
                 Ok(response.space)
             })
@@ -476,14 +494,14 @@ impl UpdateSpaceRequest {
 #[derive(Debug)]
 pub struct ListSpacesRequest {
     client: Arc<HttpClient>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
     cache: Arc<AnytypeCache>,
 }
 
 impl ListSpacesRequest {
-    /// Creates a new ListSpacesRequest.
+    /// Creates a new `ListSpacesRequest`.
     pub(crate) fn new(client: Arc<HttpClient>, cache: Arc<AnytypeCache>) -> Self {
         Self {
             client,
@@ -500,7 +518,8 @@ impl ListSpacesRequest {
     ///
     /// # Arguments
     /// * `limit` - Number of items to return per page
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
@@ -509,7 +528,8 @@ impl ListSpacesRequest {
     ///
     /// # Arguments
     /// * `offset` - Number of items to skip
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -520,6 +540,7 @@ impl ListSpacesRequest {
     ///
     /// # Arguments
     /// * `filter` - Filter condition to add
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -529,6 +550,7 @@ impl ListSpacesRequest {
     ///
     /// # Arguments
     /// * `filters` - Iterator of filters to add
+    #[must_use]
     pub fn filters(mut self, filters: impl IntoIterator<Item = Filter>) -> Self {
         self.filters.extend(filters);
         self
@@ -553,8 +575,8 @@ impl ListSpacesRequest {
         }
 
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         self.client.get_request_paged("/v1/spaces", query).await
@@ -701,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_space_model_default() {
-        let model: SpaceModel = Default::default();
+        let model: SpaceModel = SpaceModel::default();
         assert_eq!(model, SpaceModel::Space);
     }
 
