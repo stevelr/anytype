@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- file upload/preload request options: `created_in_context` and `created_in_context_ref`
+- chat message text styles: `toggle_header1`, `toggle_header2`, `toggle_header3`
+
+### Changed
+
+- bumped anytype-rpc to 0.3.0-beta.1
+
 ## [0.3.0] - anytype - 2026-01-28
 
 Major update:

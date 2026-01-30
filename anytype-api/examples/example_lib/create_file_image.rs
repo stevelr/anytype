@@ -1,12 +1,12 @@
 // Generating PNG images
 
-use anyhow::{Context, Result};
 use std::{
     fs::File,
     io::BufWriter,
     path::{Path, PathBuf},
 };
 
+use anyhow::{Context, Result};
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
 
 #[allow(dead_code)]

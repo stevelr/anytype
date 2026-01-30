@@ -2,7 +2,7 @@
 //!
 //! This module provides a fluent builder API for working with members of a space.
 //!
-//! ## Member methods on AnytypeClient
+//! ## Member methods on `AnytypeClient`
 //!
 //! - [members](AnytypeClient::members) - list members in space
 //! - [member](AnytypeClient::member) - get member
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Result,
     client::AnytypeClient,
-    filters::Query,
+    filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
 };
@@ -115,7 +115,7 @@ impl Member {
         matches!(self.role, MemberRole::Editor | MemberRole::Owner)
     }
 
-    /// Returns the display name, falling back to global_name or "Unknown".
+    /// Returns the display name, falling back to `global_name` or "Unknown".
     pub fn display_name(&self) -> &str {
         self.name
             .as_deref()
@@ -172,7 +172,7 @@ impl MemberRequest {
             .client
             .get_request(
                 &format!("/v1/spaces/{}/members/{}", self.space_id, self.member_id),
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
         Ok(response.member)
@@ -187,8 +187,8 @@ pub struct ListMembersRequest {
     client: Arc<HttpClient>,
     limits: ValidationLimits,
     space_id: String,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
 }
 
@@ -209,18 +209,21 @@ impl ListMembersRequest {
     }
 
     /// Sets the pagination limit.
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
     /// Sets the pagination offset.
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
 
     /// Adds a filter condition.
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -231,8 +234,8 @@ impl ListMembersRequest {
         self.limits.validate_id(&self.space_id, "space_id")?;
 
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         self.client

@@ -2,12 +2,12 @@
 //!
 //! This module provides a fluent builder API for working with Anytype properties.
 //!
-//! - [properties](AnytypeClient::properties) - list properties in the space
-//! - [property](AnytypeClient::property) - get property for retrieval or deletion
-//! - [new_property](AnytypeClient::new_property) - create a new property
-//! - [update_property](AnytypeClient::update_property) - update a property
-//! - [lookup_property_by_key](AnytypeClient::lookup_property_by_key) - find property using key
-//! - [lookup_property_tag](AnytypeClient::lookup_property_tag) - find tag for property, using keys or ids
+//! - [`properties`](AnytypeClient::properties) - list properties in the space
+//! - [`property`](AnytypeClient::property) - get property for retrieval or deletion
+//! - [`new_property`](AnytypeClient::new_property) - create a new property
+//! - [`update_property`](AnytypeClient::update_property) - update a property
+//! - [`lookup_property_by_key`](AnytypeClient::lookup_property_by_key) - find property using key
+//! - [`lookup_property_tag`](AnytypeClient::lookup_property_tag) - find tag for property, using keys or ids
 //!
 //! ## Quick Start
 //!
@@ -83,7 +83,7 @@ use crate::{
     Result,
     cache::AnytypeCache,
     client::AnytypeClient,
-    filters::Query,
+    filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
     tags::ListTagsRequest,
@@ -137,14 +137,14 @@ pub enum PropertyFormat {
 /// Property definition
 ///
 /// This represents the schema/definition of a property, not its value.
-/// For Select and MultiSelect properties, may optionally include Tags, if with_tags set when it was fetched,
+/// For Select and `MultiSelect` properties, may optionally include Tags, if `with_tags` set when it was fetched,
 /// or if it was cached)
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct Property {
     /// Display name of the property
     pub name: String,
 
-    /// Property key in snake_case, e.g., "last_modified_date"
+    /// Property key in `snake_case`, e.g., "`last_modified_date`"
     pub key: String,
 
     /// Unique property identifier
@@ -153,7 +153,7 @@ pub struct Property {
     /// Property format (text, number, select, etc.)
     format: PropertyFormat,
 
-    /// optional tags, if property is Select or MultiSelect, and tags have been fetched
+    /// optional tags, if property is Select or `MultiSelect`, and tags have been fetched
     tags: Option<Vec<Tag>>,
 }
 
@@ -185,9 +185,9 @@ impl PropertyWithValue {
 }
 
 impl Property {
-    /// Constructs a Property from PropertyWithValue.
-    pub fn new_from(other: &PropertyWithValue) -> Property {
-        Property {
+    /// Constructs a `Property` from `PropertyWithValue`.
+    pub fn new_from(other: &PropertyWithValue) -> Self {
+        Self {
             format: other.format(),
             id: other.id.clone(),
             key: other.key.clone(),
@@ -208,20 +208,26 @@ impl Property {
 
     /// Searches for property tag using id, key, or case-insensitive name match.
     /// Error:
-    ///  - NotFound if tags are not pre-loaded or there is no match
+    ///  - `NotFound` if tags are not pre-loaded or there is no match
     pub fn lookup_tag(&self, value: impl AsRef<str>) -> Result<Tag> {
         let check = value.as_ref().to_lowercase();
-        match self.tags().and_then(|tags| {
-            tags.iter()
-                .find(|tag| tag.id == check || tag.name.to_lowercase() == check || tag.key == check)
-                .cloned()
-        }) {
-            Some(tag) => Ok(tag),
-            None => Err(AnytypeError::NotFound {
-                obj_type: "Tag".into(),
-                key: value.as_ref().to_string(),
-            }),
-        }
+        self.tags()
+            .and_then(|tags| {
+                tags.iter()
+                    .find(|tag| {
+                        tag.id == check || tag.name.to_lowercase() == check || tag.key == check
+                    })
+                    .cloned()
+            })
+            .map_or_else(
+                || {
+                    Err(AnytypeError::NotFound {
+                        obj_type: "Tag".into(),
+                        key: value.as_ref().to_string(),
+                    })
+                },
+                Ok,
+            )
     }
 
     /// Gets the tag with the id, or None if not found.
@@ -311,16 +317,16 @@ impl PropertyValue {
     ///
     /// Works for Text, Date, Url, Email, Phone, and Checkbox formats.
     /// For select properties, returns the tag key
-    /// Returns None for array types (Files, MultiSelect, Objects).
+    /// Returns None for array types (Files, `MultiSelect`, Objects).
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            PropertyValue::Text { text } => Some(text.as_str()),
-            PropertyValue::Select { select } => Some(&select.key),
-            PropertyValue::Date { date } => Some(date.as_str()),
-            PropertyValue::Url { url } => Some(url.as_str()),
-            PropertyValue::Email { email } => Some(email.as_str()),
-            PropertyValue::Phone { phone } => Some(phone.as_str()),
-            PropertyValue::Checkbox { checkbox } => Some(if *checkbox { "true" } else { "false" }),
+            Self::Text { text } => Some(text.as_str()),
+            Self::Select { select } => Some(&select.key),
+            Self::Date { date } => Some(date.as_str()),
+            Self::Url { url } => Some(url.as_str()),
+            Self::Email { email } => Some(email.as_str()),
+            Self::Phone { phone } => Some(phone.as_str()),
+            Self::Checkbox { checkbox } => Some(if *checkbox { "true" } else { "false" }),
             _ => None,
         }
     }
@@ -330,7 +336,7 @@ impl PropertyValue {
     /// Property must be Checkbox format
     pub fn as_bool(&self) -> Option<bool> {
         match self {
-            PropertyValue::Checkbox { checkbox } => Some(*checkbox),
+            Self::Checkbox { checkbox } => Some(*checkbox),
             _ => None,
         }
     }
@@ -340,17 +346,17 @@ impl PropertyValue {
     /// Property must be Number format
     pub fn as_number(&self) -> Option<&Number> {
         match self {
-            PropertyValue::Number { number } => Some(number),
+            Self::Number { number } => Some(number),
             _ => None,
         }
     }
 
-    /// Returns the date value as DateTime object.
+    /// Returns the date value as `DateTime` object.
     ///
     /// Returns None if the property is not defined to have format Date, or could not be parsed as a date.
     pub fn as_date(&self) -> Option<DateTime<FixedOffset>> {
         match self {
-            PropertyValue::Date { date } => match DateTime::parse_from_rfc3339(date) {
+            Self::Date { date } => match DateTime::parse_from_rfc3339(date) {
                 Err(e) => {
                     error!(?e, "Date property has invalid format \"{date}\"");
                     None
@@ -364,14 +370,14 @@ impl PropertyValue {
     /// Returns the value as an array of strings.
     /// For multi-select (array of tags), returns the tags' keys.
     ///
-    /// Property must be Files, MultiSelect, or Objects
+    /// Property must be Files, `MultiSelect`, or Objects
     pub fn as_array(&self) -> Option<Vec<String>> {
         match self {
-            PropertyValue::Files { files } => Some(files.clone()),
-            PropertyValue::MultiSelect { multi_select } => {
+            Self::Files { files } => Some(files.clone()),
+            Self::MultiSelect { multi_select } => {
                 Some(multi_select.iter().map(|tag| tag.key.clone()).collect())
             }
-            PropertyValue::Objects { objects } => Some(objects.clone()),
+            Self::Objects { objects } => Some(objects.clone()),
             _ => None,
         }
     }
@@ -379,7 +385,7 @@ impl PropertyValue {
     /// Returns select value as a tag
     pub fn as_tag(&self) -> Option<&Tag> {
         match self {
-            PropertyValue::Select { select } => Some(select),
+            Self::Select { select } => Some(select),
             _ => None,
         }
     }
@@ -387,7 +393,7 @@ impl PropertyValue {
     /// Returns multi-select value as an array of tags
     pub fn as_tags(&self) -> Option<&[Tag]> {
         match self {
-            PropertyValue::MultiSelect { multi_select } => Some(multi_select),
+            Self::MultiSelect { multi_select } => Some(multi_select),
             _ => None,
         }
     }
@@ -395,35 +401,41 @@ impl PropertyValue {
     /// Returns the format corresponding to this value variant.
     pub fn format(&self) -> PropertyFormat {
         match self {
-            PropertyValue::Text { .. } => PropertyFormat::Text,
-            PropertyValue::Number { .. } => PropertyFormat::Number,
-            PropertyValue::Select { .. } => PropertyFormat::Select,
-            PropertyValue::MultiSelect { .. } => PropertyFormat::MultiSelect,
-            PropertyValue::Date { .. } => PropertyFormat::Date,
-            PropertyValue::Files { .. } => PropertyFormat::Files,
-            PropertyValue::Checkbox { .. } => PropertyFormat::Checkbox,
-            PropertyValue::Url { .. } => PropertyFormat::Url,
-            PropertyValue::Email { .. } => PropertyFormat::Email,
-            PropertyValue::Phone { .. } => PropertyFormat::Phone,
-            PropertyValue::Objects { .. } => PropertyFormat::Objects,
+            Self::Text { .. } => PropertyFormat::Text,
+            Self::Number { .. } => PropertyFormat::Number,
+            Self::Select { .. } => PropertyFormat::Select,
+            Self::MultiSelect { .. } => PropertyFormat::MultiSelect,
+            Self::Date { .. } => PropertyFormat::Date,
+            Self::Files { .. } => PropertyFormat::Files,
+            Self::Checkbox { .. } => PropertyFormat::Checkbox,
+            Self::Url { .. } => PropertyFormat::Url,
+            Self::Email { .. } => PropertyFormat::Email,
+            Self::Phone { .. } => PropertyFormat::Phone,
+            Self::Objects { .. } => PropertyFormat::Objects,
         }
     }
 }
 
 fn try_parse_num(key: &str, value: &str) -> Result<serde_json::Number> {
     // first try int
-    if let Ok(num) = value.parse::<u64>() {
-        Ok(Number::from(num))
-    } else if let Ok(num) = value.parse::<i64>() {
-        Ok(Number::from(num))
-    } else if let Ok(num) = value.parse::<f64>() {
-        // SAFETY: unwrap ok because it's a valid float
-        Ok(serde_json::Number::from_f64(num).unwrap())
-    } else {
-        Err(AnytypeError::Validation {
-            message: format!("Invalid number for property {key}: {value}"),
-        })
-    }
+    value.parse::<u64>().map_or_else(
+        |_| {
+            value.parse::<i64>().map_or_else(
+                |_| {
+                    value.parse::<f64>().map_or_else(
+                        |_| {
+                            Err(AnytypeError::Validation {
+                                message: format!("Invalid number for property {key}: {value}"),
+                            })
+                        },
+                        |num| Ok(serde_json::Number::from_f64(num).unwrap()),
+                    )
+                },
+                |num| Ok(Number::from(num)),
+            )
+        },
+        |num| Ok(Number::from(num)),
+    )
 }
 
 fn try_tag(prop: &Property, key: &str, value: &str) -> Result<String> {
@@ -447,7 +459,11 @@ impl AnytypeClient {
     // Convenience method to set properties on an object (NewObjectRequest or UpdateObjectRequest)
     // using string values. Returns error if the value cannot be converted to the applicable type.
     // When setting select and multi-select values, the value can be an id, name, or key.
-    pub async fn set_properties<K: AsRef<str>, V: AsRef<str>, SP: SetProperty>(
+    pub async fn set_properties<
+        K: AsRef<str> + Sync,
+        V: AsRef<str> + Sync,
+        SP: SetProperty + Send,
+    >(
         &self,
         space_id: &str,
         obj: SP,
@@ -455,7 +471,7 @@ impl AnytypeClient {
         props: &[(K, V)],
     ) -> Result<SP> {
         let mut obj = obj;
-        for (key, value) in props.iter() {
+        for (key, value) in props {
             let key = key.as_ref();
             let value = value.as_ref();
 
@@ -527,7 +543,7 @@ impl AnytypeClient {
 // SetProperty TRAIT
 // ============================================================================
 
-/// Trait for setting property values on objects. Used by CreateObjectRequest and UpdateObjectRequest.
+/// Trait for setting property values on objects. Used by `CreateObjectRequest` and `UpdateObjectRequest`.
 ///
 /// To set a property on an object, the property must already be defined in the object's type.
 ///
@@ -535,6 +551,7 @@ pub trait SetProperty: Sized {
     /// Adds a raw property value.
     ///
     /// Base method that all typed setters must implement.
+    #[must_use]
     fn add_property(self, property: Value) -> Self;
 
     /// Sets a text property value.
@@ -542,6 +559,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `value` - Text value
+    #[must_use]
     fn set_text(self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.add_property(json!({
             "key": key.into(),
@@ -554,6 +572,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `value` - Numeric value
+    #[must_use]
     fn set_number(self, key: impl Into<String>, value: impl Into<Number>) -> Self {
         self.add_property(json!({
             "key": key.into(),
@@ -566,6 +585,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `value` - Date string (ISO 3339 format recommended)
+    #[must_use]
     fn set_date(self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.add_property(json!({
             "key": key.into(),
@@ -578,6 +598,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `value` - URL string
+    #[must_use]
     fn set_url(self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.add_property(json!({
             "key": key.into(),
@@ -590,6 +611,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `value` - Email address
+    #[must_use]
     fn set_email(self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.add_property(json!({
             "key": key.into(),
@@ -602,6 +624,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `value` - Phone number
+    #[must_use]
     fn set_phone(self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.add_property(json!({
             "key": key.into(),
@@ -614,6 +637,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `value` - Boolean value
+    #[must_use]
     fn set_checkbox(self, key: impl Into<String>, value: bool) -> Self {
         self.add_property(json!({
             "key": key.into(),
@@ -626,6 +650,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `tag_id` - id of tag
+    #[must_use]
     fn set_select(self, key: impl Into<String>, tag_id: impl Into<String>) -> Self {
         let key = key.into();
         let tag_id = tag_id.into();
@@ -643,6 +668,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `objects` - Iterator of object IDs
+    #[must_use]
     fn set_objects(
         self,
         key: impl Into<String>,
@@ -659,6 +685,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `files` - Iterator of file references
+    #[must_use]
     fn set_files(
         self,
         key: impl Into<String>,
@@ -675,6 +702,7 @@ pub trait SetProperty: Sized {
     /// # Arguments
     /// * `key` - Property key
     /// * `values` - Iterator of tag ids
+    #[must_use]
     fn set_multi_select(
         self,
         key: impl Into<String>,
@@ -682,7 +710,7 @@ pub trait SetProperty: Sized {
     ) -> Self {
         let key = key.into();
         let values = values.into_iter().map(Into::into).collect::<Vec<String>>();
-        for value in values.iter() {
+        for value in &values {
             if !looks_like_object_id(value) {
                 error!("set_multi_select({key}, ...) invalid tag id: {value}");
             }
@@ -771,7 +799,7 @@ pub(crate) async fn set_property_tags(
 }
 
 /// Load all space properties into cache.
-/// Always fetches tags for Select and MultiSelect properties
+/// Always fetches tags for Select and `MultiSelect` properties
 async fn prime_cache_properties(
     client: &Arc<HttpClient>,
     cache: &Arc<AnytypeCache>,
@@ -781,13 +809,13 @@ async fn prime_cache_properties(
     let mut properties: Vec<Property> = client
         .get_request_paged(
             &format!("/v1/spaces/{space_id}/properties"),
-            Default::default(),
+            QueryWithFilters::default(),
         )
         .await?
         .collect_all()
         .await?;
 
-    for prop in properties.iter_mut() {
+    for prop in &mut properties {
         // if property is select or multi-select, update tags
         set_property_tags(client, limits, space_id, prop).await?;
     }
@@ -796,7 +824,7 @@ async fn prime_cache_properties(
 }
 
 impl PropertyRequest {
-    /// Creates a new PropertyRequest.
+    /// Creates a new `PropertyRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -816,6 +844,7 @@ impl PropertyRequest {
     }
 
     /// Also fetches tags for this property.
+    #[must_use]
     pub fn with_tags(mut self) -> Self {
         self.with_tags = true;
         self
@@ -845,7 +874,7 @@ impl PropertyRequest {
                 if let Some(property) = self.cache.get_property(&self.space_id, &self.property_id) {
                     let mut property = (*property).clone();
                     if !self.with_tags {
-                        property.tags = Default::default();
+                        property.tags = None;
                     }
                     return Ok(property);
                 }
@@ -865,7 +894,7 @@ impl PropertyRequest {
                     "/v1/spaces/{}/properties/{}",
                     self.space_id, self.property_id
                 ),
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
 
@@ -934,7 +963,7 @@ pub struct NewPropertyRequest {
 }
 
 impl NewPropertyRequest {
-    /// Creates a new NewPropertyRequest.
+    /// Creates a new `NewPropertyRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -960,10 +989,11 @@ impl NewPropertyRequest {
 
     /// Sets the property key.
     ///
-    /// Should be in snake_case format.
+    /// Should be in `snake_case` format.
     ///
     /// # Arguments
     /// * `key` - Unique key for the property
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
@@ -975,6 +1005,7 @@ impl NewPropertyRequest {
     /// * `name` - tag name
     /// * `key` - optional key
     /// * `color` - tag color
+    #[must_use]
     pub fn tag(mut self, name: &str, key: Option<String>, color: Color) -> Self {
         self.tags.push(CreateTagRequest {
             name: name.into(),
@@ -988,18 +1019,21 @@ impl NewPropertyRequest {
     ///
     /// # Arguments
     /// * `tags` - Iterator of tags to add
+    #[must_use]
     pub fn tags(mut self, tags: impl IntoIterator<Item = CreateTagRequest>) -> Self {
         self.tags.extend(tags);
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -1007,6 +1041,7 @@ impl NewPropertyRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -1050,7 +1085,7 @@ impl NewPropertyRequest {
             .post_request(
                 &format!("/v1/spaces/{}/properties", self.space_id),
                 &request_body,
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
 
@@ -1065,13 +1100,13 @@ impl NewPropertyRequest {
         }
 
         let property = response.property;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Property", &property.id, || async {
                 let response: PropertyResponse = self
                     .client
                     .get_request(
                         &format!("/v1/spaces/{}/properties/{}", self.space_id, property.id),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.property)
@@ -1112,7 +1147,7 @@ pub struct UpdatePropertyRequest {
 }
 
 impl UpdatePropertyRequest {
-    /// Creates a new UpdatePropertyRequest.
+    /// Creates a new `UpdatePropertyRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -1138,6 +1173,7 @@ impl UpdatePropertyRequest {
     ///
     /// # Arguments
     /// * `name` - New display name for the property
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -1146,19 +1182,22 @@ impl UpdatePropertyRequest {
     /// Updates the property key.
     ///
     /// # Arguments
-    /// * `key` - New key for the property (snake_case)
+    /// * `key` - New key for the property (`snake_case`)
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
     }
 
     /// Enables read-after-write verification for this request.
+    #[must_use]
     pub fn ensure_available(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self
     }
 
     /// Enables verification using a custom config for this request.
+    #[must_use]
     pub fn ensure_available_with(mut self, config: VerifyConfig) -> Self {
         self.verify_policy = VerifyPolicy::Enabled;
         self.verify_config = Some(config);
@@ -1166,6 +1205,7 @@ impl UpdatePropertyRequest {
     }
 
     /// Disables verification for this request.
+    #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
         self
@@ -1225,13 +1265,13 @@ impl UpdatePropertyRequest {
         }
 
         let property = response.property;
-        if let Some(config) = resolve_verify(self.verify_policy, &self.verify_config) {
+        if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
             return verify_available(&config, "Property", &property.id, || async {
                 let response: PropertyResponse = self
                     .client
                     .get_request(
                         &format!("/v1/spaces/{}/properties/{}", self.space_id, property.id),
-                        Default::default(),
+                        QueryWithFilters::default(),
                     )
                     .await?;
                 Ok(response.property)
@@ -1268,14 +1308,15 @@ pub struct ListPropertiesRequest {
     client: Arc<HttpClient>,
     limits: ValidationLimits,
     space_id: String,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
     cache: Arc<AnytypeCache>,
 }
 
 impl ListPropertiesRequest {
-    /// Creates a new ListPropertiesRequest.
+    /// Creates a new `ListPropertiesRequest`.
+    #[must_use]
     pub(crate) fn new(
         client: Arc<HttpClient>,
         limits: ValidationLimits,
@@ -1299,7 +1340,8 @@ impl ListPropertiesRequest {
     ///
     /// # Arguments
     /// * `limit` - Number of items to return per page
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
@@ -1308,7 +1350,8 @@ impl ListPropertiesRequest {
     ///
     /// # Arguments
     /// * `offset` - Number of items to skip
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -1319,6 +1362,7 @@ impl ListPropertiesRequest {
     ///
     /// # Arguments
     /// * `filter` - Filter condition to add
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -1328,6 +1372,7 @@ impl ListPropertiesRequest {
     ///
     /// # Arguments
     /// * `filters` - Iterator of filters to add
+    #[must_use]
     pub fn filters(mut self, filters: impl IntoIterator<Item = Filter>) -> Self {
         self.filters.extend(filters);
         self
@@ -1343,7 +1388,7 @@ impl ListPropertiesRequest {
     /// parameter must not contain filters or pagination limits or offsets.
     ///
     /// # Errors
-    /// - [`AnytypeError::Validation`] if space_id is invalid
+    /// - [`AnytypeError::Validation`] if `space_id` is invalid
     pub async fn list(self) -> Result<PagedResult<Property>> {
         self.limits.validate_id(&self.space_id, "space_id")?;
 
@@ -1364,8 +1409,8 @@ impl ListPropertiesRequest {
             ));
         }
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         self.client
@@ -1381,7 +1426,7 @@ impl ListPropertiesRequest {
 impl AnytypeClient {
     /// Creates a request builder for getting or deleting a single property by its id.
     /// To look up a property by its key,
-    /// use [lookup_property_by_key](AnytypeClient::lookup_property_by_key)
+    /// use [`lookup_property_by_key`](AnytypeClient::lookup_property_by_key)
     ///
     /// # Arguments
     /// * `space_id` - ID of the space containing the property
@@ -1528,9 +1573,9 @@ impl AnytypeClient {
     /// ```
     ///
     /// Errors:
-    /// - AnytypeError::NotFound if no property in the space matched
-    /// - AnytypeError::CacheDisabled if cache is disabled
-    /// - AnytypeError::* any other error
+    /// - `AnytypeError::NotFound` if no property in the space matched
+    /// - `AnytypeError::CacheDisabled` if cache is disabled
+    /// - `AnytypeError::*` any other error
     ///
     pub async fn lookup_properties(
         &self,
@@ -1578,9 +1623,9 @@ impl AnytypeClient {
     /// ```
     ///
     /// Errors:
-    /// - AnytypeError::NotFound if no property in the space matched
-    /// - AnytypeError::CacheDisabled if cache is disabled
-    /// - AnytypeError::* any other error
+    /// - `AnytypeError::NotFound` if no property in the space matched
+    /// - `AnytypeError::CacheDisabled` if cache is disabled
+    /// - `AnytypeError::*` any other error
     ///
     pub async fn lookup_property_by_key(
         &self,
@@ -1593,13 +1638,17 @@ impl AnytypeClient {
             prime_cache_properties(&self.client, &self.cache, &self.config.limits, space_id)
                 .await?;
         }
-        match self.cache.lookup_property_by_key(space_id, text.as_ref()) {
-            Some(property) => Ok((*property).clone()),
-            None => Err(AnytypeError::NotFound {
-                obj_type: "Property".into(),
-                key: text.as_ref().to_string(),
-            }),
-        }
+        self.cache
+            .lookup_property_by_key(space_id, text.as_ref())
+            .map_or_else(
+                || {
+                    Err(AnytypeError::NotFound {
+                        obj_type: "Property".into(),
+                        key: text.as_ref().to_string(),
+                    })
+                },
+                |property| Ok((*property).clone()),
+            )
     }
 
     /// Searches for property and tag combination.
@@ -1622,9 +1671,9 @@ impl AnytypeClient {
     /// ```
     ///
     /// Errors:
-    /// - AnytypeError::NotFound if no property in the space matched, or tag doesn't match
-    /// - AnytypeError::CacheDisabled if cache is disabled
-    /// - AnytypeError::* any other error
+    /// - `AnytypeError::NotFound` if no property in the space matched, or tag doesn't match
+    /// - `AnytypeError::CacheDisabled` if cache is disabled
+    /// - `AnytypeError::*` any other error
     ///
     pub async fn lookup_property_tag(
         &self,
@@ -1654,7 +1703,7 @@ mod tests {
 
     #[test]
     fn test_property_format_default() {
-        let format: PropertyFormat = Default::default();
+        let format: PropertyFormat = PropertyFormat::default();
         assert_eq!(format, PropertyFormat::Text);
     }
 

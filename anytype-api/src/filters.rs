@@ -33,7 +33,7 @@ pub struct Sort {
 impl Sort {
     /// Constructs an ascending sort request.
     pub fn asc(property: impl Into<String>) -> Self {
-        Sort {
+        Self {
             direction: SortDirection::Asc,
             property_key: property.into(),
         }
@@ -41,7 +41,7 @@ impl Sort {
 
     /// Constructs a descending sort request.
     pub fn desc(property: impl Into<String>) -> Self {
-        Sort {
+        Self {
             direction: SortDirection::Desc,
             property_key: property.into(),
         }
@@ -67,7 +67,7 @@ pub enum FilterOperator {
 /// valid combinations of field and operator supported by the server api.
 ///
 /// This struct is public, to allow constructing arbitrary expressions,
-/// including invalid combinations that result in ApiError (code 400)
+/// including invalid combinations that result in `ApiError` (code 400)
 /// responses from the server.
 ///
 /// For the common use-case of a logical AND
@@ -123,7 +123,7 @@ pub struct FilterExpression {
 
     /// nested filter expressions
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub filters: Vec<FilterExpression>,
+    pub filters: Vec<Self>,
 
     /// logical operator for combining filters (and, or). Default: "and"
     pub operator: FilterOperator,
@@ -132,9 +132,9 @@ pub struct FilterExpression {
 impl From<Vec<Filter>> for FilterExpression {
     /// Creates an AND expression from conditions.
     fn from(conditions: Vec<Filter>) -> Self {
-        FilterExpression {
+        Self {
             conditions,
-            filters: Default::default(),
+            filters: Vec::default(),
             operator: FilterOperator::And,
         }
     }
@@ -146,8 +146,9 @@ impl FilterExpression {
     }
 
     /// Constructs an AND expression for combining filters.
-    pub fn and(conditions: Vec<Filter>, filters: Vec<FilterExpression>) -> Self {
-        FilterExpression {
+    #[must_use]
+    pub fn and(conditions: Vec<Filter>, filters: Vec<Self>) -> Self {
+        Self {
             conditions,
             filters,
             operator: FilterOperator::And,
@@ -155,8 +156,9 @@ impl FilterExpression {
     }
 
     /// Constructs an OR expression for combining filters.
-    pub fn or(conditions: Vec<Filter>, filters: Vec<FilterExpression>) -> Self {
-        FilterExpression {
+    #[must_use]
+    pub fn or(conditions: Vec<Filter>, filters: Vec<Self>) -> Self {
+        Self {
             conditions,
             filters,
             operator: FilterOperator::Or,
@@ -178,23 +180,23 @@ impl Query {
     /// Sets the pagination limit (number of items to return).
     /// Default limit is 100 items. If value set is greater than the max allowed by the api (1000),
     /// a warning is printed and the limit is reduced to the max.
-    pub(crate) fn limit(self, mut limit: usize) -> Self {
+    pub(crate) fn limit(self, mut limit: u32) -> Self {
         if limit > MAX_PAGINATION_LIMIT {
             warn!(
                 "attempt to set pagination limit to {limit}. reducing to max value: {MAX_PAGINATION_LIMIT}"
             );
             limit = MAX_PAGINATION_LIMIT;
         }
-        if limit != DEFAULT_PAGINATION_LIMIT {
-            self.add_param("limit", limit.to_string())
-        } else {
+        if limit == DEFAULT_PAGINATION_LIMIT {
             self
+        } else {
+            self.add_param("limit", limit.to_string())
         }
     }
 
     /// Sets the pagination offset (starting item number for the next page)
     /// Default offset is 0.
-    pub(crate) fn offset(self, offset: usize) -> Self {
+    pub(crate) fn offset(self, offset: u32) -> Self {
         if offset != 0 {
             self.add_param("offset", offset.to_string())
         } else {
@@ -210,7 +212,7 @@ impl Query {
         self
     }
 
-    /// Adds a filter, converting Query into QueryWithFilters
+    /// Adds a filter, converting `Query` into `QueryWithFilters`
     pub(crate) fn add_filters(self, filters: &[Filter]) -> QueryWithFilters {
         let mut query_with_filters = QueryWithFilters::from(filters);
         query_with_filters.params.extend(self.params);
@@ -218,34 +220,35 @@ impl Query {
     }
 
     /// Sets optional limit (crate-internal)
-    pub(crate) fn set_limit_opt(self, limit: &Option<usize>) -> Self {
+    #[allow(clippy::ref_option)]
+    pub(crate) fn set_limit_opt(self, limit: Option<u32>) -> Self {
         if let Some(limit) = limit {
-            Self::limit(self, *limit)
+            Self::limit(self, limit)
         } else {
             self
         }
     }
 
     /// Sets optional offset (crate-internal)
-    pub(crate) fn set_offset_opt(self, offset: &Option<usize>) -> Self {
+    pub(crate) fn set_offset_opt(self, offset: Option<u32>) -> Self {
         if let Some(offset) = offset {
-            Self::offset(self, *offset)
+            Self::offset(self, offset)
         } else {
             self
         }
     }
 }
 
-/// converts Query to QueryWithFilters
+/// converts Query to `QueryWithFilters`
 /// convenience method: Most http requests support optional
 /// query parameters `limit` and `offset`. A subset of backend apis
 /// also support filter parameters (especially the list_* methods).
 /// This conversion lets us start with the most common Query, and for backend apis
-/// that support QueryWithFilters, accept `Into<QueryWithFilters>` to handle
-/// either Query (with no filters) or QueryWithFilters.
+/// that support `QueryWithFilters`, accept `Into<QueryWithFilters>` to handle
+/// either Query (with no filters) or `QueryWithFilters`.
 impl From<Query> for QueryWithFilters {
     fn from(query: Query) -> Self {
-        QueryWithFilters {
+        Self {
             params: query.params,
             error: None,
         }
@@ -254,8 +257,8 @@ impl From<Query> for QueryWithFilters {
 
 /// Internal structure to store common query parameters (`limit` and `offset`),
 /// additional parameters. Also stores an error message for deferred reporting.
-/// (parameters are when Query is converted to QueryWithFilters, but
-/// not reported until submitted to HttpClient)
+/// (parameters are when Query is converted to `QueryWithFilters`, but
+/// not reported until submitted to `HttpClient`)
 #[derive(Default, Clone, Debug)]
 pub(crate) struct QueryWithFilters {
     pub(crate) params: Vec<(String, String)>,
@@ -289,12 +292,12 @@ impl From<&[Filter]> for QueryWithFilters {
         let mut params = Vec::new();
         for filter in filters {
             if let Some(err) = filter.validate() {
-                errors.push(err)
+                errors.push(err);
             } else {
                 params.extend(filter.to_query_params());
             }
         }
-        QueryWithFilters {
+        Self {
             params,
             error: if errors.is_empty() {
                 None
@@ -371,12 +374,12 @@ pub enum Condition {
     NotContains,
 
     /// property is in the list.
-    /// used for tags (select, multi_select), files, and objects
+    /// used for tags (select, `multi_select`), files, and objects
     #[serde(rename = "in")]
     #[strum(serialize = "in")]
     In,
 
-    /// used for tags (select, multi_select), files, and objects
+    /// used for tags (select, `multi_select`), files, and objects
     #[serde(rename = "nin")]
     #[strum(serialize = "nin")]
     NotIn,
@@ -415,18 +418,18 @@ pub enum Condition {
 impl Condition {
     /// Returns true when the condition is [`Condition::None`].
     pub fn is_none(&self) -> bool {
-        matches!(self, Condition::None)
+        matches!(self, Self::None)
     }
     /// Returns true when the condition is [`Condition::Equal`].
     pub fn is_equal(&self) -> bool {
-        matches!(self, Condition::Equal)
+        matches!(self, Self::Equal)
     }
 }
 
 impl Filter {
     /// Matches when the property is empty.
     pub fn is_empty(property_key: impl Into<String>) -> Self {
-        Filter::Empty {
+        Self::Empty {
             property_key: property_key.into(),
             condition: Condition::Empty,
         }
@@ -434,7 +437,7 @@ impl Filter {
 
     /// Matches when the property is not empty.
     pub fn not_empty(property_key: impl Into<String>) -> Self {
-        Filter::NotEmpty {
+        Self::NotEmpty {
             property_key: property_key.into(),
             condition: Condition::NotEmpty,
         }
@@ -442,7 +445,7 @@ impl Filter {
 
     /// Matches when the checkbox property is true.
     pub fn checkbox_true(property_key: impl Into<String>) -> Self {
-        Filter::Checkbox {
+        Self::Checkbox {
             property_key: property_key.into(),
             condition: Condition::Equal,
             checkbox: true,
@@ -451,7 +454,7 @@ impl Filter {
 
     /// Matches when the checkbox property is false.
     pub fn checkbox_false(property_key: impl Into<String>) -> Self {
-        Filter::Checkbox {
+        Self::Checkbox {
             property_key: property_key.into(),
             condition: Condition::Equal,
             checkbox: false,
@@ -460,7 +463,7 @@ impl Filter {
 
     /// Matches when the text property equals the value.
     pub fn text_equal(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Text {
+        Self::Text {
             property_key: property_key.into(),
             condition: Condition::Equal,
             text: value.into(),
@@ -469,7 +472,7 @@ impl Filter {
 
     /// Matches when the text property does not equal the value.
     pub fn text_not_equal(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Text {
+        Self::Text {
             property_key: property_key.into(),
             condition: Condition::NotEqual,
             text: value.into(),
@@ -485,7 +488,7 @@ impl Filter {
     /// let filter = Filter::text_contains("title", "draft");
     /// ```
     pub fn text_contains(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Text {
+        Self::Text {
             property_key: property_key.into(),
             condition: Condition::Contains,
             text: value.into(),
@@ -501,7 +504,7 @@ impl Filter {
     /// let filter = Filter::text_not_contains("title", "draft");
     /// ```
     pub fn text_not_contains(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Text {
+        Self::Text {
             property_key: property_key.into(),
             condition: Condition::NotContains,
             text: value.into(),
@@ -519,7 +522,7 @@ impl Filter {
         property_key: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        Filter::MultiSelect {
+        Self::MultiSelect {
             property_key: property_key.into(),
             condition: Condition::In,
             multi_select: values.into_iter().map(std::convert::Into::into).collect(),
@@ -537,14 +540,14 @@ impl Filter {
         property_key: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        Filter::Select {
+        Self::Select {
             property_key: property_key.into(),
             condition: Condition::In,
             select: values.into_iter().map(std::convert::Into::into).collect(),
         }
     }
 
-    /// Matches when the select property equals the value (shortcut for select_in vec["value"]).
+    /// Matches when the select property equals the value. Shortcut for `select_in(vec!["value"])`.
     ///
     /// Example:
     /// ```rust,no_run
@@ -552,14 +555,14 @@ impl Filter {
     /// let filter = Filter::select_equal("status", "open");
     /// ```
     pub fn select_equal(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Select {
+        Self::Select {
             property_key: property_key.into(),
             condition: Condition::In,
             select: vec![value.into()],
         }
     }
 
-    /// Matches when the 'type' property is one of the options (shortcut for select_in("type", values)).
+    /// Matches when the 'type' property is one of the options. Shortcut for `select_in("type", values)`.
     ///
     /// Example:
     /// ```rust,no_run
@@ -568,7 +571,7 @@ impl Filter {
     /// let filter = Filter::type_in(vec!["page", "note"]);
     /// ```
     pub fn type_in(values: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Filter::Select {
+        Self::Select {
             property_key: "type".into(),
             condition: Condition::In,
             select: values.into_iter().map(std::convert::Into::into).collect(),
@@ -586,7 +589,7 @@ impl Filter {
         property_key: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        Filter::MultiSelect {
+        Self::MultiSelect {
             property_key: property_key.into(),
             condition: Condition::NotIn,
             multi_select: values.into_iter().map(std::convert::Into::into).collect(),
@@ -604,7 +607,7 @@ impl Filter {
         property_key: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        Filter::Select {
+        Self::Select {
             property_key: property_key.into(),
             condition: Condition::NotIn,
             select: values.into_iter().map(std::convert::Into::into).collect(),
@@ -622,7 +625,7 @@ impl Filter {
         property_key: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        Filter::MultiSelect {
+        Self::MultiSelect {
             property_key: property_key.into(),
             condition: Condition::All,
             multi_select: values.into_iter().map(std::convert::Into::into).collect(),
@@ -640,7 +643,7 @@ impl Filter {
         property_key: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        Filter::MultiSelect {
+        Self::MultiSelect {
             property_key: property_key.into(),
             condition: Condition::AllIn,
             multi_select: values.into_iter().map(std::convert::Into::into).collect(),
@@ -649,7 +652,7 @@ impl Filter {
 
     /// Numeric property is equal
     pub fn number_equal(property_key: impl Into<String>, value: impl Into<Number>) -> Self {
-        Filter::Number {
+        Self::Number {
             property_key: property_key.into(),
             condition: Condition::Equal,
             number: value.into(),
@@ -658,7 +661,7 @@ impl Filter {
 
     /// Numeric property is not equal
     pub fn number_not_equal(property_key: impl Into<String>, value: impl Into<Number>) -> Self {
-        Filter::Number {
+        Self::Number {
             property_key: property_key.into(),
             condition: Condition::NotEqual,
             number: value.into(),
@@ -667,7 +670,7 @@ impl Filter {
 
     /// Numeric property less than
     pub fn number_less(property_key: impl Into<String>, value: impl Into<Number>) -> Self {
-        Filter::Number {
+        Self::Number {
             property_key: property_key.into(),
             condition: Condition::Less,
             number: value.into(),
@@ -676,7 +679,7 @@ impl Filter {
 
     /// Numeric property less-than-or-equal
     pub fn number_less_or_equal(property_key: impl Into<String>, value: impl Into<Number>) -> Self {
-        Filter::Number {
+        Self::Number {
             property_key: property_key.into(),
             condition: Condition::LessOrEqual,
             number: value.into(),
@@ -685,7 +688,7 @@ impl Filter {
 
     /// Numeric property greater-than
     pub fn number_greater(property_key: impl Into<String>, value: impl Into<Number>) -> Self {
-        Filter::Number {
+        Self::Number {
             property_key: property_key.into(),
             condition: Condition::Greater,
             number: value.into(),
@@ -697,7 +700,7 @@ impl Filter {
         property_key: impl Into<String>,
         value: impl Into<Number>,
     ) -> Self {
-        Filter::Number {
+        Self::Number {
             property_key: property_key.into(),
             condition: Condition::GreaterOrEqual,
             number: value.into(),
@@ -706,7 +709,7 @@ impl Filter {
 
     /// Date is equal
     pub fn date_equal(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Date {
+        Self::Date {
             property_key: property_key.into(),
             condition: Condition::Equal,
             date: value.into(),
@@ -715,7 +718,7 @@ impl Filter {
 
     /// Date is not equal
     pub fn date_not_equal(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Date {
+        Self::Date {
             property_key: property_key.into(),
             condition: Condition::NotEqual,
             date: value.into(),
@@ -730,7 +733,7 @@ impl Filter {
     /// let filter = Filter::date_less("due_date", "2026-01-01");
     /// ```
     pub fn date_less(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Date {
+        Self::Date {
             property_key: property_key.into(),
             condition: Condition::Less,
             date: value.into(),
@@ -745,7 +748,7 @@ impl Filter {
     /// let filter = Filter::date_less_or_equal("due_date", "2025-12-31T23:59:59Z");
     /// ```
     pub fn date_less_or_equal(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Date {
+        Self::Date {
             property_key: property_key.into(),
             condition: Condition::LessOrEqual,
             date: value.into(),
@@ -754,7 +757,7 @@ impl Filter {
 
     /// Date is greater than (use rfc3339 format strings)
     pub fn date_greater(property_key: impl Into<String>, value: impl Into<String>) -> Self {
-        Filter::Date {
+        Self::Date {
             property_key: property_key.into(),
             condition: Condition::Greater,
             date: value.into(),
@@ -766,7 +769,7 @@ impl Filter {
         property_key: impl Into<String>,
         value: impl Into<String>,
     ) -> Self {
-        Filter::Date {
+        Self::Date {
             property_key: property_key.into(),
             condition: Condition::GreaterOrEqual,
             date: value.into(),
@@ -775,7 +778,7 @@ impl Filter {
 
     /// Checkbox field is equal to the (bool) value
     pub fn checkbox_equal(property_key: impl Into<String>, checkbox: bool) -> Self {
-        Filter::Checkbox {
+        Self::Checkbox {
             property_key: property_key.into(),
             condition: Condition::Equal,
             checkbox,
@@ -784,7 +787,7 @@ impl Filter {
 
     /// Checkbox field is not equal to the (bool) value
     pub fn checkbox_not_equal(property_key: impl Into<String>, checkbox: bool) -> Self {
-        Filter::Checkbox {
+        Self::Checkbox {
             property_key: property_key.into(),
             condition: Condition::NotEqual,
             checkbox,
@@ -873,13 +876,14 @@ pub enum Filter {
 }
 
 impl Serialize for Filter {
+    #[allow(clippy::too_many_lines)]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         let mut state = serializer.serialize_struct("Filter", 3)?;
         match self {
-            Filter::Text {
+            Self::Text {
                 condition,
                 property_key,
                 text,
@@ -888,7 +892,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("text", text)?;
             }
-            Filter::Number {
+            Self::Number {
                 condition,
                 property_key,
                 number,
@@ -897,7 +901,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("number", number)?;
             }
-            Filter::Select {
+            Self::Select {
                 condition,
                 property_key,
                 select,
@@ -906,7 +910,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("select", &join_values(select))?;
             }
-            Filter::MultiSelect {
+            Self::MultiSelect {
                 condition,
                 property_key,
                 multi_select,
@@ -915,7 +919,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("multi_select", multi_select)?;
             }
-            Filter::Date {
+            Self::Date {
                 condition,
                 property_key,
                 date,
@@ -924,7 +928,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("date", date)?;
             }
-            Filter::Checkbox {
+            Self::Checkbox {
                 condition,
                 property_key,
                 checkbox,
@@ -933,7 +937,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("checkbox", checkbox)?;
             }
-            Filter::Files {
+            Self::Files {
                 condition,
                 property_key,
                 files,
@@ -942,7 +946,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("files", files)?;
             }
-            Filter::Url {
+            Self::Url {
                 condition,
                 property_key,
                 url,
@@ -951,7 +955,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("url", url)?;
             }
-            Filter::Email {
+            Self::Email {
                 condition,
                 property_key,
                 email,
@@ -960,7 +964,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("email", email)?;
             }
-            Filter::Phone {
+            Self::Phone {
                 condition,
                 property_key,
                 phone,
@@ -969,7 +973,7 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("phone", phone)?;
             }
-            Filter::Objects {
+            Self::Objects {
                 condition,
                 property_key,
                 objects,
@@ -978,21 +982,18 @@ impl Serialize for Filter {
                 state.serialize_field("property_key", property_key)?;
                 state.serialize_field("objects", objects)?;
             }
-            Filter::Empty {
+            Self::Empty {
+                condition,
+                property_key,
+            }
+            | Self::NotEmpty {
                 condition,
                 property_key,
             } => {
                 state.serialize_field("condition", condition)?;
                 state.serialize_field("property_key", property_key)?;
             }
-            Filter::NotEmpty {
-                condition,
-                property_key,
-            } => {
-                state.serialize_field("condition", condition)?;
-                state.serialize_field("property_key", property_key)?;
-            }
-            Filter::Value {
+            Self::Value {
                 condition,
                 property_key,
                 value,
@@ -1026,27 +1027,27 @@ where
 impl Filter {
     fn name(&self) -> &'static str {
         match self {
-            Filter::Text { .. } => "text",
-            Filter::Number { .. } => "number",
-            Filter::Select { .. } => "select",
-            Filter::MultiSelect { .. } => "multi_select",
-            Filter::Date { .. } => "date",
-            Filter::Checkbox { .. } => "checkbox",
-            Filter::Files { .. } => "files",
-            Filter::Url { .. } => "url",
-            Filter::Email { .. } => "email",
-            Filter::Phone { .. } => "phone",
-            Filter::Objects { .. } => "objects",
-            Filter::Empty { .. } => "empty",
-            Filter::NotEmpty { .. } => "not_empty",
-            Filter::Value { .. } => "value",
+            Self::Text { .. } => "text",
+            Self::Number { .. } => "number",
+            Self::Select { .. } => "select",
+            Self::MultiSelect { .. } => "multi_select",
+            Self::Date { .. } => "date",
+            Self::Checkbox { .. } => "checkbox",
+            Self::Files { .. } => "files",
+            Self::Url { .. } => "url",
+            Self::Email { .. } => "email",
+            Self::Phone { .. } => "phone",
+            Self::Objects { .. } => "objects",
+            Self::Empty { .. } => "empty",
+            Self::NotEmpty { .. } => "not_empty",
+            Self::Value { .. } => "value",
         }
     }
 
     // validate the filter, returning optional error
     pub(crate) fn validate(&self) -> Option<String> {
         match self {
-            Filter::Date {
+            Self::Date {
                         condition:
                             Condition::Equal
                             // | Condition::NotEqual // why not? (see types.go line 71)
@@ -1068,7 +1069,7 @@ impl Filter {
                             | Condition::NotEmpty,
                             )
                     => None,
-            Filter::Select{ condition:
+            Self::Select{ condition:
                             Condition::In
                             | Condition::NotIn
                             | Condition::Empty
@@ -1082,7 +1083,7 @@ impl Filter {
                             | Condition::Empty
                             | Condition::NotEmpty,
                         ) => None,
-            Filter::Number {
+            Self::Number {
                         condition:
                             Condition::Equal
                             | Condition::NotEqual
@@ -1093,35 +1094,34 @@ impl Filter {
                             | Condition::Empty
                             | Condition::NotEmpty,
                         ..
-                    } => None,
-            Filter::Checkbox {
+                    } 
+            | Self::Checkbox {
                         condition:
                             Condition::Equal
                             | Condition::NotEqual,
                         ..
-                    } => None,
-            Filter::Empty { condition: Condition::Empty, .. } => None,
-            Filter::NotEmpty { condition: Condition::NotEmpty, .. } => None,
-
+                    } 
+            | Self::Empty { condition: Condition::Empty, .. } 
+            | Self::NotEmpty { condition: Condition::NotEmpty, .. } 
             // skip validation on Value because it's only created by Deserialization
-            Filter::Value { .. } => None ,
+            | Self::Value { .. } => None ,
 
             // anything else is invalid
             // could have used '_' here but using the more explicit variants
             // to confirm explicitly that we covered them all
-            Filter::Select { .. }
-                    | Filter::Date { .. }
-                    | Filter::Text { .. }
-                    | Filter::Url { .. }
-                    | Filter::Email { .. }
-                    | Filter::Phone { .. }
-                    | Filter::MultiSelect { .. }
-                    | Filter::Files{ .. }
-                    | Filter::Objects { .. }
-                    | Filter::Number { .. }
-                    | Filter::Checkbox { .. }
-                    | Filter::Empty { .. }
-                    | Filter::NotEmpty { .. } => {
+            Self::Select { .. }
+                    | Self::Date { .. }
+                    | Self::Text { .. }
+                    | Self::Url { .. }
+                    | Self::Email { .. }
+                    | Self::Phone { .. }
+                    | Self::MultiSelect { .. }
+                    | Self::Files{ .. }
+                    | Self::Objects { .. }
+                    | Self::Number { .. }
+                    | Self::Checkbox { .. }
+                    | Self::Empty { .. }
+                    | Self::NotEmpty { .. } => {
 
                    Some(format!("invalid condition '{}' for {} filter", self.condition(), self.name()))
 
@@ -1136,10 +1136,10 @@ impl Filter {
             // because it's handled in the match patterns in validate()
             // (Select differs from the others because it doesn't support AllIn)
             //Filter::Select { .. } => true,
-            Filter::MultiSelect { .. } => true,
-            Filter::Files { .. } => true,
-            Filter::Objects { .. } => true,
-            Filter::Value {
+            Self::MultiSelect { .. } 
+            | Self::Files { .. } 
+            | Self::Objects { .. } 
+            | Self::Value {
                 value: Some(Value::Array(_)),
                 ..
             } => true,
@@ -1150,16 +1150,16 @@ impl Filter {
     // helper function used in validate() match patterns
     fn is_text_type(&self) -> bool {
         match self {
-            Filter::Text { .. } => true,
+            Self::Text { .. } 
             // even though Date is a string type, don't include here
             // because it's handled in the match patterns in validate()
             // (Date differs from the other text types because it supports magnitude comparisons (greater, etc.)
             // and doesn't support NotEqual (I have no idea why. See types.go line 71))
             //Filter::Date { .. } => true,
-            Filter::Url { .. } => true,
-            Filter::Email { .. } => true,
-            Filter::Phone { .. } => true,
-            Filter::Value {
+            | Self::Url { .. } 
+            | Self::Email { .. } 
+            | Self::Phone { .. } 
+            | Self::Value {
                 value: Some(Value::String(_)),
                 ..
             } => true,
@@ -1169,39 +1169,39 @@ impl Filter {
 
     pub fn condition(&self) -> Condition {
         *match self {
-            Filter::Text { condition, .. } => condition,
-            Filter::Number { condition, .. } => condition,
-            Filter::Select { condition, .. } => condition,
-            Filter::MultiSelect { condition, .. } => condition,
-            Filter::Date { condition, .. } => condition,
-            Filter::Checkbox { condition, .. } => condition,
-            Filter::Files { condition, .. } => condition,
-            Filter::Url { condition, .. } => condition,
-            Filter::Email { condition, .. } => condition,
-            Filter::Phone { condition, .. } => condition,
-            Filter::Objects { condition, .. } => condition,
-            Filter::Empty { condition, .. } => condition,
-            Filter::NotEmpty { condition, .. } => condition,
-            Filter::Value { condition, .. } => condition,
+            Self::Text { condition, .. } 
+            | Self::Number { condition, .. }
+            | Self::Select { condition, .. } 
+            | Self::MultiSelect { condition, .. } 
+            | Self::Date { condition, .. } 
+            | Self::Checkbox { condition, .. } 
+            | Self::Files { condition, .. } 
+            | Self::Url { condition, .. } 
+            | Self::Email { condition, .. } 
+            | Self::Phone { condition, .. } 
+            | Self::Objects { condition, .. } 
+            | Self::Empty { condition, .. } 
+            | Self::NotEmpty { condition, .. } 
+            | Self::Value { condition, .. } => condition,
         }
     }
 
     pub fn property_key(&self) -> &str {
         match self {
-            Filter::Text { property_key, .. } => property_key,
-            Filter::Number { property_key, .. } => property_key,
-            Filter::Select { property_key, .. } => property_key,
-            Filter::MultiSelect { property_key, .. } => property_key,
-            Filter::Date { property_key, .. } => property_key,
-            Filter::Checkbox { property_key, .. } => property_key,
-            Filter::Files { property_key, .. } => property_key,
-            Filter::Url { property_key, .. } => property_key,
-            Filter::Email { property_key, .. } => property_key,
-            Filter::Phone { property_key, .. } => property_key,
-            Filter::Objects { property_key, .. } => property_key,
-            Filter::Empty { property_key, .. } => property_key,
-            Filter::NotEmpty { property_key, .. } => property_key,
-            Filter::Value { property_key, .. } => property_key,
+            Self::Text { property_key, .. } 
+            | Self::Number { property_key, .. } 
+            | Self::Select { property_key, .. } 
+            | Self::MultiSelect { property_key, .. } 
+            | Self::Date { property_key, .. } 
+            | Self::Checkbox { property_key, .. } 
+            | Self::Files { property_key, .. } 
+            | Self::Url { property_key, .. } 
+            | Self::Email { property_key, .. } 
+            | Self::Phone { property_key, .. } 
+            | Self::Objects { property_key, .. } 
+            | Self::Empty { property_key, .. } 
+            | Self::NotEmpty { property_key, .. } 
+            | Self::Value { property_key, .. } => property_key,
         }
     }
 
@@ -1219,24 +1219,23 @@ impl Filter {
 
     pub(crate) fn to_query(&self) -> (String, String) {
         match self {
-            Filter::Text { text, .. } => (self.query_key(), text.to_owned()),
-            Filter::Number { number, .. } => (self.query_key(), number.to_string()),
-            Filter::Select { select, .. } => (self.query_key(), select.join(",")),
-            Filter::MultiSelect { multi_select, .. } => (self.query_key(), multi_select.join(",")),
-            Filter::Date { date, .. } => (self.query_key(), date.to_owned()),
-            Filter::Checkbox { checkbox, .. } => (self.query_key(), checkbox.to_string()),
-            Filter::Files { files, .. } => (self.query_key(), files.join(",")),
-            Filter::Url { url, .. } => (self.query_key(), url.to_owned()),
-            Filter::Email { email, .. } => (self.query_key(), email.to_owned()),
-            Filter::Phone { phone, .. } => (self.query_key(), phone.to_owned()),
-            Filter::Objects { objects, .. } => (self.query_key(), objects.join(",")),
-            Filter::Empty { .. } => (self.query_key(), "".to_string()),
-            Filter::NotEmpty { .. } => (self.query_key(), "".to_string()),
-            Filter::Value { value, .. } => {
+            Self::Text { text, .. } => (self.query_key(), text.to_owned()),
+            Self::Number { number, .. } => (self.query_key(), number.to_string()),
+            Self::Select { select, .. } => (self.query_key(), select.join(",")),
+            Self::MultiSelect { multi_select, .. } => (self.query_key(), multi_select.join(",")),
+            Self::Date { date, .. } => (self.query_key(), date.to_owned()),
+            Self::Checkbox { checkbox, .. } => (self.query_key(), checkbox.to_string()),
+            Self::Files { files, .. } => (self.query_key(), files.join(",")),
+            Self::Url { url, .. } => (self.query_key(), url.to_owned()),
+            Self::Email { email, .. } => (self.query_key(), email.to_owned()),
+            Self::Phone { phone, .. } => (self.query_key(), phone.to_owned()),
+            Self::Objects { objects, .. } => (self.query_key(), objects.join(",")),
+            Self::Empty { .. } | Self::NotEmpty{..} => (self.query_key(), String::new()),
+            Self::Value { value, .. } => {
                 let val_str = match value {
                     Some(Value::Array(vec)) => vec
                         .iter()
-                        .map(|v| v.to_string())
+                        .map(ToString::to_string)
                         .collect::<Vec<String>>()
                         .join(","),
                     None | Some(Value::Null) => String::new(),
@@ -1249,7 +1248,7 @@ impl Filter {
 
     pub(crate) fn to_query_params(&self) -> Vec<(String, String)> {
         match self {
-            Filter::Objects { objects, .. } => {
+            Self::Objects { objects, .. } => {
                 let key = self.query_key();
                 objects
                     .iter()

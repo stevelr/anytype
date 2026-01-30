@@ -5,8 +5,10 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use anytype::prelude::*;
 use chrono::Utc;
-use tokio::net::TcpStream;
-use tokio::time::{Duration, sleep};
+use tokio::{
+    net::TcpStream,
+    time::{Duration, sleep},
+};
 
 const DEFAULT_CHAT_ID: &str = "chat-default";
 const DEFAULT_SPACE_ID: &str = "space-default";
@@ -21,7 +23,7 @@ async fn setup_client(token: &str) -> Result<(AnytypeClient, anytype::mock::Mock
     let addr = listener.local_addr()?;
     drop(listener);
 
-    let handle = anytype::mock::MockChatServer::start(addr).await?;
+    let handle = anytype::mock::MockChatServer::start(addr)?;
     wait_for_server(addr).await?;
 
     let mut config = ClientConfig::default().app_name("anytype-chat-discovery-test");

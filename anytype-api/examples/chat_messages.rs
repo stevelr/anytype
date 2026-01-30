@@ -139,7 +139,7 @@ fn resolve_order_id_arg(value: Option<&str>) -> Result<Option<String>, AnytypeEr
 
 fn is_hex(value: &str) -> bool {
     !value.is_empty()
-        && value.len() % 2 == 0
+        && value.len().is_multiple_of(2)
         && value
             .chars()
             .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
@@ -148,7 +148,7 @@ fn is_hex(value: &str) -> bool {
 fn hex_to_bytes(value: &str) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::with_capacity(value.len() / 2);
     let chars: Vec<char> = value.chars().collect();
-    if chars.len() % 2 != 0 {
+    if !chars.len().is_multiple_of(2) {
         return Err("hex order id must have even length".to_string());
     }
     for chunk in chars.chunks(2) {

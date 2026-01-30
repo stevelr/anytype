@@ -2,10 +2,10 @@
 //!
 //! This module provides a fluent builder API for working with (collections and queries).
 //!
-//! - [list_views](AnytypeClient::list_views) - list views (for collections and queries)
-//! - [view_list_objects](AnytypeClient::view_list_objects) - list objects in a collection or query
-//! - [view_remove_object](AnytypeClient::view_remove_object) - remove an object from a view (collection)
-//! - [view_add_objects](AnytypeClient::view_add_objects) - add objects to a collection
+//! - [`list_views`](AnytypeClient::list_views) - list views (for collections and queries)
+//! - [`view_list_objects`](AnytypeClient::view_list_objects) - list objects in a collection or query
+//! - [`view_remove_object`](AnytypeClient::view_remove_object) - remove an object from a view (collection)
+//! - [`view_add_objects`](AnytypeClient::view_add_objects) - add objects to a collection
 //!
 //! ## Quick Start
 //!
@@ -113,8 +113,8 @@ pub struct ViewListObjectsRequest {
     space_id: String,
     list_id: String,
     view_id: Option<String>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
 }
 
@@ -138,24 +138,28 @@ impl ViewListObjectsRequest {
     }
 
     /// Filters by a specific view.
+    #[must_use]
     pub fn view(mut self, view_id: impl Into<String>) -> Self {
         self.view_id = Some(view_id.into());
         self
     }
 
     /// Sets the pagination limit.
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
     /// Sets the pagination offset.
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
 
     /// Adds a filter condition.
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -167,8 +171,8 @@ impl ViewListObjectsRequest {
         self.limits.validate_id(&self.list_id, "list_id")?;
 
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         let path = if let Some(ref view_id) = self.view_id {
@@ -200,8 +204,8 @@ pub struct ListViewsRequest {
     limits: ValidationLimits,
     space_id: String,
     list_id: String,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 impl ListViewsRequest {
@@ -222,13 +226,15 @@ impl ListViewsRequest {
     }
 
     /// Sets the pagination limit.
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
     /// Sets the pagination offset.
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -239,8 +245,8 @@ impl ListViewsRequest {
         self.limits.validate_id(&self.list_id, "list_id")?;
 
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset);
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset);
 
         self.client
             .get_request_paged(
@@ -307,7 +313,7 @@ impl AnytypeClient {
             .post_request(
                 &format!("/v1/spaces/{space_id}/lists/{list_id}/objects"),
                 &request,
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await
     }
@@ -328,8 +334,7 @@ impl AnytypeClient {
         self.config.limits.validate_id(&object_id, "object_id")?;
         self.client
             .delete_request(&format!(
-                "/v1/spaces/{}/lists/{}/objects/{}",
-                space_id, list_id, object_id
+                "/v1/spaces/{space_id}/lists/{list_id}/objects/{object_id}",
             ))
             .await
     }

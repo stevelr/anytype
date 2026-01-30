@@ -6,8 +6,8 @@
 //! Properties and types are indexed by id and key, so either is O(1) lookup.
 //!
 //! The cache enables several convenience functions, for example,
-//! - lookup_property_by_key
-//! - lookup_type_by_key
+//! - `lookup_property_by_key`
+//! - `lookup_type_by_key`
 //!
 //! Objects and other types are not cached.
 //!
@@ -48,11 +48,15 @@
    Preferring to keep the simpler implementation until we learn of new use cases.
 */
 
-use crate::{prelude::*, properties::Property};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tracing::error;
+
+use crate::{prelude::*, properties::Property};
 
 /// Anytype cache for spaces, properties, and types
 pub struct AnytypeCache {
@@ -77,6 +81,7 @@ impl Default for AnytypeCache {
 
 impl AnytypeCache {
     /// creates a new cache, in the disabled state
+    #[must_use]
     pub fn new_disabled() -> Self {
         Self {
             enabled: Mutex::new(false),
@@ -183,7 +188,7 @@ impl AnytypeCache {
         }
     }
 
-    /// Replaces spaces in the cache. Used only by AnytypeClient.
+    /// Replaces spaces in the cache. Used only by `AnytypeClient`.
     pub(crate) fn set_spaces(&self, spaces: Vec<Space>) {
         if self.is_enabled() {
             *self.spaces.lock() = Some(spaces);
@@ -282,7 +287,7 @@ impl AnytypeCache {
     }
 
     /// Searches for cached properties using key.
-    /// Keys are snake_case and lowercase. The parameter will be converted to lowercase.
+    /// Keys are `snake_case` and lowercase. The parameter will be converted to lowercase.
     pub fn lookup_property_by_key(
         &self,
         space_id: &str,
@@ -397,7 +402,7 @@ impl AnytypeCache {
     }
 
     /// Searches for cached type by key.
-    /// Keys are snake_case and lowercase. The parameter will be converted to lowercase.
+    /// Keys are `snake_case` and lowercase. The parameter will be converted to lowercase.
     /// Excludes archived types.
     pub fn lookup_type_by_key(&self, space_id: &str, text: impl AsRef<str>) -> Option<Arc<Type>> {
         if self.is_enabled()

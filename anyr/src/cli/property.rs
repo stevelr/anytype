@@ -1,13 +1,17 @@
-use crate::cli::common::{resolve_property_id, resolve_space_id};
-use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
-use crate::filter::parse_filters;
-use crate::output::OutputFormat;
 use anyhow::{Context, Result};
-use anytype::prelude::*;
-use anytype::validation::looks_like_object_id;
+use anytype::{prelude::*, validation::looks_like_object_id};
+
+use crate::{
+    cli::{
+        AppContext,
+        common::{resolve_property_id, resolve_space_id},
+        pagination_limit, pagination_offset,
+    },
+    filter::parse_filters,
+    output::OutputFormat,
+};
 
 pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
-    ensure_authenticated(&ctx.client)?;
     match args.command {
         super::PropertyCommands::List {
             space,
@@ -76,7 +80,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
                 let (tag_name, color) = tag
                     .split_once(':')
                     .ok_or_else(|| anyhow::anyhow!("invalid tag spec: {tag}"))?;
-                let color = Color::try_from(color).context("invalid tag color {color}")?;
+                let color = Color::try_from(color).context(format!("invalid tag color {color}"))?;
                 request = request.tag(tag_name, None, color);
             }
 

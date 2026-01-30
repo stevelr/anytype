@@ -3,15 +3,15 @@
 //! This module provides a fluent builder API for working with templates.
 //! Templates provide pre-configured structures for creating new objects.
 //!
-//! ## Template methods on AnytypeClient
+//! ## Template methods on `AnytypeClient`
 //!
-//! - [templates](AnytypeClient::templates) - list templates in a space
-//! - [template](AnytypeClient::template) - get a template
+//! - [`templates`](AnytypeClient::templates) - list templates in a space
+//! - [`template`](AnytypeClient::template) - get a template
 //!
 //! To update template or delete templates, use the Object methods
 //!
-//! - [object](AnytypeClient::object) - get or delete object or template
-//! - [update_object](AnytypeClient::object) - update object or template
+//! - [`object`](AnytypeClient::object) - get or delete object or template
+//! - [`update_object`](AnytypeClient::object) - update object or template
 //!
 
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use serde::Deserialize;
 use crate::{
     Result,
     client::AnytypeClient,
-    filters::Query,
+    filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
 };
@@ -79,7 +79,7 @@ impl TemplateRequest {
                     "/v1/spaces/{}/types/{}/templates/{}",
                     self.space_id, self.type_id, self.template_id
                 ),
-                Default::default(),
+                QueryWithFilters::default(),
             )
             .await?;
         Ok(response.template)
@@ -93,8 +93,8 @@ pub struct ListTemplatesRequest {
     limits: ValidationLimits,
     space_id: String,
     type_id: String,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
     filters: Vec<Filter>,
 }
 
@@ -117,18 +117,21 @@ impl ListTemplatesRequest {
     }
 
     /// Sets the pagination limit.
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
     /// Sets the pagination offset.
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
 
     /// Adds a filter condition.
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
@@ -140,8 +143,8 @@ impl ListTemplatesRequest {
         self.limits.validate_id(&self.type_id, "type_id")?;
 
         let query = Query::default()
-            .set_limit_opt(&self.limit)
-            .set_offset_opt(&self.offset)
+            .set_limit_opt(self.limit)
+            .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
         self.client

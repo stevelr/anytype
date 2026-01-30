@@ -19,9 +19,11 @@
 
 mod common;
 
-use anytype::prelude::*;
-use anytype::test_util::{TestResult, with_test_context};
-use anytype::validation::looks_like_object_id;
+use anytype::{
+    prelude::*,
+    test_util::{TestResult, with_test_context},
+    validation::looks_like_object_id,
+};
 
 fn tweak_id(id: &str) -> String {
     if id.is_empty() {

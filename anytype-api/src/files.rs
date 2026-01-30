@@ -5,6 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "grpc")]
+use anytype_rpc::{
+    anytype::rpc::{
+        file::{discard_preload, download, upload},
+        object::search_with_meta,
+    },
+    auth::with_token,
+    model,
+};
 use chrono::{DateTime, FixedOffset};
 use prost_types::{ListValue, Struct, Value};
 use serde::{Deserialize, Serialize};
@@ -18,16 +27,6 @@ use crate::{
     error::AnytypeError,
     filters::{Filter, Sort, SortDirection},
     paged::{PagedResult, PaginatedResponse, PaginationMeta},
-};
-
-#[cfg(feature = "grpc")]
-use anytype_rpc::{
-    anytype::rpc::{
-        file::{discard_preload, download, upload},
-        object::search_with_meta,
-    },
-    auth::with_token,
-    model,
 };
 
 // ============================================================================
@@ -83,6 +82,7 @@ pub struct FilesClient<'a> {
 }
 
 impl AnytypeClient {
+    #[must_use]
     pub fn files(&self) -> FilesClient<'_> {
         FilesClient { client: self }
     }
@@ -139,6 +139,8 @@ impl<'a> FilesClient<'a> {
             file_type: None,
             style: None,
             details: None,
+            created_in_context: None,
+            created_in_context_ref: None,
         }
     }
 
@@ -148,6 +150,8 @@ impl<'a> FilesClient<'a> {
             space_id: space_id.into(),
             source: None,
             file_type: None,
+            created_in_context: None,
+            created_in_context_ref: None,
         }
     }
 
@@ -172,12 +176,13 @@ pub struct FileListRequest<'a> {
     client: &'a AnytypeClient,
     space_id: String,
     filters: Vec<Filter>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 impl FileListRequest<'_> {
     /// list files with the text in the name
+    #[must_use]
     pub fn name_contains(mut self, text: impl Into<String>) -> Self {
         self.filters.push(Filter::Text {
             condition: crate::filters::Condition::Contains,
@@ -188,7 +193,8 @@ impl FileListRequest<'_> {
     }
 
     /// list files of a specific type
-    pub fn file_type(mut self, file_type: FileType) -> Self {
+    #[must_use]
+    pub fn file_type(mut self, file_type: &FileType) -> Self {
         if let Some(filter) = file_type_filter(file_type) {
             self.filters.push(filter);
         }
@@ -196,6 +202,7 @@ impl FileListRequest<'_> {
     }
 
     /// List files with the extension
+    #[must_use]
     pub fn extension(mut self, ext: impl Into<String>) -> Self {
         self.filters.push(Filter::Text {
             condition: crate::filters::Condition::Equal,
@@ -206,6 +213,7 @@ impl FileListRequest<'_> {
     }
 
     /// List files with one of the extensions
+    #[must_use]
     pub fn extension_in(mut self, extensions: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.filters.push(Filter::Select {
             condition: crate::filters::Condition::In,
@@ -216,6 +224,7 @@ impl FileListRequest<'_> {
     }
 
     /// List files that don't have one of these extensions
+    #[must_use]
     pub fn extension_not_in(
         mut self,
         extensions: impl IntoIterator<Item = impl Into<String>>,
@@ -229,53 +238,62 @@ impl FileListRequest<'_> {
     }
 
     /// list files with size
+    #[must_use]
     pub fn size_eq(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::Equal, size));
         self
     }
 
+    #[must_use]
     pub fn size_neq(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::NotEqual, size));
         self
     }
 
+    #[must_use]
     pub fn size_lt(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::Less, size));
         self
     }
 
+    #[must_use]
     pub fn size_lte(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::LessOrEqual, size));
         self
     }
 
+    #[must_use]
     pub fn size_gt(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::Greater, size));
         self
     }
 
+    #[must_use]
     pub fn size_gte(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::GreaterOrEqual, size));
         self
     }
 
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
     }
 
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -300,16 +318,18 @@ pub struct FileSearchRequest<'a> {
     text: Option<String>,
     filters: Vec<Filter>,
     sorts: Vec<Sort>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 impl FileSearchRequest<'_> {
+    #[must_use]
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
         self
     }
 
+    #[must_use]
     pub fn name_contains(mut self, text: impl Into<String>) -> Self {
         self.filters.push(Filter::Text {
             condition: crate::filters::Condition::Contains,
@@ -319,13 +339,15 @@ impl FileSearchRequest<'_> {
         self
     }
 
-    pub fn file_type(mut self, file_type: FileType) -> Self {
+    #[must_use]
+    pub fn file_type(mut self, file_type: &FileType) -> Self {
         if let Some(filter) = file_type_filter(file_type) {
             self.filters.push(filter);
         }
         self
     }
 
+    #[must_use]
     pub fn extension(mut self, ext: impl Into<String>) -> Self {
         self.filters.push(Filter::Text {
             condition: crate::filters::Condition::Equal,
@@ -335,6 +357,7 @@ impl FileSearchRequest<'_> {
         self
     }
 
+    #[must_use]
     pub fn extension_in(mut self, extensions: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.filters.push(Filter::Select {
             condition: crate::filters::Condition::In,
@@ -344,6 +367,7 @@ impl FileSearchRequest<'_> {
         self
     }
 
+    #[must_use]
     pub fn extension_not_in(
         mut self,
         extensions: impl IntoIterator<Item = impl Into<String>>,
@@ -356,63 +380,74 @@ impl FileSearchRequest<'_> {
         self
     }
 
+    #[must_use]
     pub fn size_eq(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::Equal, size));
         self
     }
 
+    #[must_use]
     pub fn size_neq(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::NotEqual, size));
         self
     }
 
+    #[must_use]
     pub fn size_lt(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::Less, size));
         self
     }
 
+    #[must_use]
     pub fn size_lte(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::LessOrEqual, size));
         self
     }
 
+    #[must_use]
     pub fn size_gt(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::Greater, size));
         self
     }
 
+    #[must_use]
     pub fn size_gte(mut self, size: i64) -> Self {
         self.filters
             .push(size_filter(crate::filters::Condition::GreaterOrEqual, size));
         self
     }
 
+    #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
         self.filters.push(filter);
         self
     }
 
+    #[must_use]
     pub fn sort_asc(mut self, key: impl Into<String>) -> Self {
         self.sorts.push(Sort::asc(key));
         self
     }
 
+    #[must_use]
     pub fn sort_desc(mut self, key: impl Into<String>) -> Self {
         self.sorts.push(Sort::desc(key));
         self
     }
 
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -443,7 +478,7 @@ impl FileGetRequest<'_> {
         let mut commands = grpc.client_commands();
         let request = search_with_meta::Request {
             space_id: self.space_id.clone(),
-            filters: vec![filter_id_equal(&self.object_id)?],
+            filters: vec![filter_id_equal(&self.object_id)],
             sorts: Vec::new(),
             full_text: String::new(),
             offset: 0,
@@ -492,18 +527,21 @@ enum FileDownloadDestination {
 
 impl FileDownloadRequest<'_> {
     /// set the destination directory for the download
+    #[must_use]
     pub fn to_path(mut self, path: impl AsRef<Path>) -> Self {
         self.destination = Some(FileDownloadDestination::Dir(path.as_ref().to_path_buf()));
         self
     }
 
     /// set the destination directory for the download
+    #[must_use]
     pub fn to_dir(mut self, path: impl AsRef<Path>) -> Self {
         self.destination = Some(FileDownloadDestination::Dir(path.as_ref().to_path_buf()));
         self
     }
 
     /// set the destination file path for the download
+    #[must_use]
     pub fn to_file(mut self, path: impl AsRef<Path>) -> Self {
         self.destination = Some(FileDownloadDestination::File(path.as_ref().to_path_buf()));
         self
@@ -523,8 +561,7 @@ impl FileDownloadRequest<'_> {
                 let parent = path
                     .parent()
                     .filter(|value| !value.as_os_str().is_empty())
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("."));
+                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
                 if let Err(err) = std::fs::create_dir_all(&parent) {
                     return Err(AnytypeError::Other {
                         message: format!("create download directory {}: {err}", parent.display()),
@@ -614,31 +651,50 @@ pub struct FileUploadRequest<'a> {
     file_type: Option<FileType>,
     style: Option<FileStyle>,
     details: Option<serde_json::Value>,
+    created_in_context: Option<String>,
+    created_in_context_ref: Option<String>,
 }
 
 impl FileUploadRequest<'_> {
+    #[must_use]
     pub fn from_path(mut self, path: impl AsRef<Path>) -> Self {
         self.source = Some(FileSource::Path(path.as_ref().to_path_buf()));
         self
     }
 
+    #[must_use]
     pub fn from_url(mut self, url: impl Into<String>) -> Self {
         self.source = Some(FileSource::Url(url.into()));
         self
     }
 
+    #[must_use]
     pub fn file_type(mut self, file_type: FileType) -> Self {
         self.file_type = Some(file_type);
         self
     }
 
+    #[must_use]
     pub fn style(mut self, style: FileStyle) -> Self {
         self.style = Some(style);
         self
     }
 
+    #[must_use]
     pub fn details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
+        self
+    }
+
+    #[must_use]
+    pub fn created_in_context(mut self, object_id: impl Into<String>) -> Self {
+        self.created_in_context = Some(object_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn created_in_context_ref(mut self, block_id: impl Into<String>) -> Self {
+        self.created_in_context_ref = Some(block_id.into());
         self
     }
 
@@ -650,6 +706,8 @@ impl FileUploadRequest<'_> {
             self.file_type,
             self.style,
             self.details,
+            self.created_in_context,
+            self.created_in_context_ref,
             false,
             None,
         )
@@ -667,16 +725,32 @@ pub struct FilePreloadRequest<'a> {
     space_id: String,
     source: Option<FileSource>,
     file_type: Option<FileType>,
+    created_in_context: Option<String>,
+    created_in_context_ref: Option<String>,
 }
 
 impl FilePreloadRequest<'_> {
+    #[must_use]
     pub fn from_path(mut self, path: impl AsRef<Path>) -> Self {
         self.source = Some(FileSource::Path(path.as_ref().to_path_buf()));
         self
     }
 
+    #[must_use]
     pub fn file_type(mut self, file_type: FileType) -> Self {
         self.file_type = Some(file_type);
+        self
+    }
+
+    #[must_use]
+    pub fn created_in_context(mut self, object_id: impl Into<String>) -> Self {
+        self.created_in_context = Some(object_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn created_in_context_ref(mut self, block_id: impl Into<String>) -> Self {
+        self.created_in_context_ref = Some(block_id.into());
         self
     }
 
@@ -688,6 +762,8 @@ impl FilePreloadRequest<'_> {
             self.file_type,
             None,
             None,
+            self.created_in_context,
+            self.created_in_context_ref,
             true,
             None,
         )
@@ -737,14 +813,14 @@ async fn search_files(
     text: Option<String>,
     filters: Vec<Filter>,
     sorts: Vec<Sort>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 ) -> Result<PagedResult<FileObject>> {
     let grpc = client.grpc_client().await?;
     let mut commands = grpc.client_commands();
 
     let mut grpc_filters = Vec::with_capacity(filters.len() + 1);
-    grpc_filters.push(filter_not_empty("fileId")?);
+    grpc_filters.push(filter_not_empty("fileId"));
     for filter in filters {
         grpc_filters.push(filter_to_dataview(filter)?);
     }
@@ -754,6 +830,7 @@ async fn search_files(
         grpc_sorts.push(sort_to_dataview(sort));
     }
 
+    #[allow(clippy::cast_possible_wrap)] // u32 to i32 for offset and limit
     let request = search_with_meta::Request {
         space_id: space_id.to_string(),
         filters: grpc_filters,
@@ -786,8 +863,8 @@ async fn search_files(
         .collect();
 
     let limit_value = limit.unwrap_or(100);
-    let has_more = items.len() == limit_value;
-    let total = offset.unwrap_or_default() + items.len();
+    let has_more = items.len() == limit_value as usize;
+    let total = offset.unwrap_or_default() as usize + items.len();
     let response = PaginatedResponse {
         items,
         pagination: PaginationMeta {
@@ -814,6 +891,8 @@ async fn upload_file(
     file_type: Option<FileType>,
     style: Option<FileStyle>,
     details: Option<serde_json::Value>,
+    created_in_context: Option<String>,
+    created_in_context_ref: Option<String>,
     preload_only: bool,
     preload_file_id: Option<String>,
 ) -> Result<UploadResult> {
@@ -832,14 +911,16 @@ async fn upload_file(
         space_id: space_id.to_string(),
         url,
         local_path,
-        r#type: grpc_file_type(file_type.unwrap_or(FileType::File)),
+        r#type: grpc_file_type(&file_type.unwrap_or(FileType::File)),
         disable_encryption: false,
-        style: grpc_file_style(style.unwrap_or(FileStyle::Auto)),
+        style: grpc_file_style(&style.unwrap_or(FileStyle::Auto)),
         details: details.map(json_to_struct).transpose()?,
         origin: 0,
         image_kind: 0,
         preload_only,
         preload_file_id: preload_file_id.unwrap_or_default(),
+        created_in_context: created_in_context.unwrap_or_default(),
+        created_in_context_ref: created_in_context_ref.unwrap_or_default(),
     };
     let request = with_token_request(Request::new(request), grpc.token())?;
     let response = commands
@@ -856,17 +937,17 @@ async fn upload_file(
     })
 }
 
-fn grpc_file_type(file_type: FileType) -> i32 {
+fn grpc_file_type(file_type: &FileType) -> i32 {
     match file_type {
-        FileType::File | FileType::Other(_) => model::block::content::file::Type::File as i32,
-        FileType::Image => model::block::content::file::Type::Image as i32,
-        FileType::Video => model::block::content::file::Type::Video as i32,
-        FileType::Audio => model::block::content::file::Type::Audio as i32,
-        FileType::Pdf => model::block::content::file::Type::Pdf as i32,
+        &FileType::File | &FileType::Other(_) => model::block::content::file::Type::File as i32,
+        &FileType::Image => model::block::content::file::Type::Image as i32,
+        &FileType::Video => model::block::content::file::Type::Video as i32,
+        &FileType::Audio => model::block::content::file::Type::Audio as i32,
+        &FileType::Pdf => model::block::content::file::Type::Pdf as i32,
     }
 }
 
-fn grpc_file_style(style: FileStyle) -> i32 {
+fn grpc_file_style(style: &FileStyle) -> i32 {
     match style {
         FileStyle::Auto => model::block::content::file::Style::Auto as i32,
         FileStyle::Link => model::block::content::file::Style::Link as i32,
@@ -874,8 +955,8 @@ fn grpc_file_style(style: FileStyle) -> i32 {
     }
 }
 
-fn filter_not_empty(key: &str) -> Result<model::block::content::dataview::Filter> {
-    Ok(model::block::content::dataview::Filter {
+fn filter_not_empty(key: &str) -> model::block::content::dataview::Filter {
+    model::block::content::dataview::Filter {
         id: String::new(),
         operator: model::block::content::dataview::filter::Operator::No as i32,
         relation_key: key.to_string(),
@@ -886,11 +967,11 @@ fn filter_not_empty(key: &str) -> Result<model::block::content::dataview::Filter
         format: 0,
         include_time: false,
         nested_filters: Vec::new(),
-    })
+    }
 }
 
-fn filter_id_equal(id: &str) -> Result<model::block::content::dataview::Filter> {
-    Ok(model::block::content::dataview::Filter {
+fn filter_id_equal(id: &str) -> model::block::content::dataview::Filter {
+    model::block::content::dataview::Filter {
         id: String::new(),
         operator: model::block::content::dataview::filter::Operator::No as i32,
         relation_key: "id".to_string(),
@@ -901,16 +982,37 @@ fn filter_id_equal(id: &str) -> Result<model::block::content::dataview::Filter> 
         format: 0,
         include_time: false,
         nested_filters: Vec::new(),
-    })
+    }
 }
 
+#[allow(clippy::too_many_lines)]
 fn filter_to_dataview(filter: Filter) -> Result<model::block::content::dataview::Filter> {
     let (relation_key, condition, value) = match filter {
         Filter::Text {
             condition,
             property_key,
-            text,
-        } => (property_key, condition, Some(value_string(text))),
+            text: s,
+        }
+        | Filter::Date {
+            condition,
+            property_key,
+            date: s,
+        }
+        | Filter::Url {
+            condition,
+            property_key,
+            url: s,
+        }
+        | Filter::Email {
+            condition,
+            property_key,
+            email: s,
+        }
+        | Filter::Phone {
+            condition,
+            property_key,
+            phone: s,
+        } => (property_key, condition, Some(value_string(s))),
         Filter::Number {
             condition,
             property_key,
@@ -941,11 +1043,6 @@ fn filter_to_dataview(filter: Filter) -> Result<model::block::content::dataview:
                 multi_select.into_iter().map(value_string).collect(),
             )),
         ),
-        Filter::Date {
-            condition,
-            property_key,
-            date,
-        } => (property_key, condition, Some(value_string(date))),
         Filter::Checkbox {
             condition,
             property_key,
@@ -960,21 +1057,6 @@ fn filter_to_dataview(filter: Filter) -> Result<model::block::content::dataview:
             condition,
             Some(value_list(files.into_iter().map(value_string).collect())),
         ),
-        Filter::Url {
-            condition,
-            property_key,
-            url,
-        } => (property_key, condition, Some(value_string(url))),
-        Filter::Email {
-            condition,
-            property_key,
-            email,
-        } => (property_key, condition, Some(value_string(email))),
-        Filter::Phone {
-            condition,
-            property_key,
-            phone,
-        } => (property_key, condition, Some(value_string(phone))),
         Filter::Objects {
             condition,
             property_key,
@@ -987,8 +1069,8 @@ fn filter_to_dataview(filter: Filter) -> Result<model::block::content::dataview:
         Filter::Empty {
             condition,
             property_key,
-        } => (property_key, condition, None),
-        Filter::NotEmpty {
+        }
+        | Filter::NotEmpty {
             condition,
             property_key,
         } => (property_key, condition, None),
@@ -1018,8 +1100,9 @@ fn filter_to_dataview(filter: Filter) -> Result<model::block::content::dataview:
 }
 
 fn grpc_filter_condition(condition: crate::filters::Condition) -> i32 {
-    use crate::filters::Condition;
     use model::block::content::dataview::filter::Condition as GrpcCondition;
+
+    use crate::filters::Condition;
 
     match condition {
         Condition::None => GrpcCondition::None as i32,
@@ -1063,6 +1146,7 @@ fn sort_to_dataview(sort: Sort) -> model::block::content::dataview::Sort {
 
 fn file_from_details(space_id: &str, object_id: &str, details: &Struct) -> FileObject {
     let name = string_field(details, "name");
+    #[allow(clippy::cast_possible_truncation)]
     let size = number_field(details, "sizeInBytes").map(|val| val as i64);
     let mime = string_field(details, "fileMimeType");
     let added_at = string_field(details, "addedDate")
@@ -1108,7 +1192,7 @@ fn size_filter(condition: crate::filters::Condition, size: i64) -> Filter {
     }
 }
 
-fn file_type_filter(file_type: FileType) -> Option<Filter> {
+fn file_type_filter(file_type: &FileType) -> Option<Filter> {
     let (condition, value) = match file_type {
         FileType::Image => (crate::filters::Condition::Contains, "image/".to_string()),
         FileType::Video => (crate::filters::Condition::Contains, "video/".to_string()),
@@ -1166,7 +1250,7 @@ fn struct_to_json(details: &Struct) -> serde_json::Value {
 
 fn prost_value_to_json(value: &Value) -> serde_json::Value {
     match &value.kind {
-        Some(prost_types::value::Kind::NullValue(_)) => serde_json::Value::Null,
+        Some(prost_types::value::Kind::NullValue(_)) | None => serde_json::Value::Null,
         Some(prost_types::value::Kind::NumberValue(value)) => {
             Number::from_f64(*value).map_or(serde_json::Value::Null, serde_json::Value::Number)
         }
@@ -1178,7 +1262,6 @@ fn prost_value_to_json(value: &Value) -> serde_json::Value {
         Some(prost_types::value::Kind::ListValue(value)) => {
             serde_json::Value::Array(value.values.iter().map(prost_value_to_json).collect())
         }
-        None => serde_json::Value::Null,
     }
 }
 
@@ -1258,6 +1341,7 @@ fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>>
     })
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn grpc_status(status: tonic::Status) -> AnytypeError {
     AnytypeError::Other {
         message: format!("gRPC request failed: {status}"),

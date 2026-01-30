@@ -1,10 +1,10 @@
-//! Errors returned by AnytypeClient
+//! Errors returned by `AnytypeClient`
 //!
-use snafu::prelude::*;
 use std::path::PathBuf;
 
 #[cfg(feature = "grpc")]
 use anytype_rpc::error::AnytypeGrpcError;
+use snafu::prelude::*;
 
 /// Errors returned by anytype crate
 #[derive(Debug, Snafu)]
@@ -45,7 +45,7 @@ pub enum AnytypeError {
     #[snafu(display("Serialization: {source}"))]
     Serialization { source: serde_json::Error },
 
-    /// Expected item was not found. Returned for any object get() by id,
+    /// Expected item was not found. Returned for any object get by id,
     /// or property or type lookup by unique key, or tag lookup by property and name.
     #[snafu(display("{obj_type} {key} not found"))]
     NotFound { obj_type: String, key: String },
@@ -77,8 +77,8 @@ pub enum AnytypeError {
     #[snafu(display("Validation error: {message}"))]
     Validation { message: String },
 
-    /// A KeyStore has not been configured.
-    /// This is an AnytypeError rather than a KeyStoreError, because it is a client configuration error
+    /// A `KeyStore` has not been configured.
+    /// This is an `AnytypeError` rather than a `KeyStoreError`, because it is a client configuration error
     #[snafu(display("No configured keystore"))]
     NoKeyStore,
 
@@ -94,7 +94,7 @@ pub enum AnytypeError {
     #[snafu(display("gRPC service unavailable: {message}"))]
     GrpcUnavailable { message: String },
 
-    /// Error encountered by the configured KeyStore.
+    /// Error encountered by the configured `KeyStore`.
     #[snafu(display("KeyStore: {source}"))]
     KeyStore { source: KeyStoreError },
 
@@ -120,7 +120,7 @@ pub enum AnytypeError {
     Other { message: String },
 }
 
-/// Errors arising from KeyStore
+/// Errors arising from `KeyStore`
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum KeyStoreError {
@@ -157,19 +157,19 @@ pub enum KeyStoreError {
 
 impl From<keyring_core::Error> for KeyStoreError {
     fn from(source: keyring_core::Error) -> Self {
-        KeyStoreError::Keyring { source }
+        Self::Keyring { source }
     }
 }
 
 impl From<KeyStoreError> for AnytypeError {
     fn from(source: KeyStoreError) -> Self {
-        AnytypeError::KeyStore { source }
+        Self::KeyStore { source }
     }
 }
 
 #[cfg(feature = "grpc")]
 impl From<AnytypeGrpcError> for AnytypeError {
     fn from(source: AnytypeGrpcError) -> Self {
-        AnytypeError::Grpc { source }
+        Self::Grpc { source }
     }
 }
