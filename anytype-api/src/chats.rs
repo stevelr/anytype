@@ -39,19 +39,6 @@
 //! - Should previews and message subscriptions use separate `sub_id`s or a shared registry?
 
 use anytype_rpc::model;
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
-use serde::{Deserialize, Serialize};
-use tonic::Request;
-
-use crate::{
-    Result,
-    client::AnytypeClient,
-    error::AnytypeError,
-    objects::{Color, DataModel, Object, ObjectLayout},
-    properties::{PropertyValue, PropertyWithValue},
-    validation::looks_like_object_id,
-};
-
 #[cfg(feature = "grpc")]
 use anytype_rpc::{
     anytype::rpc::{
@@ -64,7 +51,19 @@ use anytype_rpc::{
     },
     auth::with_token,
 };
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use prost_types::{Struct, Value};
+use serde::{Deserialize, Serialize};
+use tonic::Request;
+
+use crate::{
+    Result,
+    client::AnytypeClient,
+    error::AnytypeError,
+    objects::{Color, DataModel, Object, ObjectLayout},
+    properties::{PropertyValue, PropertyWithValue},
+    validation::looks_like_object_id,
+};
 
 // ============================================================================
 // Public types
@@ -84,6 +83,7 @@ pub struct ChatState {
 
 impl ChatState {
     /// Returns the oldest unread message order id, if available.
+    #[must_use]
     pub fn oldest_unread_order_id(&self) -> Option<&str> {
         self.messages_oldest_order_id.as_deref()
     }
@@ -101,6 +101,7 @@ pub struct ChatMessagesPage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ChatMessage {
     pub id: String,
     pub order_id: String,
@@ -128,49 +129,58 @@ pub struct MessageContent {
 }
 
 impl MessageContent {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Append text without styling
+    #[must_use]
     pub fn text(mut self, value: impl AsRef<str>) -> Self {
         self.text.push_str(value.as_ref());
         self
     }
 
     /// append a newline to the text
+    #[must_use]
     pub fn nl(mut self) -> Self {
         self.text.push('\n');
         self
     }
 
     /// Append boldface text
+    #[must_use]
     pub fn bold(self, value: impl AsRef<str>) -> Self {
         self.push_marked_text(value.as_ref(), MessageTextMarkType::Bold, None)
     }
 
     /// Append italic text
+    #[must_use]
     pub fn italic(self, value: impl AsRef<str>) -> Self {
         self.push_marked_text(value.as_ref(), MessageTextMarkType::Italic, None)
     }
 
     /// Append code-formatted text
+    #[must_use]
     pub fn code(self, value: impl AsRef<str>) -> Self {
         self.push_marked_text(value.as_ref(), MessageTextMarkType::Keyboard, None)
     }
 
     /// Append a link
+    #[must_use]
     pub fn link(self, title: impl AsRef<str>, url: impl Into<String>) -> Self {
         self.push_marked_text(title.as_ref(), MessageTextMarkType::Link, Some(url.into()))
     }
 
     /// Append emoji
+    #[must_use]
     pub fn emoji(self, value: impl AsRef<str>) -> Self {
         self.push_marked_text(value.as_ref(), MessageTextMarkType::Emoji, None)
     }
 
     /// Append text with foreground color
-    pub fn text_color(self, value: impl AsRef<str>, color: Color) -> Self {
+    #[must_use]
+    pub fn text_color(self, value: impl AsRef<str>, color: &Color) -> Self {
         self.push_marked_text(
             value.as_ref(),
             MessageTextMarkType::TextColor,
@@ -179,10 +189,18 @@ impl MessageContent {
     }
 
     /// Append text with foreground and background color
-    pub fn text_color_bg(mut self, value: impl AsRef<str>, fg: Color, bg: Color) -> Self {
+    #[must_use]
+    pub fn text_color_bg(
+        mut self,
+        value: impl AsRef<str>,
+        fg: impl AsRef<Color>,
+        bg: impl AsRef<Color>,
+    ) -> Self {
         let value = value.as_ref();
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let start = self.text.len() as i32;
         self.text.push_str(value);
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let end = self.text.len() as i32;
 
         let range = Some(MessageTextRange {
@@ -193,12 +211,12 @@ impl MessageContent {
         self.marks.push(MessageTextMark {
             range: range.clone(),
             kind: MessageTextMarkType::TextColor,
-            param: Some(fg.to_string()),
+            param: Some(fg.as_ref().to_string()),
         });
         self.marks.push(MessageTextMark {
             range,
             kind: MessageTextMarkType::BackgroundColor,
-            param: Some(bg.to_string()),
+            param: Some(bg.as_ref().to_string()),
         });
         self
     }
@@ -209,8 +227,10 @@ impl MessageContent {
         kind: MessageTextMarkType,
         param: Option<String>,
     ) -> Self {
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let start = self.text.len() as i32;
         self.text.push_str(value);
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let end = self.text.len() as i32;
 
         self.marks.push(MessageTextMark {
@@ -278,6 +298,9 @@ pub enum MessageTextStyle {
     Marked,
     Numbered,
     Toggle,
+    ToggleHeader1,
+    ToggleHeader2,
+    ToggleHeader3,
     Description,
     Callout,
     #[serde(untagged)]
@@ -333,6 +356,7 @@ impl AnytypeClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn chats(&self) -> ChatClient<'_> {
         ChatClient { client: self }
     }
@@ -340,6 +364,7 @@ impl AnytypeClient {
 
 impl<'a> ChatClient<'a> {
     /// List all chat objects (all spaces).
+    #[must_use]
     pub fn list_chats(&self) -> ChatListRequest<'a> {
         ChatListRequest {
             client: self.client,
@@ -360,6 +385,7 @@ impl<'a> ChatClient<'a> {
     }
 
     /// Search chat objects across all spaces.
+    #[must_use]
     pub fn search_chats(&self) -> ChatSearchRequest<'a> {
         ChatSearchRequest {
             client: self.client,
@@ -671,17 +697,19 @@ impl<'a> ChatClient<'a> {
 pub struct ChatListRequest<'a> {
     client: &'a AnytypeClient,
     space_id: Option<String>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 impl ChatListRequest<'_> {
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -703,22 +731,25 @@ pub struct ChatSearchRequest<'a> {
     client: &'a AnytypeClient,
     space_id: Option<String>,
     text: Option<String>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 impl ChatSearchRequest<'_> {
+    #[must_use]
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
         self
     }
 
-    pub fn limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
-    pub fn offset(mut self, offset: usize) -> Self {
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
         self.offset = Some(offset);
         self
     }
@@ -851,16 +882,19 @@ pub struct ChatSendTextRequest<'a> {
 }
 
 impl ChatSendTextRequest<'_> {
+    #[must_use]
     pub fn style(mut self, style: MessageTextStyle) -> Self {
         self.style = style;
         self
     }
 
+    #[must_use]
     pub fn marks(mut self, marks: Vec<MessageTextMark>) -> Self {
         self.marks = marks;
         self
     }
 
+    #[must_use]
     pub fn attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
         self
@@ -892,11 +926,13 @@ pub struct ChatEditTextRequest<'a> {
 }
 
 impl ChatEditTextRequest<'_> {
+    #[must_use]
     pub fn style(mut self, style: MessageTextStyle) -> Self {
         self.style = style;
         self
     }
 
+    #[must_use]
     pub fn marks(mut self, marks: Vec<MessageTextMark>) -> Self {
         self.marks = marks;
         self
@@ -993,6 +1029,7 @@ impl ChatAddMessageRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn content(mut self, content: MessageContent) -> Self {
         self.content = Some(content);
         self
@@ -1020,6 +1057,7 @@ impl ChatAddMessageRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
         self
@@ -1111,6 +1149,7 @@ impl ChatEditMessageRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn content(mut self, content: MessageContent) -> Self {
         self.content = Some(content);
         self
@@ -1241,6 +1280,7 @@ impl ChatListMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn after(mut self, order_id: impl Into<String>) -> Self {
         self.after = Some(order_id.into());
         self
@@ -1260,6 +1300,7 @@ impl ChatListMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn before(mut self, order_id: impl Into<String>) -> Self {
         self.before = Some(order_id.into());
         self
@@ -1279,6 +1320,7 @@ impl ChatListMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn include_boundary(mut self, include: bool) -> Self {
         self.include_boundary = Some(include);
         self
@@ -1298,6 +1340,7 @@ impl ChatListMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
@@ -1318,6 +1361,7 @@ impl ChatListMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn unread_only(mut self, read_type: ChatReadType) -> Self {
         self.unread_only = Some(read_type);
         self
@@ -1346,6 +1390,7 @@ impl ChatListMessagesRequest<'_> {
             chat_object_id: self.chat_object_id,
             after_order_id: self.after.unwrap_or_default(),
             before_order_id: self.before.unwrap_or_default(),
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
             limit: self.limit.unwrap_or(0) as i32,
             include_boundary: self.include_boundary.unwrap_or(false),
         };
@@ -1364,13 +1409,12 @@ impl ChatListMessagesRequest<'_> {
             .map(chat_message_from_grpc)
             .collect();
         if let Some(read_type) = self.unread_only {
-            messages = filter_unread_messages(messages, read_type);
+            messages = filter_unread_messages(messages, &read_type);
         }
         let state = response
             .chat_state
             .as_ref()
-            .map(chat_state_from_grpc)
-            .unwrap_or_else(ChatState::default);
+            .map_or_else(ChatState::default, chat_state_from_grpc);
         Ok(ChatMessagesPage { messages, state })
     }
 }
@@ -1444,6 +1488,7 @@ impl ChatReadMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn read_type(mut self, read_type: ChatReadType) -> Self {
         self.read_type = Some(read_type);
         self
@@ -1463,6 +1508,7 @@ impl ChatReadMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn after(mut self, order_id: impl Into<String>) -> Self {
         self.after = Some(order_id.into());
         self
@@ -1482,6 +1528,7 @@ impl ChatReadMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn before(mut self, order_id: impl Into<String>) -> Self {
         self.before = Some(order_id.into());
         self
@@ -1507,6 +1554,7 @@ impl ChatReadMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn last_state_id(mut self, state_id: impl Into<String>) -> Self {
         self.last_state_id = Some(state_id.into());
         self
@@ -1530,7 +1578,7 @@ impl ChatReadMessagesRequest<'_> {
         let mut commands = grpc.client_commands();
         let read_type = self.read_type.unwrap_or(ChatReadType::Messages);
         let request = read_messages::Request {
-            r#type: grpc_read_type(read_type),
+            r#type: grpc_read_type(&read_type),
             chat_object_id: self.chat_object_id,
             after_order_id: self.after.unwrap_or_default(),
             before_order_id: self.before.unwrap_or_default(),
@@ -1571,6 +1619,7 @@ impl ChatUnreadMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn read_type(mut self, read_type: ChatReadType) -> Self {
         self.read_type = Some(read_type);
         self
@@ -1590,6 +1639,7 @@ impl ChatUnreadMessagesRequest<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn after(mut self, order_id: impl Into<String>) -> Self {
         self.after = Some(order_id.into());
         self
@@ -1613,7 +1663,7 @@ impl ChatUnreadMessagesRequest<'_> {
         let mut commands = grpc.client_commands();
         let read_type = self.read_type.unwrap_or(ChatReadType::Messages);
         let request = unread::Request {
-            r#type: grpc_unread_type(read_type),
+            r#type: grpc_unread_type(&read_type),
             chat_object_id: self.chat_object_id,
             after_order_id: self.after.unwrap_or_default(),
         };
@@ -1639,8 +1689,8 @@ async fn chat_search(
     space_id: Option<String>,
     text: Option<String>,
     filters: Vec<model::block::content::dataview::Filter>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 ) -> Result<ChatListResult> {
     if let Some(space_id) = space_id {
         return chat_search_space(client, &space_id, text, filters, limit, offset).await;
@@ -1663,13 +1713,13 @@ async fn chat_search(
 
     let offset_value = offset.unwrap_or(0);
     let mut items = if offset_value > 0 {
-        items.into_iter().skip(offset_value).collect()
+        items.into_iter().skip(offset_value as usize).collect()
     } else {
         items
     };
 
     if let Some(limit) = limit {
-        items.truncate(limit);
+        items.truncate(limit as usize);
     }
 
     Ok(ChatListResult { items })
@@ -1680,8 +1730,8 @@ async fn chat_search_space(
     space_id: &str,
     text: Option<String>,
     filters: Vec<model::block::content::dataview::Filter>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 ) -> Result<ChatListResult> {
     let grpc = client.grpc_client().await?;
     let mut commands = grpc.client_commands();
@@ -1695,7 +1745,9 @@ async fn chat_search_space(
         filters: grpc_filters,
         sorts: Vec::new(),
         full_text: text.unwrap_or_default(),
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         offset: offset.unwrap_or_default() as i32,
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         limit: limit.unwrap_or(100) as i32,
         object_type_filter: Vec::new(),
         keys: chat_details_keys(),
@@ -1746,9 +1798,9 @@ fn chat_layout_filter() -> model::block::content::dataview::Filter {
         relation_key: "resolvedLayout".to_string(),
         relation_property: String::new(),
         condition: model::block::content::dataview::filter::Condition::Equal as i32,
-        value: Some(value_number(
-            model::object_type::Layout::ChatDerived as i32 as f64,
-        )),
+        value: Some(value_number(f64::from(
+            model::object_type::Layout::ChatDerived as i32,
+        ))),
         quick_option: model::block::content::dataview::filter::QuickOption::ExactDate as i32,
         format: 0,
         include_time: false,
@@ -1794,9 +1846,11 @@ fn object_from_details(
     let name = string_field(details, "name");
     let archived = bool_field(details, "isArchived").unwrap_or(false);
     let space_id = string_field(details, "spaceId")
-        .or_else(|| default_space_id.map(|value| value.to_string()))
+        .or_else(|| default_space_id.map(ToString::to_string))
         .unwrap_or_default();
-    let layout = resolved_layout_to_object_layout(number_field(details, "resolvedLayout"));
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let layout =
+        resolved_layout_to_object_layout(number_field(details, "resolvedLayout").map(|f| f as i32));
 
     let mut properties = Vec::new();
     if let Some(date) = last_modified_date(details) {
@@ -1818,11 +1872,11 @@ fn object_from_details(
     }
 }
 
-fn resolved_layout_to_object_layout(value: Option<f64>) -> ObjectLayout {
+fn resolved_layout_to_object_layout(value: Option<i32>) -> ObjectLayout {
     let Some(value) = value else {
         return ObjectLayout::Basic;
     };
-    match value as i32 {
+    match value {
         value if value == model::object_type::Layout::Basic as i32 => ObjectLayout::Basic,
         value if value == model::object_type::Layout::Profile as i32 => ObjectLayout::Profile,
         value if value == model::object_type::Layout::Todo as i32 => ObjectLayout::Action,
@@ -1838,11 +1892,14 @@ fn resolved_layout_to_object_layout(value: Option<f64>) -> ObjectLayout {
 }
 
 fn last_modified_date(details: &Struct) -> Option<String> {
-    if let Some(value) = number_field(details, "lastModifiedDate") {
-        return Some(timestamp_to_datetime(value as i64).to_rfc3339());
-    }
     if let Some(value) = string_field(details, "lastModifiedDate") {
         return Some(value);
+    }
+    if let Some(value) = number_field(details, "lastModifiedDate") {
+        // f64 has 53 bit mantissa and we only need 31 bits for timestamp in seconds,
+        // so this isn't lossy
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        return Some(timestamp_to_datetime(value as i64).to_rfc3339());
     }
     None
 }
@@ -1997,8 +2054,8 @@ pub(crate) fn chat_state_from_grpc(state: &model::ChatState) -> ChatState {
 
 fn grpc_message_content(content: MessageContent) -> model::chat_message::MessageContent {
     model::chat_message::MessageContent {
-        text: content.text,
-        style: grpc_message_text_style(content.style),
+        text: content.text.clone(),
+        style: grpc_message_text_style(&content.style),
         marks: content.marks.into_iter().map(grpc_message_mark).collect(),
     }
 }
@@ -2009,7 +2066,7 @@ fn grpc_message_mark(mark: MessageTextMark) -> model::block::content::text::Mark
             from: range.from,
             to: range.to,
         }),
-        r#type: grpc_message_mark_type(mark.kind),
+        r#type: grpc_message_mark_type(&mark.kind),
         param: mark.param.unwrap_or_default(),
     }
 }
@@ -2019,7 +2076,7 @@ fn grpc_attachments(attachments: Vec<MessageAttachment>) -> Vec<model::chat_mess
         .into_iter()
         .map(|attachment| model::chat_message::Attachment {
             target: attachment.target,
-            r#type: grpc_message_attachment_type(attachment.kind),
+            r#type: grpc_message_attachment_type(&attachment.kind),
         })
         .collect()
 }
@@ -2039,16 +2096,19 @@ fn message_text_style_from_grpc(value: i32) -> MessageTextStyle {
         Some(Style::Marked) => MessageTextStyle::Marked,
         Some(Style::Numbered) => MessageTextStyle::Numbered,
         Some(Style::Toggle) => MessageTextStyle::Toggle,
+        Some(Style::ToggleHeader1) => MessageTextStyle::ToggleHeader1,
+        Some(Style::ToggleHeader2) => MessageTextStyle::ToggleHeader2,
+        Some(Style::ToggleHeader3) => MessageTextStyle::ToggleHeader3,
         Some(Style::Description) => MessageTextStyle::Description,
         Some(Style::Callout) => MessageTextStyle::Callout,
         None => MessageTextStyle::Other(value.to_string()),
     }
 }
 
-fn grpc_message_text_style(style: MessageTextStyle) -> i32 {
+fn grpc_message_text_style(style: &MessageTextStyle) -> i32 {
     use model::block::content::text::Style;
     match style {
-        MessageTextStyle::Paragraph => Style::Paragraph as i32,
+        MessageTextStyle::Paragraph | MessageTextStyle::Other(_) => Style::Paragraph as i32,
         MessageTextStyle::Header1 => Style::Header1 as i32,
         MessageTextStyle::Header2 => Style::Header2 as i32,
         MessageTextStyle::Header3 => Style::Header3 as i32,
@@ -2060,9 +2120,11 @@ fn grpc_message_text_style(style: MessageTextStyle) -> i32 {
         MessageTextStyle::Marked => Style::Marked as i32,
         MessageTextStyle::Numbered => Style::Numbered as i32,
         MessageTextStyle::Toggle => Style::Toggle as i32,
+        MessageTextStyle::ToggleHeader1 => Style::ToggleHeader1 as i32,
+        MessageTextStyle::ToggleHeader2 => Style::ToggleHeader2 as i32,
+        MessageTextStyle::ToggleHeader3 => Style::ToggleHeader3 as i32,
         MessageTextStyle::Description => Style::Description as i32,
         MessageTextStyle::Callout => Style::Callout as i32,
-        MessageTextStyle::Other(_) => Style::Paragraph as i32,
     }
 }
 
@@ -2084,13 +2146,13 @@ fn message_mark_type_from_grpc(value: i32) -> MessageTextMarkType {
     }
 }
 
-fn grpc_message_mark_type(kind: MessageTextMarkType) -> i32 {
+fn grpc_message_mark_type(kind: &MessageTextMarkType) -> i32 {
     use model::block::content::text::mark::Type;
-    match kind {
+    match *kind {
         MessageTextMarkType::Strikethrough => Type::Strikethrough as i32,
         MessageTextMarkType::Keyboard => Type::Keyboard as i32,
         MessageTextMarkType::Italic => Type::Italic as i32,
-        MessageTextMarkType::Bold => Type::Bold as i32,
+        MessageTextMarkType::Bold | MessageTextMarkType::Other(_) => Type::Bold as i32,
         MessageTextMarkType::Underscored => Type::Underscored as i32,
         MessageTextMarkType::Link => Type::Link as i32,
         MessageTextMarkType::TextColor => Type::TextColor as i32,
@@ -2098,7 +2160,6 @@ fn grpc_message_mark_type(kind: MessageTextMarkType) -> i32 {
         MessageTextMarkType::Mention => Type::Mention as i32,
         MessageTextMarkType::Emoji => Type::Emoji as i32,
         MessageTextMarkType::Object => Type::Object as i32,
-        MessageTextMarkType::Other(_) => Type::Bold as i32,
     }
 }
 
@@ -2112,33 +2173,35 @@ fn message_attachment_type_from_grpc(value: i32) -> MessageAttachmentType {
     }
 }
 
-fn grpc_message_attachment_type(kind: MessageAttachmentType) -> i32 {
+fn grpc_message_attachment_type(kind: &MessageAttachmentType) -> i32 {
     use model::chat_message::attachment::AttachmentType;
-    match kind {
-        MessageAttachmentType::File => AttachmentType::File as i32,
+    match *kind {
+        MessageAttachmentType::File | MessageAttachmentType::Other(_) => {
+            AttachmentType::File as i32
+        }
         MessageAttachmentType::Image => AttachmentType::Image as i32,
         MessageAttachmentType::Link => AttachmentType::Link as i32,
-        MessageAttachmentType::Other(_) => AttachmentType::File as i32,
     }
 }
 
-fn grpc_read_type(read_type: ChatReadType) -> i32 {
+fn grpc_read_type(read_type: &ChatReadType) -> i32 {
     match read_type {
-        ChatReadType::Messages => read_messages::ReadType::Messages as i32,
+        ChatReadType::Messages | ChatReadType::Other(_) => read_messages::ReadType::Messages as i32,
         ChatReadType::Mentions => read_messages::ReadType::Mentions as i32,
-        ChatReadType::Other(_) => read_messages::ReadType::Messages as i32,
     }
 }
 
-fn grpc_unread_type(read_type: ChatReadType) -> i32 {
+fn grpc_unread_type(read_type: &ChatReadType) -> i32 {
     match read_type {
-        ChatReadType::Messages => unread::ReadType::Messages as i32,
+        ChatReadType::Messages | ChatReadType::Other(_) => unread::ReadType::Messages as i32,
         ChatReadType::Mentions => unread::ReadType::Mentions as i32,
-        ChatReadType::Other(_) => unread::ReadType::Messages as i32,
     }
 }
 
-fn filter_unread_messages(messages: Vec<ChatMessage>, read_type: ChatReadType) -> Vec<ChatMessage> {
+fn filter_unread_messages(
+    messages: Vec<ChatMessage>,
+    read_type: &ChatReadType,
+) -> Vec<ChatMessage> {
     match read_type {
         ChatReadType::Messages | ChatReadType::Other(_) => {
             messages.into_iter().filter(|msg| !msg.read).collect()
@@ -2175,6 +2238,7 @@ fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>>
     })
 }
 
+#[allow(clippy::needless_pass_by_value)] // not needless, used in map_error
 fn grpc_status(status: tonic::Status) -> AnytypeError {
     AnytypeError::Other {
         message: format!("gRPC request failed: {status}"),

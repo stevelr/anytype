@@ -42,12 +42,12 @@ pub(crate) enum VerifyPolicy {
 
 pub(crate) fn resolve_verify(
     policy: VerifyPolicy,
-    config: &Option<VerifyConfig>,
+    config: Option<&VerifyConfig>,
 ) -> Option<VerifyConfig> {
     match policy {
         VerifyPolicy::Disabled => None,
-        VerifyPolicy::Default => config.clone(),
-        VerifyPolicy::Enabled => Some(config.clone().unwrap_or_default()),
+        VerifyPolicy::Default => config.cloned(),
+        VerifyPolicy::Enabled => Some(config.cloned().unwrap_or_default()),
     }
 }
 

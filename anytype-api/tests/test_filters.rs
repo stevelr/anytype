@@ -22,16 +22,17 @@
 
 mod common;
 
-use crate::common::{
-    create_object_with_retry, ensure_properties_and_type, lookup_property_tag_with_retry,
-    unique_test_name,
-};
-use anytype::prelude::*;
 use anytype::{
+    prelude::*,
     test_assert,
     test_util::{TestContext, TestResult, with_test_context},
 };
 use serial_test::serial;
+
+use crate::common::{
+    create_object_with_retry, ensure_properties_and_type, lookup_property_tag_with_retry,
+    unique_test_name,
+};
 
 // =============================================================================
 // Test Helper - Create Test Objects

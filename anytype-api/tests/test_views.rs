@@ -4,9 +4,11 @@
 
 mod common;
 
-use anytype::error::AnytypeError;
-use anytype::prelude::*;
-use anytype::test_util::{TestError, TestResult, unique_suffix, with_test_context};
+use anytype::{
+    error::AnytypeError,
+    prelude::*,
+    test_util::{TestError, TestResult, unique_suffix, with_test_context},
+};
 use serial_test::serial;
 use tokio::time::{Duration, sleep};
 
@@ -97,7 +99,7 @@ async fn view_list_objects_with_retry(
     ctx: &anytype::test_util::TestContext,
     list_id: &str,
     view_id: Option<&str>,
-    limit: usize,
+    limit: u32,
 ) -> TestResult<PagedResult<Object>> {
     let mut last_err = None;
     for attempt in 0..3 {

@@ -1,12 +1,17 @@
-use crate::cli::common::{resolve_space_id, resolve_type_id};
-use crate::cli::{
-    AppContext, ensure_authenticated, pagination_limit, pagination_offset, resolve_icon,
-};
-use crate::filter::{parse_filters, parse_type_property};
-use crate::output::OutputFormat;
+use std::collections::HashSet;
+
 use anyhow::{Result, bail};
 use anytype::validation::looks_like_object_id;
-use std::collections::HashSet;
+
+use crate::{
+    cli::{
+        AppContext,
+        common::{resolve_space_id, resolve_type_id},
+        pagination_limit, pagination_offset, resolve_icon_exists,
+    },
+    filter::{parse_filters, parse_type_property},
+    output::OutputFormat,
+};
 
 const EXCLUDED_TYPE_RELATION_KEYS: [&str; 6] = [
     "type",
@@ -17,8 +22,8 @@ const EXCLUDED_TYPE_RELATION_KEYS: [&str; 6] = [
     "last_opened_date",
 ];
 
+#[allow(clippy::too_many_lines)]
 pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
-    ensure_authenticated(&ctx.client)?;
     match args.command {
         super::TypeCommands::List {
             space,
@@ -70,7 +75,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             if let Some(plural) = plural {
                 request = request.plural_name(plural);
             }
-            if let Some(icon) = resolve_icon(&icon_emoji, &None)? {
+            if let Some(icon) = resolve_icon_exists(icon_emoji, None)? {
                 request = request.icon(icon);
             }
 
@@ -106,7 +111,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             if let Some(plural) = plural {
                 request = request.plural_name(plural);
             }
-            if let Some(icon) = resolve_icon(&icon_emoji, &None)? {
+            if let Some(icon) = resolve_icon_exists(icon_emoji, None)? {
                 request = request.icon(icon);
             }
             if let Some(layout) = layout {
@@ -118,7 +123,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
                 let mut seen_keys = HashSet::new();
                 let mut all_properties = Vec::new();
 
-                for prop in current_type.properties.iter() {
+                for prop in &current_type.properties {
                     if EXCLUDED_TYPE_RELATION_KEYS.contains(&prop.key.as_str()) {
                         continue;
                     }
@@ -138,7 +143,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
                         let mut matches =
                             ctx.client.lookup_properties(&space_id, &prop_ref).await?;
                         if matches.len() != 1 {
-                            bail!("property is ambiguous: {}", prop_ref);
+                            bail!("property is ambiguous: {prop_ref}");
                         }
                         matches.remove(0)
                     };

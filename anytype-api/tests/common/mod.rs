@@ -8,15 +8,15 @@
 #![cfg(test)]
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-use tokio::time::sleep;
-use tracing::error;
-
-use anytype::prelude::*;
-use anytype::test_util::TestError;
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 pub use anytype::test_util::{TestContext, TestResult};
+use anytype::{prelude::*, test_util::TestError};
+use tokio::time::sleep;
+use tracing::error;
 
 // =============================================================================
 // Test Helpers

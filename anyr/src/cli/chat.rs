@@ -1,23 +1,24 @@
-use std::collections::HashMap;
-use std::io::Read;
-use std::str::FromStr;
+use std::{collections::HashMap, io::Read, str::FromStr};
 
 use anyhow::{Result, anyhow, bail};
-use anytype::prelude::*;
+use anytype::{prelude::*, validation::looks_like_object_id};
 use clap::ValueEnum;
 use futures::StreamExt;
 
-use anytype::validation::looks_like_object_id;
-
-use crate::cli::common::{
-    MemberCache, load_member_cache, resolve_chat_ids, resolve_chat_name, resolve_chat_target,
-    resolve_member_name, resolve_space_id,
+use crate::{
+    cli::{
+        AppContext,
+        common::{
+            MemberCache, load_member_cache, resolve_chat_ids, resolve_chat_name,
+            resolve_chat_target, resolve_member_name, resolve_space_id,
+        },
+        pagination_limit, pagination_offset,
+    },
+    output::{OutputFormat, render_table_dynamic},
 };
-use crate::cli::{AppContext, ensure_authenticated, pagination_limit, pagination_offset};
-use crate::output::{OutputFormat, render_table_dynamic};
 
+#[allow(clippy::too_many_lines)]
 pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
-    ensure_authenticated(&ctx.client)?;
     match args.command {
         super::ChatCommands::List {
             space,
@@ -554,7 +555,7 @@ struct MessageIdOutput {
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
-pub(crate) enum MessageStyleArg {
+pub enum MessageStyleArg {
     #[value(name = "paragraph")]
     #[default]
     Paragraph,
@@ -589,26 +590,26 @@ pub(crate) enum MessageStyleArg {
 impl MessageStyleArg {
     fn to_style(self) -> MessageTextStyle {
         match self {
-            MessageStyleArg::Paragraph => MessageTextStyle::Paragraph,
-            MessageStyleArg::Header1 => MessageTextStyle::Header1,
-            MessageStyleArg::Header2 => MessageTextStyle::Header2,
-            MessageStyleArg::Header3 => MessageTextStyle::Header3,
-            MessageStyleArg::Header4 => MessageTextStyle::Header4,
-            MessageStyleArg::Quote => MessageTextStyle::Quote,
-            MessageStyleArg::Code => MessageTextStyle::Code,
-            MessageStyleArg::Title => MessageTextStyle::Title,
-            MessageStyleArg::Checkbox => MessageTextStyle::Checkbox,
-            MessageStyleArg::Marked => MessageTextStyle::Marked,
-            MessageStyleArg::Numbered => MessageTextStyle::Numbered,
-            MessageStyleArg::Toggle => MessageTextStyle::Toggle,
-            MessageStyleArg::Description => MessageTextStyle::Description,
-            MessageStyleArg::Callout => MessageTextStyle::Callout,
+            Self::Paragraph => MessageTextStyle::Paragraph,
+            Self::Header1 => MessageTextStyle::Header1,
+            Self::Header2 => MessageTextStyle::Header2,
+            Self::Header3 => MessageTextStyle::Header3,
+            Self::Header4 => MessageTextStyle::Header4,
+            Self::Quote => MessageTextStyle::Quote,
+            Self::Code => MessageTextStyle::Code,
+            Self::Title => MessageTextStyle::Title,
+            Self::Checkbox => MessageTextStyle::Checkbox,
+            Self::Marked => MessageTextStyle::Marked,
+            Self::Numbered => MessageTextStyle::Numbered,
+            Self::Toggle => MessageTextStyle::Toggle,
+            Self::Description => MessageTextStyle::Description,
+            Self::Callout => MessageTextStyle::Callout,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum ChatReadTypeArg {
+pub enum ChatReadTypeArg {
     #[value(name = "messages")]
     Messages,
     #[value(name = "mentions")]
@@ -618,8 +619,8 @@ pub(crate) enum ChatReadTypeArg {
 impl ChatReadTypeArg {
     fn to_read_type(self) -> ChatReadType {
         match self {
-            ChatReadTypeArg::Messages => ChatReadType::Messages,
-            ChatReadTypeArg::Mentions => ChatReadType::Mentions,
+            Self::Messages => ChatReadType::Messages,
+            Self::Mentions => ChatReadType::Mentions,
         }
     }
 }
@@ -645,7 +646,7 @@ fn read_content_source(value: &str) -> Result<String> {
             bail!("content source is empty; use @file, @-, or -");
         }
         let contents =
-            std::fs::read_to_string(path).map_err(|err| anyhow!("read {}: {err}", path))?;
+            std::fs::read_to_string(path).map_err(|err| anyhow!("read {path}: {err}"))?;
         return Ok(contents);
     }
     bail!("content source must be @file, @-, or -");
@@ -676,7 +677,7 @@ async fn resolve_message_id_for_order(
         .messages
         .into_iter()
         .find(|message| message.order_id == order_id)
-        .ok_or_else(|| anyhow!("message not found for order id: {}", order_id))?;
+        .ok_or_else(|| anyhow!("message not found for order id: {order_id}"))?;
 
     Ok(message.id)
 }
@@ -725,7 +726,7 @@ fn decode_order_id_arg(value: &str) -> Result<String> {
 }
 
 fn is_hex_string(value: &str) -> bool {
-    if value.is_empty() || value.len() % 2 != 0 {
+    if value.is_empty() || !value.len().is_multiple_of(2) {
         return false;
     }
     value.chars().all(|ch| ch.is_ascii_hexdigit())
@@ -747,34 +748,6 @@ fn parse_message_marks(values: &[String]) -> Result<Vec<MessageTextMark>> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encode_order_id_hex_basic() {
-        assert_eq!(encode_order_id_hex("!!@,"), "2121402c");
-        assert_eq!(encode_order_id_hex("AbC"), "416243");
-    }
-
-    #[test]
-    fn decode_order_id_hex_roundtrip() {
-        let decoded = decode_order_id_arg("2121402c").expect("decode hex");
-        assert_eq!(decoded, "!!@,");
-    }
-
-    #[test]
-    fn decode_order_id_non_hex_passthrough() {
-        let decoded = decode_order_id_arg("abc").expect("passthrough");
-        assert_eq!(decoded, "abc");
-    }
-
-    #[test]
-    fn decode_order_id_invalid_utf8() {
-        assert!(decode_order_id_arg("ff").is_err());
-    }
-}
-
 fn parse_message_mark(value: &str) -> Result<MessageTextMark> {
     let mut parts = value.splitn(4, ':');
     let kind = parts.next().unwrap_or_default();
@@ -790,7 +763,6 @@ fn parse_message_mark(value: &str) -> Result<MessageTextMark> {
 
     let range = match (from, to) {
         (None, None) => None,
-        (Some(_), None) => bail!("mark range missing end: {value}"),
         (Some(from), Some(to)) => {
             let from: i32 = from
                 .parse()
@@ -800,13 +772,14 @@ fn parse_message_mark(value: &str) -> Result<MessageTextMark> {
                 .map_err(|_| anyhow!("invalid mark range: {value}"))?;
             Some(MessageTextRange { from, to })
         }
-        _ => None,
+        (Some(_), None) => bail!("mark range missing end: {value}"),
+        (None, Some(_)) => bail!("mark range missing from: {value}"),
     };
 
     Ok(MessageTextMark {
         range,
         kind,
-        param: param.map(|value| value.to_string()),
+        param: param.map(ToString::to_string),
     })
 }
 
@@ -895,4 +868,32 @@ async fn load_space_names(ctx: &AppContext) -> Result<HashMap<String, String>> {
         .into_iter()
         .map(|space| (space.id, space.name))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_order_id_hex_basic() {
+        assert_eq!(encode_order_id_hex("!!@,"), "2121402c");
+        assert_eq!(encode_order_id_hex("AbC"), "416243");
+    }
+
+    #[test]
+    fn decode_order_id_hex_roundtrip() {
+        let decoded = decode_order_id_arg("2121402c").expect("decode hex");
+        assert_eq!(decoded, "!!@,");
+    }
+
+    #[test]
+    fn decode_order_id_non_hex_passthrough() {
+        let decoded = decode_order_id_arg("abc").expect("passthrough");
+        assert_eq!(decoded, "abc");
+    }
+
+    #[test]
+    fn decode_order_id_invalid_utf8() {
+        assert!(decode_order_id_arg("ff").is_err());
+    }
 }

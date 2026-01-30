@@ -5,20 +5,22 @@
 //!
 #![doc(hidden)]
 
-use std::path::PathBuf;
-use std::slice::Iter;
-use std::sync::Arc;
-use std::{env::VarError, sync::atomic::AtomicUsize, time::Instant};
-
-use crate::filters::Filter;
-use crate::objects::DataModel;
-#[allow(unused_imports)]
-use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
+use std::{
+    env::VarError,
+    path::PathBuf,
+    slice::Iter,
+    sync::{Arc, atomic::AtomicUsize},
+    time::Instant,
+};
 
 use chrono::Utc;
 use futures::FutureExt;
 use parking_lot::Mutex;
 use snafu::prelude::*;
+
+#[allow(unused_imports)]
+use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
+use crate::{filters::Filter, objects::DataModel};
 
 // =============================================================================
 // TestError
@@ -45,7 +47,7 @@ pub enum TestError {
 
 impl From<AnytypeError> for TestError {
     fn from(source: AnytypeError) -> Self {
-        TestError::Api { source }
+        Self::Api { source }
     }
 }
 
@@ -67,7 +69,7 @@ impl TestContext {
     /// Creates a new test context from environment variables
     ///
     /// Required environment variables:
-    /// - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
+    /// - `ANYTYPE_TEST_URL` - API endpoint (default: <http://127.0.0.1:31012>)
     /// - `ANYTYPE_KEYSTORE=file` - Path to file containing API key
     /// - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
     ///
@@ -80,7 +82,7 @@ impl TestContext {
             space_id,
             start_time: Instant::now(),
             api_call_count: AtomicUsize::new(0),
-            cleanup: Default::default(),
+            cleanup: TestCleanup::default(),
         })
     }
 
@@ -99,7 +101,7 @@ impl TestContext {
     }
 
     pub fn register_object(&self, obj_id: &str) {
-        self.cleanup.add_object(&self.space_id, obj_id)
+        self.cleanup.add_object(&self.space_id, obj_id);
     }
     pub fn register_property(&self, prop_id: &str) {
         self.cleanup.add_property(&self.space_id, prop_id);
@@ -225,17 +227,17 @@ pub struct TestResults {
 
 impl TestResults {
     pub fn pass(&mut self, name: &str) {
-        println!("  [PASS] {}", name);
+        println!("  [PASS] {name}");
         self.passed.push(name.to_string());
     }
 
     pub fn fail(&mut self, name: &str, error: &str) {
-        println!("  [FAIL] {}: {}", name, error);
+        println!("  [FAIL] {name}: {error}");
         self.failed.push((name.to_string(), error.to_string()));
     }
 
     // iterate through failures
-    pub fn failures<'a>(&'a self) -> Iter<'a, (String, String)> {
+    pub fn failures(&self) -> Iter<'_, (String, String)> {
         self.failed.iter()
     }
 
@@ -278,7 +280,7 @@ pub fn test_client() -> TestResult<AnytypeClient> {
 #[doc(hidden)]
 pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
     let base_url = std::env::var(crate::config::ANYTYPE_TEST_URL_ENV)
-        .unwrap_or(crate::config::ANYTYPE_TEST_URL.to_string());
+        .unwrap_or_else(|_| crate::config::ANYTYPE_TEST_URL.to_string());
 
     let default_key_db = db_keystore::default_path()
         .map_err(|e| TestError::Config {

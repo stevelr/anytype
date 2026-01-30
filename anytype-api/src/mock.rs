@@ -5,40 +5,46 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
 };
 
+use anytype_rpc::{
+    anytype::{
+        Event, StreamRequest,
+        event::{Message as EventMessage, message::Value as EventValue},
+        rpc::{
+            chat::{
+                add_message, delete_message, edit_message_content, get_messages,
+                get_messages_by_ids, read_all, read_messages, subscribe_last_messages,
+                subscribe_to_message_previews, toggle_message_reaction, unread, unsubscribe,
+                unsubscribe_from_message_previews,
+            },
+            object::search_with_meta,
+            workspace::open as workspace_open,
+        },
+    },
+    model,
+};
 use chrono::Utc;
 use futures::Stream;
-use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio::time::{Duration, Instant, Sleep};
+use prost_types::{Struct, Value};
+use tokio::{
+    sync::{Mutex, mpsc, oneshot},
+    time::{Duration, Instant, Sleep},
+};
 use tonic::{
+    Request, Response, Status,
     body::Body,
     codegen::{BoxFuture, Service, http},
     metadata::MetadataMap,
     server::Grpc,
     transport::Server,
-    {Request, Response, Status},
 };
 use tonic_prost::ProstCodec;
-
-use anytype_rpc::anytype::{
-    Event, StreamRequest,
-    event::{Message as EventMessage, message::Value as EventValue},
-    rpc::{
-        chat::{
-            add_message, delete_message, edit_message_content, get_messages, get_messages_by_ids,
-            read_all, read_messages, subscribe_last_messages, subscribe_to_message_previews,
-            toggle_message_reaction, unread, unsubscribe, unsubscribe_from_message_previews,
-        },
-        object::search_with_meta,
-        workspace::open as workspace_open,
-    },
-};
-use anytype_rpc::model;
-use prost_types::{Struct, Value};
 
 const DEFAULT_CHAT_ID: &str = "chat-default";
 const DEFAULT_CHAT_NAME: &str = "General";
@@ -73,6 +79,7 @@ impl MockChatServerHandle {
     pub async fn disconnect_streams(&self) {
         let mut state = self.state.lock().await;
         state.disconnect_streams().await;
+        drop(state);
     }
 }
 
@@ -119,7 +126,7 @@ impl MockChatServer {
             .await
     }
 
-    pub async fn start(addr: SocketAddr) -> Result<MockChatServerHandle, tonic::transport::Error> {
+    pub fn start(addr: SocketAddr) -> Result<MockChatServerHandle, tonic::transport::Error> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server = Self::new();
         let state = server.state.clone();
@@ -311,6 +318,7 @@ impl Service<http::Request<Body>> for ChatService {
         std::task::Poll::Ready(Ok(()))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn call(&mut self, req: http::Request<Body>) -> Self::Future {
         let state = self.state.clone();
         match req.uri().path() {
@@ -638,6 +646,7 @@ impl tonic::server::UnaryService<toggle_message_reaction::Request> for ChatToggl
                 .iter_mut()
                 .find(|msg| msg.id == input.message_id)
             else {
+                drop(state);
                 return Ok(Response::new(toggle_message_reaction::Response {
                     error: Some(toggle_message_reaction::response::Error {
                         code: toggle_message_reaction::response::error::Code::UnknownError as i32,
@@ -661,6 +670,7 @@ impl tonic::server::UnaryService<toggle_message_reaction::Request> for ChatToggl
 
             chat.touch();
             chat.next_state_id();
+            drop(state);
 
             Ok(Response::new(toggle_message_reaction::Response {
                 error: None,
@@ -685,13 +695,14 @@ impl tonic::server::UnaryService<read_all::Request> for ChatReadAllSvc {
             let user = authenticate(request.metadata(), &state_handle).await?;
             let mut state = state_handle.lock().await;
             for chat in state.chats.values_mut() {
-                for message in chat.messages.iter_mut() {
+                for message in &mut chat.messages {
                     message.read_by.insert(user.clone());
                     message.mention_read_by.insert(user.clone());
                 }
                 chat.next_state_id();
                 chat.touch();
             }
+            drop(state);
 
             Ok(Response::new(read_all::Response { error: None }))
         })
@@ -783,9 +794,11 @@ impl tonic::server::UnaryService<get_messages::Request> for ChatGetMessagesSvc {
 
             let mut messages = filter_messages(chat, &input, &user);
             if input.limit > 0 {
+                #[allow(clippy::cast_sign_loss)]
                 messages.truncate(input.limit as usize);
             }
             let chat_state = build_chat_state(chat, &user);
+            drop(state_guard);
 
             Ok(Response::new(get_messages::Response {
                 error: None,
@@ -828,6 +841,7 @@ impl tonic::server::UnaryService<get_messages_by_ids::Request> for ChatGetMessag
                 .map(|msg| msg.to_proto(&user))
                 .collect();
 
+            drop(state_guard);
             Ok(Response::new(get_messages_by_ids::Response {
                 error: None,
                 messages,
@@ -860,6 +874,7 @@ impl tonic::server::UnaryService<subscribe_last_messages::Request>
                 .get(&input.chat_object_id)
                 .expect("chat exists");
 
+            #[allow(clippy::cast_sign_loss)]
             let limit = if input.limit <= 0 {
                 1
             } else {
@@ -871,8 +886,10 @@ impl tonic::server::UnaryService<subscribe_last_messages::Request>
                 .iter()
                 .map(|msg| msg.to_proto(&user))
                 .collect::<Vec<_>>();
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
             let num_messages_before = start as i32;
             let chat_state = build_chat_state(chat, &user);
+            drop(state_guard);
 
             Ok(Response::new(subscribe_last_messages::Response {
                 error: None,
@@ -900,6 +917,7 @@ impl tonic::server::UnaryService<unsubscribe::Request> for ChatUnsubscribeSvc {
             let input = request.into_inner();
             let mut state_guard = state.lock().await;
             state_guard.unsubscribe_chat(&input.chat_object_id, &input.sub_id);
+            drop(state_guard);
             Ok(Response::new(unsubscribe::Response { error: None }))
         })
     }
@@ -944,6 +962,7 @@ impl tonic::server::UnaryService<subscribe_to_message_previews::Request>
                     dependencies: Vec::new(),
                 });
             }
+            drop(state_guard);
 
             Ok(Response::new(subscribe_to_message_previews::Response {
                 error: None,
@@ -978,6 +997,7 @@ impl tonic::server::UnaryService<unsubscribe_from_message_previews::Request>
             for chat_id in chat_ids {
                 state_guard.unsubscribe_chat(&chat_id, &input.sub_id);
             }
+            drop(state_guard);
             Ok(Response::new(unsubscribe_from_message_previews::Response {
                 error: None,
             }))
@@ -1036,6 +1056,7 @@ impl tonic::server::ServerStreamingService<StreamRequest> for ListenSessionEvent
             let (tx, rx) = mpsc::channel(64);
             let mut state_guard = state.lock().await;
             let (disconnect_epoch, epoch) = state_guard.add_listener(tx);
+            drop(state_guard);
             Ok(Response::new(EventStream {
                 receiver: rx,
                 disconnect_epoch,
@@ -1066,7 +1087,7 @@ impl tonic::server::UnaryService<read_messages::Request> for ChatReadMessagesSvc
             let chat = state.chat_mut(&input.chat_object_id);
 
             let mut marked = false;
-            for message in chat.messages.iter_mut() {
+            for message in &mut chat.messages {
                 if !order_in_read_range(&message.order_id, &input) {
                     continue;
                 }
@@ -1119,7 +1140,7 @@ impl tonic::server::UnaryService<unread::Request> for ChatUnreadMessagesSvc {
             let chat = state.chat_mut(&input.chat_object_id);
 
             let mut marked = false;
-            for message in chat.messages.iter_mut() {
+            for message in &mut chat.messages {
                 if !order_in_unread_range(&message.order_id, &input) {
                     continue;
                 }
@@ -1188,6 +1209,7 @@ impl tonic::server::UnaryService<search_with_meta::Request> for ObjectSearchWith
                     meta: Vec::new(),
                 });
             }
+            drop(state);
 
             Ok(Response::new(search_with_meta::Response {
                 error: None,
@@ -1217,12 +1239,15 @@ impl tonic::server::UnaryService<workspace_open::Request> for WorkspaceOpenSvc {
                 .get(&input.space_id)
                 .cloned()
                 .unwrap_or_default();
+            drop(state);
             Ok(Response::new(workspace_open::Response {
                 error: None,
                 info: Some(model::account::Info {
                     space_chat_id: chat_id,
                     ..Default::default()
                 }),
+                // backup paths for corrupted space storage
+                corrupted_backup_paths: Vec::default(),
             }))
         })
     }
@@ -1286,6 +1311,7 @@ fn filter_match(
     let value = &filter.value;
     match filter.relation_key.as_str() {
         "resolvedLayout" => {
+            #[allow(clippy::cast_possible_truncation)]
             let expected = value.as_ref().and_then(number_value).unwrap_or_default() as i32;
             let actual = model::object_type::Layout::ChatDerived as i32;
             match_condition_i32(condition, actual, expected)
@@ -1338,13 +1364,14 @@ fn chat_details(chat_id: &str, chat: &ChatRoom) -> Struct {
     let mut fields = std::collections::BTreeMap::new();
     fields.insert("id".to_string(), value_string(chat_id.to_string()));
     fields.insert("name".to_string(), value_string(chat.name.clone()));
+    #[allow(clippy::cast_precision_loss)]
     fields.insert(
         "lastModifiedDate".to_string(),
         value_number(chat.last_modified as f64),
     );
     fields.insert(
         "resolvedLayout".to_string(),
-        value_number(model::object_type::Layout::ChatDerived as i32 as f64),
+        value_number(f64::from(model::object_type::Layout::ChatDerived as i32)),
     );
     fields.insert("type".to_string(), value_string("chat".to_string()));
     fields.insert("isArchived".to_string(), value_bool(chat.archived));
@@ -1433,9 +1460,10 @@ fn build_chat_state(chat: &ChatRoom, viewer: &str) -> model::ChatState {
         .unwrap_or_default();
 
     model::ChatState {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         messages: Some(model::chat_state::UnreadState {
             oldest_order_id: oldest,
-            counter: unread.len() as i32,
+            counter: u64::min(unread.len() as u64, i32::MAX as u64) as i32,
         }),
         mentions: Some(model::chat_state::UnreadState {
             oldest_order_id: String::new(),
@@ -1533,11 +1561,13 @@ async fn authenticate(
         .get("token")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| Status::unauthenticated("missing token"))?;
-    let state = state.lock().await;
     let user = state
+        .lock()
+        .await
         .token_user(token)
-        .ok_or_else(|| Status::unauthenticated("invalid token"))?;
-    Ok(user.to_string())
+        .ok_or_else(|| Status::unauthenticated("invalid token"))?
+        .to_string();
+    Ok(user)
 }
 
 fn edit_message_error(code: i32, description: &str) -> edit_message_content::response::Error {

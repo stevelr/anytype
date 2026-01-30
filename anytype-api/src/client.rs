@@ -3,21 +3,26 @@
 //! # Creating new api client
 //!
 //! - [new](AnytypeClient::new) - create new client
-//! - [with_config](AnytypeClient::with_config) - create client with custom configuration
-//! - [with_client](AnytypeClient::with_client) - create client with configuration and custom reqwest client
+//! - [`with_config`](AnytypeClient::with_config) - create client with custom configuration
+//! - [`with_client`](AnytypeClient::with_client) - create client with configuration and custom reqwest client
 //!
 //! # Configuration
 //!
-//! - [get_config](AnytypeClient::get_config) - returns configuration
-//! - [api_version](AnytypeClient::api_version) - returns current anytype api version
+//! - [`get_config`](AnytypeClient::get_config) - returns configuration
+//! - [`api_version`](AnytypeClient::api_version) - returns current anytype api version
 //!
 //!
+
+use std::sync::Arc;
 
 #[cfg(feature = "grpc")]
 use anytype_rpc::client::default_grpc_endpoint;
 #[cfg(feature = "grpc")]
+use anytype_rpc::client::{AnytypeGrpcClient, AnytypeGrpcConfig};
+#[cfg(feature = "grpc")]
 use snafu::prelude::*;
-use std::sync::Arc;
+#[cfg(feature = "grpc")]
+use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::{
@@ -29,10 +34,6 @@ use crate::{
     http_client::HttpClient,
     prelude::*,
 };
-#[cfg(feature = "grpc")]
-use anytype_rpc::client::{AnytypeGrpcClient, AnytypeGrpcConfig};
-#[cfg(feature = "grpc")]
-use tokio::sync::Mutex;
 
 /// Configuration for the Anytype client. Defines endpoint url, validation limits, and other settings.
 ///
@@ -51,11 +52,11 @@ use tokio::sync::Mutex;
 pub struct ClientConfig {
     /// Base url for all anytype HTTP/REST api requests.
     /// If not provided in config, url is determined by:
-    /// * The environment variable  ANYTYPE_URL, if defined, or
-    /// * "http://127.0.0.1:31009" `anytype::ANYTYPE_DESKTOP_URL`
+    /// * The environment variable  `ANYTYPE_URL`, if defined, or
+    /// * <http://127.0.0.1:31009> `anytype::ANYTYPE_DESKTOP_URL`
     ///
     /// If you are using the anytype headless client,
-    /// you might want to use `anytype::ANYTYPE_HEADLESS_URL` "http://127.0.0.1:31012"
+    /// you might want to use `anytype::ANYTYPE_HEADLESS_URL` <http://127.0.0.1:31012>
     pub base_url: Option<String>,
 
     /// Application name used for auth challenge. In application code,
@@ -64,14 +65,14 @@ pub struct ClientConfig {
 
     /// keystore. Defaults to platform keyring service.
     /// To use file (sqlite)-based service instead of keyring,
-    /// set to "file" (for default path, usually ~/.local/state/) or "file:path=/path/to/store"
+    /// set to "file" (for default path, usually ~/.local/state/) or `file:path=/path/to/store`
     pub keystore: Option<String>,
 
-    /// optional keystore service name. Defaults to app_name.
+    /// optional keystore service name. Defaults to `app_name`.
     pub keystore_service: Option<String>,
 
     /// Limits for sanity checking.
-    /// To support pages greater than 10MB, increase limits.markdown_max_len.
+    /// To support pages greater than 10MB, increase `limits.markdown_max_len`.
     pub limits: ValidationLimits,
 
     /// Maximum consecutive 429 retries before failing (0 disables the cap).
@@ -83,8 +84,8 @@ pub struct ClientConfig {
     /// to handle arbitrary-sized bursts, with the result that the app may spend more time waiting.
     /// If `rate_limit_max_retries` is 0, the http client will always wait and retry.
     ///
-    /// Defaults to RATE_LIMIT_MAX_RETRIES_DEFAULT, or the env override if set:
-    /// ANYTYPE_RATE_LIMIT_MAX_RETRIES.
+    /// Defaults to `RATE_LIMIT_MAX_RETRIES_DEFAULT`, or the env override if set:
+    /// `ANYTYPE_RATE_LIMIT_MAX_RETRIES`.
     pub rate_limit_max_retries: u32,
 
     /// Disable in-memory caches for spaces, properties, and types.
@@ -100,10 +101,10 @@ pub struct ClientConfig {
 
 impl Default for ClientConfig {
     fn default() -> Self {
-        ClientConfig {
+        Self {
             base_url: None,
             app_name: DEFAULT_SERVICE_NAME.to_string(),
-            limits: Default::default(),
+            limits: ValidationLimits::default(),
             rate_limit_max_retries: std::env::var(RATE_LIMIT_MAX_RETRIES_ENV)
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
@@ -119,49 +120,57 @@ impl Default for ClientConfig {
 }
 
 impl ClientConfig {
-    /// Sets the app_name.
+    /// Sets the `app_name`.
+    #[must_use]
     pub fn app_name(self, app_name: &str) -> Self {
-        ClientConfig {
+        Self {
             app_name: app_name.to_string(),
             ..self
         }
     }
 
+    #[must_use]
     pub fn limits(self, limits: ValidationLimits) -> Self {
-        ClientConfig { limits, ..self }
+        Self { limits, ..self }
     }
 
+    #[must_use]
     pub fn disable_cache(self, disable_cache: bool) -> Self {
-        ClientConfig {
+        Self {
             disable_cache,
             ..self
         }
     }
 
     /// Enables read-after-write verification using the provided config.
+    #[must_use]
     pub fn ensure_available(self, verify: VerifyConfig) -> Self {
-        ClientConfig {
+        Self {
             verify: Some(verify),
             ..self
         }
     }
 
     /// Sets the verify config explicitly (None disables verification).
+    #[must_use]
     pub fn verify_config(self, verify: Option<VerifyConfig>) -> Self {
-        ClientConfig { verify, ..self }
+        Self { verify, ..self }
     }
 
     /// Sets the gRPC endpoint (override default)
     #[cfg(feature = "grpc")]
+    #[must_use]
     pub fn grpc_endpoint(mut self, endpoint: String) -> Self {
         self.grpc_endpoint = Some(endpoint);
         self
     }
 
+    #[must_use]
     pub fn get_limits(&self) -> &ValidationLimits {
         &self.limits
     }
 
+    #[must_use]
     pub fn get_verify_config(&self) -> Option<&VerifyConfig> {
         self.verify.as_ref()
     }
@@ -184,7 +193,7 @@ impl std::fmt::Debug for AnytypeClient {
             .field("config", &self.config)
             .field("keystore:service", &self.keystore.service().to_string())
             .field("cache", &self.cache)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -222,7 +231,7 @@ impl AnytypeClient {
     }
 
     /// Creates a client from a `reqwest::ClientBuilder` and configuration.
-    /// ClientBuilder can be customized with timeouts, proxies, dns servers, user_agent, etc.
+    /// `ClientBuilder` can be customized with timeouts, proxies, dns servers, `user_agent`, etc.
     /// Configure `ClientConfig.keystore` if you want file-based credential storage.
     ///
     /// # Example
@@ -236,14 +245,15 @@ impl AnytypeClient {
     /// # }
     /// ```
     pub fn with_client(builder: reqwest::ClientBuilder, config: ClientConfig) -> Result<Self> {
-        let base_url = config
-            .base_url
-            .clone()
-            .unwrap_or(std::env::var(ANYTYPE_URL_ENV).unwrap_or(ANYTYPE_DESKTOP_URL.to_string()));
-        let keystore_service = config.keystore_service.unwrap_or(config.app_name.clone());
+        let base_url = config.base_url.clone().unwrap_or_else(|| {
+            std::env::var(ANYTYPE_URL_ENV).unwrap_or_else(|_| ANYTYPE_DESKTOP_URL.to_string())
+        });
+        let keystore_service = config
+            .keystore_service
+            .unwrap_or_else(|| config.app_name.clone());
         let keystore = KeyStore::new(&keystore_service, config.keystore.as_deref().unwrap_or(""))?;
         #[cfg(feature = "grpc")]
-        let grpc_endpoint = config.grpc_endpoint.unwrap_or(default_grpc_endpoint());
+        let grpc_endpoint = config.grpc_endpoint.unwrap_or_else(default_grpc_endpoint);
 
         // ask keystore for http creds: this may trigger user auth for os keyring keystore
         let http_creds = keystore.get_http_credentials()?;
@@ -301,20 +311,22 @@ impl AnytypeClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn get_config(&self) -> &ClientConfig {
         &self.config
     }
 
     /// Returns the configured http endpoint
+    #[must_use]
     pub fn get_http_endpoint(&self) -> &str {
         &self.client.base_url
     }
 
     /// Returns the configured grpc endpoint
     #[cfg(feature = "grpc")]
-    pub fn get_grpc_endpoint(&self) -> &str {
-        // SAFETY: unwrap ok because grpc_endpoint is always Some(...)
-        self.config.grpc_endpoint.as_deref().unwrap()
+    #[must_use]
+    pub fn get_grpc_endpoint(&self) -> Option<String> {
+        self.config.grpc_endpoint.clone()
     }
 
     /// Returns the anytype api version, for example: "2025-11-08".
@@ -328,6 +340,7 @@ impl AnytypeClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn api_version(&self) -> String {
         crate::ANYTYPE_API_VERSION.to_string()
     }
@@ -343,11 +356,13 @@ impl AnytypeClient {
         }
         drop(guard);
 
-        let grpc_config = if let Some(endpoint) = &self.config.grpc_endpoint {
-            AnytypeGrpcConfig::new(endpoint)
-        } else {
-            AnytypeGrpcConfig::default()
-        };
+        let grpc_config = self
+            .config
+            .grpc_endpoint
+            .as_ref()
+            .map_or_else(AnytypeGrpcConfig::default, |endpoint| {
+                AnytypeGrpcConfig::new(endpoint.to_owned())
+            });
 
         self.create_grpc_client(&grpc_config).await?;
         let guard = self.grpc.lock().await;
@@ -381,16 +396,20 @@ impl AnytypeClient {
             .fail();
         };
 
-        let mut guard = self.grpc.lock().await;
-        *guard = Some(client);
+        {
+            let mut guard = self.grpc.lock().await;
+            *guard = Some(client);
+        }
         Ok(())
     }
 
     /// Minimal authenticated gRPC ping (list apps).
     #[cfg(feature = "grpc")]
     pub async fn ping_grpc(&self) -> Result<()> {
-        use anytype_rpc::anytype::rpc::account::local_link::list_apps::Request as ListAppsRequest;
-        use anytype_rpc::auth::with_token;
+        use anytype_rpc::{
+            anytype::rpc::account::local_link::list_apps::Request as ListAppsRequest,
+            auth::with_token,
+        };
         use tonic::Request;
 
         let grpc = self.grpc_client().await?;
@@ -447,6 +466,7 @@ impl AnytypeClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn http_metrics(&self) -> HttpMetricsSnapshot {
         self.client.metrics_snapshot()
     }
@@ -471,6 +491,7 @@ impl AnytypeClient {
 impl AnytypeClient {
     // accessor to support cache tests
     #[doc(hidden)]
+    #[must_use]
     pub fn cache(&self) -> Arc<AnytypeCache> {
         self.cache.clone()
     }

@@ -19,8 +19,7 @@
 
 mod common;
 
-use anytype::prelude::*;
-use anytype::test_util::with_test_context_unit;
+use anytype::{prelude::*, test_util::with_test_context_unit};
 use common::{create_object_with_retry, unique_test_name, update_object_with_retry};
 
 // =============================================================================

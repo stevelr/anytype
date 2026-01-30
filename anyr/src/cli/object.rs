@@ -1,15 +1,18 @@
-use crate::cli::{
-    AppContext,
-    common::{resolve_space_id, resolve_type, resolve_type_ids, resolve_type_key},
-    ensure_authenticated, must_have_body, pagination_limit, pagination_offset, resolve_icon,
-};
-use crate::filter::{parse_filters, parse_property};
-use crate::output::OutputFormat;
 use anyhow::Result;
 use anytype::prelude::*;
 
+use crate::{
+    cli::{
+        AppContext,
+        common::{resolve_space_id, resolve_type, resolve_type_ids, resolve_type_key},
+        must_have_body, pagination_limit, pagination_offset, resolve_icon_exists,
+    },
+    filter::{parse_filters, parse_property},
+    output::OutputFormat,
+};
+
+#[allow(clippy::too_many_lines)]
 pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
-    ensure_authenticated(&ctx.client)?;
     match args.command {
         super::ObjectCommands::List {
             space,
@@ -92,11 +95,11 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
                 request = request.name(name);
             }
 
-            if let Some(body) = must_have_body(&body, &body_file)? {
+            if let Some(body) = must_have_body(body, body_file)? {
                 request = request.body(body);
             }
 
-            if let Some(icon) = resolve_icon(&icon_emoji, &icon_file)? {
+            if let Some(icon) = resolve_icon_exists(icon_emoji, icon_file)? {
                 request = request.icon(icon);
             }
 
@@ -144,11 +147,11 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
                 request = request.name(name);
             }
 
-            if let Some(body) = must_have_body(&body, &body_file)? {
+            if let Some(body) = must_have_body(body, body_file)? {
                 request = request.body(body);
             }
 
-            if let Some(icon) = resolve_icon(&icon_emoji, &icon_file)? {
+            if let Some(icon) = resolve_icon_exists(icon_emoji, icon_file)? {
                 request = request.icon(icon);
             }
 

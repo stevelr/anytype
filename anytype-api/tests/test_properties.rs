@@ -16,10 +16,13 @@
 
 mod common;
 
-use crate::common::{create_object_with_retry, unique_test_name};
-use anytype::prelude::*;
-use anytype::test_util::{TestResult, unique_suffix, with_test_context};
+use anytype::{
+    prelude::*,
+    test_util::{TestResult, unique_suffix, with_test_context},
+};
 use serde_json::Number;
+
+use crate::common::{create_object_with_retry, unique_test_name};
 
 // =============================================================================
 // Property Format Setters - Create objects with each format

@@ -21,8 +21,7 @@ mod common;
 
 use std::time::Duration;
 
-use anytype::prelude::*;
-use anytype::test_util::with_test_context_unit;
+use anytype::{prelude::*, test_util::with_test_context_unit};
 use common::unique_test_name;
 
 // =============================================================================
@@ -66,7 +65,7 @@ async fn test_search_global_with_limit() {
             .expect("Failed to execute global search with limit");
 
         assert!(
-            results.len() <= limit,
+            results.len() <= limit as usize,
             "Results should respect limit: got {} for limit {}",
             results.len(),
             limit

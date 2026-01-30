@@ -18,8 +18,9 @@
 //! cargo test -p anytype --test smoke_test
 //! ```
 
-use anytype::{prelude::*, test_util::*};
 use std::{collections::HashSet, time::Duration};
+
+use anytype::{prelude::*, test_util::*};
 
 // =============================================================================
 // Test Configuration

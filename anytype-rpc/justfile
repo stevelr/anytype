@@ -4,6 +4,22 @@ _default:
 check:
     cargo build
     cargo clippy -- -D warnings
+    cargo clippy --manifest-path tools/gen-protos/Cargo.toml -- -D warnings
     fd -e rs | xargs rustfmt --edition 2024 --check
+    typos
+    cspell .
 
-
+gen-protos ref="develop":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+    curl -fsSL "https://codeload.github.com/anyproto/anytype-heart/tar.gz/{{ref}}" -o "$tmp_dir/repo.tgz"
+    tar -xzf "$tmp_dir/repo.tgz" -C "$tmp_dir"
+    repo_dir="$(find "$tmp_dir" -maxdepth 1 -type d -name "anytype-heart-*" | head -n 1)"
+    if [[ -z "$repo_dir" ]]; then
+        echo "Failed to locate extracted repo directory" >&2
+        exit 1
+    fi
+    CARGO_TARGET_DIR=./tools/gen-protos/target cargo run --manifest-path tools/gen-protos/Cargo.toml -- "$repo_dir"
+    rustfmt --edition 2024 src/gen/*.rs

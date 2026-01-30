@@ -30,7 +30,10 @@ set -euo pipefail
 # 1. In the desktop app, create a space with "test" in the name, and get an invite
 #    to the space (Settings, Members, Invite link. click to enable Editor access, Copy)
 # 2. Paste the invite link below to set "space_invite=""
-#    The value should look like "https://invite.any.coop/bafybei...#..."
+#    The value should be in one of these formats:
+#      - anytype app invite: `anytype://invite/?cid=<cid>&key-<key>`
+#      - self-hosted networks: `http(s)://<any-host>/<cid>#<key>`
+#      - anytype app invite (old?): `https://invite.any.coop/<cid>#<key>`
 space_invite="${space_invite:=""}"
 
 # 3. If running cargo tests anytype-api folder, uncomment these two lines:

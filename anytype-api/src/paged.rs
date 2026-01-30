@@ -8,7 +8,7 @@
 //!
 //!
 use std::{
-    fmt, mem,
+    mem,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -55,20 +55,21 @@ use crate::{
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Debug)]
 pub struct PagedResult<T> {
     response: PaginatedResponse<T>,
     refill: Option<Refill>,
 }
 
 // client and request object needed to get next PaginatedResponse
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Refill {
     client: Arc<HttpClient>,
     request: HttpRequest,
 }
 
 impl<T> PagedResult<T> {
-    /// Creates a new PagedResult from a response, client, and the original request.
+    /// Creates a new `PagedResult` from a response, client, and the original request.
     pub(crate) fn new(
         response: PaginatedResponse<T>,
         client: Arc<HttpClient>,
@@ -89,14 +90,15 @@ impl<T> PagedResult<T> {
     }
 
     /// Creates a paged result from a complete list of items.
-    /// Used when using cached items to provide a list() result.
+    /// Used when using cached items to provide a list result.
     pub(crate) fn from_items(items: Vec<T>) -> Self {
         let total = items.len();
         let response = PaginatedResponse {
             items,
             pagination: PaginationMeta {
                 has_more: false,
-                limit: total,
+                #[allow(clippy::cast_possible_truncation)]
+                limit: (total & (u32::MAX as usize)) as u32,
                 offset: 0,
                 total,
             },
@@ -130,14 +132,14 @@ impl<T> DerefMut for PagedResult<T> {
     }
 }
 
-// Implement Debug by delegating to the inner response
-impl<T: fmt::Debug> fmt::Debug for PagedResult<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PagedResult")
-            .field("response", &self.response)
-            .finish()
-    }
-}
+// // Implement Debug by delegating to the inner response
+// impl<T: fmt::Debug> fmt::Debug for PagedResult<T> {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         f.debug_struct("PagedResult")
+//             .field("response", &self.response)
+//             .finish()
+//     }
+// }
 
 // Implement Serialize by delegating to the inner response
 // This allows CLI code to serialize PagedResult<T> as if it were PaginatedResponse<T>
@@ -153,27 +155,20 @@ impl<T: Serialize> Serialize for PagedResult<T> {
 #[allow(clippy::type_complexity)]
 fn next_response_iter<T>(
     next_response: PaginatedResponse<T>,
-    limit: usize,
+    limit: u32,
     refill: Refill,
 ) -> Option<(
     Result<T, AnytypeError>,
-    (
-        std::vec::IntoIter<T>,
-        bool,
-        usize,
-        usize,
-        Option<Refill>,
-        bool,
-    ),
+    (std::vec::IntoIter<T>, bool, u32, u32, Option<Refill>, bool),
 )> {
     let new_has_more = next_response.pagination.has_more;
     let new_offset = next_response.pagination.offset + next_response.pagination.limit;
     let mut new_items = next_response.items.into_iter();
 
     // Get first item from new page (empty page stops iteration)
-    new_items.next().map(|item| {
+    new_items.next().map(|item: T| {
         (
-            Ok(item),
+            Ok::<T, AnytypeError>(item),
             (
                 new_items,
                 new_has_more,
@@ -310,7 +305,7 @@ impl<'a, T> IntoIterator for &'a PagedResult<T> {
 }
 
 /// Pagination information
-/// For convenience, the limit and offset can be turned into Query with into()
+/// For convenience, the limit and offset can be turned into Query with `into()`
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PaginationResponse {
     pub has_more: bool,
@@ -328,18 +323,15 @@ pub struct PaginatedResponse<T> {
 
 impl<T> PaginatedResponse<T> {
     /// Returns the number of items.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
     /// Returns true if there are no items in this page.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
-    }
-
-    /// Iterates over the items in this response (may need to get next page for all).
-    pub fn iter(&self) -> std::slice::Iter<'_, T> {
-        self.items.iter()
     }
 
     /// Creates a mutable iterator over items in this response.
@@ -354,6 +346,14 @@ impl<T> PaginatedResponse<T> {
 }
 
 // create iterator over a shared reference to items
+impl<'a, T> PaginatedResponse<T> {
+    /// Returns an iterator over shared items.
+    pub fn iter(&'a self) -> std::slice::Iter<'a, T> {
+        self.items.iter()
+    }
+}
+
+// create iterator over a shared reference to items
 impl<'a, T> IntoIterator for &'a PaginatedResponse<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
@@ -364,12 +364,21 @@ impl<'a, T> IntoIterator for &'a PaginatedResponse<T> {
     }
 }
 
-/// pagination record keeping, returned as part of PaginatedResponse
+impl<'a, T> IntoIterator for &'a mut PaginatedResponse<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
+    }
+}
+
+/// pagination record keeping, returned as part of `PaginatedResponse`
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PaginationMeta {
     pub has_more: bool,
-    pub limit: usize,
-    pub offset: usize,
+    pub limit: u32,
+    pub offset: u32,
     pub total: usize,
 }
 
@@ -386,7 +395,7 @@ mod tests {
         name: String,
     }
 
-    /// Create a test HttpRequest
+    /// Create a test `HttpRequest`
     fn create_test_request() -> HttpRequest {
         HttpRequest {
             method: reqwest::Method::GET,
@@ -411,7 +420,7 @@ mod tests {
                 name: "Item 2".to_string(),
             },
         ];
-        let paged = PagedResult::from_items(items.clone());
+        let paged = PagedResult::from_items(items);
 
         // Test Deref - access items directly
         assert_eq!(paged.items.len(), 2);
@@ -449,8 +458,7 @@ mod tests {
             name: "Test".to_string(),
         }];
         let paged = PagedResult::from_items(items);
-
-        let debug_str = format!("{:?}", paged);
+        let debug_str = format!("{paged:?}");
 
         // Should contain PagedResult and response
         assert!(debug_str.contains("PagedResult"));
@@ -502,7 +510,7 @@ mod tests {
                 name: "Item 3".to_string(),
             },
         ];
-        let paged = PagedResult::from_items(items.clone());
+        let paged = PagedResult::from_items(items);
 
         // Iterate using for loop (uses IntoIterator for &PagedResult)
         let mut collected: Vec<&TestItem> = Vec::new();
