@@ -22,7 +22,6 @@
 
 set -euo pipefail
 
- set -x
 #################
 #   SETUP
 #################
