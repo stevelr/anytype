@@ -4,16 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [0.3.1] - anytype - 2026-02-16
 
 ### Added
 
+- new function `backup_space()` to export any space, format: Markdown, Protobuf, or Json; with/without Files, and other options.
 - file upload/preload request options: `created_in_context` and `created_in_context_ref`
 - chat message text styles: `toggle_header1`, `toggle_header2`, `toggle_header3`
+- new gRPC `process_watcher` module for reusable process lifecycle tracking (subscribe/wait/reconnect/unsubscribe), with cancellation-channel support and configurable timeouts/fallbacks.
+- archived object management APIs on `AnytypeClient`:
+  - `list_archived(space_id)` builder with `limit`, `offset`, and `types` filters.
+  - `count_archived(space_id)` to count archived objects.
+  - `delete_archived(space_id, &[String])` to hard-delete archived objects in gRPC batches of 200.
+  - `delete_all_archived(space_id)` to delete all archived objects by paging archived IDs and deleting in repeated batches (200 per delete request) with settle delay and progress debug logs.
 
 ### Changed
 
-- bumped anytype-rpc to 0.3.0-beta.1
+- bumped anytype-rpc to 0.3.0
+- removed generate-markdown example
 
 ## [0.3.0] - anytype - 2026-01-28
 

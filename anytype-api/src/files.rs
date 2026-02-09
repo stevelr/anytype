@@ -11,7 +11,6 @@ use anytype_rpc::{
         file::{discard_preload, download, upload},
         object::search_with_meta,
     },
-    auth::with_token,
     model,
 };
 use chrono::{DateTime, FixedOffset};
@@ -26,6 +25,7 @@ use crate::{
     client::AnytypeClient,
     error::AnytypeError,
     filters::{Filter, Sort, SortDirection},
+    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
     paged::{PagedResult, PaginatedResponse, PaginationMeta},
 };
 
@@ -581,17 +581,17 @@ impl FileDownloadRequest<'_> {
                 request_path.to_string_lossy().to_string()
             },
         };
-        let request = with_token_request(Request::new(request), grpc.token()).map_err(|e| {
-            error!("download rpc error: {e}");
-            e
+        let request = with_token_request(Request::new(request), grpc.token()).map_err(|err| {
+            error!("download rpc error: {err}");
+            err
         })?;
 
         let response = commands
             .file_download(request)
             .await
-            .map_err(|e| {
-                error!("download error grpc_status {e:?}");
-                grpc_status(e)
+            .map_err(|err| {
+                error!("download error grpc_status {err:?}");
+                grpc_status(err)
             })?
             .into_inner();
 
@@ -991,28 +991,28 @@ fn filter_to_dataview(filter: Filter) -> Result<model::block::content::dataview:
         Filter::Text {
             condition,
             property_key,
-            text: s,
+            text: str,
         }
         | Filter::Date {
             condition,
             property_key,
-            date: s,
+            date: str,
         }
         | Filter::Url {
             condition,
             property_key,
-            url: s,
+            url: str,
         }
         | Filter::Email {
             condition,
             property_key,
-            email: s,
+            email: str,
         }
         | Filter::Phone {
             condition,
             property_key,
-            phone: s,
-        } => (property_key, condition, Some(value_string(s))),
+            phone: str,
+        } => (property_key, condition, Some(value_string(str))),
         Filter::Number {
             condition,
             property_key,
@@ -1225,21 +1225,6 @@ fn number_field(details: &Struct, key: &str) -> Option<f64> {
     })
 }
 
-fn ensure_error_ok<T: GrpcError>(error: Option<&T>, action: &str) -> Result<()> {
-    if let Some(error) = error
-        && error.code() != 0
-    {
-        return Err(AnytypeError::Other {
-            message: format!(
-                "{action} failed: {} (code {})",
-                error.description(),
-                error.code()
-            ),
-        });
-    }
-    Ok(())
-}
-
 fn struct_to_json(details: &Struct) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (key, value) in &details.fields {
@@ -1332,63 +1317,5 @@ fn value_bool(value: bool) -> Value {
 fn value_list(values: Vec<Value>) -> Value {
     Value {
         kind: Some(prost_types::value::Kind::ListValue(ListValue { values })),
-    }
-}
-
-fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>> {
-    with_token(request, token).map_err(|err| AnytypeError::Auth {
-        message: err.to_string(),
-    })
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn grpc_status(status: tonic::Status) -> AnytypeError {
-    AnytypeError::Other {
-        message: format!("gRPC request failed: {status}"),
-    }
-}
-
-trait GrpcError {
-    fn code(&self) -> i32;
-    fn description(&self) -> &str;
-}
-
-impl GrpcError for upload::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for download::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for discard_preload::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for search_with_meta::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
     }
 }

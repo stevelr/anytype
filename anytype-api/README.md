@@ -111,6 +111,21 @@ async fn main() -> Result<(), AnytypeError> {
 
 See the [Examples](./examples/README.md) folder for more code samples.
 
+## Archived Object Cleanup
+
+```rust,no_run
+use anytype::prelude::*;
+
+# async fn example(client: &AnytypeClient, space_id: &str) -> Result<(), AnytypeError> {
+let count = client.count_archived(space_id).await?;
+println!("archived before delete: {count}");
+
+let deleted = client.delete_all_archived(space_id).await?;
+println!("deleted archived objects: {deleted}");
+# Ok(())
+# }
+```
+
 ## Files (gRPC)
 
 File operations require the `grpc` feature (enabled by default).

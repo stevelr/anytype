@@ -131,13 +131,13 @@ impl TestContext {
 }
 
 #[doc(hidden)]
-pub async fn with_test_context<F, Fut, T>(f: F) -> TestResult<T>
+pub async fn with_test_context<F, Fut, T>(test_fn: F) -> TestResult<T>
 where
     F: FnOnce(Arc<TestContext>) -> Fut,
     Fut: std::future::Future<Output = TestResult<T>>,
 {
     let ctx = Arc::new(TestContext::new().await?);
-    let result = std::panic::AssertUnwindSafe(f(Arc::clone(&ctx)))
+    let result = std::panic::AssertUnwindSafe(test_fn(Arc::clone(&ctx)))
         .catch_unwind()
         .await;
     let cleanup_res = ctx.cleanup().await;
@@ -163,7 +163,7 @@ where
 }
 
 #[doc(hidden)]
-pub async fn with_test_context_unit<F, Fut>(f: F)
+pub async fn with_test_context_unit<F, Fut>(test_fn: F)
 where
     F: FnOnce(Arc<TestContext>) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -174,7 +174,7 @@ where
             .expect("Failed to create test context"),
     );
 
-    let result = std::panic::AssertUnwindSafe(f(Arc::clone(&ctx)))
+    let result = std::panic::AssertUnwindSafe(test_fn(Arc::clone(&ctx)))
         .catch_unwind()
         .await;
     if let Err(cleanup_err) = ctx.cleanup().await {
@@ -283,8 +283,8 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
         .unwrap_or_else(|_| crate::config::ANYTYPE_TEST_URL.to_string());
 
     let default_key_db = db_keystore::default_path()
-        .map_err(|e| TestError::Config {
-            message: e.to_string(),
+        .map_err(|err| TestError::Config {
+            message: err.to_string(),
         })?
         .parent()
         .context(ConfigSnafu {

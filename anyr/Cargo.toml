@@ -5,7 +5,7 @@
 # 
 [package]
 name = "anyr"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "CLI for Anytype - list, search, and perform CRUD operations on Anytype objects."
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ name = "anyr"
 
 [dependencies]
 anyhow.workspace = true
-anytype = { version = "0.3.0", path = "../anytype-api", features = ["grpc"] }
+anytype = { version = "0.3.1", path = "../anytype-api", features = ["grpc"] }
 clap.workspace = true
 futures.workspace = true
 serde.workspace = true

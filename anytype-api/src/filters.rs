@@ -1060,7 +1060,7 @@ impl Filter {
                             | Condition::NotEmpty,
                         ..
                     } => None,
-            f if f.is_text_type() && matches!(f.condition(),
+            filter if filter.is_text_type() && matches!(filter.condition(),
                             Condition::Equal
                             | Condition::NotEqual
                             | Condition::Contains
@@ -1076,7 +1076,7 @@ impl Filter {
                             | Condition::NotEmpty,
                             ..
                         } => None,
-            f if f.is_array_type() && matches!(f.condition(),
+            filter if filter.is_array_type() && matches!(filter.condition(),
                             Condition::In
                             | Condition::AllIn
                             | Condition::NotIn
@@ -1094,17 +1094,17 @@ impl Filter {
                             | Condition::Empty
                             | Condition::NotEmpty,
                         ..
-                    } 
+                    }
             | Self::Checkbox {
                         condition:
                             Condition::Equal
                             | Condition::NotEqual,
                         ..
-                    } 
-            | Self::Empty { condition: Condition::Empty, .. } 
-            | Self::NotEmpty { condition: Condition::NotEmpty, .. } 
+                    }
+            | Self::Empty { condition: Condition::Empty, .. }
+            | Self::NotEmpty { condition: Condition::NotEmpty, .. }
             // skip validation on Value because it's only created by Deserialization
-            | Self::Value { .. } => None ,
+            | Self::Value { .. } => None,
 
             // anything else is invalid
             // could have used '_' here but using the more explicit variants
@@ -1136,9 +1136,9 @@ impl Filter {
             // because it's handled in the match patterns in validate()
             // (Select differs from the others because it doesn't support AllIn)
             //Filter::Select { .. } => true,
-            Self::MultiSelect { .. } 
-            | Self::Files { .. } 
-            | Self::Objects { .. } 
+            Self::MultiSelect { .. }
+            | Self::Files { .. }
+            | Self::Objects { .. }
             | Self::Value {
                 value: Some(Value::Array(_)),
                 ..
@@ -1150,15 +1150,15 @@ impl Filter {
     // helper function used in validate() match patterns
     fn is_text_type(&self) -> bool {
         match self {
-            Self::Text { .. } 
+            Self::Text { .. }
             // even though Date is a string type, don't include here
             // because it's handled in the match patterns in validate()
             // (Date differs from the other text types because it supports magnitude comparisons (greater, etc.)
             // and doesn't support NotEqual (I have no idea why. See types.go line 71))
             //Filter::Date { .. } => true,
-            | Self::Url { .. } 
-            | Self::Email { .. } 
-            | Self::Phone { .. } 
+            | Self::Url { .. }
+            | Self::Email { .. }
+            | Self::Phone { .. }
             | Self::Value {
                 value: Some(Value::String(_)),
                 ..
@@ -1169,38 +1169,38 @@ impl Filter {
 
     pub fn condition(&self) -> Condition {
         *match self {
-            Self::Text { condition, .. } 
+            Self::Text { condition, .. }
             | Self::Number { condition, .. }
-            | Self::Select { condition, .. } 
-            | Self::MultiSelect { condition, .. } 
-            | Self::Date { condition, .. } 
-            | Self::Checkbox { condition, .. } 
-            | Self::Files { condition, .. } 
-            | Self::Url { condition, .. } 
-            | Self::Email { condition, .. } 
-            | Self::Phone { condition, .. } 
-            | Self::Objects { condition, .. } 
-            | Self::Empty { condition, .. } 
-            | Self::NotEmpty { condition, .. } 
+            | Self::Select { condition, .. }
+            | Self::MultiSelect { condition, .. }
+            | Self::Date { condition, .. }
+            | Self::Checkbox { condition, .. }
+            | Self::Files { condition, .. }
+            | Self::Url { condition, .. }
+            | Self::Email { condition, .. }
+            | Self::Phone { condition, .. }
+            | Self::Objects { condition, .. }
+            | Self::Empty { condition, .. }
+            | Self::NotEmpty { condition, .. }
             | Self::Value { condition, .. } => condition,
         }
     }
 
     pub fn property_key(&self) -> &str {
         match self {
-            Self::Text { property_key, .. } 
-            | Self::Number { property_key, .. } 
-            | Self::Select { property_key, .. } 
-            | Self::MultiSelect { property_key, .. } 
-            | Self::Date { property_key, .. } 
-            | Self::Checkbox { property_key, .. } 
-            | Self::Files { property_key, .. } 
-            | Self::Url { property_key, .. } 
-            | Self::Email { property_key, .. } 
-            | Self::Phone { property_key, .. } 
-            | Self::Objects { property_key, .. } 
-            | Self::Empty { property_key, .. } 
-            | Self::NotEmpty { property_key, .. } 
+            Self::Text { property_key, .. }
+            | Self::Number { property_key, .. }
+            | Self::Select { property_key, .. }
+            | Self::MultiSelect { property_key, .. }
+            | Self::Date { property_key, .. }
+            | Self::Checkbox { property_key, .. }
+            | Self::Files { property_key, .. }
+            | Self::Url { property_key, .. }
+            | Self::Email { property_key, .. }
+            | Self::Phone { property_key, .. }
+            | Self::Objects { property_key, .. }
+            | Self::Empty { property_key, .. }
+            | Self::NotEmpty { property_key, .. }
             | Self::Value { property_key, .. } => property_key,
         }
     }
@@ -1230,7 +1230,7 @@ impl Filter {
             Self::Email { email, .. } => (self.query_key(), email.to_owned()),
             Self::Phone { phone, .. } => (self.query_key(), phone.to_owned()),
             Self::Objects { objects, .. } => (self.query_key(), objects.join(",")),
-            Self::Empty { .. } | Self::NotEmpty{..} => (self.query_key(), String::new()),
+            Self::Empty { .. } | Self::NotEmpty { .. } => (self.query_key(), String::new()),
             Self::Value { value, .. } => {
                 let val_str = match value {
                     Some(Value::Array(vec)) => vec
@@ -1239,7 +1239,7 @@ impl Filter {
                         .collect::<Vec<String>>()
                         .join(","),
                     None | Some(Value::Null) => String::new(),
-                    Some(v) => v.to_string(),
+                    Some(val) => val.to_string(),
                 };
                 (self.query_key(), val_str)
             }

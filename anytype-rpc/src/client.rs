@@ -1,3 +1,4 @@
+use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::anytype::ClientCommandsClient;
@@ -54,9 +55,13 @@ impl AnytypeGrpcClient {
     }
 
     pub async fn connect_channel(config: &AnytypeGrpcConfig) -> Result<Channel, AnytypeGrpcError> {
-        Ok(Endpoint::from_shared(config.endpoint.clone())?
-            .connect()
-            .await?)
+        let endpoint = Endpoint::from_shared(config.endpoint.clone())?
+            .connect_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_timeout(Duration::from_secs(10))
+            .keep_alive_while_idle(true);
+        Ok(endpoint.connect().await?)
     }
 
     /// if you're using the headless client, you can generate a session token

@@ -872,7 +872,7 @@ async fn prime_cache_types(
         .collect_all()
         .await?
         .into_iter()
-        .filter(|t: &Type| !t.archived)
+        .filter(|typ: &Type| !typ.archived)
         .collect();
     cache.set_types(space_id, types);
     Ok(())

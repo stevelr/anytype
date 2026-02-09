@@ -38,19 +38,16 @@
 //! - Is `last_state_id` stable enough for resume, or should we use `order_id` only?
 //! - Should previews and message subscriptions use separate `sub_id`s or a shared registry?
 
-use anytype_rpc::model;
 #[cfg(feature = "grpc")]
-use anytype_rpc::{
-    anytype::rpc::{
-        chat::{
-            add_message, delete_message, edit_message_content, get_messages, get_messages_by_ids,
-            read_all, read_messages, toggle_message_reaction, unread,
-        },
-        object::search_with_meta,
-        workspace::open as workspace_open,
+use anytype_rpc::anytype::rpc::{
+    chat::{
+        add_message, delete_message, edit_message_content, get_messages, get_messages_by_ids,
+        read_all, read_messages, toggle_message_reaction, unread,
     },
-    auth::with_token,
+    object::search_with_meta,
+    workspace::open as workspace_open,
 };
+use anytype_rpc::model;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use prost_types::{Struct, Value};
 use serde::{Deserialize, Serialize};
@@ -60,6 +57,7 @@ use crate::{
     Result,
     client::AnytypeClient,
     error::AnytypeError,
+    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
     objects::{Color, DataModel, Object, ObjectLayout},
     properties::{PropertyValue, PropertyWithValue},
     validation::looks_like_object_id,
@@ -1849,8 +1847,9 @@ fn object_from_details(
         .or_else(|| default_space_id.map(ToString::to_string))
         .unwrap_or_default();
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-    let layout =
-        resolved_layout_to_object_layout(number_field(details, "resolvedLayout").map(|f| f as i32));
+    let layout = resolved_layout_to_object_layout(
+        number_field(details, "resolvedLayout").map(|fval| fval as i32),
+    );
 
     let mut properties = Vec::new();
     if let Some(date) = last_modified_date(details) {
@@ -2054,7 +2053,7 @@ pub(crate) fn chat_state_from_grpc(state: &model::ChatState) -> ChatState {
 
 fn grpc_message_content(content: MessageContent) -> model::chat_message::MessageContent {
     model::chat_message::MessageContent {
-        text: content.text.clone(),
+        text: content.text,
         style: grpc_message_text_style(&content.style),
         marks: content.marks.into_iter().map(grpc_message_mark).collect(),
     }
@@ -2230,147 +2229,4 @@ fn timestamp_to_datetime(value: i64) -> DateTime<FixedOffset> {
 
 fn empty_to_none(value: String) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
-}
-
-fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>> {
-    with_token(request, token).map_err(|err| AnytypeError::Auth {
-        message: err.to_string(),
-    })
-}
-
-#[allow(clippy::needless_pass_by_value)] // not needless, used in map_error
-fn grpc_status(status: tonic::Status) -> AnytypeError {
-    AnytypeError::Other {
-        message: format!("gRPC request failed: {status}"),
-    }
-}
-
-trait GrpcError {
-    fn code(&self) -> i32;
-    fn description(&self) -> &str;
-}
-
-impl GrpcError for add_message::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for edit_message_content::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for delete_message::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for toggle_message_reaction::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for get_messages::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for get_messages_by_ids::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for read_messages::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for unread::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for read_all::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for search_with_meta::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for workspace_open::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-fn ensure_error_ok<T: GrpcError>(error: Option<&T>, action: &str) -> Result<()> {
-    if let Some(error) = error
-        && error.code() != 0
-    {
-        return Err(AnytypeError::Other {
-            message: format!(
-                "{action} failed: {} (code {})",
-                error.description(),
-                error.code()
-            ),
-        });
-    }
-    Ok(())
 }

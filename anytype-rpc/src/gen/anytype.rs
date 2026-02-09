@@ -14952,6 +14952,74 @@ pub mod rpc {
                 }
             }
         }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct AutoDownloadSetLimit {}
+        /// Nested message and enum types in `AutoDownloadSetLimit`.
+        pub mod auto_download_set_limit {
+            #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                /// 0 = no limit, >0 = max file size in mebibytes
+                #[prost(int64, tag = "1")]
+                pub size_limit_mebibytes: i64,
+            }
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
     pub struct Navigation {}
@@ -32524,6 +32592,27 @@ pub mod client_commands_client {
             req.extensions_mut().insert(GrpcMethod::new(
                 "anytype.ClientCommands",
                 "FileCacheCancelDownload",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn file_auto_download_set_limit(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::file::auto_download_set_limit::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::file::auto_download_set_limit::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/FileAutoDownloadSetLimit",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "FileAutoDownloadSetLimit",
             ));
             self.inner.unary(req, path, codec).await
         }
