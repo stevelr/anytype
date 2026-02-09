@@ -166,6 +166,8 @@ pub mod error;
 #[cfg(feature = "grpc")]
 pub mod files;
 pub mod filters;
+#[cfg(feature = "grpc")]
+pub(crate) mod grpc_util;
 mod http_client;
 pub mod keystore;
 pub mod members;
@@ -174,6 +176,8 @@ pub mod members;
 pub mod mock;
 pub mod objects;
 pub mod paged;
+#[cfg(feature = "grpc")]
+pub mod process_watcher;
 pub mod properties;
 pub mod search;
 pub mod spaces;
@@ -240,6 +244,13 @@ pub mod prelude {
         },
         files::{FileObject, FileStyle, FileType, FilesClient},
         keystore::GrpcCredentials,
+        process_watcher::{
+            ProcessCompletionFallback, ProcessKind, ProcessWatchCancelToken, ProcessWatchProgress,
+            ProcessWatchRequest, ProcessWatcher, ProcessWatcherTimeouts,
+        },
+        spaces::{
+            BackupExportFormat, BackupSpaceRequest, DeleteAllArchivedResult, SpaceBackupResult,
+        },
     };
 }
 

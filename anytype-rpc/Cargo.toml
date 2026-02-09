@@ -5,7 +5,7 @@
 # 
 [package]
 name = "anytype-rpc"
-version = "0.3.0-beta.1"
+version = "0.3.0"
 edition = "2024"
 description = "Anytype gRPC client"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
@@ -23,13 +23,13 @@ prost-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-serde_yaml_ng = "=0.10.0"
+serde_yaml_ng = "0.10.0"
 tokio.workspace = true
 
 # grpc
 prost = "0.14.3"
-tonic = "0.14.2"
-tonic-prost = "0.14.2"
+tonic = "0.14.4"
+tonic-prost = "0.14.4"
 
 [[bin]]
 name = "anytype-rpc"

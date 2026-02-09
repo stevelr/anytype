@@ -25,13 +25,12 @@ grpc = ["dep:anytype-rpc", "dep:tonic", "dep:tonic-prost"]
 path = "src/lib.rs"
 
 [dependencies]
-anytype-rpc = { version = "0.3.0-beta.1", path = "../anytype-rpc", optional = true }
+anytype-rpc = { version = "0.3.0", path = "../anytype-rpc", optional = true }
 bytes.workspace = true
 chrono.workspace = true
-db-keystore = "0.3.1"
+db-keystore = "0.4.1"
 futures.workspace = true
-keyring = "4.0.0-rc.3"
-keyring-core = "0.7.2"
+keyring-core = { version = "0.7.2", features = ["sample"] }
 parking_lot.workspace = true
 prost-types.workspace = true
 reqwest.workspace = true
@@ -41,10 +40,21 @@ serde_path_to_error.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
-tonic = { version = "0.14.2", optional = true }
-tonic-prost = { version = "0.14.2", optional = true }
+tonic = { version = "0.14.4", optional = true }
+tonic-prost = { version = "0.14.4", optional = true }
 tracing.workspace = true
 zeroize.workspace = true
+
+# these only needed if we don't directly import keyring
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "0.2.2", features = ["keychain", "protected"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils-keyring-store = { version = "0.2.1" }
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+dbus-secret-service-keyring-store = { version = "0.3.3", features = ["crypto-rust", "vendored"] }
+zbus-secret-service-keyring-store = { version = "0.2.2", features = ["rt-async-io-crypto-rust"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "0.5.1"
 
 [dev-dependencies]
 clap.workspace = true
@@ -52,5 +62,8 @@ png = "0.18"
 serial_test = "3.3.1"
 test-log.workspace = true
 tiny-skia = "0.11"
-markdown2pdf = "0.2.1"
 anyhow.workspace = true
+
+# [patch.crates-io]
+# db-keystore = "0.4.1"
+# regex = "1.12.3"

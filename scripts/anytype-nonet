@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+ 
+# Run anytype cli in a network namespace that blocks outgoing connections,
+# and allows localhost and incoming connections.
+# 
+# The purpose of this is to spare Anytype's hosted network servers from being bombarded
+# with test-generated activity. If tests are good about cleaning up after themselves,
+# restarting a server outside the namespace should be a reasonably peaceful event.
+#
+# Requires: linux, anytype (headless cli server), runuser, ip2route, nftables, sudo
+ 
+set -eo pipefail
+
+# path to anytype executable
+ANYTYPE_CLI_BIN="${ANYTYPE_CLI_BIN:-anytype}"
+# user to run as
+user=$(whoami)
+# command to execute
+cmd=( "/home/steve/.local/bin/serve" )
+#cmd=( "$ANYTYPE_CLI_BIN" "serve" )
+# listen ports forwarded to localhost in the namespace
+PORTS_FORWARDED="31009,31010,31012"
+#RUNUSER_FLAGS=R{RUNUSER_FLAGS:=""}
+
+
+NS_NAME="anycli_block"
+VETH_HOST="veth_anycli"
+VETH_NS="veth_ns"
+NS_IP="10.222.0.2/24"
+HOST_IP="10.222.0.1/24"
+
+firewall_rules() {
+    rules=$(mktemp)
+    cat >"$rules" <<_NFT
+      add table inet filter
+      add chain inet filter output { type filter hook output priority 0 ; }
+
+      # allow outbound on localhost to localhost
+      add rule inet filter output oif "lo" accept
+      add rule inet filter output ip daddr 127.0.0.0/8 accept
+      # allow established,related (responses to incoming connections)
+      add rule inet filter output ct state established,related accept
+
+      # block NEW outbound connections
+      add rule inet filter output ct state new drop
+
+      # DNAT incoming traffic on ports to loopback
+      add table ip nat
+      add chain ip nat prerouting { type nat hook prerouting priority -100 ; }
+      add rule ip nat prerouting tcp dport { $PORTS_FORWARDED } dnat to 127.0.0.1
+_NFT
+    echo "$rules"
+}
+
+cleanup() {
+    echo "Removing namespace $NS_NAME. You may be prompted for a sudo password."
+    sudo ip netns del "$NS_NAME" 2>/dev/null || true
+    sudo ip link del "$VETH_HOST" 2>/dev/null || true
+}
+
+run_in_namespace() {
+
+    if ip netns list | grep -qE "^${NS_NAME}( |$)"; then
+        echo Namespace exists - process may be running.
+        exit 1
+    fi
+    
+    rules_file=$(firewall_rules)
+    
+    # Create the network namespace
+    sudo ip netns add "$NS_NAME"
+    trap cleanup EXIT
+    
+    # Create and link veth pair
+    sudo ip link add "$VETH_HOST" type veth peer name $VETH_NS
+    sudo ip link set $VETH_NS netns "$NS_NAME"
+    
+    # Configure Host-side interface
+    sudo ip addr add "$HOST_IP" dev "$VETH_HOST"
+    sudo ip link set "$VETH_HOST" up
+    
+    # Configure Namespace-side interface and Loopback
+    sudo ip netns exec "$NS_NAME" ip addr add "$NS_IP" dev "$VETH_NS"
+    sudo ip netns exec "$NS_NAME" ip link set "$VETH_NS" up
+    sudo ip netns exec "$NS_NAME" ip link set lo up
+    
+    # enable route_localnet
+    # otherwise, kernel drops packets to 127,0.0.1 that arrive on a non-loopback interface
+    sudo ip netns exec "$NS_NAME" sysctl -w net.ipv4.conf.$VETH_NS.route_localnet=1
+
+    # Apply Firewall Rules INSIDE the namespace
+    sudo ip netns exec "$NS_NAME" nft -f "$rules_file"
+    
+    # Start the server in the namespace
+    echo "Starting server in $NS_NAME. Connect on $NS_IP ports $PORTS_FORWARDED"
+    if [ "$user" = "root" ]; then
+        sudo ip netns exec "$NS_NAME" "${cmd[@]}"
+    else
+        sudo ip netns exec "$NS_NAME" runuser "$user" -c "${cmd[*]}"
+    fi
+}
+
+run_in_namespace "$@"
+

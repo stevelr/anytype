@@ -78,7 +78,6 @@ use serde_json::{Number, Value, json};
 use snafu::prelude::*;
 use tracing::error;
 
-use super::tags::CreateTagRequest;
 use crate::{
     Result,
     cache::AnytypeCache,
@@ -86,7 +85,7 @@ use crate::{
     filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
-    tags::ListTagsRequest,
+    tags::{CreateTagRequest, ListTagsRequest},
     validation::looks_like_object_id,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
 };
@@ -357,8 +356,8 @@ impl PropertyValue {
     pub fn as_date(&self) -> Option<DateTime<FixedOffset>> {
         match self {
             Self::Date { date } => match DateTime::parse_from_rfc3339(date) {
-                Err(e) => {
-                    error!(?e, "Date property has invalid format \"{date}\"");
+                Err(err) => {
+                    error!(?err, "Date property has invalid format \"{date}\"");
                     None
                 }
                 Ok(date) => Some(date),

@@ -24,6 +24,7 @@ use anytype_rpc::{
                 unsubscribe_from_message_previews,
             },
             object::search_with_meta,
+            process::{subscribe as process_subscribe, unsubscribe as process_unsubscribe},
             workspace::open as workspace_open,
         },
     },
@@ -73,13 +74,23 @@ impl MockChatServerHandle {
 
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(());
-        let _ = self.task.await;
+        let mut task = self.task;
+        if tokio::time::timeout(Duration::from_secs(1), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+        }
     }
 
     pub async fn disconnect_streams(&self) {
         let mut state = self.state.lock().await;
         state.disconnect_streams().await;
         drop(state);
+    }
+
+    pub async fn emit_event(&self, event: Event) {
+        broadcast_event(&self.state, event).await;
     }
 }
 
@@ -431,6 +442,22 @@ impl Service<http::Request<Body>> for ChatService {
                     let mut grpc = Grpc::new(ProstCodec::default());
                     let svc = ListenSessionEventsSvc { state };
                     Ok(grpc.server_streaming(svc, req).await)
+                };
+                Box::pin(fut)
+            }
+            "/anytype.ClientCommands/ProcessSubscribe" => {
+                let fut = async move {
+                    let mut grpc = Grpc::new(ProstCodec::default());
+                    let svc = ProcessSubscribeSvc { state };
+                    Ok(grpc.unary(svc, req).await)
+                };
+                Box::pin(fut)
+            }
+            "/anytype.ClientCommands/ProcessUnsubscribe" => {
+                let fut = async move {
+                    let mut grpc = Grpc::new(ProstCodec::default());
+                    let svc = ProcessUnsubscribeSvc { state };
+                    Ok(grpc.unary(svc, req).await)
                 };
                 Box::pin(fut)
             }
@@ -1071,6 +1098,42 @@ impl tonic::server::ServerStreamingService<StreamRequest> for ListenSessionEvent
 #[derive(Clone)]
 struct ChatReadMessagesSvc {
     state: Arc<Mutex<MockState>>,
+}
+
+#[derive(Clone)]
+struct ProcessSubscribeSvc {
+    state: Arc<Mutex<MockState>>,
+}
+
+impl tonic::server::UnaryService<process_subscribe::Request> for ProcessSubscribeSvc {
+    type Response = process_subscribe::Response;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
+
+    fn call(&mut self, request: Request<process_subscribe::Request>) -> Self::Future {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let _user = authenticate(request.metadata(), &state).await?;
+            Ok(Response::new(process_subscribe::Response { error: None }))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ProcessUnsubscribeSvc {
+    state: Arc<Mutex<MockState>>,
+}
+
+impl tonic::server::UnaryService<process_unsubscribe::Request> for ProcessUnsubscribeSvc {
+    type Response = process_unsubscribe::Response;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
+
+    fn call(&mut self, request: Request<process_unsubscribe::Request>) -> Self::Future {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let _user = authenticate(request.metadata(), &state).await?;
+            Ok(Response::new(process_unsubscribe::Response { error: None }))
+        })
+    }
 }
 
 impl tonic::server::UnaryService<read_messages::Request> for ChatReadMessagesSvc {

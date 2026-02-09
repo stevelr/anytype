@@ -12,6 +12,7 @@
 		"anyr",
 		"anytype",
 		"ANYTYPECLIENT",
+		"backlinks",
 		"chrono",
 		"codegen",
 		"creds",
@@ -20,6 +21,7 @@
 		"didip",
 		"etest",
 		"from_xywh",
+		"fval",
 		"hashtable",
 		"hexkey",
 		"imageops",
@@ -41,6 +43,8 @@
 		"stevelr",
 		"subsec",
 		"turso",
-		"zeroize"
+		"uninlined",
+		"zeroize",
+		"zbus"
 	]
 }

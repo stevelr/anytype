@@ -43,6 +43,9 @@
               protobuf
               rustc
               cargo
+              chafa
+              # build static library that anyback can link
+              pkgsStatic.chafa
             ];
             PROTOC = "${pkgs.protobuf}/bin/protoc";
             PROTOC_INCLUDE = "${pkgs.protobuf}/include";

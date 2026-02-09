@@ -13,31 +13,33 @@ use crate::{
     prelude::*,
 };
 
-fn is_cid_chars(s: &str) -> bool {
+fn is_cid_chars(str: &str) -> bool {
     // base32 lower-case alphabet used by CIDv1 (no padding)
-    s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+    str.bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'2'..=b'7'))
 }
-fn is_base36_chars(s: &str) -> bool {
-    s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9'))
+fn is_base36_chars(str: &str) -> bool {
+    str.bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9'))
 }
 
 /// Determine if a string is (probably) an object id or space id,
 /// using syntactic checks.
 /// Does not check whether the apparent-id represents an actual object.
-pub fn looks_like_object_id(s: &str) -> bool {
+pub fn looks_like_object_id(str: &str) -> bool {
     const PREFIX: &str = "bafyrei";
     const LEN: usize = 59;
 
-    if s.len() < LEN || !s.starts_with(PREFIX) {
+    if str.len() < LEN || !str.starts_with(PREFIX) {
         return false;
     }
-    if s.len() == LEN && is_cid_chars(s) {
+    if str.len() == LEN && is_cid_chars(str) {
         return true;
     }
 
     // space id is in the form CID.HASH, where CID is the 59-char base32 id,
     // and HASH is FNV‑1 64‑bit hash of the account public key bytes, formatted with base36
-    if let Some((p1, p2)) = s.split_once('.')
+    if let Some((p1, p2)) = str.split_once('.')
         && p1.len() == LEN
         && is_cid_chars(p1)
         && matches!(p2.len(), 1..=13)

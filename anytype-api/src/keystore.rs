@@ -293,25 +293,43 @@ fn store_from_env(service: &str) -> std::result::Result<Arc<CredentialStore>, Ke
 }
 
 fn init_keystore(input: &str, service: &str) -> Result<Arc<CredentialStore>, KeyStoreError> {
-    let (mut keystore_name, modifiers) =
+    let (keystore_name, modifiers) =
         parse_keystore(input).map_err(|message| KeyStoreError::Config { message })?;
-
-    if keystore_name == "file" {
-        keystore_name = "sqlite"
-    };
 
     match keystore_name {
         "env" => {
             let env_store = store_from_env(service)?;
-            keyring_core::set_default_store(env_store);
+            Ok(env_store)
         }
-        _ => {
-            keyring::use_named_store_with_modifiers(keystore_name, &modifiers)?;
+        "file" | "sqlite" => {
+            let store: Arc<db_keystore::DbKeyStore> =
+                db_keystore::DbKeyStore::new_with_modifiers(&modifiers)?;
+            Ok(store)
         }
+        #[cfg(target_os = "macos")]
+        "keychain" => {
+            use apple_native_keyring_store::keychain::Store;
+            Ok(Store::new_with_configuration(&modifiers)?)
+        }
+        #[cfg(target_os = "linux")]
+        "keyutils" => {
+            use linux_keyutils_keyring_store::Store;
+            Ok(Store::new_with_configuration(&modifiers)?)
+        }
+        #[cfg(target_os = "linux")]
+        "secret-service" | "secret-service-sync" => {
+            use dbus_secret_service_keyring_store::Store;
+            Ok(Store::new_with_configuration(&modifiers)?)
+        }
+        #[cfg(target_os = "windows")]
+        "windows" => {
+            use windows_native_keyring_store::Store;
+            Ok(Store::new_with_configuration(&modifiers)?)
+        }
+        _ => Err(KeyStoreError::Config {
+            message: format!("Unsupported keystore {keystore_name} for this platform"),
+        }),
     }
-    // unwrap ok because every code path above sets default store
-    let store = keyring_core::get_default_store().unwrap();
-    Ok(store)
 }
 
 #[derive(Clone)]
@@ -423,8 +441,10 @@ impl KeyStore {
     fn remove_key(&self, name: impl AsRef<str>) -> Result<(), KeyStoreError> {
         debug!(service = &self.service, user = name.as_ref(), "remove_key");
         let entry = self.store.build(&self.service, name.as_ref(), None)?;
-        entry.delete_credential()?;
-        Ok(())
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+            Err(err) => Err(KeyStoreError::Keyring { source: err }),
+        }
     }
 
     /// Looks up http auth token.
@@ -583,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    //#[ignore] // Run with: cargo test -- --ignored
+    #[ignore] // Run with: cargo test -- --ignored
     fn test_keyring_storage_end_to_end() -> Result<(), KeyStoreError> {
         // This test uses the actual OS keyring and may prompt for authentication
         // Run explicitly with: cargo test -- --ignored test_keyring_storage_end_to_end
