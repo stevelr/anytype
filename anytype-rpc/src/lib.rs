@@ -46,6 +46,8 @@ pub mod anytype {
 
 /// Authentication helpers for creating sessions and attaching tokens.
 pub mod auth;
+/// Space backup helpers using ObjectListExport gRPC.
+pub mod backup;
 /// gRPC client configuration and helpers.
 pub mod client;
 /// Helpers for headless config-based auth.

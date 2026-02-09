@@ -18,6 +18,10 @@ pub enum AnytypeGrpcError {
     #[snafu(display("View error: {source}"))]
     View { source: ViewError },
 
+    /// Space backup operation error.
+    #[snafu(display("Backup error: {source}"))]
+    Backup { source: BackupError },
+
     /// gRPC transport connection error.
     #[snafu(display("Transport error: {source}"))]
     Transport { source: tonic::transport::Error },
@@ -92,6 +96,50 @@ pub enum ViewError {
     NotSupportedView { view_id: String, actual: i32 },
 }
 
+/// Errors from space backup operations.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum BackupError {
+    /// gRPC status error from a request.
+    #[snafu(display("Transport error: {source}"))]
+    BackupRpc { source: tonic::Status },
+
+    /// Anytype API returned an error response.
+    #[snafu(display("API error ({code}): {description}"))]
+    BackupApiResponse { code: i32, description: String },
+
+    /// Authentication token metadata was invalid.
+    #[snafu(display("Auth error: {source}"))]
+    BackupAuth { source: AuthError },
+
+    /// Backup options were invalid.
+    #[snafu(display("Invalid backup options: {message}"))]
+    InvalidOptions { message: String },
+
+    /// Failed to resolve the friendly name for a space.
+    #[snafu(display("Failed to resolve space name for {space_id}: {message}"))]
+    SpaceNameLookup { space_id: String, message: String },
+
+    /// Server response did not include an export path.
+    #[snafu(display("Backup response missing export path"))]
+    MissingExportPath,
+
+    /// Failed to create or access a local path.
+    #[snafu(display("I/O error for {path:?}: {source}"))]
+    BackupIo {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    /// Failed to move generated backup to its final target path.
+    #[snafu(display("Failed to move backup from {from:?} to {to:?}: {source}"))]
+    BackupMove {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+        source: std::io::Error,
+    },
+}
+
 // From impls for AuthError
 impl From<tonic::Status> for AuthError {
     fn from(source: tonic::Status) -> Self {
@@ -125,6 +173,19 @@ impl From<tonic::Status> for ViewError {
     }
 }
 
+// From impls for BackupError
+impl From<tonic::Status> for BackupError {
+    fn from(source: tonic::Status) -> Self {
+        BackupError::BackupRpc { source }
+    }
+}
+
+impl From<AuthError> for BackupError {
+    fn from(source: AuthError) -> Self {
+        BackupError::BackupAuth { source }
+    }
+}
+
 // From impls for AnytypeGrpcError
 impl From<AuthError> for AnytypeGrpcError {
     fn from(source: AuthError) -> Self {
@@ -141,6 +202,12 @@ impl From<ConfigError> for AnytypeGrpcError {
 impl From<ViewError> for AnytypeGrpcError {
     fn from(source: ViewError) -> Self {
         AnytypeGrpcError::View { source }
+    }
+}
+
+impl From<BackupError> for AnytypeGrpcError {
+    fn from(source: BackupError) -> Self {
+        AnytypeGrpcError::Backup { source }
     }
 }
 
