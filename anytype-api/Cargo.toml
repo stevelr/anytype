@@ -28,7 +28,7 @@ path = "src/lib.rs"
 anytype-rpc = { version = "0.3.0-beta.1", path = "../anytype-rpc", optional = true }
 bytes.workspace = true
 chrono.workspace = true
-db-keystore = "0.3.1"
+db-keystore = "0.4.0"
 futures.workspace = true
 keyring = "4.0.0-beta.3"
 keyring-core = "0.7.2"
