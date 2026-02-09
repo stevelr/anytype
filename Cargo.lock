@@ -2091,14 +2091,15 @@ dependencies = [
 
 [[package]]
 name = "keyring"
-version = "4.0.0-beta.3"
+version = "4.0.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff43661927877c1f403bf6d6e85aa384c2f435cd96e68bcb2bfa8bb70f8ca270"
+checksum = "39bbe20062ef0c05c6c0f215d3a84eb1288fea17c2c4fa3a10e9e8ec9ff741f0"
 dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
  "base64",
  "clap",
+ "db-keystore",
  "dbus-secret-service-keyring-store",
  "fastrand",
  "keyring-core",
