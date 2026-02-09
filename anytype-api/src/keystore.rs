@@ -221,7 +221,7 @@ fn parse_keystore(input: &str) -> Result<(&str, HashMap<&str, &str>), String> {
 
     // Split at the first colon to separate the keystore from key=value pairs
     let (keystore, remainder) = match input.split_once(':') {
-        Some((ks, r)) => (ks, Some(r)),
+        Some((ks, remainder)) => (ks, Some(remainder)),
         None => (input, None),
     };
 
@@ -390,9 +390,9 @@ impl KeyStore {
                             debug!("get_key got entry with NoEntry !?!?");
                             Ok(None)
                         }
-                        Err(e) => {
-                            error!("get_key: {e}");
-                            Err(e.into())
+                        Err(err) => {
+                            error!("get_key: {err}");
+                            Err(err.into())
                         }
                     },
                 )
@@ -401,9 +401,9 @@ impl KeyStore {
                 debug!(service = &self.service, user = name, "key lookup: no entry");
                 Ok(None)
             }
-            Err(e) => {
-                error!(service = &self.service, user = name, "key lookup: {e}");
-                Err(e.into())
+            Err(err) => {
+                error!(service = &self.service, user = name, "key lookup: {err}");
+                Err(err.into())
             }
         }
     }
