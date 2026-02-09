@@ -8,7 +8,7 @@ members = ["anytype-api", "anyr", "anytype-rpc", "any-edit"]
 resolver = "3"
 
 [workspace.dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.101"
 bytes = "1.11.0"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.54", features = ["derive", "env"] }
