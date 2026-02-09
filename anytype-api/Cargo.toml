@@ -51,6 +51,6 @@ clap.workspace = true
 png = "0.18"
 serial_test = "3.3.1"
 test-log.workspace = true
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 markdown2pdf = "0.2.1"
 anyhow.workspace = true
