@@ -8,7 +8,6 @@
 use std::path::Path;
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use db_keystore::DbKeyStore;
 use keyring_core::CredentialStore;
 use tracing::{debug, error};
 use zeroize::Zeroize;
@@ -222,7 +221,7 @@ fn parse_keystore(input: &str) -> Result<(&str, HashMap<&str, &str>), String> {
 
     // Split at the first colon to separate the keystore from key=value pairs
     let (keystore, remainder) = match input.split_once(':') {
-        Some((ks, r)) => (ks, Some(r)),
+        Some((ks, remainder)) => (ks, Some(remainder)),
         None => (input, None),
     };
 
@@ -293,48 +292,26 @@ fn store_from_env(service: &str) -> std::result::Result<Arc<CredentialStore>, Ke
     Ok(sample)
 }
 
-fn init_keystore<'a>(
-    input: &'a str,
-    service: &str,
-) -> Result<(&'a str, Arc<CredentialStore>), KeyStoreError> {
-    let (keystore, modifiers) =
+fn init_keystore(input: &str, service: &str) -> Result<Arc<CredentialStore>, KeyStoreError> {
+    let (mut keystore_name, modifiers) =
         parse_keystore(input).map_err(|message| KeyStoreError::Config { message })?;
 
-    match keystore {
-        "file" | "sqlite" => {
-            let file_store = DbKeyStore::new_with_modifiers(&modifiers)?;
-            keyring_core::set_default_store(file_store);
-        }
+    if keystore_name == "file" {
+        keystore_name = "sqlite"
+    };
+
+    match keystore_name {
         "env" => {
             let env_store = store_from_env(service)?;
             keyring_core::set_default_store(env_store);
         }
-        #[cfg(target_os = "macos")]
-        "keychain" => {
-            keyring::use_apple_keychain_store(&modifiers)?;
-        }
-        #[cfg(target_os = "linux")]
-        "keyutils" => {
-            keyring::use_linux_keyutils_store(&modifiers)?;
-        }
-        #[cfg(target_os = "linux")]
-        "secret-service" => {
-            keyring::use_dbus_secret_service_store(&modifiers)?;
-        }
-        #[cfg(target_os = "windows")]
-        "windows" => {
-            keyring::use_windows_native_store(&modifiers)?;
-        }
         _ => {
-            return Err(keyring_core::Error::NotSupportedByStore(format!(
-                "keystore type {keystore} is not supported on this platform"
-            ))
-            .into());
+            keyring::use_named_store_with_modifiers(keystore_name, &modifiers)?;
         }
     }
     // unwrap ok because every code path above sets default store
     let store = keyring_core::get_default_store().unwrap();
-    Ok((keystore, store))
+    Ok(store)
 }
 
 #[derive(Clone)]
@@ -372,7 +349,7 @@ impl KeyStore {
         } else {
             keystore_spec.to_string()
         };
-        let (_name, store) = init_keystore(&spec, &service)?;
+        let store = init_keystore(&spec, &service)?;
         Ok(Self {
             service,
             store,
@@ -413,9 +390,9 @@ impl KeyStore {
                             debug!("get_key got entry with NoEntry !?!?");
                             Ok(None)
                         }
-                        Err(e) => {
-                            error!("get_key: {e}");
-                            Err(e.into())
+                        Err(err) => {
+                            error!("get_key: {err}");
+                            Err(err.into())
                         }
                     },
                 )
@@ -424,9 +401,9 @@ impl KeyStore {
                 debug!(service = &self.service, user = name, "key lookup: no entry");
                 Ok(None)
             }
-            Err(e) => {
-                error!(service = &self.service, user = name, "key lookup: {e}");
-                Err(e.into())
+            Err(err) => {
+                error!(service = &self.service, user = name, "key lookup: {err}");
+                Err(err.into())
             }
         }
     }
