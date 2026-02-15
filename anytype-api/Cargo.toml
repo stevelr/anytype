@@ -41,7 +41,7 @@ serde_path_to_error.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
-tonic = { version = "0.14.2", optional = true }
+tonic = { version = "0.14.4", optional = true }
 tonic-prost = { version = "0.14.2", optional = true }
 tracing.workspace = true
 zeroize.workspace = true
