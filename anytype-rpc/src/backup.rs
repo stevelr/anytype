@@ -14,7 +14,7 @@ use crate::anytype::rpc::object::show::Request as ObjectShowRequest;
 use crate::auth::with_token;
 use crate::client::AnytypeGrpcClient;
 pub use crate::error::BackupError;
-use crate::model::export::Format as ExportFormat;
+pub use crate::model::export::Format as ExportFormat;
 
 /// Options for a space backup request.
 #[derive(Debug, Clone)]
@@ -102,7 +102,12 @@ impl AnytypeGrpcClient {
             source,
         })?;
 
-        let space_name = self.lookup_space_name(&options.space_id).await?;
+        // Space-name lookup is for output naming only. Export should still succeed
+        // if name lookup fails for an otherwise valid space id.
+        let space_name = self
+            .lookup_space_name(&options.space_id)
+            .await
+            .unwrap_or_else(|_| options.space_id.clone());
 
         let mut commands = self.client_commands();
         let request = ObjectListExportRequest {
@@ -258,7 +263,7 @@ mod tests {
 
     #[test]
     fn sanitize_component() {
-        assert_eq!(sanitize_path_component("My Space"), "My_Space");
+        assert_eq!(sanitize_path_component("My Space"), "my_space");
         assert_eq!(sanitize_path_component("  $$$ "), "space");
         assert_eq!(sanitize_path_component("a/b\\c"), "a_b_c");
     }
@@ -266,7 +271,7 @@ mod tests {
     #[test]
     fn target_name_has_zip_when_requested() {
         let name = generated_target_name("backup", "My Space", true);
-        assert!(name.starts_with("backup_My_Space_"));
+        assert!(name.starts_with("backup_my_space_"));
         assert!(name.ends_with(".zip"));
     }
 }

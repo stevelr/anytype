@@ -8,6 +8,7 @@
 //! - [`space`](AnytypeClient::space) - get space
 //! - [`new_space`](AnytypeClient::new_space) - create a new space
 //! - [`update_space`](AnytypeClient::space) - update space properties
+//! - [`backup_space`](AnytypeClient::backup_space) - back up a space (requires `grpc` feature)
 //!
 //! ## Quick Start
 //!
@@ -42,13 +43,39 @@
 //! - [`NewSpaceRequest`] - Builder for creating a space
 //! - [`UpdateSpaceRequest`] - Builder for updating a space
 //! - [`ListSpacesRequest`] - Builder for listing spaces
+//! - [`BackupSpaceRequest`] - Builder for backing up a space (requires `grpc` feature)
+//! - [`BackupExportFormat`] - Export format for backups (requires `grpc` feature)
 
+#[cfg(feature = "grpc")]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
+#[cfg(feature = "grpc")]
+use tracing::debug;
 
+#[cfg(feature = "grpc")]
+use std::path::{Path, PathBuf};
+#[cfg(feature = "grpc")]
+use std::time::Duration;
+
+#[cfg(feature = "grpc")]
+use anytype_rpc::anytype::rpc::object::list_delete;
+#[cfg(feature = "grpc")]
+pub use anytype_rpc::backup::SpaceBackupResult;
+#[cfg(feature = "grpc")]
+use anytype_rpc::backup::{ExportFormat, SpaceBackupOptions};
+#[cfg(feature = "grpc")]
+use anytype_rpc::{anytype::rpc::object::search_with_meta, model};
+#[cfg(feature = "grpc")]
+use prost_types::{ListValue, Value};
+#[cfg(feature = "grpc")]
+use tonic::Request;
+
+#[cfg(feature = "grpc")]
+use crate::grpc_util::{ensure_error_ok, grpc_status, with_token_request};
 use crate::{
     Result,
     cache::AnytypeCache,
@@ -583,6 +610,322 @@ impl ListSpacesRequest {
     }
 }
 
+/// Result of [`AnytypeClient::delete_all_archived`].
+#[cfg(feature = "grpc")]
+#[derive(Debug, Clone)]
+pub struct DeleteAllArchivedResult {
+    /// Number of objects successfully deleted.
+    pub deleted: u64,
+    /// Object IDs that could not be deleted (backend errors).
+    pub failed_ids: Vec<String>,
+}
+
+/// Request builder for listing archived objects in a space.
+///
+/// Obtained via [`AnytypeClient::list_archived`].
+#[derive(Debug)]
+pub struct ListArchivedRequest<'a> {
+    client: &'a AnytypeClient,
+    limits: ValidationLimits,
+    space_id: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    type_ids: Vec<String>,
+}
+
+impl<'a> ListArchivedRequest<'a> {
+    pub(crate) fn new(
+        client: &'a AnytypeClient,
+        limits: ValidationLimits,
+        space_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            limits,
+            space_id: space_id.into(),
+            limit: None,
+            offset: None,
+            type_ids: Vec::new(),
+        }
+    }
+
+    /// Sets the pagination limit (max items per page).
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Sets the pagination offset (starting position).
+    #[must_use]
+    pub fn offset(mut self, offset: u32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Filters archived objects by type ids.
+    #[must_use]
+    pub fn types(mut self, type_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.type_ids = type_ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Executes the archived-list request.
+    pub async fn list(self) -> Result<PagedResult<Object>> {
+        self.limits.validate_id(&self.space_id, "space_id")?;
+        #[cfg(feature = "grpc")]
+        {
+            return search_archived_objects(
+                self.client,
+                &self.space_id,
+                self.limit,
+                self.offset,
+                &self.type_ids,
+            )
+            .await;
+        }
+
+        #[cfg(not(feature = "grpc"))]
+        {
+            return GrpcUnavailableSnafu {
+                message: "list_archived requires grpc feature".to_string(),
+            }
+            .fail();
+        }
+    }
+}
+
+/// Export format for space backups.
+///
+// This exposes a subset of the internal export formats that are suitable for backups.
+#[cfg(feature = "grpc")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::EnumString)]
+pub enum BackupExportFormat {
+    /// Markdown format
+    #[strum(ascii_case_insensitive)]
+    Markdown,
+
+    /// Protobuf binary format
+    #[strum(ascii_case_insensitive, serialize = "proto")]
+    Protobuf,
+
+    /// JSON format
+    #[strum(ascii_case_insensitive)]
+    #[default]
+    Json,
+}
+
+#[cfg(feature = "grpc")]
+impl BackupExportFormat {
+    /// Converts to the internal gRPC export format.
+    fn to_export_format(self) -> ExportFormat {
+        match self {
+            Self::Markdown => ExportFormat::Markdown,
+            Self::Protobuf => ExportFormat::Protobuf,
+            Self::Json => ExportFormat::Json,
+        }
+    }
+}
+
+/// Request builder for backing up a space.
+///
+/// Obtained via [`AnytypeClient::backup_space`].
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use anytype::prelude::*;
+/// # async fn example(client: &AnytypeClient) -> Result<(), AnytypeError> {
+/// let result = client.backup_space("space_id")
+///     .format(BackupExportFormat::Json)
+///     .backup_dir("/tmp/backups")
+///     .include_files(true)
+///     .backup().await?;
+/// println!("Backup saved to: {}", result.output_path.display());
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "grpc")]
+#[derive(Debug)]
+pub struct BackupSpaceRequest<'a> {
+    client: &'a AnytypeClient,
+    space_id: String,
+    backup_dir: Option<PathBuf>,
+    filename_prefix: Option<String>,
+    object_ids: Vec<String>,
+    format: BackupExportFormat,
+    zip: Option<bool>,
+    include_nested: Option<bool>,
+    include_files: Option<bool>,
+    is_json: Option<bool>,
+    include_archived: Option<bool>,
+    include_backlinks: Option<bool>,
+    include_space: Option<bool>,
+    md_include_properties_and_schema: Option<bool>,
+}
+
+#[cfg(feature = "grpc")]
+impl BackupSpaceRequest<'_> {
+    /// Sets the backup output directory.
+    ///
+    /// Defaults to the current working directory.
+    #[must_use]
+    pub fn backup_dir(mut self, path: impl AsRef<Path>) -> Self {
+        self.backup_dir = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Sets the filename prefix for the backup file.
+    ///
+    /// Defaults to `"backup"`.
+    #[must_use]
+    pub fn filename_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.filename_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Sets specific object IDs to export.
+    ///
+    /// If empty (the default), exports the full space.
+    #[must_use]
+    pub fn object_ids(mut self, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.object_ids = ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the export format.
+    ///
+    /// Defaults to [`BackupExportFormat::Json`].
+    #[must_use]
+    pub fn format(mut self, format: BackupExportFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Whether to produce a zip archive.
+    ///
+    /// Defaults to `true`.
+    #[must_use]
+    pub fn zip(mut self, zip: bool) -> Self {
+        self.zip = Some(zip);
+        self
+    }
+
+    /// Whether to include linked (nested) objects.
+    ///
+    /// Defaults to `true`.
+    #[must_use]
+    pub fn include_nested(mut self, include: bool) -> Self {
+        self.include_nested = Some(include);
+        self
+    }
+
+    /// Whether to include attached files.
+    ///
+    /// Defaults to `true`.
+    #[must_use]
+    pub fn include_files(mut self, include: bool) -> Self {
+        self.include_files = Some(include);
+        self
+    }
+
+    /// For protobuf export, whether to use JSON payload format.
+    ///
+    /// Defaults to `false`.
+    #[must_use]
+    pub fn is_json(mut self, is_json: bool) -> Self {
+        self.is_json = Some(is_json);
+        self
+    }
+
+    /// Whether to include archived objects.
+    ///
+    /// Defaults to `false`.
+    #[must_use]
+    pub fn include_archived(mut self, include: bool) -> Self {
+        self.include_archived = Some(include);
+        self
+    }
+
+    /// Whether to include backlinks.
+    ///
+    /// Defaults to `false`.
+    #[must_use]
+    pub fn include_backlinks(mut self, include: bool) -> Self {
+        self.include_backlinks = Some(include);
+        self
+    }
+
+    /// Whether to include space metadata.
+    ///
+    /// Defaults to `false`.
+    #[must_use]
+    pub fn include_space(mut self, include: bool) -> Self {
+        self.include_space = Some(include);
+        self
+    }
+
+    /// Whether to include properties frontmatter and schema for markdown export.
+    ///
+    /// Defaults to `true`.
+    #[must_use]
+    pub fn md_include_properties_and_schema(mut self, include: bool) -> Self {
+        self.md_include_properties_and_schema = Some(include);
+        self
+    }
+
+    /// Executes the backup.
+    ///
+    /// # Returns
+    /// The backup result including the output path and number of exported objects.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::Other`] if the backup fails
+    pub async fn backup(self) -> Result<SpaceBackupResult> {
+        let mut options = SpaceBackupOptions::new(&self.space_id);
+        if let Some(dir) = self.backup_dir {
+            options.backup_dir = dir;
+        }
+        if let Some(prefix) = self.filename_prefix {
+            options.filename_prefix = prefix;
+        }
+        if !self.object_ids.is_empty() {
+            options.object_ids = self.object_ids;
+        }
+        options.format = self.format.to_export_format();
+        if let Some(zip) = self.zip {
+            options.zip = zip;
+        }
+        if let Some(include_nested) = self.include_nested {
+            options.include_nested = include_nested;
+        }
+        if let Some(include_files) = self.include_files {
+            options.include_files = include_files;
+        }
+        if let Some(is_json) = self.is_json {
+            options.is_json = is_json;
+        }
+        if let Some(include_archived) = self.include_archived {
+            options.include_archived = include_archived;
+        }
+        options.no_progress = true;
+        if let Some(include_backlinks) = self.include_backlinks {
+            options.include_backlinks = include_backlinks;
+        }
+        if let Some(include_space) = self.include_space {
+            options.include_space = include_space;
+        }
+        if let Some(md) = self.md_include_properties_and_schema {
+            options.md_include_properties_and_schema = md;
+        }
+
+        let grpc = self.client.grpc_client().await?;
+        grpc.backup_space(options)
+            .await
+            .map_err(|err| AnytypeError::Grpc { source: err.into() })
+    }
+}
+
 /// Load all spaces into cache.
 async fn prime_cache_spaces(client: &Arc<HttpClient>, cache: &Arc<AnytypeCache>) -> Result<()> {
     let query = Query::default().add_filters(&[]);
@@ -711,6 +1054,469 @@ impl AnytypeClient {
     pub fn spaces(&self) -> ListSpacesRequest {
         ListSpacesRequest::new(self.client.clone(), self.cache.clone())
     }
+
+    /// Creates a request builder for listing archived objects in a space.
+    pub fn list_archived(&self, space_id: impl Into<String>) -> ListArchivedRequest<'_> {
+        ListArchivedRequest::new(self, self.config.limits.clone(), space_id)
+    }
+
+    /// Counts archived objects in a space.
+    pub async fn count_archived(&self, space_id: impl AsRef<str>) -> Result<u64> {
+        let space_id = space_id.as_ref();
+        let mut offset = 0_u32;
+        let mut count = 0_u64;
+        const BATCH: u32 = 500;
+
+        loop {
+            let page = self
+                .list_archived(space_id)
+                .limit(BATCH)
+                .offset(offset)
+                .list()
+                .await?;
+
+            count = count.saturating_add(page.items.len() as u64);
+            if !page.pagination.has_more || page.items.is_empty() {
+                break;
+            }
+            offset = offset.saturating_add(BATCH);
+        }
+
+        Ok(count)
+    }
+
+    /// Permanently deletes archived objects by object id in batches of 200.
+    #[cfg(feature = "grpc")]
+    pub async fn delete_archived(
+        &self,
+        space_id: impl AsRef<str>,
+        object_ids: &[String],
+    ) -> Result<u64> {
+        const BATCH: usize = 200;
+        self.config
+            .limits
+            .validate_id(space_id.as_ref(), "space_id")?;
+
+        if object_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let grpc = self.grpc_client().await?;
+        let mut commands = grpc.client_commands();
+        let mut total_deleted = 0_u64;
+
+        for chunk in object_ids.chunks(BATCH) {
+            let request = list_delete::Request {
+                object_ids: chunk.to_vec(),
+            };
+            let request = with_token_request(Request::new(request), grpc.token())?;
+            let response = commands
+                .object_list_delete(request)
+                .await
+                .map_err(grpc_status)?
+                .into_inner();
+
+            ensure_error_ok(response.error.as_ref(), "grpc object_list_delete")?;
+
+            total_deleted = total_deleted.saturating_add(chunk.len() as u64);
+        }
+
+        Ok(total_deleted)
+    }
+
+    /// Deletes all archived objects in a space.
+    ///
+    /// Fetches up to 500 archived object IDs per round and deletes them in
+    /// sub-batches of 200 via [`Self::delete_archived`].
+    ///
+    /// Between batches, waits 2 seconds to allow server-side state to settle.
+    #[cfg(feature = "grpc")]
+    pub async fn delete_all_archived(
+        &self,
+        space_id: impl AsRef<str>,
+    ) -> Result<DeleteAllArchivedResult> {
+        let space_id = space_id.as_ref();
+        const BATCH: usize = 500;
+
+        let mut total_deleted = 0_u64;
+        let mut known_failed_ids: HashSet<String> = HashSet::new();
+        loop {
+            let page = self
+                .list_archived(space_id)
+                .limit(BATCH as u32)
+                .offset(0)
+                .list()
+                .await?;
+
+            if page.items.is_empty() {
+                debug!(
+                    space_id,
+                    total_deleted, "delete_all_archived complete: no archived objects remain"
+                );
+                break;
+            }
+
+            let mut seen = HashSet::with_capacity(page.items.len());
+            let mut ids: Vec<String> = Vec::with_capacity(page.items.len());
+            for id in page.items.iter().map(|obj| obj.id.clone()) {
+                if id.is_empty() {
+                    continue;
+                }
+                if known_failed_ids.contains(&id) {
+                    continue;
+                }
+                if seen.insert(id.clone()) {
+                    ids.push(id);
+                }
+            }
+
+            if ids.is_empty() {
+                debug!(
+                    space_id,
+                    failed = known_failed_ids.len(),
+                    "delete_all_archived: page contains only known failing ids; stopping"
+                );
+                break;
+            }
+
+            let result = delete_archived_best_effort(self, space_id, &ids).await?;
+            total_deleted = total_deleted.saturating_add(result.deleted);
+            for id in result.failed_ids {
+                known_failed_ids.insert(id);
+            }
+
+            if result.deleted == 0 {
+                debug!(
+                    space_id,
+                    failed = known_failed_ids.len(),
+                    "delete_all_archived: no progress in this round; stopping"
+                );
+                break;
+            }
+
+            if total_deleted.is_multiple_of(500) {
+                debug!(
+                    space_id,
+                    total_deleted, "delete_all_archived progress: deleted archived objects"
+                );
+            }
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        if !known_failed_ids.is_empty() {
+            debug!(
+                space_id,
+                total_deleted,
+                failed = known_failed_ids.len(),
+                "delete_all_archived: some objects could not be deleted"
+            );
+        }
+
+        Ok(DeleteAllArchivedResult {
+            deleted: total_deleted,
+            failed_ids: known_failed_ids.into_iter().collect(),
+        })
+    }
+
+    /// Creates a request builder for backing up a space.
+    ///
+    /// Requires the `grpc` feature.
+    ///
+    /// # Arguments
+    /// * `space_id` - ID of the space to back up
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use anytype::prelude::*;
+    /// # async fn example(client: &AnytypeClient) -> Result<(), AnytypeError> {
+    /// let result = client.backup_space("space_id")
+    ///     .format(BackupExportFormat::Json)
+    ///     .backup_dir("/tmp/backups")
+    ///     .backup().await?;
+    /// println!("Backup: {}", result.output_path.display());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "grpc")]
+    pub fn backup_space(&self, space_id: impl Into<String>) -> BackupSpaceRequest<'_> {
+        BackupSpaceRequest {
+            client: self,
+            space_id: space_id.into(),
+            backup_dir: None,
+            filename_prefix: None,
+            object_ids: Vec::new(),
+            format: BackupExportFormat::default(),
+            zip: None,
+            include_nested: None,
+            include_files: None,
+            is_json: None,
+            include_archived: None,
+            include_backlinks: None,
+            include_space: None,
+            md_include_properties_and_schema: None,
+        }
+    }
+}
+
+#[cfg(feature = "grpc")]
+async fn search_archived_objects(
+    client: &AnytypeClient,
+    space_id: &str,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    type_ids: &[String],
+) -> Result<PagedResult<Object>> {
+    let limit = limit.unwrap_or(100);
+    let offset = offset.unwrap_or(0);
+
+    // Some anytype-heart builds use "isArchived", others may expose "archived".
+    // Try the preferred key first, then fallback.
+    let preferred = archived_search_request(space_id, "isArchived", limit, offset, type_ids);
+    let response = match run_archived_search(client, preferred).await {
+        Ok(response) => response,
+        Err(err) if archived_relation_not_found(&err, "isArchived") => {
+            let fallback = archived_search_request(space_id, "archived", limit, offset, type_ids);
+            run_archived_search(client, fallback).await?
+        }
+        Err(err) => return Err(err),
+    };
+
+    let result_count = response.results.len();
+    let items: Vec<Object> = response
+        .results
+        .into_iter()
+        .filter_map(|result| archived_object_from_search_result(space_id, result))
+        .collect();
+
+    let has_more = result_count == limit as usize;
+    let response = PaginatedResponse {
+        items,
+        pagination: PaginationMeta {
+            has_more,
+            limit,
+            offset,
+            total: offset as usize + result_count,
+        },
+    };
+    Ok(PagedResult::from_response(response))
+}
+
+#[cfg(feature = "grpc")]
+fn archived_search_request(
+    space_id: &str,
+    archived_relation_key: &str,
+    limit: u32,
+    offset: u32,
+    type_ids: &[String],
+) -> search_with_meta::Request {
+    let mut filters = vec![dataview_filter_checkbox_equal(archived_relation_key, true)];
+    if !type_ids.is_empty() {
+        filters.push(dataview_filter_type_in(type_ids));
+    }
+
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    search_with_meta::Request {
+        space_id: space_id.to_string(),
+        filters,
+        sorts: Vec::new(),
+        full_text: String::new(),
+        offset: offset as i32,
+        limit: limit as i32,
+        object_type_filter: Vec::new(),
+        keys: Vec::new(),
+        return_meta: false,
+        return_meta_relation_details: false,
+        return_html_highlights_instead_of_ranges: false,
+    }
+}
+
+#[cfg(feature = "grpc")]
+async fn run_archived_search(
+    client: &AnytypeClient,
+    request: search_with_meta::Request,
+) -> Result<search_with_meta::Response> {
+    let grpc = client.grpc_client().await?;
+    let mut commands = grpc.client_commands();
+    let request = with_token_request(Request::new(request), grpc.token())?;
+    let response = commands
+        .object_search_with_meta(request)
+        .await
+        .map_err(grpc_status)?
+        .into_inner();
+
+    ensure_error_ok(response.error.as_ref(), "grpc archived search")?;
+
+    Ok(response)
+}
+
+#[cfg(feature = "grpc")]
+fn archived_relation_not_found(err: &AnytypeError, key: &str) -> bool {
+    match err {
+        AnytypeError::Other { message } => {
+            message.contains("failed to resolve relation")
+                && (message.contains(&format!("\"{key}\"")) || message.contains(key))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "grpc")]
+fn dataview_filter_checkbox_equal(
+    key: &str,
+    value: bool,
+) -> model::block::content::dataview::Filter {
+    model::block::content::dataview::Filter {
+        id: String::new(),
+        operator: model::block::content::dataview::filter::Operator::No as i32,
+        relation_key: key.to_string(),
+        relation_property: String::new(),
+        condition: model::block::content::dataview::filter::Condition::Equal as i32,
+        value: Some(Value {
+            kind: Some(prost_types::value::Kind::BoolValue(value)),
+        }),
+        quick_option: model::block::content::dataview::filter::QuickOption::ExactDate as i32,
+        format: 0,
+        include_time: false,
+        nested_filters: Vec::new(),
+    }
+}
+
+#[cfg(feature = "grpc")]
+fn dataview_filter_type_in(type_ids: &[String]) -> model::block::content::dataview::Filter {
+    model::block::content::dataview::Filter {
+        id: String::new(),
+        operator: model::block::content::dataview::filter::Operator::No as i32,
+        relation_key: "type".to_string(),
+        relation_property: String::new(),
+        condition: model::block::content::dataview::filter::Condition::In as i32,
+        value: Some(Value {
+            kind: Some(prost_types::value::Kind::ListValue(ListValue {
+                values: type_ids
+                    .iter()
+                    .map(|id| Value {
+                        kind: Some(prost_types::value::Kind::StringValue(id.clone())),
+                    })
+                    .collect(),
+            })),
+        }),
+        quick_option: model::block::content::dataview::filter::QuickOption::ExactDate as i32,
+        format: 0,
+        include_time: false,
+        nested_filters: Vec::new(),
+    }
+}
+
+#[cfg(feature = "grpc")]
+fn archived_object_from_search_result(
+    space_id: &str,
+    result: model::search::Result,
+) -> Option<Object> {
+    let details = result.details.unwrap_or_default();
+    let id = normalized_search_result_id(result.object_id, &details)?;
+    let archived = struct_bool_field(&details, "isArchived")
+        .or_else(|| struct_bool_field(&details, "archived"))
+        .unwrap_or(true);
+    let name = struct_string_field(&details, "name");
+
+    Some(Object {
+        archived,
+        icon: None,
+        id,
+        layout: ObjectLayout::default(),
+        markdown: None,
+        name,
+        object: DataModel::Object,
+        properties: Vec::new(),
+        snippet: None,
+        space_id: space_id.to_string(),
+        r#type: None,
+    })
+}
+
+#[cfg(feature = "grpc")]
+fn struct_bool_field(details: &prost_types::Struct, key: &str) -> Option<bool> {
+    details
+        .fields
+        .get(key)
+        .and_then(|value| value.kind.as_ref())
+        .and_then(|kind| match kind {
+            prost_types::value::Kind::BoolValue(value) => Some(*value),
+            _ => None,
+        })
+}
+
+#[cfg(feature = "grpc")]
+fn struct_string_field(details: &prost_types::Struct, key: &str) -> Option<String> {
+    details
+        .fields
+        .get(key)
+        .and_then(|value| value.kind.as_ref())
+        .and_then(|kind| match kind {
+            prost_types::value::Kind::StringValue(value) => Some(value.clone()),
+            _ => None,
+        })
+}
+
+#[cfg(feature = "grpc")]
+fn normalized_search_result_id(object_id: String, details: &prost_types::Struct) -> Option<String> {
+    if !object_id.is_empty() {
+        return Some(object_id);
+    }
+    let fallback = struct_string_field(details, "id")?;
+    if fallback.is_empty() {
+        None
+    } else {
+        Some(fallback)
+    }
+}
+
+#[cfg(feature = "grpc")]
+#[derive(Debug)]
+struct DeleteBestEffortResult {
+    deleted: u64,
+    failed_ids: Vec<String>,
+}
+
+#[cfg(feature = "grpc")]
+async fn delete_archived_best_effort(
+    client: &AnytypeClient,
+    space_id: &str,
+    ids: &[String],
+) -> Result<DeleteBestEffortResult> {
+    let mut pending: Vec<Vec<String>> = ids.chunks(500).map(|chunk| chunk.to_vec()).collect();
+    let mut deleted = 0_u64;
+    let mut failed_ids = Vec::new();
+
+    while let Some(batch) = pending.pop() {
+        match client.delete_archived(space_id, &batch).await {
+            Ok(num_deleted) => {
+                deleted = deleted.saturating_add(num_deleted);
+            }
+            Err(err) => {
+                if batch.len() == 1 {
+                    debug!(
+                        space_id,
+                        object_id = batch[0].as_str(),
+                        error = %err,
+                        "delete_archived_best_effort: skipping undeletable archived object id"
+                    );
+                    failed_ids.push(batch[0].clone());
+                    continue;
+                }
+
+                let mid = batch.len() / 2;
+                pending.push(batch[mid..].to_vec());
+                pending.push(batch[..mid].to_vec());
+            }
+        }
+    }
+
+    Ok(DeleteBestEffortResult {
+        deleted,
+        failed_ids,
+    })
 }
 
 // ============================================================================

@@ -1,0 +1,128 @@
+# Changelog
+
+## [0.3.0 - alpha] - anyback - 2026-02-16
+
+- Flattened CLI: removed `archive` subcommand group and `info` command.
+  - `archive inspect` -> `list` (with `--brief`, `--expanded`, `--files`)
+  - `archive cmp` -> `diff`
+  - `archive cp` -> `extract` (positional: `<archive> <id> <output>`)
+  - `info` -> `list` (for summary/object IDs) or `manifest` (for manifest JSON)
+  - New `manifest` command for standalone manifest output.
+- `list` includes summary and object IDs by default; use `--brief` for summary only.
+- Legacy `archive`, `info` commands rejected with migration guidance.
+
+- Changed backup/export archive output defaults:
+  - ZIP is now the default archive format for backup/export.
+  - removed the `--zip` CLI flag from `backup`/`export`.
+  - directory-layout archive support remains in archive reader/import paths.
+- Added an `anyback_reader::markdown` module that converts protobuf snapshots
+  (`objects/<id>.pb`) to markdown directly from archive data, including text
+  block styles, inline marks, links/bookmarks, file/image links, and markdown
+  table rendering (`Table` / `TableRows` / `TableColumns` blocks).
+- Added `anyback archive cp OBJID FILE [--archive ARCHIVE]`:
+  - saves document-like objects as markdown
+  - saves file/image objects as raw payload bytes
+- Inspector updates:
+  - Preview panel now attempts real markdown rendering from protobuf snapshots
+  - Added `w` save-as flow for selected object with remembered output directory
+- Renamed primary commands:
+  - `backup create` -> `backup`
+  - `restore apply` -> `restore`
+  - legacy forms are now rejected with guidance to use the simplified commands
+- Replaced `restore plan` preflight flow with direct restore/import preflight:
+  - added `restore --dry-run` and `import --dry-run`
+  - removed restore plan/apply split from primary CLI flow
+- Added backup zip output controls:
+  - new `--zip` flag on `backup`
+  - `--dest PATH` now auto-enables zip mode when `PATH` ends in `.zip`
+  - manifest metadata is written to sidecar `<archive>.manifest.json` (sibling path)
+  - inspect/restore still read legacy in-archive `manifest.json` for compatibility
+- Added `archive cmp ARCHIVE1 ARCHIVE2`:
+  - compares directory/zip archives
+  - emits `ARCHIVE1 only`, `ARCHIVE2 only`, and `Changed` sections
+  - supports `pb` vs `pb`, `pb-json` vs `pb-json`, and cross-compare `pb` vs `pb-json`
+- Restore now supports archives without `manifest.json` (including desktop-generated backups), and infers object IDs for reporting when possible.
+- `backup create` output args updated:
+  - renamed parent directory option to `--dir`
+  - added `--dest PATH` for explicit archive output path
+  - added `--prefix` for generated archive naming
+  - added conflict and path validation (`--dest` vs `--dir/--prefix`, existing/missing paths)
+- Added milestone-02 e2e coverage for full backup + restore in same space.
+- Added nightly integrity fuzz scaffold test (`tests/integrity_nightly.rs`) with profile/env controls for object count, body size, elapsed time, and total bytes.
+- Restore transport compatibility update:
+  - reintroduced path-based restore/import via `Rpc.Object.Import.Request.params.PbParams.path` for full archive apply
+  - moved snapshot restore code paths behind cargo feature `snapshot-import` (opt-in)
+  - when built without `snapshot-import`, `--objects` restore/import returns actionable guidance to rebuild with that feature
+- Added integrity failure artifact capture in `tests/integrity_nightly.rs`:
+  - persists failed batch metadata, backup/restore command output, archive file listing, and copied archive under `/tmp/anyback-integrity-failures/...`
+  - adds `ANYBACK_INTEGRITY_TYPES` and `ANYBACK_INTEGRITY_FORMAT=pb|pb-json` controls
+- On Linux/macOS, call `nix::unistd::sync()` after writing backup archive metadata to reduce transient filesystem visibility races in follow-up restore/integrity runs.
+- Added `archive inspect` command with optional JSON output (`--json`) and optional file listing (`--files`).
+- Extended `archive inspect`:
+  - supports both directory and `.zip` archives without unpacking
+  - adds `--expanded` mode to parse all `*.pb`/`*.pb.json` snapshot files and emit per-file metadata
+  - is fault-tolerant: unreadable snapshot files are marked `status="unreadable"` with reason while remaining files continue to parse
+- Milestone 1 (restore snapshot transport plan) implementation:
+  - added shared archive reader module used by restore staging, `archive inspect`, and `archive cmp`
+  - removed duplicate dir/zip traversal branches in restore staging in favor of one archive-reader path
+  - added archive reader unit tests for directory and zip listing/read behavior
+- Refactored archive reader into a standalone library target:
+  - `anyback/Cargo.toml` now defines lib crate `anyback_reader` plus CLI bin `anyback`
+  - archive reader API moved to `anyback_reader::archive` for reuse by external inspector programs
+  - archive reader code has no keystore dependencies
+  - CLI-only dependencies are gated behind feature `cli` (enabled by default); library consumers can use `default-features = false`
+- Milestone 2 (snapshot transport engine) implementation:
+  - added snapshot import builder and batch planner for `Rpc.Object.Import.Request.snapshots`
+  - added chunk limits with env overrides:
+    - `ANYBACK_IMPORT_MAX_SINGLE_SNAPSHOT_BYTES`
+    - `ANYBACK_IMPORT_MAX_BATCH_BYTES`
+    - `ANYBACK_IMPORT_MAX_BATCH_SNAPSHOTS`
+  - added oversize single-snapshot error path with object id/path/size context
+  - added unit tests for batch split and oversize enforcement
+  - added initial transport switch `ANYBACK_RESTORE_TRANSPORT=snapshots` during migration
+  - snapshot transport currently supports `*.pb`; `*.pb.json` restore returns actionable error
+- Milestone 3 (event-driven progress/completion) implementation:
+  - restore now wraps import lifecycle with `ProcessSubscribe`/`ListenSessionEvents`/`ProcessUnsubscribe`
+  - restore now waits for `processNew`/`processUpdate`/`processDone` correlation per import dispatch and tracks `importFinish` summaries
+  - added restore process timeout env overrides:
+    - `ANYBACK_EVENT_STREAM_CONNECT_TIMEOUT`
+    - `ANYBACK_PROCESS_START_TIMEOUT`
+    - `ANYBACK_PROCESS_IDLE_TIMEOUT`
+    - `ANYBACK_PROCESS_DONE_TIMEOUT`
+  - restore JSON report now includes `event_progress` summary with process/event counts and final observed process state
+- Milestone 3 (path transport hardening) implementation:
+  - removed restore import staging helpers and manifest-stripping staging branches
+  - removed path-race retry branch for `"no such file or directory"` in integrity restore harness
+- Increased nightly integrity profile complexity in `tests/integrity_nightly.rs`:
+  - `small` profile now runs more iterations/objects and higher body-byte budgets
+  - `medium` profile now runs more iterations/objects with larger byte/time caps
+  - profile parse test now enforces monotonic growth across tiny/small/medium/large
+- Expanded nightly integrity semantic coverage in `tests/integrity_nightly.rs`:
+  - validates restored object type, description property, and per-object markdown markers
+  - uploads and roundtrips file attachments (with context metadata) on even iterations
+  - validates file attachment roundtrip via restore JSON success rows (`type=file`, expected file name)
+- Restore reliability hardening:
+  - restore import progress is always enabled at the RPC layer (`no_progress=false`) so process events remain observable in non-interactive runs
+  - session event stream drop/read failures now trigger reconnect-and-continue within existing restore timeouts
+  - restore cancellation now uses an `mpsc` channel so signal handlers (SIGINT/SIGTERM) can request cancellation via the same path intended for future TUI cancel actions
+  - import API errors now include code-based hints for common import failure classes
+- Restore/import completion hardening for path-based imports:
+  - restore/import now fails if process completion events time out instead of silently proceeding
+  - this prevents early command exit while server-side async import is still running against archive paths
+- Test cleanup hardening:
+  - e2e and nightly integrity tests now register per-test prefix cleanup guards that run on early returns/panics
+  - cleanup no longer depends solely on end-of-test happy-path execution
+- Added chat restore coverage:
+- new e2e tests validate chat message roundtrip for chat spaces and regular spaces with chats
+- nightly `large` profile now runs chat-message roundtrip checks for both regular spaces-with-chats and chat spaces
+- chat validations explicitly assert that sent message tokens are present after restore
+
+## 0.1.0 - 2026-02-10
+
+- Initial proof-of-concept CLI scaffold.
+- Added commands: `auth`, `export`, `import`, `info`.
+- Implemented object-list export using `ObjectListExport` via `anytype-api` backup wrapper.
+- Added archive `manifest.json` generation in export output directory.
+- Implemented best-effort import using gRPC `ObjectImport` (`IGNORE_ERRORS`).
+- Added JSON import report output via `--log`.
+- Added unit tests for object-list parsing and manifest utilities.

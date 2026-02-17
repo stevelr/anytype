@@ -16,6 +16,10 @@ anyr auth login
 # List spaces your user is authorized to access
 anyr space list -t     # output as table (-t/--table)
 
+# Count or delete archived objects in a space
+anyr space count-archived "Work"
+anyr space delete-archived "Work" [ --confirm ]
+
 # List Pages in space "Work"
 anyr object list "Work" --type page -t
 
@@ -27,10 +31,12 @@ anyr file list "Personal" -t
 anyr file download <FILE_OBJECT_ID> --dir /tmp
 anyr file upload "Personal" -f ./path/to/file.png
 
-# Get chat messages from space "Chat"
-anyr chat messages list "Chat" -t
+# Create a chat in a regular space
+anyr chat create "Work" "Ops"
+# Get chat messages from a chat in a space
+anyr chat messages list "Work" "Ops" -t
 # Post message
-anyr chat messages send "Chat-" --text "hello world?"
+anyr chat messages send "Work" "Ops" --text "hello world?"
 ```
 
 ## Common options
@@ -140,6 +146,14 @@ anyr type list "Personal" -t
 ```sh
 # search space "Work" for tasks containing the text "customer"
 anyr search --space "Work" --type Task --text customer -t
+```
+
+**Archived object cleanup**
+
+```sh
+space="Work"
+anyr space count-archived "$space"
+anyr space delete-archived "$space" --confirm
 ```
 
 **List tasks in space**

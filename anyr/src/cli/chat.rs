@@ -10,16 +10,16 @@ use crate::{
         AppContext,
         common::{
             MemberCache, load_member_cache, resolve_chat_ids, resolve_chat_name,
-            resolve_chat_target, resolve_member_name, resolve_space_id,
+            resolve_chat_target, resolve_member_name, resolve_space_id, resolve_type_key,
         },
         pagination_limit, pagination_offset,
     },
     output::{OutputFormat, render_table_dynamic},
 };
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::large_stack_frames)]
 pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
-    match args.command {
+    match *args.command {
         super::ChatCommands::List {
             space,
             text,
@@ -104,44 +104,45 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 _ => ctx.output.emit_json(&result),
             }
         }
-        super::ChatCommands::Get { chat, space } => {
-            let space_id = match space.as_deref() {
-                Some(space) => Some(resolve_space_id(ctx, space).await?),
-                None => None,
+        super::ChatCommands::Create { space, name } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let chat_type_key = match resolve_type_key(ctx, &space_id, "Chat").await {
+                Ok(key) => key,
+                Err(first_err) => resolve_type_key(ctx, &space_id, "chat")
+                    .await
+                    .map_err(|_| first_err)?,
             };
-            let (space_id, chat_id) = resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
-            let chat = if let Some(space_id) = space_id.as_deref() {
-                ctx.client
-                    .chats()
-                    .get_chat(space_id, &chat_id)
-                    .get()
-                    .await?
-            } else {
-                let chats = ctx.client.chats().list_chats().list().await?;
-                chats
-                    .items
-                    .into_iter()
-                    .find(|item| item.id == chat_id)
-                    .ok_or_else(|| anyhow!("chat not found: {chat_id}"))?
-            };
+            let chat = ctx
+                .client
+                .new_object(&space_id, chat_type_key)
+                .name(name)
+                .create()
+                .await?;
+            ctx.output.emit_json(&chat)
+        }
+        super::ChatCommands::Get { space, chat } => {
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+            let chat = ctx
+                .client
+                .chats()
+                .get_chat(&space_id, &chat_id)
+                .get()
+                .await?;
             ctx.output.emit_json(&chat)
         }
         super::ChatCommands::Messages(args) => match args.command {
             super::ChatMessagesCommands::List {
-                chat,
                 space,
+                chat,
                 after,
                 before,
                 include_boundary,
                 limit,
                 unread_only,
             } => {
-                let space_id = match space.as_deref() {
-                    Some(space) => Some(resolve_space_id(ctx, space).await?),
-                    None => None,
-                };
-                let (space_id, chat_id) =
-                    resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
+                let space_id = resolve_space_id(ctx, &space).await?;
+                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
                 let mut request = ctx.client.chats().list_messages(&chat_id).limit(limit);
 
                 if let Some(after) = after {
@@ -163,10 +164,7 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 }
                 match ctx.output.format() {
                     OutputFormat::Table => {
-                        let member_cache = match space_id.as_deref() {
-                            Some(space_id) => Some(load_member_cache(ctx, space_id).await?),
-                            None => None,
-                        };
+                        let member_cache = Some(load_member_cache(ctx, &space_id).await?);
                         let headers = vec![
                             "order_id".to_string(),
                             "timestamp".to_string(),
@@ -178,7 +176,7 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                             .iter()
                             .map(|message| {
                                 let sender = format_sender(
-                                    space_id.as_deref(),
+                                    Some(space_id.as_str()),
                                     member_cache.as_ref(),
                                     &message.creator,
                                 );
@@ -197,16 +195,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 }
             }
             super::ChatMessagesCommands::Get {
-                chat,
                 space,
+                chat,
                 message_ids,
             } => {
-                let space_id = match space.as_deref() {
-                    Some(space) => Some(resolve_space_id(ctx, space).await?),
-                    None => None,
-                };
-                let (space_id, chat_id) =
-                    resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
+                let space_id = resolve_space_id(ctx, &space).await?;
+                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
                 let message_ids = resolve_message_ids(ctx, &chat_id, &message_ids).await?;
                 let mut messages = ctx
                     .client
@@ -220,10 +214,7 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
 
                 match ctx.output.format() {
                     OutputFormat::Table => {
-                        let member_cache = match space_id.as_deref() {
-                            Some(space_id) => Some(load_member_cache(ctx, space_id).await?),
-                            None => None,
-                        };
+                        let member_cache = Some(load_member_cache(ctx, &space_id).await?);
                         let headers = vec![
                             "timestamp".to_string(),
                             "sender".to_string(),
@@ -234,7 +225,7 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                             .iter()
                             .map(|message| {
                                 let sender = format_sender(
-                                    space_id.as_deref(),
+                                    Some(space_id.as_str()),
                                     member_cache.as_ref(),
                                     &message.creator,
                                 );
@@ -253,8 +244,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 }
             }
             super::ChatMessagesCommands::Send {
-                chat,
                 space,
+                chat,
                 text,
                 style,
                 mark,
@@ -263,12 +254,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 content_text,
                 text_args,
             } => {
-                let space_id = match space.as_deref() {
-                    Some(space) => Some(resolve_space_id(ctx, space).await?),
-                    None => None,
-                };
-                let (_space_id, chat_id) =
-                    resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
+                let space_id = resolve_space_id(ctx, &space).await?;
+                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
                 let attachments = parse_message_attachments(&attachment)?;
 
                 let message_id = if let Some(content_json) = content_json {
@@ -307,20 +294,16 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 ctx.output.emit_json(&MessageIdOutput { id: message_id })
             }
             super::ChatMessagesCommands::Edit {
+                space,
                 chat,
                 message_id,
-                space,
                 text,
                 style,
                 mark,
                 content_json,
             } => {
-                let space_id = match space.as_deref() {
-                    Some(space) => Some(resolve_space_id(ctx, space).await?),
-                    None => None,
-                };
-                let (_space_id, chat_id) =
-                    resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
+                let space_id = resolve_space_id(ctx, &space).await?;
+                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
                 let message_id = resolve_message_id_for_order(ctx, &chat_id, &message_id).await?;
 
                 if let Some(content_json) = content_json {
@@ -347,16 +330,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 ctx.output.emit_json(&ResultOutput { result: true })
             }
             super::ChatMessagesCommands::Delete {
+                space,
                 chat,
                 message_id,
-                space,
             } => {
-                let space_id = match space.as_deref() {
-                    Some(space) => Some(resolve_space_id(ctx, space).await?),
-                    None => None,
-                };
-                let (_space_id, chat_id) =
-                    resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
+                let space_id = resolve_space_id(ctx, &space).await?;
+                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
                 let message_id = resolve_message_id_for_order(ctx, &chat_id, &message_id).await?;
                 ctx.client
                     .chats()
@@ -367,18 +346,15 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             }
         },
         super::ChatCommands::Read {
-            chat,
             space,
+            chat,
             read_type,
             after,
             before,
             last_state_id,
         } => {
-            let space_id = match space.as_deref() {
-                Some(space) => Some(resolve_space_id(ctx, space).await?),
-                None => None,
-            };
-            let (_space_id, chat_id) = resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
             let mut request = ctx.client.chats().read_messages(&chat_id);
             if let Some(read_type) = read_type {
                 request = request.read_type(read_type.to_read_type());
@@ -396,16 +372,13 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             ctx.output.emit_json(&ResultOutput { result: true })
         }
         super::ChatCommands::Unread {
-            chat,
             space,
+            chat,
             read_type,
             after,
         } => {
-            let space_id = match space.as_deref() {
-                Some(space) => Some(resolve_space_id(ctx, space).await?),
-                None => None,
-            };
-            let (_space_id, chat_id) = resolve_chat_target(ctx, space_id.as_deref(), &chat).await?;
+            let space_id = resolve_space_id(ctx, &space).await?;
+            let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
             let mut request = ctx.client.chats().unread_messages(&chat_id);
             if let Some(read_type) = read_type {
                 request = request.read_type(read_type.to_read_type());

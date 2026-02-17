@@ -1,0 +1,8 @@
+# typos (spell checker) configuration
+
+[files]
+# ignore these files
+extend-exclude = ["docs/cli-plan.md"]
+
+[default.extend-identifiers]
+# overrides: if right side of equals is same as left side, no change is made

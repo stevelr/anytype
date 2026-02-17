@@ -251,10 +251,13 @@ impl<T: DeserializeOwned + Send + 'static> PagedResult<T> {
                                 request: next_request,
                             },
                         ),
-                        Err(e) => {
+                        Err(err) => {
                             // Yield the error and mark as errored to stop on next iteration
                             errored = true;
-                            Some((Err(e), (items, false, offset, limit, Some(refill), errored)))
+                            Some((
+                                Err(err),
+                                (items, false, offset, limit, Some(refill), errored),
+                            ))
                         }
                     }
                 } else {
@@ -551,8 +554,8 @@ mod tests {
         let new_request = request.with_pagination(20, 15);
 
         // Check that offset and limit are updated
-        let offset = new_request.query.iter().find(|(k, _)| k == "offset");
-        let limit = new_request.query.iter().find(|(k, _)| k == "limit");
+        let offset = new_request.query.iter().find(|(key, _)| key == "offset");
+        let limit = new_request.query.iter().find(|(key, _)| key == "limit");
 
         assert_eq!(offset, Some(&("offset".to_string(), "20".to_string())));
         assert_eq!(limit, Some(&("limit".to_string(), "15".to_string())));
@@ -569,19 +572,19 @@ mod tests {
         let new_request = request.with_pagination(30, 25);
 
         // Should still have the filter param
-        let filter = new_request.query.iter().find(|(k, _)| k == "filter");
+        let filter = new_request.query.iter().find(|(key, _)| key == "filter");
         assert_eq!(filter, Some(&("filter".to_string(), "active".to_string())));
 
         // Offset and limit should be replaced, not duplicated
         let offsets: Vec<_> = new_request
             .query
             .iter()
-            .filter(|(k, _)| k == "offset")
+            .filter(|(key, _)| key == "offset")
             .collect();
         let limits: Vec<_> = new_request
             .query
             .iter()
-            .filter(|(k, _)| k == "limit")
+            .filter(|(key, _)| key == "limit")
             .collect();
 
         assert_eq!(offsets.len(), 1);

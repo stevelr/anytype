@@ -410,7 +410,7 @@ impl AnytypeCache {
         {
             // Direct lookup by key (keys are indexed in the map)
             let check = text.as_ref().trim().to_lowercase();
-            map.get(&check).filter(|t| !t.archived).cloned()
+            map.get(&check).filter(|typ| !typ.archived).cloned()
         } else {
             None
         }
@@ -440,7 +440,7 @@ impl AnytypeCache {
         if !self.is_enabled() {
             return;
         }
-        let non_archived: Vec<_> = types.into_iter().filter(|t| !t.archived).collect();
+        let non_archived: Vec<_> = types.into_iter().filter(|typ| !typ.archived).collect();
         // Each type is stored twice (by id and key), so allocate accordingly
         let mut map = HashMap::with_capacity(non_archived.len() * 2);
         for typ in non_archived {
@@ -533,7 +533,7 @@ impl std::fmt::Debug for AnytypeCache {
             .map(|spaces| {
                 spaces
                     .iter()
-                    .map(|s| s.name.as_str())
+                    .map(|space| space.name.as_str())
                     .collect::<Vec<&str>>()
                     .join(",")
             })

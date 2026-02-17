@@ -4,4 +4,6 @@ result
 anyproto/
 docs/
 .claude
+.codex
 tmp/
+AGENTS.md

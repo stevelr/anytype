@@ -6,6 +6,9 @@
 # If all you need are http credentials, you don't need this script, as you can do the
 # interactive authentication with the anytype crate, anyr, or any-edit.
 # 
+# The anytype cli should be running and 'anytype' should be in your path. You can specify
+# the executable path with ANYTYPE_CLI_BIN, e.g., "export ANYTYPE_CLI_BIN=anytype-cli/dist/anytype"
+# 
 # To generate grpc credentials for an external app, you need an account-key, which is printed
 # on the terminal when the cli initializes (in response to "any auth create ...").
 # This script runs the cli initialization, captures the account key, and saves it
@@ -22,7 +25,8 @@
 
 set -euo pipefail
 
- set -x
+ANYTYPE_CLI_BIN="${ANYTYPE_CLI_BIN:-anytype}"
+
 #################
 #   SETUP
 #################
@@ -68,10 +72,6 @@ export ANYTYPE_GRPC_ENDPOINT=http://127.0.0.1:31010
 #   END SETUP
 #################
 
-if [ -z "$space_invite" ]; then
-  echo "set space_invite in the script"
-  exit 1
-fi
  
 # it would be convenient if the cli auth commands supported json output, or even text output,
 # but it doesn't, so we need to strip out the ascii art (box around the key)
@@ -88,7 +88,7 @@ init_cli_and_keystore() {
     # # if ~/.anytype/config.json has accountKey and sessionToken, we can import from there. Those creds are in config.json only if the server didn't use the os keyring
     # if [ "$(jq -r '.accountKey' <"$HOME"/.anytype/config.json)" != "null" ]; then
     #     anyr auth set-grpc  --config ~/.anytype/config.json
-    #     any auth apikey create http  | extract_http_token | anyr auth set-http
+    #     "$ANYTYPE_CLI_BIN" auth apikey create http  | extract_http_token | anyr auth set-http
     #     return
     # fi
 
@@ -96,13 +96,13 @@ init_cli_and_keystore() {
     tstamp=$(date '+%s')
     ANY_USER=${ANY_USER:-"bot_${tstamp}"}
 
-    account_key=$(any auth create "$ANY_USER" 2>/dev/null | extract_account_key)
+    account_key=$("$ANYTYPE_CLI_BIN" auth create "$ANY_USER" 2>/dev/null | extract_account_key)
     if [ -z "$account_key" ]; then
-      echo "acctount_key failed. exiting. Make sure headless server is running ('any service start' or 'any serve')"
+      echo "acctount_key failed. exiting. Make sure headless server is running ('"$ANYTYPE_CLI_BIN" service start' or '"$ANYTYPE_CLI_BIN" serve')"
       exit 1
     fi
       
-    http_token=$(any auth apikey create "api_${tstamp}" | extract_http_token)
+    http_token=$("$ANYTYPE_CLI_BIN" auth apikey create "api_${tstamp}" | extract_http_token)
     if [ -z "$http_token" ]; then
       echo "token failed"
       exit 1
@@ -116,16 +116,21 @@ init_cli_and_keystore() {
 # headless cli - join space
 join_space() {
 
-    any space join "$space_invite"
+    "$ANYTYPE_CLI_BIN" space join "$space_invite"
     sleep 2
-    any space list
+    "$ANYTYPE_CLI_BIN" space list
 
     sleep 4
     anyr space list -t
 }
 
 init_cli_and_keystore
-join_space
+
+if [ -n "$space_invite" ]; then
+  join_space
+else
+  echo "no invite code. skipping space join"
+fi
 
 # Remind the user to use the headless client for BOTH http and grpc.
 echo "Don't forget to set ANYTYPE_URL=$ANYTYPE_URL"
