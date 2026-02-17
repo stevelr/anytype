@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased] - anytype-rpc
+## [0.3.0] - anytype-rpc - 2026-02-16
 
 ### Changes
 
@@ -12,9 +12,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Generated source is in `src/gen`. Instructions for regenerating `src/gen/*.rs` from protobuf definitions in github:anytype-heart are in the README.
 
 - **Breaking**
-  - Updated proto files to 0.48-rc.5 (anytype-heart 362cd4edda47e656fe199fb9b705a54b47792c9d)
+  - Updated proto files to 0.48.0
 
 ### Added
+
+- new api to backup space `AnytypeGrpcClient::backup_space`
+- cli additions
+  - space create, delete, invite (create/show/revoke), enable-sharing, disable-sharing
+- gRPC client channel now sets explicit transport defaults for long-running operations:
+  - connect timeout: 30s
+  - TCP keepalive: 60s
+  - HTTP/2 keepalive interval/timeout: 30s/10s
+  - keepalive while idle enabled
 
 - new storage package anytype.storage
   - `anytype_rpc::storage::FileInfo`

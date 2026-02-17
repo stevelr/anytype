@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.4.0] - anyr - 2026-02-16
+
+### Added
+
+- new space archive commands:
+  - `anyr space count-archived SPACE_NAME_OR_ID`
+  - `anyr space delete-archived SPACE_NAME_OR_ID [--confirm]`
+- `anyr chat create SPACE_NAME_OR_ID CHAT_NAME` to create chat objects in a space
+
+### Changed
+
+- **Breaking**: chat command argument order is now consistent for space-scoped chat operations:
+  - `anyr chat get SPACE CHAT`
+  - `anyr chat read SPACE CHAT`
+  - `anyr chat unread SPACE CHAT`
+  - `anyr chat messages list/get/send/edit/delete SPACE CHAT ...`
+
 ## [0.3.0] - anyr - 2026-01-28
 
 ### Added

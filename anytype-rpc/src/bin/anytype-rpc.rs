@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -9,7 +9,7 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 
 use anytype_rpc::anytype::{
-    ClientCommandsClient, rpc::account::local_link::list_apps::Request as ListAppsRequest,
+    ClientCommandsClient, rpc, rpc::account::local_link::list_apps::Request as ListAppsRequest,
     rpc::block::create::Request as BlockCreateRequest,
     rpc::block::list_delete::Request as BlockListDeleteRequest,
     rpc::block::paste::Request as BlockPasteRequest,
@@ -75,6 +75,77 @@ enum AuthCommand {
 #[derive(Subcommand, Debug)]
 enum SpaceCommand {
     List(SpaceListArgs),
+    Create(SpaceCreateArgs),
+    Delete(SpaceDeleteArgs),
+    Invite(InviteArgs),
+    EnableSharing(SpaceIdArgs),
+    DisableSharing(SpaceIdArgs),
+}
+
+#[derive(Args, Debug)]
+struct InviteArgs {
+    #[command(subcommand)]
+    command: InviteCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum InviteCommand {
+    /// Show the current invite for a space
+    Show(InviteShowArgs),
+    /// Create a new invite for a space
+    Create(InviteCreateArgs),
+    /// Revoke the current invite for a space
+    Revoke(InviteRevokeArgs),
+}
+
+#[derive(Args, Debug)]
+struct InviteShowArgs {
+    #[command(flatten)]
+    shared: SharedArgs,
+    /// Space name or ID
+    space: String,
+}
+
+#[derive(Args, Debug)]
+struct InviteCreateArgs {
+    #[command(flatten)]
+    shared: SharedArgs,
+    /// Space name or ID
+    space: String,
+    /// Grant reader permissions
+    #[arg(long, group = "perms")]
+    reader: bool,
+    /// Grant writer permissions
+    #[arg(long, group = "perms")]
+    writer: bool,
+    /// Grant owner permissions
+    #[arg(long, group = "perms")]
+    owner: bool,
+    /// Create a guest invite
+    #[arg(long, group = "approval")]
+    guest: bool,
+    /// Require approval before invitee can join
+    #[arg(long, group = "approval")]
+    with_approval: bool,
+    /// Allow invitee to join without approval (default)
+    #[arg(long, group = "approval")]
+    auto_approve: bool,
+}
+
+#[derive(Args, Debug)]
+struct InviteRevokeArgs {
+    #[command(flatten)]
+    shared: SharedArgs,
+    /// Space name or ID
+    space: String,
+}
+
+#[derive(Args, Debug)]
+struct SpaceIdArgs {
+    #[command(flatten)]
+    shared: SharedArgs,
+    /// Space name or ID
+    space: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -86,7 +157,7 @@ enum ObjectCommand {
 #[derive(Args, Debug)]
 struct SharedArgs {
     /// gRPC server address
-    #[arg(long, default_value = DEFAULT_GRPC_ADDR)]
+    #[arg(long, default_value = DEFAULT_GRPC_ADDR, env="ANYTYPE_GRPC_ENDPOINT")]
     addr: String,
     /// Path to config.json (defaults to ~/.anytype/config.json)
     #[arg(long)]
@@ -124,6 +195,25 @@ struct SpaceListArgs {
     /// Override resolvedLayout filter value
     #[arg(long)]
     layout_value: Option<i64>,
+}
+
+#[derive(Args, Debug)]
+struct SpaceCreateArgs {
+    #[command(flatten)]
+    shared: SharedArgs,
+    /// Name for the new space
+    name: String,
+    /// Create a chat space
+    #[arg(long)]
+    chat: bool,
+}
+
+#[derive(Args, Debug)]
+struct SpaceDeleteArgs {
+    #[command(flatten)]
+    shared: SharedArgs,
+    /// Space name or ID to delete
+    name_or_id: String,
 }
 
 #[derive(Args, Debug)]
@@ -196,6 +286,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Command::Space(args) => match args.command {
             SpaceCommand::List(args) => space_list(args).await?,
+            SpaceCommand::Create(args) => space_create(args).await?,
+            SpaceCommand::Delete(args) => space_delete(args).await?,
+            SpaceCommand::Invite(args) => match args.command {
+                InviteCommand::Show(args) => invite_show(args).await?,
+                InviteCommand::Create(args) => invite_create(args).await?,
+                InviteCommand::Revoke(args) => invite_revoke(args).await?,
+            },
+            SpaceCommand::EnableSharing(args) => enable_sharing(args).await?,
+            SpaceCommand::DisableSharing(args) => disable_sharing(args).await?,
         },
     }
     Ok(())
@@ -269,6 +368,377 @@ async fn space_list(args: SpaceListArgs) -> Result<(), Box<dyn std::error::Error
         println!("  {} - {}", space.id, space.name);
     }
 
+    Ok(())
+}
+
+/// Returns true if the string looks like a space ID (bafyrei... format).
+fn is_space_id(s: &str) -> bool {
+    let Some((prefix, suffix)) = s.split_once('.') else {
+        return false;
+    };
+    prefix.len() == 59 && prefix.starts_with("bafyrei") && !suffix.is_empty() && suffix.len() <= 13
+}
+
+async fn space_create(args: SpaceCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let config =
+        load_config(&resolve_config_path(args.shared.config.as_deref())?).unwrap_or_default();
+    let channel = connect(&args.shared.addr).await?;
+    let (session_token, _) = get_session_token(&args.shared, &config, &channel).await?;
+
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "name".to_string(),
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(args.name.clone())),
+        },
+    );
+
+    let request = rpc::workspace::create::Request {
+        details: Some(prost_types::Struct { fields }),
+        use_case: rpc::object::import_use_case::request::UseCase::None as i32,
+        with_chat: args.chat,
+    };
+    let mut client = ClientCommandsClient::new(channel);
+    let response = client
+        .workspace_create(with_token(Request::new(request), &session_token)?)
+        .await?
+        .into_inner();
+
+    if let Some(error) = &response.error
+        && error.code != 0
+    {
+        return Err(format!(
+            "WorkspaceCreate failed: {} (code {})",
+            error.description, error.code
+        )
+        .into());
+    }
+
+    println!("Created space: id={} name={}", response.space_id, args.name);
+    Ok(())
+}
+
+/// Resolve a space name or ID to a space ID.
+/// If the input looks like a space ID, returns it as-is.
+/// Otherwise, looks up the name via ObjectSearch and returns the matching ID.
+async fn resolve_space_id(
+    name_or_id: &str,
+    shared: &SharedArgs,
+    session_token: &str,
+    tech_space_id: &str,
+    channel: Channel,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if is_space_id(name_or_id) {
+        return Ok(name_or_id.to_string());
+    }
+    let list_args = SpaceListArgs {
+        shared: SharedArgs {
+            addr: shared.addr.clone(),
+            config: shared.config.clone(),
+            app_key: shared.app_key.clone(),
+            account_key: shared.account_key.clone(),
+            token: shared.token.clone(),
+        },
+        debug: false,
+        layout_only: false,
+        no_filters: false,
+        layout_value: None,
+    };
+    let spaces = list_spaces(channel, session_token, tech_space_id, &list_args).await?;
+    let matching: Vec<_> = spaces.iter().filter(|s| s.name == name_or_id).collect();
+    match matching.len() {
+        0 => Err(format!("No space found with name '{name_or_id}'").into()),
+        1 => Ok(matching[0].id.clone()),
+        n => {
+            eprintln!("Multiple spaces ({n}) match name '{name_or_id}':");
+            for s in &matching {
+                eprintln!("  {}", s.id);
+            }
+            Err(format!(
+                "Ambiguous name '{name_or_id}': {n} spaces match. Use the space ID instead."
+            )
+            .into())
+        }
+    }
+}
+
+/// Common setup: load config, connect, get session token, resolve space name/ID.
+async fn setup_with_space(
+    shared: &SharedArgs,
+    name_or_id: &str,
+) -> Result<(Channel, String, String, ConfigFile), Box<dyn std::error::Error>> {
+    let config_path = resolve_config_path(shared.config.as_deref())?;
+    let config = load_config(&config_path).unwrap_or_default();
+    let tech_space_id = config
+        .tech_space_id
+        .as_deref()
+        .ok_or("techSpaceId not found in config.json")?
+        .to_string();
+    let channel = connect(&shared.addr).await?;
+    let (session_token, _) = get_session_token(shared, &config, &channel).await?;
+    let space_id = resolve_space_id(
+        name_or_id,
+        shared,
+        &session_token,
+        &tech_space_id,
+        channel.clone(),
+    )
+    .await?;
+    Ok((channel, session_token, space_id, config))
+}
+
+async fn space_delete(args: SpaceDeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (channel, session_token, space_id, _) =
+        setup_with_space(&args.shared, &args.name_or_id).await?;
+
+    let mut client = ClientCommandsClient::new(channel);
+    let response = client
+        .space_delete(with_token(
+            Request::new(rpc::space::delete::Request {
+                space_id: space_id.clone(),
+            }),
+            &session_token,
+        )?)
+        .await?
+        .into_inner();
+
+    if let Some(error) = &response.error
+        && error.code != 0
+    {
+        return Err(format!(
+            "SpaceDelete failed: {} (code {})",
+            error.description, error.code
+        )
+        .into());
+    }
+
+    println!("Deleted space: {space_id}");
+    Ok(())
+}
+
+fn invite_type_name(value: i32) -> &'static str {
+    match value {
+        0 => "member",
+        1 => "guest",
+        2 => "auto-approve",
+        _ => "unknown",
+    }
+}
+
+fn permissions_name(value: i32) -> &'static str {
+    match value {
+        0 => "reader",
+        1 => "writer",
+        2 => "owner",
+        3 => "none",
+        _ => "unknown",
+    }
+}
+
+fn invite_url(cid: &str, key: &str) -> String {
+    format!("https://invite.any.coop/{cid}#{key}")
+}
+
+async fn invite_show(args: InviteShowArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (channel, session_token, space_id, _) = setup_with_space(&args.shared, &args.space).await?;
+
+    let mut client = ClientCommandsClient::new(channel);
+
+    // Get the current member invite
+    let member_response = client
+        .space_invite_get_current(with_token(
+            Request::new(rpc::space::invite_get_current::Request {
+                space_id: space_id.clone(),
+            }),
+            &session_token,
+        )?)
+        .await?
+        .into_inner();
+
+    // Get the guest invite (may not exist for all space types)
+    let guest_response = client
+        .space_invite_get_guest(with_token(
+            Request::new(rpc::space::invite_get_guest::Request {
+                space_id: space_id.clone(),
+            }),
+            &session_token,
+        )?)
+        .await?
+        .into_inner();
+
+    let mut invites = Vec::<serde_json::Value>::new();
+
+    let member_has_error = member_response.error.as_ref().is_some_and(|e| e.code != 0);
+    if !member_has_error && !member_response.invite_cid.is_empty() {
+        invites.push(serde_json::json!({
+            "type": invite_type_name(member_response.invite_type),
+            "permissions": permissions_name(member_response.permissions),
+            "cid": member_response.invite_cid,
+            "key": member_response.invite_file_key,
+            "url": invite_url(&member_response.invite_cid, &member_response.invite_file_key),
+        }));
+    }
+
+    let guest_has_error = guest_response.error.as_ref().is_some_and(|e| e.code != 0);
+    if !guest_has_error && !guest_response.invite_cid.is_empty() {
+        invites.push(serde_json::json!({
+            "type": "guest",
+            "cid": guest_response.invite_cid,
+            "key": guest_response.invite_file_key,
+            "url": invite_url(&guest_response.invite_cid, &guest_response.invite_file_key),
+        }));
+    }
+
+    if invites.is_empty() {
+        println!("No active invites for space {space_id}");
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "space_id": space_id,
+                "invites": invites,
+            }))?
+        );
+    }
+
+    Ok(())
+}
+
+async fn invite_create(args: InviteCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (channel, session_token, space_id, _) = setup_with_space(&args.shared, &args.space).await?;
+
+    use anytype_rpc::model::{InviteType, ParticipantPermissions};
+
+    let permissions = if args.owner {
+        ParticipantPermissions::Owner as i32
+    } else if args.writer {
+        ParticipantPermissions::Writer as i32
+    } else {
+        ParticipantPermissions::Reader as i32
+    };
+
+    let invite_type = if args.guest {
+        InviteType::Guest as i32
+    } else if args.with_approval {
+        InviteType::Member as i32
+    } else {
+        // default: auto-approve
+        InviteType::WithoutApprove as i32
+    };
+
+    let mut client = ClientCommandsClient::new(channel);
+    let response = client
+        .space_invite_generate(with_token(
+            Request::new(rpc::space::invite_generate::Request {
+                space_id: space_id.clone(),
+                invite_type,
+                permissions,
+            }),
+            &session_token,
+        )?)
+        .await?
+        .into_inner();
+
+    if let Some(error) = &response.error
+        && error.code != 0
+    {
+        return Err(format!(
+            "InviteGenerate failed: {} (code {})",
+            error.description, error.code
+        )
+        .into());
+    }
+
+    let output = serde_json::json!({
+        "cid": response.invite_cid,
+        "key": response.invite_file_key,
+        "url": invite_url(&response.invite_cid, &response.invite_file_key),
+    });
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+async fn invite_revoke(args: InviteRevokeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (channel, session_token, space_id, _) = setup_with_space(&args.shared, &args.space).await?;
+
+    let mut client = ClientCommandsClient::new(channel);
+    let response = client
+        .space_invite_revoke(with_token(
+            Request::new(rpc::space::invite_revoke::Request {
+                space_id: space_id.clone(),
+            }),
+            &session_token,
+        )?)
+        .await?
+        .into_inner();
+
+    if let Some(error) = &response.error
+        && error.code != 0
+    {
+        return Err(format!(
+            "InviteRevoke failed: {} (code {})",
+            error.description, error.code
+        )
+        .into());
+    }
+
+    println!("Revoked invite for space {space_id}");
+    Ok(())
+}
+
+async fn enable_sharing(args: SpaceIdArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (channel, session_token, space_id, _) = setup_with_space(&args.shared, &args.space).await?;
+
+    let mut client = ClientCommandsClient::new(channel);
+    let response = client
+        .space_make_shareable(with_token(
+            Request::new(rpc::space::make_shareable::Request {
+                space_id: space_id.clone(),
+            }),
+            &session_token,
+        )?)
+        .await?
+        .into_inner();
+
+    if let Some(error) = &response.error
+        && error.code != 0
+    {
+        return Err(format!(
+            "MakeShareable failed: {} (code {})",
+            error.description, error.code
+        )
+        .into());
+    }
+
+    println!("Sharing enabled for space {space_id}");
+    Ok(())
+}
+
+async fn disable_sharing(args: SpaceIdArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (channel, session_token, space_id, _) = setup_with_space(&args.shared, &args.space).await?;
+
+    let mut client = ClientCommandsClient::new(channel);
+    let response = client
+        .space_stop_sharing(with_token(
+            Request::new(rpc::space::stop_sharing::Request {
+                space_id: space_id.clone(),
+            }),
+            &session_token,
+        )?)
+        .await?
+        .into_inner();
+
+    if let Some(error) = &response.error
+        && error.code != 0
+    {
+        return Err(format!(
+            "StopSharing failed: {} (code {})",
+            error.description, error.code
+        )
+        .into());
+    }
+
+    println!("Sharing disabled for space {space_id}");
     Ok(())
 }
 

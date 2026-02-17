@@ -331,8 +331,8 @@ impl HttpClient {
         path: &str,
         query: QueryWithFilters,
     ) -> Result<T> {
-        query.validate().map_err(|e| AnytypeError::Validation {
-            message: format!("get_request {path} {e}"),
+        query.validate().map_err(|err| AnytypeError::Validation {
+            message: format!("get_request {path} {err}"),
         })?;
         let req = HttpRequest {
             method: Method::GET,
@@ -454,7 +454,7 @@ impl HttpClient {
         log_request(&req_builder, req.body.as_ref());
 
         // Track bytes to be sent (body size)
-        let body_size = req.body.as_ref().map_or(0, |b| b.len() as u64);
+        let body_size = req.body.as_ref().map_or(0, |bytes| bytes.len() as u64);
 
         loop {
             if let Some(wait_time) = retry_wait {
@@ -512,10 +512,10 @@ impl HttpClient {
                             rate_limit_retries = rate_limit_retries.saturating_add(1);
                             let headers = response.headers();
                             match parse_retry_after(headers) {
-                                Err(e) => {
-                                    error!("{e:?}");
+                                Err(err) => {
+                                    error!("{err:?}");
                                     // couldn't parse header.
-                                    return Err(e)
+                                    return Err(err)
                                 }
                                 Ok(ParsedRetry{ header, duration}) => {
                                     if self.rate_limit_max_retries > 0
@@ -611,13 +611,13 @@ impl HttpClient {
                         },
                     }
                 }
-                Err(e) => {
-                    error!(source=?e, ?req, "http");
+                Err(err) => {
+                    error!(source=?err, ?req, "http");
                     // Check for connection or timeout errors
-                    if (e.is_connect() || e.is_timeout()) && is_idempotent_method(&req.method) {
+                    if (err.is_connect() || err.is_timeout()) && is_idempotent_method(&req.method) {
                         rate_limit_retries = 0;
                         if attempt < MAX_RETRIES {
-                            log_and_backoff(attempt, e.to_string()).await;
+                            log_and_backoff(attempt, err.to_string()).await;
                             self.metrics.increment_retries();
                             attempt += 1;
                             continue;
@@ -626,7 +626,7 @@ impl HttpClient {
                         return Err(AnytypeError::Http {
                             method: req.method.to_string(),
                             url: req.path,
-                            source: e,
+                            source: err,
                         });
                     }
                     // Other non-recoverable errors (e.g., DNS error, invalid URL, etc.)
@@ -634,7 +634,7 @@ impl HttpClient {
                     return Err(AnytypeError::Http {
                         method: req.method.to_string(),
                         url: req.path,
-                        source: e,
+                        source: err,
                     });
                 }
             }
@@ -665,8 +665,8 @@ impl GetPaged for Arc<HttpClient> {
         path: &str,
         query: QueryWithFilters,
     ) -> Result<super::paged::PagedResult<T>> {
-        query.validate().map_err(|e| AnytypeError::Validation {
-            message: format!("get_request_paged {path} {e}"),
+        query.validate().map_err(|err| AnytypeError::Validation {
+            message: format!("get_request_paged {path} {err}"),
         })?;
         let req = HttpRequest {
             method: Method::GET,
@@ -685,8 +685,8 @@ impl GetPaged for Arc<HttpClient> {
         body: &B,
         query: QueryWithFilters,
     ) -> Result<super::paged::PagedResult<T>> {
-        query.validate().map_err(|e| AnytypeError::Validation {
-            message: format!("post_request_paged {path} {e}"),
+        query.validate().map_err(|err| AnytypeError::Validation {
+            message: format!("post_request_paged {path} {err}"),
         })?;
         let req = HttpRequest {
             method: Method::POST,
@@ -705,13 +705,13 @@ impl GetPaged for Arc<HttpClient> {
 // requires RUST_LOG=anytype::http_json=trace
 fn log_request(builder: &reqwest::RequestBuilder, body: Option<&Bytes>) {
     if tracing::enabled!(target: "anytype::http_json", tracing::Level::TRACE)
-        && let Some(req) = builder.try_clone().and_then(|b| b.build().ok())
+        && let Some(req) = builder.try_clone().and_then(|builder| builder.build().ok())
     {
         let method = req.method().as_str();
         let url = req.url();
         let body = body
             .as_ref()
-            .map(|b| String::from_utf8_lossy(b).to_string())
+            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
             .unwrap_or_default();
         // Log method, url (including all query parameters), and body
         // don't log headers so we don't leak api token

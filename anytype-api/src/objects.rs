@@ -59,7 +59,9 @@
 use std::sync::Arc;
 
 #[cfg(feature = "grpc")]
-use anytype_rpc::{anytype::rpc::object::share_by_link, auth::with_token};
+use crate::grpc_util::{grpc_status, with_token_request};
+#[cfg(feature = "grpc")]
+use anytype_rpc::anytype::rpc::object::share_by_link;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
@@ -1303,21 +1305,6 @@ impl AnytypeClient {
         }
 
         Ok(response.link)
-    }
-}
-
-#[cfg(feature = "grpc")]
-fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>> {
-    with_token(request, token).map_err(|err| AnytypeError::Auth {
-        message: err.to_string(),
-    })
-}
-
-#[cfg(feature = "grpc")]
-#[allow(clippy::needless_pass_by_value)]
-fn grpc_status(status: tonic::Status) -> AnytypeError {
-    AnytypeError::Other {
-        message: format!("gRPC request failed: {status}"),
     }
 }
 

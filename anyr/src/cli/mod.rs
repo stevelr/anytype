@@ -92,21 +92,6 @@ pub struct Cli {
     pub command: Commands,
 }
 
-// #[derive(Debug, Clone)]
-// pub enum KeystoreConfig {
-//     File(PathBuf),
-//     Keyring(String),
-// }
-
-// impl KeystoreConfig {
-//     pub fn description(&self) -> String {
-//         match self {
-//             KeystoreConfig::File(path) => format!("file ({})", path.display()),
-//             KeystoreConfig::Keyring(service) => format!("keyring ({service})"),
-//         }
-//     }
-// }
-
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Authentication commands
@@ -237,6 +222,20 @@ pub enum SpaceCommands {
         /// new space description
         #[arg(long)]
         description: Option<String>,
+    },
+    /// Count archived objects in a space
+    CountArchived {
+        /// space id or name
+        space: String,
+    },
+    /// Permanently delete all archived objects in a space
+    DeleteArchived {
+        /// space id or name
+        space: String,
+
+        /// skip confirmation prompt
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -918,7 +917,7 @@ pub struct ListArgs {
 #[derive(Args, Debug)]
 pub struct ChatArgs {
     #[command(subcommand)]
-    pub command: ChatCommands,
+    pub command: Box<ChatCommands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -937,14 +936,22 @@ pub enum ChatCommands {
         pagination: PaginationArgs,
     },
 
+    /// Create a chat object in a space
+    Create {
+        /// space id or name
+        space: String,
+
+        /// chat name
+        name: String,
+    },
+
     /// Get chat object
     Get {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
-
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
     },
 
     /// Message operations
@@ -953,12 +960,11 @@ pub enum ChatCommands {
 
     /// Mark messages as read
     Read {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
-
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
 
         /// read type (messages or mentions)
         #[arg(long, value_enum)]
@@ -979,12 +985,11 @@ pub enum ChatCommands {
 
     /// Mark messages as unread
     Unread {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
-
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
 
         /// unread type (messages or mentions)
         #[arg(long, value_enum)]
@@ -1029,12 +1034,11 @@ pub struct ChatMessagesArgs {
 pub enum ChatMessagesCommands {
     /// List messages for a chat
     List {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
-
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
 
         /// show messages after order id
         #[arg(long)]
@@ -1059,20 +1063,22 @@ pub enum ChatMessagesCommands {
 
     /// Get messages by id
     Get {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
 
         /// message ids or order ids
         #[arg(required = true)]
         message_ids: Vec<String>,
-
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
     },
 
     /// Send a message
     Send {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
 
@@ -1100,10 +1106,6 @@ pub enum ChatMessagesCommands {
         #[arg(long)]
         content_text: Option<String>,
 
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
-
         /// message text if --text is not provided
         #[arg(value_name = "TEXT", trailing_var_arg = true)]
         text_args: Vec<String>,
@@ -1111,6 +1113,9 @@ pub enum ChatMessagesCommands {
 
     /// Edit a message
     Edit {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
 
@@ -1132,23 +1137,18 @@ pub enum ChatMessagesCommands {
         /// raw JSON `MessageContent` (@file, @-, or -)
         #[arg(long)]
         content_json: Option<String>,
-
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
     },
 
     /// Delete a message
     Delete {
+        /// space id or name
+        space: String,
+
         /// chat id or name/title
         chat: String,
 
         /// message id or order id
         message_id: String,
-
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
-        #[arg(long)]
-        space: Option<String>,
     },
 }
 

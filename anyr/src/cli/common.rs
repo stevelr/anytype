@@ -61,7 +61,7 @@ pub async fn resolve_chat_target(
     }
 
     Err(anyhow!(
-        "chat name requires --space (or a space name/id) to resolve: {chat_id_or_name}"
+        "chat name requires a space context (space id/name) to resolve: {chat_id_or_name}"
     ))
 }
 

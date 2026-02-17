@@ -20,7 +20,6 @@ use anytype_rpc::{
         unsubscribe_from_message_previews,
     },
     anytype::{Event, StreamRequest, event::message::Value as EventValue},
-    auth::with_token,
     client::{AnytypeGrpcClient, AnytypeGrpcConfig},
 };
 use futures::Stream;
@@ -38,6 +37,7 @@ use crate::{
     },
     client::AnytypeClient,
     error::AnytypeError,
+    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
 };
 
 const DEFAULT_BUFFER_CAPACITY: usize = 256;
@@ -973,89 +973,6 @@ async fn get_messages_after(
         .into_inner();
     ensure_error_ok(response.error.as_ref(), "chat get messages")?;
     Ok(response)
-}
-
-fn with_token_request<T>(request: Request<T>, token: &str) -> Result<Request<T>> {
-    with_token(request, token).map_err(|err| AnytypeError::Auth {
-        message: err.to_string(),
-    })
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn grpc_status(status: tonic::Status) -> AnytypeError {
-    AnytypeError::Other {
-        message: format!("gRPC request failed: {status}"),
-    }
-}
-
-trait GrpcError {
-    fn code(&self) -> i32;
-    fn description(&self) -> &str;
-}
-
-impl GrpcError for subscribe_last_messages::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for unsubscribe::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for subscribe_to_message_previews::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for unsubscribe_from_message_previews::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-impl GrpcError for get_messages::response::Error {
-    fn code(&self) -> i32 {
-        self.code
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-fn ensure_error_ok<T: GrpcError>(error: Option<&T>, action: &str) -> Result<()> {
-    if let Some(error) = error
-        && error.code() != 0
-    {
-        return Err(AnytypeError::Other {
-            message: format!(
-                "{action} failed: {} (code {})",
-                error.description(),
-                error.code()
-            ),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
