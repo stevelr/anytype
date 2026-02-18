@@ -1,17 +1,21 @@
+use std::collections::HashMap;
 use std::env;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyback_reader::archive::ArchiveReader;
 use anyback_reader::markdown::{
-    SavedObjectKind, convert_archive_object_to_markdown, save_archive_object,
+    ArchiveObjectInfo, SavedObjectKind, build_archive_object_index,
+    convert_snapshot_bytes_to_markdown, save_archive_object,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossterm::{
     event::{self, Event},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use lru::LruCache;
 use ratatui::{Terminal, backend::CrosstermBackend, widgets::TableState};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
@@ -43,8 +47,112 @@ pub struct LinkRow {
     pub target_name: String,
 }
 
+const DEFAULT_MAX_CACHE_BYTES: usize = 200 * 1024 * 1024;
+const CACHE_LOW_WATERMARK_PCT: usize = 90;
+const MIN_CACHE_ENTRY_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Default)]
+struct CachedObject {
+    snapshot_bytes: Option<Vec<u8>>,
+    markdown: Option<std::result::Result<String, String>>,
+}
+
+impl CachedObject {
+    fn approx_bytes(&self) -> usize {
+        let snapshot = self.snapshot_bytes.as_ref().map_or(0, Vec::len);
+        let markdown = self.markdown.as_ref().map_or(0, |result| match result {
+            Ok(text) | Err(text) => text.len(),
+        });
+        snapshot.saturating_add(markdown)
+    }
+}
+
+struct ObjectCache {
+    lru: LruCache<String, CachedObject>,
+    current_bytes: usize,
+    max_bytes: usize,
+    max_entry_bytes: usize,
+    low_watermark_bytes: usize,
+}
+
+impl ObjectCache {
+    fn new(max_bytes: usize) -> Self {
+        let max_bytes = max_bytes.max(1);
+        let max_entry_bytes = (max_bytes / 5).max(MIN_CACHE_ENTRY_BYTES).min(max_bytes);
+        let low_watermark_bytes = (max_bytes.saturating_mul(CACHE_LOW_WATERMARK_PCT)) / 100;
+        Self {
+            lru: LruCache::new(NonZeroUsize::new(4096).expect("non-zero cache capacity")),
+            current_bytes: 0,
+            max_bytes,
+            max_entry_bytes,
+            low_watermark_bytes,
+        }
+    }
+
+    fn get_markdown(&mut self, object_id: &str) -> Option<std::result::Result<String, String>> {
+        self.lru
+            .get(object_id)
+            .and_then(|entry| entry.markdown.clone())
+    }
+
+    fn get_snapshot_bytes(&mut self, object_id: &str) -> Option<Vec<u8>> {
+        self.lru
+            .get(object_id)
+            .and_then(|entry| entry.snapshot_bytes.clone())
+    }
+
+    fn upsert(
+        &mut self,
+        object_id: String,
+        snapshot_bytes: Option<Vec<u8>>,
+        markdown: Option<std::result::Result<String, String>>,
+    ) {
+        let mut entry = if let Some(existing) = self.lru.pop(&object_id) {
+            self.current_bytes = self.current_bytes.saturating_sub(existing.approx_bytes());
+            existing
+        } else {
+            CachedObject::default()
+        };
+
+        if let Some(snapshot) = snapshot_bytes {
+            entry.snapshot_bytes = Some(snapshot);
+        }
+        if let Some(markdown) = markdown {
+            entry.markdown = Some(markdown);
+        }
+
+        let approx = entry.approx_bytes();
+        if approx == 0 || approx > self.max_entry_bytes {
+            return;
+        }
+
+        self.evict_for(approx);
+        if self.current_bytes.saturating_add(approx) > self.max_bytes {
+            return;
+        }
+
+        self.current_bytes = self.current_bytes.saturating_add(approx);
+        self.lru.put(object_id, entry);
+    }
+
+    fn evict_for(&mut self, incoming_bytes: usize) {
+        if self.current_bytes.saturating_add(incoming_bytes) <= self.max_bytes {
+            return;
+        }
+        while self.current_bytes.saturating_add(incoming_bytes) > self.low_watermark_bytes {
+            let Some((_, evicted)) = self.lru.pop_lru() else {
+                break;
+            };
+            self.current_bytes = self.current_bytes.saturating_sub(evicted.approx_bytes());
+        }
+    }
+}
+
 pub struct App {
     pub index: ArchiveIndex,
+    pub archive_reader: Option<ArchiveReader>,
+    pub markdown_index: Option<HashMap<String, ArchiveObjectInfo>>,
+    object_cache: ObjectCache,
     pub focus: PanelFocus,
     pub sort: SortState,
     pub table_state: TableState,
@@ -79,6 +187,15 @@ pub struct App {
 
 impl App {
     pub fn new(index: ArchiveIndex) -> Self {
+        Self::with_resources(index, None, None, DEFAULT_MAX_CACHE_BYTES)
+    }
+
+    pub fn with_resources(
+        index: ArchiveIndex,
+        archive_reader: Option<ArchiveReader>,
+        markdown_index: Option<HashMap<String, ArchiveObjectInfo>>,
+        max_cache_bytes: usize,
+    ) -> Self {
         let mut table_state = TableState::default();
         if !index.entries.is_empty() {
             table_state.select(Some(0));
@@ -86,6 +203,9 @@ impl App {
 
         let mut app = Self {
             index,
+            archive_reader,
+            markdown_index,
+            object_cache: ObjectCache::new(max_cache_bytes),
             focus: PanelFocus::Contents,
             sort: SortState::default(),
             table_state,
@@ -120,11 +240,15 @@ impl App {
         app
     }
 
-    pub fn run(path: &Path) -> Result<()> {
+    pub fn run(path: &Path, max_cache_bytes: usize) -> Result<()> {
         eprintln!("Loading archive...");
+        let archive_reader = ArchiveReader::from_path(path)?;
+        let markdown_index = build_archive_object_index(&archive_reader).ok();
         let index = ArchiveIndex::build(path)?;
 
-        let mut app = Self::new(index);
+        let mut app = Self::with_resources(index, None, None, max_cache_bytes);
+        app.archive_reader = Some(archive_reader);
+        app.markdown_index = markdown_index;
 
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -673,12 +797,10 @@ impl App {
             return;
         };
 
-        let reader = match ArchiveReader::from_path(Path::new(&self.index.archive_path)) {
-            Ok(reader) => reader,
-            Err(err) => {
-                self.image_preview_error = Some(format!("image preview unavailable: {err}"));
-                return;
-            }
+        let Some(reader) = self.archive_reader.as_ref() else {
+            self.image_preview_error =
+                Some("image preview unavailable: archive reader not initialized".to_string());
+            return;
         };
         let bytes = match reader.read_bytes(&image_path) {
             Ok(bytes) => bytes,
@@ -699,10 +821,14 @@ impl App {
     }
 
     pub(crate) fn prepare_markdown_preview(&mut self) {
-        let selected = self
-            .current_entry()
-            .map(|entry| (entry.id.clone(), entry.layout_name.clone()));
-        let Some((entry_id, layout_name)) = selected else {
+        let selected = self.current_entry().map(|entry| {
+            (
+                entry.id.clone(),
+                entry.layout_name.clone(),
+                entry.path.clone(),
+            )
+        });
+        let Some((entry_id, layout_name, entry_path)) = selected else {
             self.markdown_preview = None;
             self.markdown_preview_key = None;
             self.markdown_preview_error = None;
@@ -726,15 +852,64 @@ impl App {
         self.markdown_preview = None;
         self.markdown_preview_error = None;
 
-        match convert_archive_object_to_markdown(Path::new(&self.index.archive_path), &entry_id) {
+        if let Some(cached) = self.object_cache.get_markdown(&entry_id) {
+            match cached {
+                Ok(markdown) => self.markdown_preview = Some(markdown),
+                Err(err) => self.markdown_preview_error = Some(err),
+            }
+            return;
+        }
+
+        let mut snapshot_bytes_to_cache = None;
+        let snapshot_bytes = if let Some(cached) = self.object_cache.get_snapshot_bytes(&entry_id) {
+            cached
+        } else {
+            let Some(reader) = self.archive_reader.as_ref() else {
+                let msg =
+                    "markdown preview unavailable: archive reader not initialized".to_string();
+                self.markdown_preview_error = Some(msg.clone());
+                self.object_cache.upsert(entry_id, None, Some(Err(msg)));
+                return;
+            };
+            let bytes = match reader.read_bytes(&entry_path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    let msg =
+                        format!("markdown preview unavailable: failed to read snapshot: {err}");
+                    self.markdown_preview_error = Some(msg.clone());
+                    self.object_cache.upsert(entry_id, None, Some(Err(msg)));
+                    return;
+                }
+            };
+            snapshot_bytes_to_cache = Some(bytes.clone());
+            bytes
+        };
+
+        let rendered = (|| -> Result<String> {
+            let object_index = self
+                .markdown_index
+                .as_ref()
+                .ok_or_else(|| anyhow!("markdown index not initialized"))?;
+            convert_snapshot_bytes_to_markdown(&entry_path, &snapshot_bytes, object_index)
+        })();
+
+        match rendered {
             Ok(markdown) if !markdown.trim().is_empty() => {
-                self.markdown_preview = Some(markdown);
+                self.markdown_preview = Some(markdown.clone());
+                self.object_cache
+                    .upsert(entry_id, snapshot_bytes_to_cache, Some(Ok(markdown)));
             }
             Ok(_) => {
-                self.markdown_preview_error = Some("markdown preview unavailable".to_string());
+                let msg = "markdown preview unavailable".to_string();
+                self.markdown_preview_error = Some(msg.clone());
+                self.object_cache
+                    .upsert(entry_id, snapshot_bytes_to_cache, Some(Err(msg)));
             }
             Err(err) => {
-                self.markdown_preview_error = Some(format!("markdown preview unavailable: {err}"));
+                let msg = format!("markdown preview unavailable: {err}");
+                self.markdown_preview_error = Some(msg.clone());
+                self.object_cache
+                    .upsert(entry_id, snapshot_bytes_to_cache, Some(Err(msg)));
             }
         }
     }

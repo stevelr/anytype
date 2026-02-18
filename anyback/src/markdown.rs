@@ -631,7 +631,8 @@ fn struct_field_as_string(details: &Struct, key: &str) -> Option<String> {
     }
 }
 
-fn build_archive_object_index(
+/// Build a lightweight archive-wide object metadata index used for markdown link rendering.
+pub fn build_archive_object_index(
     reader: &ArchiveReader,
 ) -> Result<HashMap<String, ArchiveObjectInfo>> {
     let mut out = HashMap::new();
@@ -681,6 +682,36 @@ fn find_snapshot_path(reader: &ArchiveReader, object_id: &str) -> Option<String>
             None
         }
     })
+}
+
+/// Convert a snapshot file (`objects/<id>.pb` or `objects/<id>.pb.json`) to markdown text,
+/// using a prebuilt object index for link/name resolution.
+pub fn convert_archive_snapshot_to_markdown(
+    reader: &ArchiveReader,
+    snapshot_path: &str,
+    object_index: &HashMap<String, ArchiveObjectInfo>,
+) -> Result<String> {
+    let snapshot_bytes = reader
+        .read_bytes(snapshot_path)
+        .with_context(|| format!("failed reading snapshot from archive: {snapshot_path}"))?;
+    convert_snapshot_bytes_to_markdown(snapshot_path, &snapshot_bytes, object_index)
+}
+
+/// Convert raw snapshot bytes (`*.pb`/`*.pb.json`) to markdown using a prebuilt object index.
+pub fn convert_snapshot_bytes_to_markdown(
+    snapshot_path: &str,
+    snapshot_bytes: &[u8],
+    object_index: &HashMap<String, ArchiveObjectInfo>,
+) -> Result<String> {
+    let lower = snapshot_path.to_ascii_lowercase();
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    if lower.ends_with(".pb") {
+        return convert_pb_snapshot_to_markdown(&snapshot_bytes, object_index);
+    }
+    if lower.ends_with(".pb.json") {
+        return convert_pb_json_snapshot_to_markdown(&snapshot_bytes, object_index);
+    }
+    bail!("unsupported snapshot format: {snapshot_path}")
 }
 
 fn parse_snapshot_details_to_map(path: &str, bytes: &[u8]) -> Result<HashMap<String, String>> {
@@ -851,19 +882,8 @@ pub fn convert_archive_object_to_markdown(archive_path: &Path, object_id: &str) 
     let reader = ArchiveReader::from_path(archive_path)?;
     let snapshot_path = find_snapshot_path(&reader, object_id)
         .ok_or_else(|| anyhow!("snapshot not found in archive for object: {object_id}"))?;
-    let snapshot_bytes = reader
-        .read_bytes(&snapshot_path)
-        .with_context(|| format!("failed reading snapshot from archive: {snapshot_path}"))?;
     let object_index = build_archive_object_index(&reader)?;
-    let lower = snapshot_path.to_ascii_lowercase();
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
-    if lower.ends_with(".pb") {
-        return convert_pb_snapshot_to_markdown(&snapshot_bytes, &object_index);
-    }
-    if lower.ends_with(".pb.json") {
-        return convert_pb_json_snapshot_to_markdown(&snapshot_bytes, &object_index);
-    }
-    bail!("unsupported snapshot format: {snapshot_path}")
+    convert_archive_snapshot_to_markdown(&reader, &snapshot_path, &object_index)
 }
 
 pub fn save_archive_object(
