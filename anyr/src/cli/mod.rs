@@ -181,6 +181,17 @@ pub enum AuthCommands {
         /// Provide gRPC session token via stdin
         #[arg(long)]
         token: bool,
+
+        /// Derive gRPC credentials from BIP39 mnemonic (12 words via stdin)
+        #[arg(long)]
+        bip39: bool,
+    },
+
+    /// Discover Anytype gRPC listening port
+    FindGrpc {
+        /// Program name prefix to match in lsof (default: "anytype")
+        #[arg(long, default_value = "anytype")]
+        program: String,
     },
 }
 
@@ -1293,6 +1304,15 @@ pub struct AppContext {
 
 pub async fn run(cli: Cli) -> Result<()> {
     let output = Output::new(resolve_output_format(&cli), cli.output.clone());
+
+    // Handle commands that don't need a client or keystore
+    if let Commands::Auth(AuthArgs {
+        command: AuthCommands::FindGrpc { ref program },
+    }) = cli.command
+    {
+        return auth::find_grpc_cmd(&output, program).await;
+    }
+
     let date_format = resolve_table_date_format(&cli);
 
     let client = build_client(&cli)?;

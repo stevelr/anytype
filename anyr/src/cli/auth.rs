@@ -16,7 +16,9 @@ pub async fn handle(ctx: &AppContext, args: super::AuthArgs) -> Result<()> {
             config,
             account_key,
             token,
-        } => set_grpc(ctx, config, account_key, token),
+            bip39,
+        } => set_grpc(ctx, config, account_key, token, bip39),
+        super::AuthCommands::FindGrpc { .. } => unreachable!("handled before client init"),
     }
 }
 
@@ -121,13 +123,14 @@ fn set_grpc(
     config: Option<std::path::PathBuf>,
     account_key: bool,
     token: bool,
+    bip39: bool,
 ) -> Result<()> {
-    let options = [token, config.is_some(), account_key]
+    let options = [token, config.is_some(), account_key, bip39]
         .into_iter()
         .filter(|enabled| *enabled)
         .count();
     if options > 1 {
-        anyhow::bail!("--token, --config, and --account-key are mutually exclusive");
+        anyhow::bail!("--token, --config, --account-key, and --bip39 are mutually exclusive");
     }
     let creds = if token {
         print!("Enter gRPC session token: ");
@@ -149,9 +152,20 @@ fn set_grpc(
             anyhow::bail!("gRPC account key is empty");
         }
         GrpcCredentials::from_account_key(account_key.to_string())
+    } else if bip39 {
+        print!("Enter BIP39 mnemonic: ");
+        io::stdout().flush()?;
+        let mut mnemonic = String::new();
+        io::stdin().read_line(&mut mnemonic)?;
+        let mnemonic = mnemonic.trim();
+        if mnemonic.is_empty() {
+            anyhow::bail!("BIP39 mnemonic is empty");
+        }
+        let (account_key, account_id) = crate::crypto::derive_keys_from_mnemonic(mnemonic)?;
+        GrpcCredentials::from_account_key(account_key).with_account_id(account_id)
     } else {
         let path = config.ok_or_else(|| {
-            anyhow::anyhow!("--config PATH, --account-key, or --token is required")
+            anyhow::anyhow!("--config PATH, --account-key, --bip39, or --token is required")
         })?;
         let contents = std::fs::read_to_string(&path)?;
         let cfg: HeadlessConfig = serde_json::from_str(&contents)?;
@@ -175,4 +189,16 @@ fn set_grpc(
     }
     let response = serde_json::json!({ "grpc_credentials": "updated" });
     ctx.output.emit_json(&response)
+}
+
+pub async fn find_grpc_cmd(output: &crate::output::Output, program: &str) -> Result<()> {
+    match anytype::client::find_grpc(Some(program)).await {
+        Some(port) => {
+            if output.format() == OutputFormat::Quiet {
+                return Ok(());
+            }
+            output.emit_json(&serde_json::json!({ "port": port }))
+        }
+        None => anyhow::bail!("No gRPC listener found"),
+    }
 }

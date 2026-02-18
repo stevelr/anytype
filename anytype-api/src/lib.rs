@@ -242,6 +242,7 @@ pub mod prelude {
             MessageAttachment, MessageAttachmentType, MessageContent, MessageReaction,
             MessageTextMark, MessageTextMarkType, MessageTextRange, MessageTextStyle,
         },
+        client::find_grpc,
         files::{FileObject, FileStyle, FileType, FilesClient},
         keystore::GrpcCredentials,
         process_watcher::{
