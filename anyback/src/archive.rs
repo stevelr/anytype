@@ -3,6 +3,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -30,10 +31,26 @@ impl ArchiveSourceKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ArchiveReader {
     root: PathBuf,
     source: ArchiveSourceKind,
+    zip: Option<ZipReaderState>,
+}
+
+#[derive(Clone)]
+struct ZipReaderState {
+    archive: Arc<Mutex<ZipArchive<fs::File>>>,
+    files: Arc<Vec<ArchiveFileEntry>>,
+}
+
+impl std::fmt::Debug for ArchiveReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArchiveReader")
+            .field("root", &self.root)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ArchiveReader {
@@ -42,15 +59,32 @@ impl ArchiveReader {
             return Ok(Self {
                 root: path.to_path_buf(),
                 source: ArchiveSourceKind::Directory,
+                zip: None,
             });
         }
         if path.is_file() {
             let file = fs::File::open(path)
                 .with_context(|| format!("failed to open archive file {}", path.display()))?;
-            if ZipArchive::new(file).is_ok() {
+            if let Ok(mut zip) = ZipArchive::new(file) {
+                let mut files = Vec::new();
+                for idx in 0..zip.len() {
+                    let entry = zip.by_index(idx)?;
+                    if entry.is_dir() {
+                        continue;
+                    }
+                    files.push(ArchiveFileEntry {
+                        path: entry.name().to_string(),
+                        bytes: entry.size(),
+                    });
+                }
+                files.sort_by(|a, b| a.path.cmp(&b.path));
                 return Ok(Self {
                     root: path.to_path_buf(),
                     source: ArchiveSourceKind::Zip,
+                    zip: Some(ZipReaderState {
+                        archive: Arc::new(Mutex::new(zip)),
+                        files: Arc::new(files),
+                    }),
                 });
             }
         }
@@ -65,9 +99,9 @@ impl ArchiveReader {
     }
 
     pub fn list_files(&self) -> Result<Vec<ArchiveFileEntry>> {
-        let mut entries = Vec::new();
         match self.source {
             ArchiveSourceKind::Directory => {
+                let mut entries = Vec::new();
                 let mut stack = vec![self.root.clone()];
                 while let Some(dir) = stack.pop() {
                     for entry in fs::read_dir(&dir)? {
@@ -87,26 +121,14 @@ impl ArchiveReader {
                         });
                     }
                 }
+                entries.sort_by(|a, b| a.path.cmp(&b.path));
+                Ok(entries)
             }
             ArchiveSourceKind::Zip => {
-                let file = fs::File::open(&self.root)?;
-                let mut zip = ZipArchive::new(file).with_context(|| {
-                    format!("failed to open zip archive {}", self.root.display())
-                })?;
-                for idx in 0..zip.len() {
-                    let entry = zip.by_index(idx)?;
-                    if entry.is_dir() {
-                        continue;
-                    }
-                    entries.push(ArchiveFileEntry {
-                        path: entry.name().to_string(),
-                        bytes: entry.size(),
-                    });
-                }
+                let state = self.zip_state()?;
+                Ok(state.files.as_ref().clone())
             }
         }
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(entries)
     }
 
     pub fn read_bytes(&self, rel_path: &str) -> Result<Vec<u8>> {
@@ -117,8 +139,11 @@ impl ArchiveReader {
                     .with_context(|| format!("failed to read archive file {}", path.display()))
             }
             ArchiveSourceKind::Zip => {
-                let file = fs::File::open(&self.root)?;
-                let mut zip = ZipArchive::new(file)?;
+                let state = self.zip_state()?;
+                let mut zip = state
+                    .archive
+                    .lock()
+                    .map_err(|_| anyhow!("zip archive lock poisoned"))?;
                 let mut entry = zip
                     .by_name(rel_path)
                     .with_context(|| format!("archive entry not found in zip: {rel_path}"))?;
@@ -141,8 +166,11 @@ impl ArchiveReader {
                 Ok(Some(bytes))
             }
             ArchiveSourceKind::Zip => {
-                let file = fs::File::open(&self.root)?;
-                let mut zip = ZipArchive::new(file)?;
+                let state = self.zip_state()?;
+                let mut zip = state
+                    .archive
+                    .lock()
+                    .map_err(|_| anyhow!("zip archive lock poisoned"))?;
                 let Ok(mut entry) = zip.by_name(rel_path) else {
                     return Ok(None);
                 };
@@ -151,6 +179,12 @@ impl ArchiveReader {
                 Ok(Some(out))
             }
         }
+    }
+
+    fn zip_state(&self) -> Result<&ZipReaderState> {
+        self.zip
+            .as_ref()
+            .ok_or_else(|| anyhow!("zip archive state unavailable"))
     }
 }
 

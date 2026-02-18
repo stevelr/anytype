@@ -228,6 +228,10 @@ pub enum AuthCommands {
 pub struct InspectorArgs {
     /// Archive path (directory or .zip)
     pub archive: PathBuf,
+
+    /// Maximum inspector cache size (default unit: MiB). Examples: 200, 512k, 64mb, 1g
+    #[arg(long = "max-cache", value_name = "SIZE", default_value = "200", value_parser = parse_cache_size)]
+    pub max_cache: usize,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -603,7 +607,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Manifest(args) => return handle_manifest(cli.json, args),
         Commands::Diff(args) => return handle_diff(cli.json, args),
         Commands::Extract(args) => return handle_extract(cli.json, args),
-        Commands::Inspect(args) => return inspector::run_inspector(&args.archive),
+        Commands::Inspect(args) => return inspector::run_inspector(&args.archive, args.max_cache),
         _ => {}
     }
 
@@ -1292,6 +1296,33 @@ fn parse_timeout_env_secs(name: &str, default: Duration) -> Result<Duration> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(err) => Err(anyhow!("failed to read {name}: {err}")),
     }
+}
+
+fn parse_cache_size(raw: &str) -> Result<usize> {
+    let input = raw.trim();
+    ensure!(!input.is_empty(), "cache size must not be empty");
+
+    let split = input
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(input.len());
+    let (digits, unit_raw) = input.split_at(split);
+    ensure!(!digits.is_empty(), "cache size must start with a number");
+    let value = digits.parse::<u64>()?;
+    ensure!(value > 0, "cache size must be > 0");
+    let unit = unit_raw.trim().to_ascii_lowercase();
+
+    let multiplier = match unit.as_str() {
+        "" => 1024_u64 * 1024_u64,
+        "k" | "kb" => 1024_u64,
+        "m" | "mb" => 1024_u64 * 1024_u64,
+        "g" | "gb" => 1024_u64 * 1024_u64 * 1024_u64,
+        _ => bail!("unsupported cache size unit: {unit_raw}"),
+    };
+
+    let bytes = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow!("cache size is too large"))?;
+    usize::try_from(bytes).context("cache size exceeds platform limits")
 }
 
 fn import_event_timeouts_from_env() -> Result<ProcessWatcherTimeouts> {
@@ -2876,6 +2907,18 @@ mod tests {
         let cli = Cli::try_parse_from(["anyback", "inspect", "archive-dir"]).unwrap();
         if let Commands::Inspect(args) = cli.command {
             assert_eq!(args.archive, PathBuf::from("archive-dir"));
+            assert_eq!(args.max_cache, 200 * 1024 * 1024);
+        } else {
+            panic!("expected inspect command");
+        }
+    }
+
+    #[test]
+    fn parse_inspect_command_with_max_cache_units() {
+        let cli = Cli::try_parse_from(["anyback", "inspect", "--max-cache", "512k", "archive-dir"])
+            .unwrap();
+        if let Commands::Inspect(args) = cli.command {
+            assert_eq!(args.max_cache, 512 * 1024);
         } else {
             panic!("expected inspect command");
         }
@@ -3401,6 +3444,32 @@ mod tests {
         unsafe { std::env::set_var(key, "0") };
         let err = parse_timeout_env_secs(key, Duration::from_secs(5)).unwrap_err();
         unsafe { std::env::remove_var(key) };
+        assert!(err.to_string().contains("must be > 0"));
+    }
+
+    #[test]
+    fn parse_cache_size_defaults_to_mib() {
+        assert_eq!(parse_cache_size("200").unwrap(), 200 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_cache_size_accepts_units_case_insensitive() {
+        assert_eq!(parse_cache_size("1k").unwrap(), 1024);
+        assert_eq!(parse_cache_size("2KB").unwrap(), 2 * 1024);
+        assert_eq!(parse_cache_size("3m").unwrap(), 3 * 1024 * 1024);
+        assert_eq!(parse_cache_size("4Mb").unwrap(), 4 * 1024 * 1024);
+        assert_eq!(parse_cache_size("1G").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_cache_size_rejects_invalid_unit() {
+        let err = parse_cache_size("10tb").unwrap_err();
+        assert!(err.to_string().contains("unsupported cache size unit"));
+    }
+
+    #[test]
+    fn parse_cache_size_rejects_zero() {
+        let err = parse_cache_size("0").unwrap_err();
         assert!(err.to_string().contains("must be > 0"));
     }
 

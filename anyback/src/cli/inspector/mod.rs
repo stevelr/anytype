@@ -7,6 +7,6 @@ use std::path::Path;
 
 use anyhow::Result;
 
-pub fn run_inspector(path: &Path) -> Result<()> {
-    app::App::run(path)
+pub fn run_inspector(path: &Path, max_cache_bytes: usize) -> Result<()> {
+    app::App::run(path, max_cache_bytes)
 }

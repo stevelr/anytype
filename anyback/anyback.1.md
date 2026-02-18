@@ -24,7 +24,7 @@ anyback - backup and restore Anytype spaces and objects
 
 `anyback extract ARCHIVE ID OUTPUT`
 
-`anyback inspect ARCHIVE`
+`anyback inspect ARCHIVE [--max-cache SIZE]`
 
 `anyback auth <SUBCOMMAND>`
 
@@ -48,6 +48,7 @@ anyback - backup and restore Anytype spaces and objects
 - `inspect` launches an interactive TUI to browse the archive:
   - preview renders markdown from protobuf snapshots (including tables).
   - save-as (`w`) writes markdown or raw bytes.
+  - `--max-cache SIZE` sets inspector preview cache budget (default `200 MiB`).
 
 ## GLOBAL OPTIONS
 
