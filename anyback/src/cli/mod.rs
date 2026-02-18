@@ -1312,9 +1312,8 @@ fn parse_cache_size(raw: &str) -> Result<usize> {
     let unit = unit_raw.trim().to_ascii_lowercase();
 
     let multiplier = match unit.as_str() {
-        "" => 1024_u64 * 1024_u64,
+        "" | "m" | "mb" => 1024_u64 * 1024_u64,
         "k" | "kb" => 1024_u64,
-        "m" | "mb" => 1024_u64 * 1024_u64,
         "g" | "gb" => 1024_u64 * 1024_u64 * 1024_u64,
         _ => bail!("unsupported cache size unit: {unit_raw}"),
     };

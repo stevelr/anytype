@@ -44,6 +44,11 @@ const HELP_TEXT: &[(&str, &str)] = &[
     ("/", "Search by title"),
     ("f", "Filter by type"),
     ("w", "Save selected object"),
+    ("Ctrl-e", "Open selected object in $EDITOR"),
+    ("Ctrl-o", "Open selected object in Anytype"),
+    ("Ctrl-c", "Copy selected object id"),
+    ("Ctrl-d / Ctrl-u", "Half-page down / up"),
+    ("Ctrl-a/e/k", "In input: start/end/kill-to-eol"),
     ("Esc", "Clear filters / dismiss"),
     ("Enter", "Apply input / follow link"),
     ("b", "Back to previous object"),
@@ -179,6 +184,7 @@ fn draw_contents_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             ])
         })
         .collect();
+    app.contents_visible_rows = area.height.saturating_sub(3).max(1);
 
     let widths = [
         Constraint::Length(7),
@@ -304,21 +310,20 @@ fn draw_properties_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         || vec![Line::from("  No object selected")],
         |entry| {
             if entry.properties.is_empty() {
-                vec![Line::from("  (no scalar properties)")]
+                vec![Line::from("  (no user properties)")]
             } else {
                 entry
                     .properties
                     .iter()
                     .map(|(key, value)| {
-                        Line::from(vec![
-                            Span::styled(
-                                format!("  {key}: "),
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(value.clone()),
-                        ])
+                        let mut spans = vec![Span::styled(
+                            format!("  {key}: "),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )];
+                        spans.extend(property_value_spans(value));
+                        Line::from(spans)
                     })
                     .collect()
             }
@@ -430,6 +435,7 @@ fn draw_links_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             ])
         })
         .collect();
+    app.links_visible_rows = area.height.saturating_sub(3).max(1);
 
     let table = Table::new(
         rows,
@@ -499,6 +505,48 @@ fn markdown_line_style(line: &str) -> Style {
     Style::default()
 }
 
+fn property_value_spans(value: &str) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < value.len() {
+        let Some(rel_open) = value[cursor..].find('(') else {
+            break;
+        };
+        let open = cursor + rel_open;
+        let Some(rel_close) = value[open..].find(')') else {
+            break;
+        };
+        let close = open + rel_close;
+        let id_candidate = value[open + 1..close].trim();
+        if looks_like_object_id(id_candidate) {
+            if open > cursor {
+                spans.push(Span::raw(value[cursor..open].to_string()));
+            }
+            spans.push(Span::styled(
+                value[open..=close].to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            cursor = close + 1;
+        } else {
+            cursor = open + 1;
+        }
+    }
+
+    if cursor < value.len() {
+        spans.push(Span::raw(value[cursor..].to_string()));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::raw(value.to_string()));
+    }
+    spans
+}
+
+fn looks_like_object_id(value: &str) -> bool {
+    value.starts_with("baf") && value.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let (text, prefix_len) = match app.input_mode {
         InputMode::Search => {
@@ -514,7 +562,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             (format!("{prefix}{}", app.input_buffer), prefix.len())
         }
         InputMode::None => {
-            let t = app.status_message.as_ref().map_or_else(|| " j/k:move  Tab:panel  /:search  f:filter  w:save-as  Enter:follow  b:back  s/S:sort  ?:help  q:quit"
+            let t = app.status_message.as_ref().map_or_else(|| " j/k:move  Ctrl-d/u:half-page  Tab:panel  /:search  f:filter  w:save-as  Ctrl-e:editor  Ctrl-o:anytype  Ctrl-c:copy-id  Enter:follow  b:back  s/S:sort  ?:help  q:quit"
                     .to_string(), std::clone::Clone::clone);
             (t, 0)
         }
@@ -681,5 +729,16 @@ mod tests {
         assert!(screen.contains("Search title: alpha"));
         assert!(screen.contains("Keybindings"));
         assert!(screen.contains("Search by title"));
+    }
+
+    #[test]
+    fn property_value_spans_downtones_object_id_suffix() {
+        let id = "bafyreixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let spans = property_value_spans(&format!("Open ({id}), Next"));
+        let rendered: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered, format!("Open ({id}), Next"));
+        assert!(spans.iter().any(
+            |s| s.content.as_ref() == format!("({id})") && s.style.fg == Some(Color::DarkGray)
+        ));
     }
 }

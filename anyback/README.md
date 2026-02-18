@@ -1,10 +1,14 @@
 # anyback
 
+[![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&include_prereleases&filter=anyback-v*&label=release)](https://github.com/stevelr/anytype/releases?q=anyback-v&expanded=true)
+[![docs.rs](https://img.shields.io/docsrs/anyback?label=docs.rs)](https://docs.rs/anyback)
+[![crates.io](https://img.shields.io/crates/v/anyback.svg)](https://crates.io/crates/anyback)
+
 `anyback` is a command-line tool for backing up and restoring Anytype spaces.
 
 See `anyback.1.md` for detailed CLI documentation.
 
-**0.3.0 - Alpha**
+**Alpha Release**
 
 - This is an alpha version - Testing is still in progress. If you're adventurous, please give it a try. File any issues on github.
 

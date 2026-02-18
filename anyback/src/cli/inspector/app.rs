@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyback_reader::archive::ArchiveReader;
 use anyback_reader::markdown::{
@@ -10,6 +12,7 @@ use anyback_reader::markdown::{
     convert_snapshot_bytes_to_markdown, save_archive_object,
 };
 use anyhow::{Result, anyhow};
+use chrono::{DateTime, SecondsFormat, Utc};
 use crossterm::{
     event::{self, Event},
     execute,
@@ -18,10 +21,12 @@ use crossterm::{
 use lru::LruCache;
 use ratatui::{Terminal, backend::CrosstermBackend, widgets::TableState};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
+use serde_json::Value;
 
 use super::index::{ArchiveIndex, ObjectEntry, SortState};
 use super::keys::{KeyAction, map_key_with_input_mode};
 use super::ui;
+use crate::cli::decode::{parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelFocus {
@@ -50,6 +55,14 @@ pub struct LinkRow {
 const DEFAULT_MAX_CACHE_BYTES: usize = 200 * 1024 * 1024;
 const CACHE_LOW_WATERMARK_PCT: usize = 90;
 const MIN_CACHE_ENTRY_BYTES: usize = 256 * 1024;
+
+fn is_non_markdown_layout(layout_name: &str) -> bool {
+    layout_name.eq_ignore_ascii_case("image")
+        || layout_name.eq_ignore_ascii_case("file")
+        || layout_name.eq_ignore_ascii_case("audio")
+        || layout_name.eq_ignore_ascii_case("video")
+        || layout_name.eq_ignore_ascii_case("pdf")
+}
 
 #[derive(Debug, Clone, Default)]
 struct CachedObject {
@@ -179,13 +192,17 @@ pub struct App {
     pub markdown_preview_error: Option<String>,
     pub last_save_dir: Option<PathBuf>,
     pub status_message: Option<String>,
+    pending_open_editor: bool,
     // (content_lines, viewport_height) set during rendering for scroll clamping.
     pub preview_scroll_limit: (u16, u16),
     pub properties_scroll_limit: (u16, u16),
     pub meta_scroll_limit: (u16, u16),
+    pub contents_visible_rows: u16,
+    pub links_visible_rows: u16,
 }
 
 impl App {
+    #[allow(dead_code)]
     pub fn new(index: ArchiveIndex) -> Self {
         Self::with_resources(index, None, None, DEFAULT_MAX_CACHE_BYTES)
     }
@@ -231,9 +248,12 @@ impl App {
             markdown_preview_error: None,
             last_save_dir: None,
             status_message: None,
+            pending_open_editor: false,
             preview_scroll_limit: (0, 0),
             properties_scroll_limit: (0, 0),
             meta_scroll_limit: (0, 0),
+            contents_visible_rows: 0,
+            links_visible_rows: 0,
         };
 
         app.apply_filters(None);
@@ -289,6 +309,12 @@ impl App {
             {
                 let action = map_key_with_input_mode(key, self.input_mode != InputMode::None);
                 self.handle_action(action);
+                if self.pending_open_editor {
+                    self.pending_open_editor = false;
+                    if let Err(err) = self.open_current_in_editor(terminal) {
+                        self.status_message = Some(format!("open editor failed: {err}"));
+                    }
+                }
             }
 
             if self.should_quit {
@@ -297,6 +323,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_action(&mut self, action: KeyAction) {
         if self.input_mode != InputMode::None {
             self.handle_input_action(action);
@@ -319,6 +346,8 @@ impl App {
 
         match action {
             KeyAction::Quit => self.should_quit = true,
+            KeyAction::CopyObjectId => self.copy_current_object_id(),
+            KeyAction::OpenInAnytype => self.open_current_in_anytype(),
             KeyAction::ToggleHelp => self.show_help = true,
             KeyAction::StartSearch => {
                 self.input_mode = InputMode::Search;
@@ -333,6 +362,9 @@ impl App {
             KeyAction::StartSaveAs => {
                 self.begin_save_as();
             }
+            KeyAction::OpenInEditor => {
+                self.pending_open_editor = true;
+            }
             KeyAction::Dismiss => {
                 if !self.search_query.is_empty() || self.type_filter.is_some() {
                     self.search_query.clear();
@@ -346,7 +378,10 @@ impl App {
             | KeyAction::InputChar(_)
             | KeyAction::Backspace
             | KeyAction::CursorLeft
-            | KeyAction::CursorRight => {}
+            | KeyAction::CursorRight
+            | KeyAction::CursorStart
+            | KeyAction::CursorEnd
+            | KeyAction::KillToEnd => {}
             KeyAction::NextPanel => {
                 self.focus = match self.focus {
                     PanelFocus::Contents => PanelFocus::Links,
@@ -380,6 +415,8 @@ impl App {
             }
             KeyAction::MoveDown => self.handle_scroll_down(1),
             KeyAction::MoveUp => self.handle_scroll_up(1),
+            KeyAction::HalfPageDown => self.handle_scroll_down(self.half_page_amount()),
+            KeyAction::HalfPageUp => self.handle_scroll_up(self.half_page_amount()),
             KeyAction::PageDown => self.handle_scroll_down(20),
             KeyAction::PageUp => self.handle_scroll_up(20),
             KeyAction::JumpFirst => self.handle_jump_first(),
@@ -437,6 +474,15 @@ impl App {
                         .next()
                         .map_or(0, char::len_utf8);
                 }
+            }
+            KeyAction::CursorStart => {
+                self.input_cursor = 0;
+            }
+            KeyAction::CursorEnd => {
+                self.input_cursor = self.input_buffer.len();
+            }
+            KeyAction::KillToEnd => {
+                self.input_buffer.truncate(self.input_cursor);
             }
             KeyAction::FollowLink => {
                 let value = self.input_buffer.trim().to_string();
@@ -596,6 +642,59 @@ impl App {
             }
             PanelFocus::Metadata => {
                 self.meta_scroll = self.meta_scroll.saturating_add(100);
+            }
+        }
+    }
+
+    fn half_page_amount(&self) -> usize {
+        let viewport = match self.focus {
+            PanelFocus::Contents => self.contents_visible_rows,
+            PanelFocus::Links => self.links_visible_rows,
+            PanelFocus::Preview => self.preview_scroll_limit.1,
+            PanelFocus::Properties => self.properties_scroll_limit.1,
+            PanelFocus::Metadata => self.meta_scroll_limit.1,
+        };
+        usize::from((viewport / 2).max(1))
+    }
+
+    fn copy_current_object_id(&mut self) {
+        let Some(entry) = self.current_entry() else {
+            self.status_message = Some("no object selected".to_string());
+            return;
+        };
+        let id = entry.id.clone();
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(id.clone()) {
+                Ok(()) => {
+                    self.status_message = Some(format!("copied object id: {id}"));
+                }
+                Err(err) => {
+                    self.status_message = Some(format!("copy failed: {err}"));
+                }
+            },
+            Err(err) => {
+                self.status_message = Some(format!("copy failed: {err}"));
+            }
+        }
+    }
+
+    fn open_current_in_anytype(&mut self) {
+        let Some(entry) = self.current_entry() else {
+            self.status_message = Some("no object selected".to_string());
+            return;
+        };
+        let object_id = entry.id.clone();
+        let Some(space_id) = self.resolve_space_id() else {
+            self.status_message = Some("open failed: could not resolve space id".to_string());
+            return;
+        };
+        let url = format!("anytype://object?objectId={object_id}&spaceId={space_id}");
+        match open_url(&url) {
+            Ok(()) => {
+                self.status_message = Some(format!("opened in Anytype: {object_id}"));
+            }
+            Err(err) => {
+                self.status_message = Some(format!("open failed: {err}"));
             }
         }
     }
@@ -834,12 +933,7 @@ impl App {
             self.markdown_preview_error = None;
             return;
         };
-        if layout_name.eq_ignore_ascii_case("image")
-            || layout_name.eq_ignore_ascii_case("file")
-            || layout_name.eq_ignore_ascii_case("audio")
-            || layout_name.eq_ignore_ascii_case("video")
-            || layout_name.eq_ignore_ascii_case("pdf")
-        {
+        if is_non_markdown_layout(&layout_name) {
             self.markdown_preview = None;
             self.markdown_preview_key = None;
             self.markdown_preview_error = None;
@@ -924,12 +1018,7 @@ impl App {
             .clone()
             .or_else(|| env::current_dir().ok());
         let mut suggested = sanitize_save_name(&entry.name);
-        if entry.layout_name.eq_ignore_ascii_case("image")
-            || entry.layout_name.eq_ignore_ascii_case("file")
-            || entry.layout_name.eq_ignore_ascii_case("audio")
-            || entry.layout_name.eq_ignore_ascii_case("video")
-            || entry.layout_name.eq_ignore_ascii_case("pdf")
-        {
+        if is_non_markdown_layout(&entry.layout_name) {
             let ext = Path::new(&entry.name)
                 .extension()
                 .and_then(|v| v.to_str())
@@ -956,8 +1045,15 @@ impl App {
             self.status_message = Some("no object selected".to_string());
             return;
         };
+        let object_id = entry.id.clone();
+        let layout_name = entry.layout_name.clone();
         let path = PathBuf::from(value);
-        let result = save_archive_object(Path::new(&self.index.archive_path), &entry.id, &path);
+        let result = if is_non_markdown_layout(&layout_name) {
+            save_archive_object(Path::new(&self.index.archive_path), &object_id, &path)
+        } else {
+            self.write_current_markdown_to_path(&path)
+                .map(|()| SavedObjectKind::Markdown)
+        };
         match result {
             Ok(kind) => {
                 if let Some(parent) = path.parent() {
@@ -973,6 +1069,399 @@ impl App {
                 self.status_message = Some(format!("save failed: {err}"));
             }
         }
+    }
+
+    fn open_current_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<()> {
+        let Some(entry) = self.current_entry() else {
+            return Err(anyhow!("no object selected"));
+        };
+        if is_non_markdown_layout(&entry.layout_name) {
+            return Err(anyhow!(
+                "selected object is a binary/file layout; editor open supports markdown objects only"
+            ));
+        }
+        let object_id = entry.id.clone();
+        let path = env::temp_dir().join(format!("{object_id}.md"));
+        self.write_current_markdown_to_path(&path)?;
+
+        let editor = env::var("EDITOR").map_err(|_| anyhow!("$EDITOR is not set"))?;
+
+        disable_raw_mode().map_err(|err| anyhow!("failed to disable raw mode: {err}"))?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)
+            .map_err(|err| anyhow!("failed to leave alternate screen: {err}"))?;
+
+        let open_result = run_editor_command(&editor, &path);
+
+        let restore_screen = execute!(terminal.backend_mut(), EnterAlternateScreen);
+        let restore_raw = enable_raw_mode();
+        if let Err(err) = restore_screen {
+            return Err(anyhow!("failed to restore alternate screen: {err}"));
+        }
+        if let Err(err) = restore_raw {
+            return Err(anyhow!("failed to re-enable raw mode: {err}"));
+        }
+        terminal
+            .clear()
+            .map_err(|err| anyhow!("failed to clear terminal after editor exit: {err}"))?;
+
+        open_result?;
+        self.status_message = Some(format!("edited: {}", path.display()));
+        Ok(())
+    }
+
+    fn write_current_markdown_to_path(&self, dest: &Path) -> Result<()> {
+        let Some(entry) = self.current_entry() else {
+            return Err(anyhow!("no object selected"));
+        };
+        if is_non_markdown_layout(&entry.layout_name) {
+            return Err(anyhow!("selected object cannot be exported as markdown"));
+        }
+        let object_id = entry.id.clone();
+        let object_name = entry.name.clone();
+        let object_type = entry.type_display.clone();
+        let object_properties = entry.properties.clone();
+        let snapshot_path = entry.path.clone();
+        let name_by_id: HashMap<String, String> = self
+            .index
+            .entries
+            .iter()
+            .filter_map(|item| {
+                let name = item.name.trim();
+                (!name.is_empty()).then(|| (item.id.clone(), name.to_string()))
+            })
+            .collect();
+
+        let reader = self
+            .archive_reader
+            .as_ref()
+            .ok_or_else(|| anyhow!("archive reader not initialized"))?;
+        let snapshot_bytes = reader
+            .read_bytes(&snapshot_path)
+            .map_err(|err| anyhow!("failed reading snapshot from archive: {err}"))?;
+        let details = parse_snapshot_details_map(&snapshot_path, &snapshot_bytes)?;
+        let markdown = if let Some(object_index) = self.markdown_index.as_ref() {
+            convert_snapshot_bytes_to_markdown(&snapshot_path, &snapshot_bytes, object_index)?
+        } else {
+            let object_index = build_archive_object_index(reader)?;
+            convert_snapshot_bytes_to_markdown(&snapshot_path, &snapshot_bytes, &object_index)?
+        };
+
+        let front_matter = build_yaml_front_matter(
+            &object_id,
+            &object_name,
+            &object_type,
+            self.index
+                .manifest
+                .as_ref()
+                .map(|manifest| manifest.source_space_id.as_str()),
+            &details,
+            &name_by_id,
+            &object_properties,
+        );
+        let output = format!("{front_matter}\n{markdown}");
+
+        fs::write(dest, output)
+            .map_err(|err| anyhow!("failed writing markdown to {}: {err}", dest.display()))?;
+        Ok(())
+    }
+
+    fn resolve_space_id(&self) -> Option<String> {
+        if let Some(manifest) = self.index.manifest.as_ref() {
+            let space_id = manifest.source_space_id.trim();
+            if !space_id.is_empty() {
+                return Some(space_id.to_string());
+            }
+        }
+
+        if let Some(entry) = self.current_entry()
+            && let Some(reader) = self.archive_reader.as_ref()
+            && let Ok(bytes) = reader.read_bytes(&entry.path)
+            && let Ok(details) = parse_snapshot_details_map(&entry.path, &bytes)
+        {
+            let empty_index: HashMap<String, String> = HashMap::new();
+            if let Some(space_id) =
+                detail_string(&details, &["spaceId", "spaceID", "space_id"], &empty_index)
+            {
+                let trimmed = space_id.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+
+        extract_space_id_from_archive_name(Path::new(&self.index.archive_path))
+    }
+}
+
+fn run_editor_command(editor: &str, file_path: &Path) -> Result<()> {
+    let quoted_path = shell_quote_path(file_path);
+    let cmdline = format!("{editor} {quoted_path}");
+    #[cfg(windows)]
+    let status = Command::new("cmd")
+        .args(["/C", &cmdline])
+        .status()
+        .map_err(|err| anyhow!("failed to launch editor via cmd: {err}"))?;
+    #[cfg(not(windows))]
+    let status = Command::new("sh")
+        .args(["-c", &cmdline])
+        .status()
+        .map_err(|err| anyhow!("failed to launch editor via sh: {err}"))?;
+
+    if !status.success() {
+        return Err(anyhow!("editor exited with status {status}"));
+    }
+    Ok(())
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        cmd
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        cmd
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        cmd
+    };
+
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|err| anyhow!("failed to launch url opener: {err}"))?;
+    if !status.success() {
+        return Err(anyhow!("url opener exited with status {status}"));
+    }
+    Ok(())
+}
+
+fn extract_space_id_from_archive_name(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    for token in file_name.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if looks_like_object_id(token) {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn shell_quote_path(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('"', "\"\"");
+    format!("\"{text}\"")
+}
+
+#[cfg(not(windows))]
+fn shell_quote_path(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\'', "'\"'\"'");
+    format!("'{text}'")
+}
+
+fn parse_snapshot_details_map(
+    snapshot_path: &str,
+    snapshot_bytes: &[u8],
+) -> Result<serde_json::Map<String, Value>> {
+    let lower = snapshot_path.to_ascii_lowercase();
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    if lower.ends_with(".pb.json") {
+        return parse_snapshot_details_from_pb_json(snapshot_bytes).map(|(_, details)| details);
+    }
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    if lower.ends_with(".pb") {
+        return parse_snapshot_details_from_pb(snapshot_bytes).map(|(_, details)| details);
+    }
+    Err(anyhow!("unsupported snapshot format: {snapshot_path}"))
+}
+
+fn build_yaml_front_matter(
+    object_id: &str,
+    object_name: &str,
+    object_type: &str,
+    default_space_id: Option<&str>,
+    details: &serde_json::Map<String, Value>,
+    name_by_id: &HashMap<String, String>,
+    properties: &[(String, String)],
+) -> String {
+    let name =
+        detail_string(details, &["name"], name_by_id).unwrap_or_else(|| object_name.to_string());
+    let space_id = detail_string(details, &["spaceId", "spaceID", "space_id"], name_by_id)
+        .or_else(|| default_space_id.map(ToString::to_string))
+        .unwrap_or_default();
+    let object_type =
+        detail_string(details, &["type"], name_by_id).unwrap_or_else(|| object_type.to_string());
+    let creator = detail_string(details, &["creator", "createdBy", "created_by"], name_by_id)
+        .unwrap_or_default();
+    let created_date = detail_string(details, &["createdDate", "created_date"], name_by_id)
+        .as_deref()
+        .and_then(value_as_rfc3339)
+        .unwrap_or_default();
+    let last_modified_date = detail_string(
+        details,
+        &["lastModifiedDate", "last_modified_date"],
+        name_by_id,
+    )
+    .as_deref()
+    .and_then(value_as_rfc3339)
+    .unwrap_or_default();
+
+    let mut output = format!(
+        concat!(
+            "---\n",
+            "name: {}\n",
+            "object_id: {}\n",
+            "space_id: {}\n",
+            "type: {}\n",
+            "created_date: {}\n",
+            "last_modified_date: {}\n",
+            "creator: {}\n"
+        ),
+        yaml_quote(&name),
+        yaml_quote(object_id),
+        yaml_quote(&space_id),
+        yaml_quote(&object_type),
+        yaml_quote(&created_date),
+        yaml_quote(&last_modified_date),
+        yaml_quote(&creator),
+    );
+
+    if !properties.is_empty() {
+        output.push_str("properties:\n");
+        for (key, value) in properties {
+            output.push_str("  ");
+            output.push_str(&yaml_key(key));
+            output.push_str(": ");
+            output.push_str(&yaml_quote(value));
+            output.push('\n');
+        }
+    }
+
+    output.push_str("---\n");
+    output
+}
+
+fn detail_string(
+    details: &serde_json::Map<String, Value>,
+    keys: &[&str],
+    name_by_id: &HashMap<String, String>,
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| details.get(*key))
+        .and_then(|value| detail_value_to_string(value, name_by_id))
+}
+
+fn detail_value_to_string(value: &Value, name_by_id: &HashMap<String, String>) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else if looks_like_object_id(trimmed) {
+                Some(format_object_ref(trimmed, name_by_id))
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(num) => Some(num.to_string()),
+        Value::Bool(v) => Some(v.to_string()),
+        Value::Array(items) => {
+            let values: Vec<String> = items
+                .iter()
+                .filter_map(|item| detail_value_to_string(item, name_by_id))
+                .collect();
+            (!values.is_empty()).then(|| values.join(", "))
+        }
+        Value::Object(map) => {
+            if let Some(id) = map.get("id").and_then(Value::as_str) {
+                let trimmed = id.trim();
+                if looks_like_object_id(trimmed) {
+                    return Some(format_object_ref(trimmed, name_by_id));
+                }
+            }
+            for key in ["name", "key", "id", "value"] {
+                if let Some(text) = map
+                    .get(key)
+                    .and_then(|value| detail_value_to_string(value, name_by_id))
+                    && !text.is_empty()
+                {
+                    return Some(text);
+                }
+            }
+            serde_json::to_string(map).ok()
+        }
+        Value::Null => None,
+    }
+}
+
+fn format_object_ref(object_id: &str, name_by_id: &HashMap<String, String>) -> String {
+    if let Some(name) = name_by_id.get(object_id)
+        && !name.trim().is_empty()
+    {
+        return format!("{name} ({object_id})");
+    }
+    object_id.to_string()
+}
+
+fn looks_like_object_id(value: &str) -> bool {
+    value.starts_with("baf") && value.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn value_as_rfc3339(value: &str) -> Option<String> {
+    let text = value.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(text) {
+        return Some(
+            parsed
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        );
+    }
+    if let Ok(raw) = text.parse::<i64>() {
+        return epoch_to_rfc3339(raw);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    if let Ok(raw) = text.parse::<f64>() {
+        return epoch_to_rfc3339(raw as i64);
+    }
+    None
+}
+
+fn epoch_to_rfc3339(raw: i64) -> Option<String> {
+    let dt = if raw > 10_000_000_000 {
+        DateTime::<Utc>::from_timestamp_millis(raw)
+    } else {
+        DateTime::<Utc>::from_timestamp(raw, 0)
+    }?;
+    Some(dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn yaml_quote(value: &str) -> String {
+    let cleaned = value.replace(['\n', '\r'], " ").replace('\'', "''");
+    format!("'{cleaned}'")
+}
+
+fn yaml_key(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        value.to_string()
+    } else {
+        yaml_quote(value)
     }
 }
 
@@ -1141,5 +1630,108 @@ mod tests {
         app.apply_sort();
 
         assert_eq!(app.current_entry().unwrap().id, selected);
+    }
+
+    #[test]
+    fn input_mode_ctrl_shortcuts_edit_buffer() {
+        let mut app = fixture_app();
+        app.input_mode = InputMode::SaveAs;
+        app.input_buffer = "alpha beta gamma".to_string();
+        app.input_cursor = "alpha ".len();
+
+        app.handle_action(KeyAction::KillToEnd);
+        assert_eq!(app.input_buffer, "alpha ");
+
+        app.input_buffer = "alpha beta".to_string();
+        app.input_cursor = app.input_buffer.len();
+        app.handle_action(KeyAction::CursorStart);
+        assert_eq!(app.input_cursor, 0);
+
+        app.handle_action(KeyAction::CursorEnd);
+        assert_eq!(app.input_cursor, app.input_buffer.len());
+    }
+
+    #[test]
+    fn half_page_scroll_uses_current_panel_viewport() {
+        let mut app = fixture_app();
+        app.focus = PanelFocus::Preview;
+        app.preview_scroll_limit = (200, 20);
+        app.handle_action(KeyAction::HalfPageDown);
+        assert_eq!(app.preview_scroll, 10);
+        app.handle_action(KeyAction::HalfPageUp);
+        assert_eq!(app.preview_scroll, 0);
+
+        app.focus = PanelFocus::Contents;
+        app.contents_visible_rows = 10;
+        app.table_state.select(Some(0));
+        app.handle_action(KeyAction::HalfPageDown);
+        assert_eq!(app.table_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn value_as_rfc3339_handles_epoch_seconds_and_millis() {
+        assert_eq!(
+            value_as_rfc3339("1700000000").as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
+        assert_eq!(
+            value_as_rfc3339("1700000000000").as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
+    }
+
+    #[test]
+    fn yaml_front_matter_includes_expected_fields() {
+        let details = serde_json::json!({
+            "name": "Example",
+            "spaceId": "space-123",
+            "type": "note",
+            "createdDate": 1_700_000_000,
+            "lastModifiedDate": 1_700_003_600,
+            "creator": "member-1"
+        });
+        let front = build_yaml_front_matter(
+            "obj-1",
+            "Fallback Name",
+            "page",
+            Some("fallback-space"),
+            details.as_object().unwrap(),
+            &HashMap::new(),
+            &[],
+        );
+
+        assert!(front.contains("name: 'Example'"));
+        assert!(front.contains("object_id: 'obj-1'"));
+        assert!(front.contains("space_id: 'space-123'"));
+        assert!(front.contains("type: 'note'"));
+        assert!(front.contains("created_date: '2023-11-14T22:13:20Z'"));
+        assert!(front.contains("last_modified_date: '2023-11-14T23:13:20Z'"));
+        assert!(front.contains("creator: 'member-1'"));
+    }
+
+    #[test]
+    fn yaml_front_matter_resolves_select_and_multi_select_ids() {
+        let type_id = "bafyreitype111111111111111111111111111111111111111111111111";
+        let tag_id = "bafyreitag1111111111111111111111111111111111111111111111111";
+        let details = serde_json::json!({
+            "name": "Example",
+            "type": type_id,
+            "spaceId": "space-1"
+        });
+        let names = HashMap::from([(type_id.to_string(), "Task".to_string())]);
+        let props = vec![("Tags".to_string(), format!("Homework ({tag_id})"))];
+        let front = build_yaml_front_matter(
+            "obj-2",
+            "Fallback Name",
+            "page",
+            Some("fallback-space"),
+            details.as_object().unwrap(),
+            &names,
+            &props,
+        );
+
+        assert!(front.contains(&format!("type: 'Task ({type_id})'")));
+        assert!(front.contains(&format!("Tags: 'Homework ({tag_id})'")));
+        assert!(front.contains("properties:"));
     }
 }

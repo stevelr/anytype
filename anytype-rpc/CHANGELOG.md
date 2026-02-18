@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.3.1]
+
+- no change, re-releasing to use new release tag format
+
 ## [0.3.0] - anytype-rpc - 2026-02-16
 
 ### Changes

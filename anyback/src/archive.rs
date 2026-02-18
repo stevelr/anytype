@@ -149,6 +149,8 @@ impl ArchiveReader {
                     .with_context(|| format!("archive entry not found in zip: {rel_path}"))?;
                 let mut out = Vec::new();
                 entry.read_to_end(&mut out)?;
+                drop(entry);
+                drop(zip);
                 Ok(out)
             }
         }
@@ -176,6 +178,8 @@ impl ArchiveReader {
                 };
                 let mut out = Vec::new();
                 entry.read_to_end(&mut out)?;
+                drop(entry);
+                drop(zip);
                 Ok(Some(out))
             }
         }

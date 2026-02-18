@@ -689,7 +689,7 @@ fn find_snapshot_path(reader: &ArchiveReader, object_id: &str) -> Option<String>
 pub fn convert_archive_snapshot_to_markdown(
     reader: &ArchiveReader,
     snapshot_path: &str,
-    object_index: &HashMap<String, ArchiveObjectInfo>,
+    object_index: &HashMap<String, ArchiveObjectInfo, RandomState>,
 ) -> Result<String> {
     let snapshot_bytes = reader
         .read_bytes(snapshot_path)
@@ -701,15 +701,15 @@ pub fn convert_archive_snapshot_to_markdown(
 pub fn convert_snapshot_bytes_to_markdown(
     snapshot_path: &str,
     snapshot_bytes: &[u8],
-    object_index: &HashMap<String, ArchiveObjectInfo>,
+    object_index: &HashMap<String, ArchiveObjectInfo, RandomState>,
 ) -> Result<String> {
     let lower = snapshot_path.to_ascii_lowercase();
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     if lower.ends_with(".pb") {
-        return convert_pb_snapshot_to_markdown(&snapshot_bytes, object_index);
+        return convert_pb_snapshot_to_markdown(snapshot_bytes, object_index);
     }
     if lower.ends_with(".pb.json") {
-        return convert_pb_json_snapshot_to_markdown(&snapshot_bytes, object_index);
+        return convert_pb_json_snapshot_to_markdown(snapshot_bytes, object_index);
     }
     bail!("unsupported snapshot format: {snapshot_path}")
 }

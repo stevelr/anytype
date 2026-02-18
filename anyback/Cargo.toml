@@ -5,7 +5,7 @@
 
 [package]
 name = "anyback"
-version = "0.3.0-alpha"
+version = "0.4.0-alpha.2"
 edition = "2024"
 description = "Backup and restore CLI for Anytype"
 license = "Apache-2.0"
@@ -45,14 +45,15 @@ cli = [
   "dep:tonic",
   "dep:prost",
   "dep:lru",
+  "dep:arboard",
 ]
 # waiting on anytype-heart bug fix before re-enabling snapshot import mode
 snapshot-import = []
 
 [dependencies]
 anyhow.workspace = true
-anytype = { version = "0.3.1", path = "../anytype-api", features = ["grpc"], optional = true }
-anytype-rpc = { version = "0.3.0", path = "../anytype-rpc", optional = true }
+anytype = { version = "0.3.2", path = "../anytype-api", features = ["grpc"], optional = true }
+anytype-rpc = { version = "0.3.1", path = "../anytype-rpc", optional = true }
 chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
@@ -74,6 +75,7 @@ tempfile = { version = "3.25.0", optional = true }
 tonic = { version = "0.14.4", optional = true }
 prost = { version = "0.14.3", optional = true }
 lru = { version = "0.13.0", optional = true }
+arboard = { version = "3.6", optional = true }
 zip = "8.1.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
