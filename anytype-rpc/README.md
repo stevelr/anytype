@@ -1,5 +1,9 @@
 # Anytype gRPC client
 
+[![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&filter=anytype-rpc-v*&label=release)](https://github.com/stevelr/anytype/releases?q=anytype-rpc-v&expanded=true)
+[![docs.rs](https://img.shields.io/docsrs/anytype-rpc?label=docs.rs)](https://docs.rs/anytype-rpc)
+[![crates.io](https://img.shields.io/crates/v/anytype-rpc.svg)](https://crates.io/crates/anytype-rpc)
+
 The gRPC api isn't officially supported (by Anytype) for third party clients. However, it's used heavily by Anytype applications, including the desktop app and headless cli, and it's the only way for applications to access certain functionality that is not available over the HTTP api, such as Files, Chats, Blocks, and Relations.
 
 ## Status and plan

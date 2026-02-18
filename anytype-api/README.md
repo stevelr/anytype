@@ -2,6 +2,10 @@
 
 An ergonomic Anytype API client in Rust.
 
+[![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&filter=anytype-v*&label=release)](https://github.com/stevelr/anytype/releases?q=anytype-v&expanded=true)
+[![docs.rs](https://img.shields.io/docsrs/anytype?label=docs.rs)](https://docs.rs/anytype)
+[![crates.io](https://img.shields.io/crates/v/anytype.svg)](https://crates.io/crates/anytype)
+
 **[Home](https://github.com/stevelr/anytype) &nbsp; | &nbsp; [Documentation](https://docs.rs/anytype) &nbsp; | &nbsp; [Examples](https://github.com/stevelr/anytype/blob/main/anytype-api/examples/)**
 
 ## Overview
