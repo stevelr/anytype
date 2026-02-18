@@ -1,9 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0-alpha.2]
 
 - Inspector updates:
   - Added `inspect --max-cache SIZE` (default `200 MiB`) and switched preview caching to size-aware LRU with approximate byte budgeting.
+  - Save to markdown file now includes properties in yaml header
+  - More properties visible in preview pane (select and multi-select had been omitted)
+    - select and multi-select are looked up and display as Name and Id instead of Name
+  - Added new keymaps
+    - ctrl-e open markdown in editor
+    - ctrl-c copy object id to clipboard
+    - ctrl-o open object in anytype app (using registered url scheme anytype://)
+    - single-line edit keys for editing save-as path (ctrl-a, ctrl-e, ctrl-k)
   - Fixed inspector preview performance regression by reusing cached snapshot/markdown data instead of repeatedly re-reading and re-rendering the same objects.
 
 ## [0.3.0 - alpha] - anyback - 2026-02-16

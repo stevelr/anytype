@@ -218,7 +218,8 @@ impl ArchiveIndex {
             let size = file_sizes.get(&entry.path).copied().unwrap_or(0);
             let size_display = format_size(size);
             let archived = entry.archived.unwrap_or(false);
-            let properties = details.map_or_else(Vec::new, collect_user_properties);
+            let properties =
+                details.map_or_else(Vec::new, |d| collect_user_properties(d, &name_by_id));
             let preview = details.map_or_else(
                 || "(no preview available)".to_string(),
                 |d| build_preview(d, &name),
@@ -533,13 +534,16 @@ fn build_preview(details: &serde_json::Map<String, Value>, fallback_name: &str) 
     }
 }
 
-fn collect_user_properties(details: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
+fn collect_user_properties(
+    details: &serde_json::Map<String, Value>,
+    name_by_id: &HashMap<String, String>,
+) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (key, value) in details {
         if is_system_property(key) {
             continue;
         }
-        if let Some(text) = scalar_property_text(value) {
+        if let Some(text) = property_value_text(value, name_by_id) {
             out.push((key.clone(), text));
         }
     }
@@ -571,20 +575,69 @@ fn is_system_property(key: &str) -> bool {
     )
 }
 
-fn scalar_property_text(value: &Value) -> Option<String> {
+fn property_value_text(value: &Value, name_by_id: &HashMap<String, String>) -> Option<String> {
     match value {
         Value::String(s) => {
             let text = s.trim();
-            if text.is_empty() || looks_like_object_id(text) {
+            if text.is_empty() {
                 None
+            } else if looks_like_object_id(text) {
+                Some(format_object_ref(text, name_by_id))
             } else {
                 Some(text.to_string())
             }
         }
         Value::Bool(v) => Some(v.to_string()),
         Value::Number(n) => Some(n.to_string()),
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
+        Value::Array(items) => {
+            let values: Vec<String> = items
+                .iter()
+                .filter_map(|item| property_item_text(item, name_by_id))
+                .collect();
+            (!values.is_empty()).then(|| values.join(", "))
+        }
+        Value::Object(map) => {
+            if let Some(id) = map.get("id").and_then(Value::as_str) {
+                let trimmed = id.trim();
+                if looks_like_object_id(trimmed) {
+                    return Some(format_object_ref(trimmed, name_by_id));
+                }
+            }
+            for key in ["name", "title", "key", "id", "value"] {
+                if let Some(text) = map
+                    .get(key)
+                    .and_then(|v| property_value_text(v, name_by_id))
+                    && !text.is_empty()
+                {
+                    return Some(text);
+                }
+            }
+            serde_json::to_string(map).ok()
+        }
+        Value::Null => None,
     }
+}
+
+fn property_item_text(value: &Value, name_by_id: &HashMap<String, String>) -> Option<String> {
+    match value {
+        Value::Array(items) => {
+            let values: Vec<String> = items
+                .iter()
+                .filter_map(|item| property_item_text(item, name_by_id))
+                .collect();
+            (!values.is_empty()).then(|| values.join(", "))
+        }
+        _ => property_value_text(value, name_by_id),
+    }
+}
+
+fn format_object_ref(object_id: &str, name_by_id: &HashMap<String, String>) -> String {
+    if let Some(name) = name_by_id.get(object_id)
+        && !name.trim().is_empty()
+    {
+        return format!("{name} ({object_id})");
+    }
+    object_id.to_string()
 }
 
 fn collect_preview_strings(value: &Value, out: &mut Vec<String>, depth: usize) {
@@ -771,5 +824,49 @@ mod tests {
         let map = details.as_object().unwrap();
         let selected = infer_image_payload_path("bafyreifileobj", map, &files);
         assert_eq!(selected.as_deref(), Some("files/QmImageHash1234"));
+    }
+
+    #[test]
+    fn collect_user_properties_includes_array_and_object_values() {
+        let details = serde_json::json!({
+            "name": "Example",
+            "layout": 0,
+            "tag": [{"name": "alpha"}, {"name": "beta"}],
+            "category": {"name": "ops"},
+            "rating": 5
+        });
+        let map = details.as_object().unwrap();
+        let props = collect_user_properties(map, &HashMap::new());
+
+        assert!(props.contains(&("tag".to_string(), "alpha, beta".to_string())));
+        assert!(props.contains(&("category".to_string(), "ops".to_string())));
+        assert!(props.contains(&("rating".to_string(), "5".to_string())));
+    }
+
+    #[test]
+    fn collect_user_properties_resolves_object_ids_to_name_and_id() {
+        let status_id = "bafyreistatus111111111111111111111111111111111111111111111111";
+        let tag_a = "bafyreitagaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let tag_b = "bafyreitagbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let details = serde_json::json!({
+            "name": "Example",
+            "status": status_id,
+            "tags": [tag_a, tag_b]
+        });
+        let map = details.as_object().unwrap();
+        let name_by_id = HashMap::from([
+            (status_id.to_string(), "Open".to_string()),
+            (tag_a.to_string(), "Homework".to_string()),
+            (tag_b.to_string(), "Geography".to_string()),
+        ]);
+
+        let props = collect_user_properties(map, &name_by_id);
+
+        assert!(props.contains(&("status".to_string(), format!("Open ({status_id})"))));
+        assert!(props.contains(&(
+            "tags".to_string(),
+            format!("Homework ({tag_a}), Geography ({tag_b})")
+        )));
     }
 }

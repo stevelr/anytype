@@ -1,5 +1,8 @@
 # any-edit: Edit Anytype document in external editor
 
+[![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&filter=any-edit-v*&label=release)](https://github.com/stevelr/anytype/releases?q=any-edit-v&expanded=true)
+[![crates.io](https://img.shields.io/crates/v/any-edit.svg)](https://crates.io/crates/any-edit)
+
 `any-edit` exports an [Anytype](https://anytype.io) document (page, note, task, or other object type) to a markdown file, opens the file in an editor, waits for the editor to exit, then imports the updated document into Anytype.
 
 A Raycast extension ([script](./scripts/) included) can be used to assign a hotkey for "edit this page in external editor".
