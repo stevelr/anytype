@@ -1,5 +1,8 @@
 # anyr
 
+[![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&filter=anyr-v*&label=release)](https://github.com/stevelr/anytype/releases?q=anyr-v&expanded=true)
+[![crates.io](https://img.shields.io/crates/v/anyr.svg)](https://crates.io/crates/anyr)
+
 List, search, and manipulate anytype objects from the command-line
 
 Homepage: https://github.com/stevelr/anytype
