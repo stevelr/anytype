@@ -22,10 +22,19 @@ name = "anyr"
 [dependencies]
 anyhow.workspace = true
 anytype = { version = "0.3.1", path = "../anytype-api", features = ["grpc"] }
+base64 = "0.22"
+bip39 = "2"
+bs58 = "0.5"
 clap.workspace = true
+ed25519-dalek = "2"
 futures.workspace = true
+hmac = "0.12"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+hex = "0.4"

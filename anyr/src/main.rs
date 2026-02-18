@@ -26,6 +26,7 @@
 #![warn(clippy::unused_async)]
 
 mod cli;
+mod crypto;
 mod error;
 mod filter;
 mod output;
