@@ -20,6 +20,7 @@ See `anyback.1.md` for detailed CLI documentation.
 - Browse archives with an interactive TUI (`inspect`)
   - view object properties, metadata, and markdown preview
   - export files and simplified object markdown
+  - configurable preview cache budget with `--max-cache` (default `200 MiB`)
 - List archive contents, compare archives, extract objects
 
 ## Commands
@@ -31,7 +32,7 @@ anyback list    ARCHIVE [--brief|--expanded|--files]
 anyback manifest ARCHIVE
 anyback diff    ARCHIVE1 ARCHIVE2
 anyback extract ARCHIVE ID OUTPUT
-anyback inspect ARCHIVE
+anyback inspect ARCHIVE [--max-cache SIZE]
 anyback auth    ...
 ```
 

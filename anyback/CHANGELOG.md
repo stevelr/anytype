@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+- Inspector updates:
+  - Added `inspect --max-cache SIZE` (default `200 MiB`) and switched preview caching to size-aware LRU with approximate byte budgeting.
+  - Fixed inspector preview performance regression by reusing cached snapshot/markdown data instead of repeatedly re-reading and re-rendering the same objects.
+
 ## [0.3.0 - alpha] - anyback - 2026-02-16
 
 - Flattened CLI: removed `archive` subcommand group and `info` command.
