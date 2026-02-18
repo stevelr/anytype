@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- auth updates:
+  - `anyr auth set-grpc --bip39` to derive and save gRPC account credentials from a BIP39 mnemonic.
+  - `anyr auth find-grpc [--program PREFIX]` to discover a local Anytype gRPC listener port.
+
 ## [0.4.0] - anyr - 2026-02-16
 
 ### Added

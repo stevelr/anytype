@@ -496,3 +496,147 @@ impl AnytypeClient {
         self.cache.clone()
     }
 }
+
+/// Discover an Anytype gRPC listening port on the local machine.
+///
+/// Runs `lsof -Pni` to find TCP ports in LISTEN state owned by a process whose
+/// name starts with `program` (default `"anytype"`), then probes each candidate
+/// with an unauthenticated `AppGetVersion` gRPC call.
+///
+/// Returns the first port that responds, or `None`.
+///
+/// Only supported on macOS and Linux.
+#[cfg(feature = "grpc")]
+pub async fn find_grpc(program: Option<impl Into<String>>) -> Option<u16> {
+    let prefix = program.map_or_else(|| "anytype".to_string(), Into::into);
+
+    let ports = match lsof_listen_ports(&prefix).await {
+        Ok(ports) => ports,
+        Err(err) => {
+            debug!("lsof failed: {err}");
+            return None;
+        }
+    };
+
+    for port in &ports {
+        if probe_grpc_port(*port).await {
+            return Some(*port);
+        }
+    }
+    None
+}
+
+/// Run `lsof -Pni` and extract unique listening ports for the given program prefix.
+#[cfg(feature = "grpc")]
+async fn lsof_listen_ports(prefix: &str) -> std::result::Result<Vec<u16>, String> {
+    let output = tokio::process::Command::new("lsof")
+        .args(["-Pni"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|err| format!("failed to run lsof: {err}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut ports = Vec::new();
+
+    for line in stdout.lines() {
+        // COMMAND is the first whitespace-delimited field
+        let Some(command) = line.split_whitespace().next() else {
+            continue;
+        };
+        if !command.starts_with(prefix) {
+            continue;
+        }
+        if !line.contains("LISTEN") {
+            continue;
+        }
+        // Extract port: find the last ':' before "(LISTEN)" or end-of-line,
+        // then parse the number that follows it.
+        if let Some(port) = extract_port(line)
+            && !ports.contains(&port)
+        {
+            ports.push(port);
+        }
+    }
+
+    Ok(ports)
+}
+
+/// Extract a port number from an lsof NAME column like `*:31010 (LISTEN)`
+/// or `127.0.0.1:31010 (LISTEN)` or `[::1]:31010 (LISTEN)`.
+#[cfg(feature = "grpc")]
+fn extract_port(line: &str) -> Option<u16> {
+    // Find the portion before "(LISTEN)" and work backwards to the last ':'
+    let before_listen = line.split("(LISTEN)").next()?;
+    let colon_pos = before_listen.rfind(':')?;
+    let after_colon = before_listen[colon_pos + 1..].trim();
+    after_colon.parse().ok()
+}
+
+/// Try an unauthenticated `AppGetVersion` call on the given port.
+#[cfg(feature = "grpc")]
+async fn probe_grpc_port(port: u16) -> bool {
+    use anytype_rpc::anytype::{
+        ClientCommandsClient, rpc::app::get_version::Request as AppGetVersionRequest,
+    };
+    use std::time::Duration;
+    use tonic::transport::Endpoint;
+
+    let endpoint = match Endpoint::from_shared(format!("http://127.0.0.1:{port}")) {
+        Ok(ep) => ep.connect_timeout(Duration::from_secs(2)),
+        Err(_) => return false,
+    };
+
+    let channel = match endpoint.connect().await {
+        Ok(ch) => ch,
+        Err(_) => return false,
+    };
+
+    let mut client = ClientCommandsClient::new(channel);
+    client
+        .app_get_version(tonic::Request::new(AppGetVersionRequest {}))
+        .await
+        .is_ok()
+}
+
+#[cfg(all(feature = "grpc", test))]
+mod find_grpc_tests {
+    use super::*;
+
+    #[test]
+    fn extract_port_ipv4() {
+        let line = "anytype   12345 user   25u  IPv4 0x1234  0t0  TCP 127.0.0.1:31010 (LISTEN)";
+        assert_eq!(extract_port(line), Some(31010));
+    }
+
+    #[test]
+    fn extract_port_wildcard() {
+        let line = "anytype   12345 user   25u  IPv4 0x1234  0t0  TCP *:31010 (LISTEN)";
+        assert_eq!(extract_port(line), Some(31010));
+    }
+
+    #[test]
+    fn extract_port_ipv6() {
+        let line = "anytypeH  12345 user   26u  IPv6 0x5678  0t0  TCP [::1]:31010 (LISTEN)";
+        assert_eq!(extract_port(line), Some(31010));
+    }
+
+    #[test]
+    fn extract_port_no_listen() {
+        let line =
+            "anytype   12345 user   25u  IPv4 0x1234  0t0  TCP 127.0.0.1:31010 (ESTABLISHED)";
+        // extract_port relies on "(LISTEN)" to delimit the port number,
+        // so non-LISTEN lines return None. The caller pre-filters for LISTEN.
+        assert_eq!(extract_port(line), None);
+    }
+
+    #[tokio::test]
+    async fn lsof_listen_ports_filters_prefix() {
+        // With an unlikely prefix, we should get an empty list
+        let ports = lsof_listen_ports("zzz_nonexistent_program_zzz")
+            .await
+            .unwrap();
+        assert!(ports.is_empty());
+    }
+}
