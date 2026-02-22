@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- removed skia as dependency (was used to generate image file for the files example)
+- files example requires setting path and file type to path and type of existing
+  local files, instead of generating them locally
+
+- bumped dependencies: zbus-secret-service-keyring-store from 0.2.2 to 0.3.0
+
 ## [0.3.2]
 
 ### Added

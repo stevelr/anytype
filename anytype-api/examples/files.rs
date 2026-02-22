@@ -1,10 +1,13 @@
 // Demonstrates gRPC-backed file operations.
+//
+// Before running this example, update the file paths to local files,
+// and set file_type to FileType::(File, Image, Video, Audio, Pdf, or Other)
+//
 
 use anyhow::{Context, Result};
 
 mod example_lib;
 use anytype::prelude::*;
-use example_lib::{create_file_image::create_png, create_file_pdf::create_pdf};
 
 const NUM_FILES: usize = 2;
 
@@ -20,32 +23,32 @@ async fn main() -> Result<()> {
     let temp_dir = std::env::temp_dir().join("anytype_files_example");
     std::fs::create_dir_all(&temp_dir).context(format!("create temp dir {temp_dir:?}"))?;
 
-    // create image files and upload
+    // upload local files
     let mut files = Vec::new();
-    for color_num in 0..NUM_FILES {
-        let path = create_png(10, color_num, &temp_dir)?;
-        let file = client
-            .files()
-            .upload(&space_id)
-            .from_path(&path)
-            .file_type(FileType::Image)
-            .upload()
-            .await?;
-        println!(
-            "Uploaded file {} id:{}",
-            file.name.as_deref().unwrap_or("unnamed"),
-            file.id
-        );
-        files.push(file);
-    }
 
-    // create pdf file and upload
-    let path = create_pdf(&temp_dir)?;
+    // TODO: update path and file_type
+    let path = "./document.pdf";
     let file = client
         .files()
         .upload(&space_id)
-        .from_path(&path)
+        .from_path(path)
         .file_type(FileType::Pdf)
+        .upload()
+        .await?;
+    println!(
+        "Uploaded file {} id:{}",
+        file.name.as_deref().unwrap_or("unnamed"),
+        file.id
+    );
+    files.push(file);
+
+    // TODO: update path and file_type
+    let path = "./picture.png";
+    let file = client
+        .files()
+        .upload(&space_id)
+        .from_path(path)
+        .file_type(FileType::Image)
         .upload()
         .await?;
     println!(
