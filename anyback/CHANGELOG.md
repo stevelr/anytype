@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- bumped dependencies: lru -> 0.16.4, nix -> 0.31.1, rand -> 0.10.0
+
 ## [0.4.0-alpha.2]
 
 - Inspector updates:
