@@ -30,7 +30,7 @@ bytes.workspace = true
 chrono.workspace = true
 db-keystore = "0.4.1"
 futures.workspace = true
-keyring-core = { version = "0.7.2", features = ["sample"] }
+keyring-core = { version = "0.7.4", features = ["sample"] }
 parking_lot.workspace = true
 prost-types.workspace = true
 reqwest.workspace = true
