@@ -26,7 +26,7 @@ test-log = { version = "0.2.19", features = ["log", "trace"] }
 tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-crossterm = "0.28"
+crossterm = "0.29"
 ratatui = "0.29"
 zeroize = { version = "1.8.2", features = ["derive"] }
 
