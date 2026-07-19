@@ -34,7 +34,7 @@
 //!     .key("project")
 //!     .create().await?;
 //!
-//! // Update a type: change name and add a property
+//! // Update a type: change its name and replace its recommended properties
 //! let project = client.update_type(&space_id, &project.id)
 //!     .name("My New Project")
 //!     .property("Location", "location", PropertyFormat::Text)
@@ -221,8 +221,8 @@ struct UpdateTypeRequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     layout: Option<TypeLayout>,
 
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    properties: Vec<CreateTypeProperty>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<Vec<CreateTypeProperty>>,
 }
 
 // ============================================================================
@@ -538,7 +538,7 @@ pub struct UpdateTypeRequest {
     plural_name: Option<String>,
     icon: Option<Icon>,
     layout: Option<TypeLayout>,
-    properties: Vec<CreateTypeProperty>,
+    properties: Option<Vec<CreateTypeProperty>>,
     cache: Arc<AnytypeCache>,
     verify_policy: VerifyPolicy,
     verify_config: Option<VerifyConfig>,
@@ -564,7 +564,7 @@ impl UpdateTypeRequest {
             plural_name: None,
             icon: None,
             layout: None,
-            properties: Vec::new(),
+            properties: None,
             cache,
             verify_policy: VerifyPolicy::Default,
             verify_config,
@@ -643,7 +643,11 @@ impl UpdateTypeRequest {
         self
     }
 
-    /// Adds a property definition to the type.
+    /// Adds a property definition to the replacement property list.
+    ///
+    /// When this method is used, the REST API replaces all existing
+    /// non-featured recommended properties with the properties supplied to
+    /// this update. It does not append to the type's current properties.
     ///
     /// # Arguments
     /// * `name` - name of property to add
@@ -656,13 +660,33 @@ impl UpdateTypeRequest {
         key: impl Into<String>,
         format: PropertyFormat,
     ) -> Self {
-        self.properties.push({
+        self.properties.get_or_insert_default().push({
             CreateTypeProperty {
                 name: name.into(),
                 key: key.into(),
                 format,
             }
         });
+        self
+    }
+
+    /// Replaces all non-featured recommended properties on the type.
+    ///
+    /// The provided collection is the complete replacement, not a set of
+    /// additions. Pass an empty collection or use [`Self::clear_properties`]
+    /// to remove all non-featured recommended properties.
+    #[must_use]
+    pub fn properties(mut self, properties: impl IntoIterator<Item = CreateTypeProperty>) -> Self {
+        self.properties = Some(properties.into_iter().collect());
+        self
+    }
+
+    /// Removes all non-featured recommended properties from the type.
+    ///
+    /// Featured properties managed by Anytype are not affected.
+    #[must_use]
+    pub fn clear_properties(mut self) -> Self {
+        self.properties = Some(Vec::new());
         self
     }
 
@@ -685,7 +709,7 @@ impl UpdateTypeRequest {
                 || self.plural_name.is_some()
                 || self.icon.is_some()
                 || self.layout.is_some()
-                || !self.properties.is_empty(),
+                || self.properties.is_some(),
             ValidationSnafu {
                 message: "update_type: must set at least one field to update".to_string(),
             }
@@ -969,7 +993,8 @@ impl AnytypeClient {
     ///     .key("my_project")
     ///     .create().await?;
     ///
-    /// // change name and add a text field "Location"
+    /// // Change the name and replace all non-featured recommended properties
+    /// // with a single text field named "Location".
     /// let typ = client.update_type(&space_id, &project.id)
     ///     .name("My New Project")
     ///     .property("Location", "location", PropertyFormat::Text)
@@ -1117,6 +1142,51 @@ impl AnytypeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn update_property(name: &str, key: &str) -> CreateTypeProperty {
+        CreateTypeProperty {
+            name: name.to_string(),
+            key: key.to_string(),
+            format: PropertyFormat::Text,
+        }
+    }
+
+    #[test]
+    fn update_type_omits_unchanged_properties() {
+        let body = UpdateTypeRequestBody::default();
+        assert_eq!(serde_json::to_value(body).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn update_type_serializes_property_replacement() {
+        let body = UpdateTypeRequestBody {
+            properties: Some(vec![update_property("Location", "location")]),
+            ..UpdateTypeRequestBody::default()
+        };
+
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({
+                "properties": [{
+                    "format": "text",
+                    "key": "location",
+                    "name": "Location"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn update_type_serializes_explicit_property_clear() {
+        let body = UpdateTypeRequestBody {
+            properties: Some(Vec::new()),
+            ..UpdateTypeRequestBody::default()
+        };
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({ "properties": [] })
+        );
+    }
 
     #[test]
     fn test_type_layout_default() {

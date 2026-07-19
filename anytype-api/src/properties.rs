@@ -744,10 +744,9 @@ struct CreatePropertyRequestBody {
 }
 
 /// Internal request body for updating a property
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize)]
 struct UpdatePropertyRequestBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    name: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
@@ -1168,7 +1167,10 @@ impl UpdatePropertyRequest {
         }
     }
 
-    /// Updates the property name.
+    /// Sets the property name required by the REST update endpoint.
+    ///
+    /// This must be supplied even when only changing the property key. Use the
+    /// property's current name to leave it unchanged.
     ///
     /// # Arguments
     /// * `name` - New display name for the property
@@ -1218,30 +1220,30 @@ impl UpdatePropertyRequest {
     /// The updated property.
     ///
     /// # Errors
-    /// - [`AnytypeError::Validation`] if called without setting any fields
+    /// - [`AnytypeError::Validation`] if called without setting a name
     /// - [`AnytypeError::NotFound`] if the property doesn't exist
     pub async fn update(self) -> Result<Property> {
         self.limits.validate_id(&self.space_id, "space_id")?;
         self.limits.validate_id(&self.property_id, "property_id")?;
 
-        // Check that at least one field is being updated
+        // anytype-heart's REST binding requires name even when only the key changes.
         ensure!(
-            self.name.is_some() || self.key.is_some(),
+            self.name.is_some(),
             ValidationSnafu {
-                message: "update_property: must set at least one field to update (name or key)"
-                    .to_string(),
+                message:
+                    "update_property: name is required by the REST API (including for key changes)"
+                        .to_string(),
             }
         );
 
-        if let Some(ref name) = self.name {
-            self.limits.validate_name(name, "property name")?;
-        }
+        let name = self.name.expect("property name checked above");
+        self.limits.validate_name(&name, "property name")?;
         if let Some(ref key) = self.key {
             self.limits.validate_name(key, "property key")?;
         }
 
         let request_body = UpdatePropertyRequestBody {
-            name: self.name,
+            name,
             key: self.key,
         };
 
@@ -1488,6 +1490,10 @@ impl AnytypeClient {
     }
 
     /// Creates a request builder for updating an existing property.
+    ///
+    /// The builder must be given [`UpdatePropertyRequest::name`] before
+    /// [`UpdatePropertyRequest::update`] is called, including for key-only
+    /// changes, because the REST endpoint requires the property's name.
     ///
     /// # Arguments
     /// * `space_id` - ID of the space containing the property
@@ -1792,10 +1798,32 @@ mod tests {
     }
 
     #[test]
-    fn test_update_property_request_body_empty() {
-        let body = UpdatePropertyRequestBody::default();
+    fn test_update_property_request_body_requires_name_on_wire() {
+        let body = UpdatePropertyRequestBody {
+            name: "Priority".to_string(),
+            key: None,
+        };
         let json = serde_json::to_string(&body).unwrap();
-        assert_eq!(json, "{}");
+        assert_eq!(json, r#"{"name":"Priority"}"#);
+    }
+
+    #[tokio::test]
+    async fn test_update_property_rejects_key_without_name() {
+        let mut config = crate::client::ClientConfig::default().app_name("property-update-unit");
+        config.keystore = Some("env".to_string());
+        let client = AnytypeClient::with_config(config).expect("client");
+        let valid_id = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+
+        let error = client
+            .update_property(valid_id, valid_id)
+            .key("new_key")
+            .update()
+            .await
+            .expect_err("a key-only REST update must fail validation");
+
+        assert!(
+            matches!(error, AnytypeError::Validation { ref message } if message.contains("name is required"))
+        );
     }
 
     #[test]

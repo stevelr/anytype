@@ -709,6 +709,55 @@ async fn test_types_update_custom() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
+async fn test_types_replace_and_clear_recommended_properties() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let suffix = unique_suffix();
+        let type_key = format!("test_replace_props_{suffix}");
+        let first_key = format!("first_prop_{suffix}");
+        let second_key = format!("second_prop_{suffix}");
+
+        let created = ctx
+            .client
+            .new_type(&ctx.space_id, "Property Replacement Type")
+            .key(type_key)
+            .property("First Property", &first_key, PropertyFormat::Text)
+            .property("Second Property", &second_key, PropertyFormat::Number)
+            .create()
+            .await?;
+        ctx.register_type(&created.id);
+
+        let replaced = ctx
+            .client
+            .update_type(&ctx.space_id, &created.id)
+            .properties([CreateTypeProperty {
+                name: "First Property".to_string(),
+                key: first_key.clone(),
+                format: PropertyFormat::Text,
+            }])
+            .update()
+            .await?;
+
+        assert!(replaced.properties.iter().any(|p| p.key == first_key));
+        assert!(!replaced.properties.iter().any(|p| p.key == second_key));
+
+        let cleared = ctx
+            .client
+            .update_type(&ctx.space_id, &created.id)
+            .clear_properties()
+            .update()
+            .await?;
+
+        assert!(!cleared.properties.iter().any(|p| p.key == first_key));
+        assert!(!cleared.properties.iter().any(|p| p.key == second_key));
+        ctx.increment_calls(3);
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[test_log::test]
 async fn test_types_delete_custom() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let unique_key = format!("test_delete_{}", chrono::Utc::now().timestamp_millis());
