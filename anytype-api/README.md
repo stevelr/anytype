@@ -252,8 +252,8 @@ Plus:
 
 The current Anytype http backend api does not provide access to some data in Anytype vaults.
 
-- ~~Files~~ _Update:_ REST supports basic transfer; gRPC supplies richer file operations.
-- ~~Chats and Messages~~ _Update:_ REST supports chat management and plain message operations; gRPC supplies structured messages and richer streams.
+- ~~Files~~ *Update:* REST supports basic transfer; gRPC supplies richer file operations.
+- ~~Chats and Messages~~ *Update:* REST supports chat management and plain message operations; gRPC supplies structured messages and richer streams.
 - Blocks. Pages and other document-like objects can be exported as markdown, but markdown export is somewhat lossy, for example, in tables, markdown export preserves table layout, with bold and italic styling, but foreground and background colors are lost.
 - Relationships - only a subset of relation types are available in the REST api.
 
@@ -285,7 +285,7 @@ The amount of time needed for "settling" seems to be 1 second or less.
 let obj = client.new_object("space_id", "page").name("Quick note").ensure_available().create().await?;
 ```
 
-To enable verification for _all_ new objects, types, and properties, add `.ensure_available(VerifyConfig::default())` to the config when creating the client. Setting this in the client configuration is not recommended except for an environment like unit tests where you're hammering the server and need to get results immediately. If verification is enabled in the client config, it will be applied to all `create` calls, unless disabled on a per-call basis by using `.no_verify()`:
+To enable verification for *all* new objects, types, and properties, add `.ensure_available(VerifyConfig::default())` to the config when creating the client. Setting this in the client configuration is not recommended except for an environment like unit tests where you're hammering the server and need to get results immediately. If verification is enabled in the client config, it will be applied to all `create` calls, unless disabled on a per-call basis by using `.no_verify()`:
 
 ```rust,no_run
 let obj = client.new_object("space_id", "page").name("Quicker note").no_verify().create().await?;
