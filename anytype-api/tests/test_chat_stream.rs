@@ -1,7 +1,10 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use anytype::prelude::*;
+use anytype::{
+    prelude::*,
+    test_util::{unique_suffix, with_test_context},
+};
 use chrono::Utc;
 use futures::StreamExt;
 use tokio::{
@@ -9,7 +12,7 @@ use tokio::{
     time::{Duration, sleep, timeout},
 };
 
-async fn setup_client() -> Result<(AnytypeClient, anytype::mock::MockChatServerHandle)> {
+async fn setup_mock_client() -> Result<(AnytypeClient, anytype::mock::MockChatServerHandle)> {
     let temp_path = std::env::temp_dir().join(format!(
         "anytype_chat_stream_test_{}.db",
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -34,47 +37,109 @@ async fn setup_client() -> Result<(AnytypeClient, anytype::mock::MockChatServerH
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_stream)]
 async fn chat_stream_receives_messages() -> Result<()> {
-    let (client, handle) = setup_client().await?;
-    let chat_id = "chat-default";
+    with_test_context(|ctx| async move {
+        let chat = ctx
+            .client
+            .chats()
+            .in_space(&ctx.space_id)
+            .create(
+                format!("chat-stream-{}", unique_suffix()),
+                Icon::Emoji {
+                    emoji: "📡".to_string(),
+                },
+            )
+            .create()
+            .await?;
+        ctx.register_object(&chat.id);
 
-    let ChatStreamHandle { mut events, .. } = client.chat_stream().subscribe_chat(chat_id).build();
-    let message_id = client
-        .chats()
-        .add_message(chat_id)
-        .content(MessageContent {
-            text: "hello".to_string(),
-            style: MessageTextStyle::Paragraph,
-            marks: Vec::new(),
-        })
-        .send()
-        .await?;
+        let message_id = ctx
+            .client
+            .chats()
+            .send_text(&chat.id, "hello from the real server")
+            .send()
+            .await?;
+        // Subscribe after publishing so the real server's initial message
+        // snapshot deterministically verifies the gRPC stream conversion.
+        let ChatStreamHandle { mut events, .. } =
+            ctx.client.chat_stream().subscribe_chat(&chat.id).build();
 
-    let event = timeout(
-        Duration::from_secs(2),
-        wait_for_event(&mut events, |event| {
-            matches!(event, ChatEvent::MessageAdded { .. })
-        }),
-    )
-    .await??;
+        let event = timeout(
+            Duration::from_secs(10),
+            wait_for_event(&mut events, |event| {
+                matches!(event, ChatEvent::MessageAdded { .. })
+            }),
+        )
+        .await
+        .expect("real chat stream event timed out")
+        .expect("real chat stream ended");
 
-    match event {
-        ChatEvent::MessageAdded { chat_id, message } => {
-            assert_eq!(chat_id, "chat-default");
-            assert_eq!(message.id, message_id);
+        match event {
+            ChatEvent::MessageAdded { chat_id, message } => {
+                assert_eq!(chat_id, chat.id);
+                assert_eq!(message.id, message_id);
+            }
+            other => panic!("expected MessageAdded event, got {other:?}"),
         }
-        other => {
-            anyhow::bail!("expected MessageAdded event, got {other:?}");
-        }
-    }
 
-    handle.shutdown().await;
+        ctx.client
+            .chats()
+            .in_space(&ctx.space_id)
+            .delete_message(&chat.id, &message_id)
+            .await?;
+        Ok(())
+    })
+    .await?;
     Ok(())
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_stream)]
+async fn rest_chat_stream_receives_initial_message() -> Result<()> {
+    with_test_context(|ctx| async move {
+        let chats = ctx.client.chats().in_space(&ctx.space_id);
+        let chat = chats
+            .create(
+                format!("rest-chat-stream-{}", unique_suffix()),
+                Icon::Emoji {
+                    emoji: "📨".to_string(),
+                },
+            )
+            .create()
+            .await?;
+        ctx.register_object(&chat.id);
+        let message_id = chats
+            .add_message(&chat.id, MessageContent::new().text("hello from REST SSE"))
+            .send()
+            .await?;
+
+        let mut events = chats
+            .message_stream(&chat.id)
+            .limit(1)
+            .heartbeat_seconds(1)
+            .open()
+            .await?;
+        let event = timeout(Duration::from_secs(10), events.next())
+            .await
+            .expect("REST chat stream event timed out")
+            .expect("REST chat stream ended")?;
+        assert!(matches!(
+            event,
+            ChatHttpEvent::MessageAdded { message } if message.id == message_id
+        ));
+
+        chats.delete_message(&chat.id, &message_id).await?;
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial(chat_stream)]
 async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
-    let (client, handle) = setup_client().await?;
+    let (client, handle) = setup_mock_client().await?;
     let chat_id = "chat-default";
 
     let backoff = BackoffPolicy {
@@ -83,7 +148,6 @@ async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
         factor: 1.5,
     };
 
-    eprintln!("aa");
     let ChatStreamHandle { mut events, .. } = client
         .chat_stream()
         .subscribe_chat(chat_id)
@@ -101,7 +165,6 @@ async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
         .send()
         .await?;
 
-    eprintln!("bb");
     let _ = timeout(
         Duration::from_secs(2),
         wait_for_event(&mut events, |event| {
@@ -109,10 +172,7 @@ async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
         }),
     )
     .await??;
-    eprintln!("b2");
-
     handle.disconnect_streams().await;
-    eprintln!("b3");
     let _ = timeout(
         Duration::from_secs(2),
         wait_for_event(&mut events, |event| {
@@ -120,9 +180,6 @@ async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
         }),
     )
     .await??;
-    eprintln!("b4");
-
-    eprintln!("cc");
     let message_id = client
         .chats()
         .add_message(chat_id)
@@ -142,7 +199,6 @@ async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
     )
     .await??;
 
-    eprintln!("dd");
     let event = timeout(
         Duration::from_secs(2),
         wait_for_event(&mut events, |event| {
@@ -151,14 +207,12 @@ async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
     )
     .await??;
 
-    eprintln!("ee");
     if let ChatEvent::MessageAdded { message, .. } = event {
         assert_eq!(message.id, message_id);
     } else {
         anyhow::bail!("expected MessageAdded after reconnect");
     }
 
-    eprintln!("ff");
     handle.shutdown().await;
     Ok(())
 }

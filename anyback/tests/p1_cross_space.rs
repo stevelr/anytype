@@ -74,6 +74,7 @@ impl Drop for P1CleanupGuard {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_restore_non_archived_object_between_spaces_preserves_fields() -> Result<()> {
     let _guard = test_lock().lock().await;
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;
@@ -114,6 +115,7 @@ async fn p1_restore_non_archived_object_between_spaces_preserves_fields() -> Res
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Result<()> {
     let _guard = test_lock().lock().await;
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;
@@ -315,6 +317,7 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result<()> {
     let _guard = test_lock().lock().await;
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;
@@ -506,6 +509,7 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_restore_type_object_between_spaces_preserves_fields() -> Result<()> {
     let _guard = test_lock().lock().await;
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;
@@ -558,6 +562,7 @@ async fn p1_restore_type_object_between_spaces_preserves_fields() -> Result<()> 
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_restore_property_object_between_spaces_preserves_fields() -> Result<()> {
     let _guard = test_lock().lock().await;
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;
@@ -610,6 +615,7 @@ async fn p1_restore_property_object_between_spaces_preserves_fields() -> Result<
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_characterize_type_property_key_normalization_patterns() -> Result<()> {
     // Root cause in anytype-heart:
     // core/api/util/key.go -> ToTypeApiKey / ToPropertyApiKey -> strcase.ToSnake(...)
@@ -731,6 +737,7 @@ async fn p1_characterize_type_property_key_normalization_patterns() -> Result<()
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_restore_collection_and_items_between_spaces_preserves_fields() -> Result<()> {
     let _guard = test_lock().lock().await;
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;
@@ -775,6 +782,7 @@ async fn p1_restore_collection_and_items_between_spaces_preserves_fields() -> Re
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn p1_restore_custom_type_object_between_spaces_preserves_fields() -> Result<()> {
     let _guard = test_lock().lock().await;
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;

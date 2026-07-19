@@ -803,7 +803,6 @@ mod pagination {
     #[tokio::test]
     #[test_log::test]
     #[serial]
-    #[ignore]
     async fn test_pagination_offset() {
         with_test_context_unit(|ctx| async move {
             // Get first page

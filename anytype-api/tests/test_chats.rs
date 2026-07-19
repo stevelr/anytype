@@ -1,120 +1,132 @@
-use std::net::SocketAddr;
-
-use anytype::prelude::*;
-use chrono::Utc;
-use tokio::{
-    net::TcpStream,
-    time::{Duration, sleep},
+use anytype::{
+    prelude::*,
+    test_util::{TestResult, unique_suffix, with_test_context},
 };
 
 #[tokio::test]
-async fn test_chat_message_crud() -> anyhow::Result<()> {
-    let temp_path = std::env::temp_dir().join(format!(
-        "anytype_chat_test_{}.db",
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
-    drop(listener);
+async fn test_chat_message_crud() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let chat = ctx
+            .client
+            .chats()
+            .in_space(&ctx.space_id)
+            .create(
+                format!("chat-crud-{}", unique_suffix()),
+                Icon::Emoji {
+                    emoji: "🧪".to_string(),
+                },
+            )
+            .create()
+            .await?;
+        ctx.register_object(&chat.id);
 
-    let handle = anytype::mock::MockChatServer::start(addr)?;
-    wait_for_server(addr).await?;
+        let message_id = ctx
+            .client
+            .chats()
+            .add_message(&chat.id)
+            .content(MessageContent {
+                text: "hello".to_string(),
+                style: MessageTextStyle::Paragraph,
+                marks: Vec::new(),
+            })
+            .send()
+            .await?;
 
-    let mut config = ClientConfig::default().app_name("anytype-chat-test");
-    config.keystore = Some(format!("file:path={}", temp_path.display()));
-    config.keystore_service = Some("anytype-chat-test".to_string());
-    config.grpc_endpoint = Some(format!("http://{}", addr));
+        let page = ctx
+            .client
+            .chats()
+            .list_messages(&chat.id)
+            .list_page()
+            .await?;
+        assert!(page.messages.iter().any(|msg| msg.id == message_id));
 
-    let client = AnytypeClient::with_config(config)?;
-    let keystore = client.get_key_store();
-    keystore.update_grpc_credentials(&GrpcCredentials::from_token("token-alice"))?;
+        ctx.client
+            .chats()
+            .edit_message(&chat.id, &message_id)
+            .content(MessageContent::new().italic("updated"))
+            .send()
+            .await?;
 
-    let chat_id = "chat-default";
-    let message_id = client
-        .chats()
-        .add_message(chat_id)
-        .content(MessageContent {
-            text: "hello".to_string(),
-            style: MessageTextStyle::Paragraph,
-            marks: Vec::new(),
-        })
-        .send()
-        .await?;
+        let messages = ctx
+            .client
+            .chats()
+            .get_messages(&chat.id, [&message_id])
+            .get()
+            .await?;
+        assert_eq!(messages[0].content.text, "updated");
+        assert!(matches!(
+            messages[0].content.marks[0].kind,
+            MessageTextMarkType::Italic
+        ));
 
-    let page = client.chats().list_messages(chat_id).list_page().await?;
-    assert!(page.messages.iter().any(|msg| msg.id == message_id));
+        ctx.client
+            .chats()
+            .read_messages(&chat.id)
+            .read_type(ChatReadType::Messages)
+            .mark_read()
+            .await?;
 
-    client
-        .chats()
-        .edit_message(chat_id, &message_id)
-        .content(MessageContent {
-            text: "updated".to_string(),
-            style: MessageTextStyle::Paragraph,
-            marks: Vec::new(),
-        })
-        .send()
-        .await?;
+        ctx.client
+            .chats()
+            .unread_messages(&chat.id)
+            .read_type(ChatReadType::Messages)
+            .after("0000000000000000")
+            .mark_unread()
+            .await?;
 
-    let messages = client
-        .chats()
-        .get_messages(chat_id, [&message_id])
-        .get()
-        .await?;
-    assert_eq!(messages[0].content.text, "updated");
-
-    client
-        .chats()
-        .read_messages(chat_id)
-        .read_type(ChatReadType::Messages)
-        .mark_read()
-        .await?;
-
-    let page = client
-        .chats()
-        .list_messages(chat_id)
-        .unread_only(ChatReadType::Messages)
-        .list_page()
-        .await?;
-    assert!(
-        page.messages.is_empty(),
-        "expected no unread messages after mark_read"
-    );
-
-    client
-        .chats()
-        .unread_messages(chat_id)
-        .read_type(ChatReadType::Messages)
-        .after("0000000000000000")
-        .mark_unread()
-        .await?;
-
-    let page = client
-        .chats()
-        .list_messages(chat_id)
-        .unread_only(ChatReadType::Messages)
-        .list_page()
-        .await?;
-    assert!(
-        page.messages.iter().any(|msg| msg.id == message_id),
-        "expected message to be marked unread"
-    );
-
-    client
-        .chats()
-        .delete_message(chat_id, &message_id)
-        .delete()
-        .await?;
-
-    handle.shutdown().await;
-    Ok(())
+        ctx.client
+            .chats()
+            .in_space(&ctx.space_id)
+            .delete_message(&chat.id, &message_id)
+            .await?;
+        Ok(())
+    })
+    .await
 }
 
-async fn wait_for_server(addr: SocketAddr) -> anyhow::Result<()> {
-    for _ in 0..20 {
-        if TcpStream::connect(addr).await.is_ok() {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-    anyhow::bail!("mock server failed to start on {addr}");
+#[tokio::test]
+async fn test_rest_chat_message_crud() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let chats = ctx.client.chats().in_space(&ctx.space_id);
+        let chat = chats
+            .create(
+                format!("rest-chat-crud-{}", unique_suffix()),
+                Icon::Emoji {
+                    emoji: "🌐".to_string(),
+                },
+            )
+            .create()
+            .await?;
+        ctx.register_object(&chat.id);
+
+        let message_id = chats
+            .add_message(&chat.id, MessageContent::new().bold("hello over REST"))
+            .send()
+            .await?;
+        let created = chats.get_message(&chat.id, &message_id).get().await?;
+        assert_eq!(created.content.text, "hello over REST");
+        assert!(matches!(
+            created.content.marks[0].kind,
+            MessageTextMarkType::Bold
+        ));
+
+        chats
+            .edit_message(
+                &chat.id,
+                &message_id,
+                MessageContent::new().italic("updated over REST"),
+            )
+            .send()
+            .await?;
+        let updated = chats.get_message(&chat.id, &message_id).get().await?;
+        assert_eq!(updated.content.text, "updated over REST");
+        assert!(matches!(
+            updated.content.marks[0].kind,
+            MessageTextMarkType::Italic
+        ));
+
+        chats.delete_message(&chat.id, &message_id).await?;
+        Ok(())
+    })
+    .await
 }

@@ -207,7 +207,7 @@ impl Query {
     /// Adds query parameter name=value to request url.
     /// This is a general-purpose (and therefore possibly error-prone) function,
     /// and not exported outside the crate.
-    fn add_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub(crate) fn add_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.params.push((name.into(), value.into()));
         self
     }

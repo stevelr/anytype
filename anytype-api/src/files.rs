@@ -1,6 +1,8 @@
-//! # Anytype Files (gRPC)
+//! # Anytype Files
 //!
-//! gRPC-backed file operations: list/search files, upload/download, and preload flows.
+//! File transfers use REST when the HTTP API has equivalent functionality.
+//! Metadata, search, preload, URL upload, and uploads with rich placement/style
+//! options continue to use gRPC.
 //!
 
 use std::path::{Path, PathBuf};
@@ -15,6 +17,14 @@ use anytype_rpc::{
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
 use prost_types::{ListValue, Struct, Value};
+use reqwest::{
+    Method, StatusCode,
+    header::{
+        ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderMap,
+        HeaderName, HeaderValue, IF_MATCH, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE,
+        IF_UNMODIFIED_SINCE, LAST_MODIFIED, RANGE,
+    },
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
 use tonic::Request;
@@ -75,8 +85,7 @@ pub enum FileStyle {
 /// Response from an HTTP file upload (`POST /v1/spaces/{space_id}/files`).
 ///
 /// This is the subset of file metadata the REST upload endpoint returns. The
-/// gRPC [`upload`](FilesClient::upload) path returns a richer [`FileObject`];
-/// see `docs/http-grpc-overlap.md` for the mapping.
+/// unified [`FilesClient::upload`] builder normalizes this into [`FileObject`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileUploadResponse {
     /// File object ID
@@ -93,6 +102,50 @@ pub struct FileUploadResponse {
     /// Size of the uploaded file, in bytes
     #[serde(default)]
     pub size_in_bytes: Option<i64>,
+}
+
+/// HTTP metadata returned for a REST file download or `HEAD` request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileHttpMetadata {
+    /// Media type of the selected file or image variant.
+    pub content_type: Option<String>,
+    /// Response body length. For a ranged response this is the partial length.
+    pub content_length: Option<u64>,
+    /// Byte range selected by the server, such as `bytes 0-499/1200`.
+    pub content_range: Option<String>,
+    /// Range units supported by the server, normally `bytes`.
+    pub accept_ranges: Option<String>,
+    /// Server-provided modification timestamp in HTTP-date form.
+    pub last_modified: Option<String>,
+    /// Server-provided entity tag, when available.
+    pub etag: Option<String>,
+    /// Cache policy supplied by the file endpoint.
+    pub cache_control: Option<String>,
+}
+
+/// Result of a configurable REST file download.
+#[derive(Debug, Clone)]
+pub struct FileContentResponse {
+    /// HTTP status, including `206`, `304`, `412`, or `416` control responses.
+    pub status: StatusCode,
+    /// File-related response headers.
+    pub metadata: FileHttpMetadata,
+    /// Response body. Conditional and `HEAD` responses normally have no body.
+    pub bytes: Bytes,
+}
+
+impl FileContentResponse {
+    /// Returns true when a conditional request found the cached representation current.
+    #[must_use]
+    pub fn is_not_modified(&self) -> bool {
+        self.status == StatusCode::NOT_MODIFIED
+    }
+
+    /// Returns true when the server fulfilled a byte-range request.
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        self.status == StatusCode::PARTIAL_CONTENT
+    }
 }
 
 // ============================================================================
@@ -146,6 +199,11 @@ impl<'a> FilesClient<'a> {
         }
     }
 
+    /// Download through the legacy gRPC API.
+    ///
+    /// New code should prefer [`download_bytes`](Self::download_bytes), which
+    /// uses the REST file endpoint. This method remains available for callers
+    /// that rely on the server writing directly to a destination path.
     pub fn download(&self, object_id: impl Into<String>) -> FileDownloadRequest<'a> {
         FileDownloadRequest {
             client: self.client,
@@ -164,6 +222,8 @@ impl<'a> FilesClient<'a> {
             details: None,
             created_in_context: None,
             created_in_context_ref: None,
+            file_name: None,
+            mime: None,
         }
     }
 
@@ -200,6 +260,76 @@ impl<'a> FilesClient<'a> {
 // ============================================================================
 
 impl<'a> FilesClient<'a> {
+    /// Download a file's raw bytes over REST.
+    pub async fn download_bytes(
+        &self,
+        space_id: impl Into<String>,
+        file_id: impl Into<String>,
+    ) -> Result<Bytes> {
+        Ok(self
+            .download_request(space_id, file_id)
+            .download()
+            .await?
+            .bytes)
+    }
+
+    /// Delete a file over REST.
+    pub async fn delete(
+        &self,
+        space_id: impl Into<String>,
+        file_id: impl Into<String>,
+    ) -> Result<()> {
+        self.delete_request(space_id, file_id).delete().await
+    }
+
+    /// Configure a REST file download or `HEAD` metadata request.
+    #[must_use]
+    pub fn download_request(
+        &self,
+        space_id: impl Into<String>,
+        file_id: impl Into<String>,
+    ) -> FileContentRequest<'a> {
+        FileContentRequest {
+            client: self.client,
+            space_id: space_id.into(),
+            file_id: file_id.into(),
+            width: None,
+            range: None,
+            if_match: None,
+            if_none_match: None,
+            if_modified_since: None,
+            if_unmodified_since: None,
+            if_range: None,
+        }
+    }
+
+    /// Fetch file metadata with an HTTP `HEAD` request.
+    ///
+    /// Use [`download_request`](Self::download_request) when image width or
+    /// conditional headers are needed.
+    pub async fn metadata(
+        &self,
+        space_id: impl Into<String>,
+        file_id: impl Into<String>,
+    ) -> Result<FileContentResponse> {
+        self.download_request(space_id, file_id).head().await
+    }
+
+    /// Configure a REST file deletion, including permanent deletion.
+    #[must_use]
+    pub fn delete_request(
+        &self,
+        space_id: impl Into<String>,
+        file_id: impl Into<String>,
+    ) -> FileDeleteRequest<'a> {
+        FileDeleteRequest {
+            client: self.client,
+            space_id: space_id.into(),
+            file_id: file_id.into(),
+            skip_bin: false,
+        }
+    }
+
     /// Upload a file over the REST API (`POST /v1/spaces/{space_id}/files`).
     ///
     /// This is the REST equivalent of the gRPC [`upload`](Self::upload): simpler
@@ -211,6 +341,7 @@ impl<'a> FilesClient<'a> {
     /// path with [`FileHttpUploadRequest::path`], then call
     /// [`FileHttpUploadRequest::upload`].
     #[must_use]
+    #[deprecated(since = "0.5.0", note = "use upload for automatic backend selection")]
     pub fn http_upload(&self, space_id: impl Into<String>) -> FileHttpUploadRequest<'a> {
         FileHttpUploadRequest {
             client: self.client,
@@ -227,13 +358,13 @@ impl<'a> FilesClient<'a> {
     ///
     /// Returns the file contents. This is the REST equivalent of the gRPC
     /// [`download`](Self::download); both stream the same raw bytes.
+    #[deprecated(since = "0.5.0", note = "use download_bytes")]
     pub async fn http_download(
         &self,
         space_id: impl Into<String>,
         file_id: impl Into<String>,
     ) -> Result<Bytes> {
-        let path = format!("/v1/spaces/{}/files/{}", space_id.into(), file_id.into());
-        self.client.client.get_bytes(&path).await
+        self.download_bytes(space_id, file_id).await
     }
 
     /// Delete a file over the REST API
@@ -241,14 +372,197 @@ impl<'a> FilesClient<'a> {
     ///
     /// The REST API is the only transport with a first-class file delete; the
     /// gRPC path removes files via generic object deletion.
+    #[deprecated(since = "0.5.0", note = "use delete")]
     pub async fn http_delete(
         &self,
         space_id: impl Into<String>,
         file_id: impl Into<String>,
     ) -> Result<()> {
-        let path = format!("/v1/spaces/{}/files/{}", space_id.into(), file_id.into());
-        self.client.client.delete_no_content(&path).await
+        self.delete(space_id, file_id).await
     }
+}
+
+/// Builder for ranged, conditional, resized-image, and metadata file requests.
+pub struct FileContentRequest<'a> {
+    client: &'a AnytypeClient,
+    space_id: String,
+    file_id: String,
+    width: Option<u32>,
+    range: Option<String>,
+    if_match: Option<String>,
+    if_none_match: Option<String>,
+    if_modified_since: Option<String>,
+    if_unmodified_since: Option<String>,
+    if_range: Option<String>,
+}
+
+impl FileContentRequest<'_> {
+    /// Select a pre-rendered image variant at the given pixel width.
+    ///
+    /// The server ignores this option for non-image files. A width of zero
+    /// requests the original image.
+    #[must_use]
+    pub fn width(mut self, width: u32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// Set an HTTP byte range, for example `bytes=0-499` or `bytes=-500`.
+    #[must_use]
+    pub fn range(mut self, range: impl Into<String>) -> Self {
+        self.range = Some(range.into());
+        self
+    }
+
+    /// Set the `If-Match` precondition.
+    #[must_use]
+    pub fn if_match(mut self, value: impl Into<String>) -> Self {
+        self.if_match = Some(value.into());
+        self
+    }
+
+    /// Set the `If-None-Match` cache validator.
+    #[must_use]
+    pub fn if_none_match(mut self, value: impl Into<String>) -> Self {
+        self.if_none_match = Some(value.into());
+        self
+    }
+
+    /// Set the `If-Modified-Since` cache validator using an HTTP-date string.
+    #[must_use]
+    pub fn if_modified_since(mut self, value: impl Into<String>) -> Self {
+        self.if_modified_since = Some(value.into());
+        self
+    }
+
+    /// Set the `If-Unmodified-Since` precondition using an HTTP-date string.
+    #[must_use]
+    pub fn if_unmodified_since(mut self, value: impl Into<String>) -> Self {
+        self.if_unmodified_since = Some(value.into());
+        self
+    }
+
+    /// Set the `If-Range` validator for a ranged request.
+    #[must_use]
+    pub fn if_range(mut self, value: impl Into<String>) -> Self {
+        self.if_range = Some(value.into());
+        self
+    }
+
+    /// Execute an HTTP `GET`, preserving range and conditional statuses.
+    pub async fn download(self) -> Result<FileContentResponse> {
+        self.send(Method::GET).await
+    }
+
+    /// Execute an HTTP `HEAD`, returning headers without downloading the body.
+    pub async fn head(self) -> Result<FileContentResponse> {
+        self.send(Method::HEAD).await
+    }
+
+    async fn send(self, method: Method) -> Result<FileContentResponse> {
+        let path = file_path(&self.space_id, &self.file_id);
+        let query = self
+            .width
+            .map(|width| vec![("width".to_string(), width.to_string())])
+            .unwrap_or_default();
+        let mut headers = HeaderMap::new();
+        insert_optional_header(&mut headers, RANGE, self.range)?;
+        insert_optional_header(&mut headers, IF_MATCH, self.if_match)?;
+        insert_optional_header(&mut headers, IF_NONE_MATCH, self.if_none_match)?;
+        insert_optional_header(&mut headers, IF_MODIFIED_SINCE, self.if_modified_since)?;
+        insert_optional_header(&mut headers, IF_UNMODIFIED_SINCE, self.if_unmodified_since)?;
+        insert_optional_header(&mut headers, IF_RANGE, self.if_range)?;
+
+        let response = self
+            .client
+            .client
+            .file_request(method, &path, &query, headers)
+            .await?;
+        Ok(FileContentResponse {
+            status: response.status,
+            metadata: file_http_metadata(&response.headers),
+            bytes: response.body,
+        })
+    }
+}
+
+/// Builder for soft or permanent REST file deletion.
+pub struct FileDeleteRequest<'a> {
+    client: &'a AnytypeClient,
+    space_id: String,
+    file_id: String,
+    skip_bin: bool,
+}
+
+impl FileDeleteRequest<'_> {
+    /// Set whether deletion bypasses the bin and permanently removes the file.
+    #[must_use]
+    pub fn skip_bin(mut self, skip_bin: bool) -> Self {
+        self.skip_bin = skip_bin;
+        self
+    }
+
+    /// Permanently remove the file instead of moving it to the bin.
+    #[must_use]
+    pub fn permanently(mut self) -> Self {
+        self.skip_bin = true;
+        self
+    }
+
+    /// Execute the deletion.
+    pub async fn delete(self) -> Result<()> {
+        let path = file_path(&self.space_id, &self.file_id);
+        let query = if self.skip_bin {
+            vec![("skip_bin".to_string(), "true".to_string())]
+        } else {
+            Vec::new()
+        };
+        self.client
+            .client
+            .file_request(Method::DELETE, &path, &query, HeaderMap::new())
+            .await?;
+        Ok(())
+    }
+}
+
+fn file_path(space_id: &str, file_id: &str) -> String {
+    format!("/v1/spaces/{space_id}/files/{file_id}")
+}
+
+fn insert_optional_header(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    value: Option<String>,
+) -> Result<()> {
+    if let Some(value) = value {
+        let value = HeaderValue::from_str(&value).map_err(|error| AnytypeError::Validation {
+            message: format!("invalid {name} header: {error}"),
+        })?;
+        headers.insert(name, value);
+    }
+    Ok(())
+}
+
+fn file_http_metadata(headers: &HeaderMap) -> FileHttpMetadata {
+    FileHttpMetadata {
+        content_type: header_string(headers, CONTENT_TYPE),
+        content_length: headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok()),
+        content_range: header_string(headers, CONTENT_RANGE),
+        accept_ranges: header_string(headers, ACCEPT_RANGES),
+        last_modified: header_string(headers, LAST_MODIFIED),
+        etag: header_string(headers, ETAG),
+        cache_control: header_string(headers, CACHE_CONTROL),
+    }
+}
+
+fn header_string(headers: &HeaderMap, name: HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// Builder for an HTTP (REST) file upload. Created by
@@ -301,47 +615,15 @@ impl FileHttpUploadRequest<'_> {
     /// Returns an error if neither [`bytes`](Self::bytes) nor [`path`](Self::path)
     /// was set, if the source file cannot be read, or if the request fails.
     pub async fn upload(self) -> Result<FileUploadResponse> {
-        let (bytes, name) = match (self.data, self.source_path) {
-            (Some(data), path) => (
-                data,
-                self.file_name.or_else(|| {
-                    path.as_ref()
-                        .and_then(|path| path.file_name())
-                        .and_then(|fname| fname.to_str())
-                        .map(String::from)
-                }),
-            ),
-            (None, Some(path)) => {
-                let data = tokio::fs::read(&path)
-                    .await
-                    .map_err(|err| AnytypeError::Other {
-                        message: format!("failed to read {}: {err}", path.display()),
-                    })?;
-                let name = self.file_name.or_else(|| {
-                    path.file_name()
-                        .and_then(|fname| fname.to_str())
-                        .map(String::from)
-                });
-                (Bytes::from(data), name)
-            }
-            (None, None) => {
-                return Err(AnytypeError::Validation {
-                    message: "http_upload requires bytes() or path()".to_string(),
-                });
-            }
-        };
-        let name = name.unwrap_or_else(|| "file".to_string());
-        let mut part = reqwest::multipart::Part::bytes(bytes.to_vec()).file_name(name);
-        if let Some(mime) = self.mime {
-            part = part
-                .mime_str(&mime)
-                .map_err(|err| AnytypeError::Validation {
-                    message: format!("invalid mime type: {err}"),
-                })?;
-        }
-        let form = reqwest::multipart::Form::new().part("file", part);
-        let path = format!("/v1/spaces/{}/files", self.space_id);
-        self.client.client.post_multipart(&path, form).await
+        http_upload_file(
+            self.client,
+            &self.space_id,
+            self.data,
+            self.source_path,
+            self.file_name,
+            self.mime,
+        )
+        .await
     }
 }
 
@@ -821,6 +1103,10 @@ impl FileDownloadRequest<'_> {
     }
 }
 
+/// Unified file-upload builder.
+///
+/// Path and byte uploads without rich options use REST. URL uploads and
+/// requests with file type, style, details, or creation context use gRPC.
 pub struct FileUploadRequest<'a> {
     client: &'a AnytypeClient,
     space_id: String,
@@ -830,6 +1116,8 @@ pub struct FileUploadRequest<'a> {
     details: Option<serde_json::Value>,
     created_in_context: Option<String>,
     created_in_context_ref: Option<String>,
+    file_name: Option<String>,
+    mime: Option<String>,
 }
 
 impl FileUploadRequest<'_> {
@@ -842,6 +1130,21 @@ impl FileUploadRequest<'_> {
     #[must_use]
     pub fn from_url(mut self, url: impl Into<String>) -> Self {
         self.source = Some(FileSource::Url(url.into()));
+        self
+    }
+
+    /// Upload an in-memory file. Simple byte and path uploads use REST.
+    #[must_use]
+    pub fn bytes(mut self, file_name: impl Into<String>, data: impl Into<Bytes>) -> Self {
+        self.file_name = Some(file_name.into());
+        self.source = Some(FileSource::Bytes(data.into()));
+        self
+    }
+
+    /// Set the MIME type used by a REST upload.
+    #[must_use]
+    pub fn mime(mut self, mime: impl Into<String>) -> Self {
+        self.mime = Some(mime.into());
         self
     }
 
@@ -875,7 +1178,27 @@ impl FileUploadRequest<'_> {
         self
     }
 
+    /// Upload the file through the least-capable backend that preserves every
+    /// requested option, returning a normalized [`FileObject`].
     pub async fn upload(self) -> Result<FileObject> {
+        if self.uses_rest() {
+            let (data, source_path) = match self.source {
+                Some(FileSource::Bytes(data)) => (Some(data), None),
+                Some(FileSource::Path(path)) => (None, Some(path)),
+                Some(FileSource::Url(_)) | None => unreachable!("REST backend selection"),
+            };
+            let response = http_upload_file(
+                self.client,
+                &self.space_id,
+                data,
+                source_path,
+                self.file_name,
+                self.mime,
+            )
+            .await?;
+            return Ok(file_from_http_upload(&self.space_id, response));
+        }
+
         let result = upload_file(
             self.client,
             &self.space_id,
@@ -894,6 +1217,17 @@ impl FileUploadRequest<'_> {
             &result.object_id,
             &result.details,
         ))
+    }
+
+    fn uses_rest(&self) -> bool {
+        upload_uses_rest(
+            self.source.as_ref(),
+            self.file_type.is_some()
+                || self.style.is_some()
+                || self.details.is_some()
+                || self.created_in_context.is_some()
+                || self.created_in_context_ref.is_some(),
+        )
     }
 }
 
@@ -982,6 +1316,83 @@ impl FileDiscardPreloadRequest<'_> {
 enum FileSource {
     Url(String),
     Path(PathBuf),
+    Bytes(Bytes),
+}
+
+fn upload_uses_rest(source: Option<&FileSource>, has_rich_options: bool) -> bool {
+    matches!(source, Some(FileSource::Path(_) | FileSource::Bytes(_))) && !has_rich_options
+}
+
+async fn http_upload_file(
+    client: &AnytypeClient,
+    space_id: &str,
+    data: Option<Bytes>,
+    source_path: Option<PathBuf>,
+    file_name: Option<String>,
+    mime: Option<String>,
+) -> Result<FileUploadResponse> {
+    let (bytes, name) = match (data, source_path) {
+        (Some(data), path) => (
+            data,
+            file_name.or_else(|| {
+                path.as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(String::from)
+            }),
+        ),
+        (None, Some(path)) => {
+            let data = tokio::fs::read(&path)
+                .await
+                .map_err(|err| AnytypeError::Other {
+                    message: format!("failed to read {}: {err}", path.display()),
+                })?;
+            let name = file_name.or_else(|| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(String::from)
+            });
+            (Bytes::from(data), name)
+        }
+        (None, None) => {
+            return Err(AnytypeError::Validation {
+                message: "file upload requires bytes or a path".to_string(),
+            });
+        }
+    };
+
+    let mut part = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name(name.unwrap_or_else(|| "file".to_string()));
+    if let Some(mime) = mime {
+        part = part
+            .mime_str(&mime)
+            .map_err(|err| AnytypeError::Validation {
+                message: format!("invalid mime type: {err}"),
+            })?;
+    }
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let path = format!("/v1/spaces/{space_id}/files");
+    client.client.post_multipart(&path, form).await
+}
+
+fn file_from_http_upload(space_id: &str, response: FileUploadResponse) -> FileObject {
+    let file_type = response
+        .media
+        .as_deref()
+        .map(file_type_from_mime)
+        .unwrap_or_default();
+    FileObject {
+        id: response.object_id,
+        space_id: space_id.to_string(),
+        name: response.name,
+        size: response.size_in_bytes,
+        mime: response.media,
+        added_at: None,
+        file_type,
+        style: FileStyle::Auto,
+        target_object_id: None,
+        details: serde_json::Value::Null,
+    }
 }
 
 async fn search_files(
@@ -1082,6 +1493,11 @@ async fn upload_file(
     let (url, local_path) = match source {
         FileSource::Url(url) => (url, String::new()),
         FileSource::Path(path) => (String::new(), path.to_string_lossy().to_string()),
+        FileSource::Bytes(_) => {
+            return Err(AnytypeError::Validation {
+                message: "in-memory uploads are only supported by the REST backend".to_string(),
+            });
+        }
     };
 
     let request = upload::Request {
@@ -1494,5 +1910,256 @@ fn value_bool(value: bool) -> Value {
 fn value_list(values: Vec<Value>) -> Value {
     Value {
         kind: Some(prost_types::value::Kind::ListValue(ListValue { values })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use bytes::Bytes;
+    use reqwest::StatusCode;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+
+    use super::{
+        FileSource, FileStyle, FileType, FileUploadResponse, file_from_http_upload,
+        upload_uses_rest,
+    };
+    use crate::{
+        client::{AnytypeClient, ClientConfig},
+        keystore::HttpCredentials,
+    };
+
+    static NEXT_MOCK_ID: AtomicU64 = AtomicU64::new(1);
+
+    async fn mock_file_client(response: &'static str) -> (AnytypeClient, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock file server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept mock request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read mock request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write mock response");
+            String::from_utf8(request).expect("HTTP request is UTF-8")
+        });
+
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-file-http-unit-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("file-http-unit");
+        config.base_url = Some(format!("http://{address}"));
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("file-http-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("create mock client");
+        client.set_api_key(HttpCredentials::new("test-token"));
+        (client, server)
+    }
+
+    #[test]
+    fn simple_path_and_byte_uploads_select_rest() {
+        let path = FileSource::Path(PathBuf::from("example.txt"));
+        let bytes = FileSource::Bytes(Bytes::from_static(b"hello"));
+
+        assert!(upload_uses_rest(Some(&path), false));
+        assert!(upload_uses_rest(Some(&bytes), false));
+    }
+
+    #[test]
+    fn rich_and_url_uploads_select_grpc() {
+        let path = FileSource::Path(PathBuf::from("example.txt"));
+        let url = FileSource::Url("https://example.invalid/file".to_string());
+
+        assert!(!upload_uses_rest(Some(&path), true));
+        assert!(!upload_uses_rest(Some(&url), false));
+        assert!(!upload_uses_rest(None, false));
+    }
+
+    #[test]
+    fn rest_upload_response_normalizes_to_file_object() {
+        let file = file_from_http_upload(
+            "space-id",
+            FileUploadResponse {
+                object_id: "file-id".to_string(),
+                name: Some("report.txt".to_string()),
+                extension: Some("txt".to_string()),
+                media: Some("text/plain".to_string()),
+                size_in_bytes: Some(5),
+            },
+        );
+
+        assert_eq!(file.id, "file-id");
+        assert_eq!(file.space_id, "space-id");
+        assert_eq!(file.name.as_deref(), Some("report.txt"));
+        assert_eq!(file.mime.as_deref(), Some("text/plain"));
+        assert_eq!(file.size, Some(5));
+        assert!(matches!(file.file_type, FileType::File));
+        assert!(matches!(file.style, FileStyle::Auto));
+        assert!(file.details.is_null());
+    }
+
+    #[test]
+    fn current_http_upload_schema_deserializes() {
+        let response: FileUploadResponse = serde_json::from_value(serde_json::json!({
+            "object_id": "file-id",
+            "name": "photo.png",
+            "extension": "png",
+            "media": "image/png",
+            "size_in_bytes": 42
+        }))
+        .expect("deserialize current anytype-heart file response");
+
+        assert_eq!(response.object_id, "file-id");
+        assert_eq!(response.extension.as_deref(), Some("png"));
+    }
+
+    #[tokio::test]
+    async fn ranged_download_sends_width_and_conditional_headers() {
+        let (client, server) = mock_file_client(
+            "HTTP/1.1 206 Partial Content\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: 5\r\n\
+             Content-Range: bytes 0-4/11\r\n\
+             Accept-Ranges: bytes\r\n\
+             Last-Modified: Sun, 19 Jul 2026 12:00:00 GMT\r\n\
+             Cache-Control: max-age=31536000, private\r\n\
+             Connection: close\r\n\r\nhello",
+        )
+        .await;
+
+        let response = client
+            .files()
+            .download_request("space-1", "file-1")
+            .width(320)
+            .range("bytes=0-4")
+            .if_match("\"current\"")
+            .if_none_match("\"stale\"")
+            .if_modified_since("Sun, 19 Jul 2026 11:00:00 GMT")
+            .if_unmodified_since("Sun, 19 Jul 2026 13:00:00 GMT")
+            .if_range("Sun, 19 Jul 2026 12:00:00 GMT")
+            .download()
+            .await
+            .expect("ranged download");
+
+        assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
+        assert!(response.is_partial());
+        assert_eq!(response.bytes, Bytes::from_static(b"hello"));
+        assert_eq!(response.metadata.content_length, Some(5));
+        assert_eq!(
+            response.metadata.content_range.as_deref(),
+            Some("bytes 0-4/11")
+        );
+        assert_eq!(response.metadata.accept_ranges.as_deref(), Some("bytes"));
+        assert_eq!(
+            response.metadata.content_type.as_deref(),
+            Some("text/plain")
+        );
+
+        let request = server.await.expect("mock server task").to_ascii_lowercase();
+        assert!(request.starts_with("get /v1/spaces/space-1/files/file-1?width=320 http/1.1"));
+        assert!(request.contains("\r\nrange: bytes=0-4\r\n"));
+        assert!(request.contains("\r\nif-match: \"current\"\r\n"));
+        assert!(request.contains("\r\nif-none-match: \"stale\"\r\n"));
+        assert!(request.contains("\r\nif-modified-since: sun, 19 jul 2026 11:00:00 gmt\r\n"));
+        assert!(request.contains("\r\nif-unmodified-since: sun, 19 jul 2026 13:00:00 gmt\r\n"));
+        assert!(request.contains("\r\nif-range: sun, 19 jul 2026 12:00:00 gmt\r\n"));
+    }
+
+    #[tokio::test]
+    async fn head_returns_file_metadata_without_a_body() {
+        let (client, server) = mock_file_client(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: image/png\r\n\
+             Content-Length: 1234\r\n\
+             Accept-Ranges: bytes\r\n\
+             ETag: \"image-v1\"\r\n\
+             Last-Modified: Sun, 19 Jul 2026 12:00:00 GMT\r\n\
+             Connection: close\r\n\r\n",
+        )
+        .await;
+
+        let response = client
+            .files()
+            .metadata("space-1", "image-1")
+            .await
+            .expect("HEAD metadata");
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert!(response.bytes.is_empty());
+        assert_eq!(response.metadata.content_length, Some(1234));
+        assert_eq!(response.metadata.content_type.as_deref(), Some("image/png"));
+        assert_eq!(response.metadata.etag.as_deref(), Some("\"image-v1\""));
+        assert_eq!(
+            response.metadata.last_modified.as_deref(),
+            Some("Sun, 19 Jul 2026 12:00:00 GMT")
+        );
+
+        let request = server.await.expect("mock server task");
+        assert!(request.starts_with("HEAD /v1/spaces/space-1/files/image-1 HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn conditional_not_modified_status_is_preserved() {
+        let (client, server) = mock_file_client(
+            "HTTP/1.1 304 Not Modified\r\n\
+             Last-Modified: Sun, 19 Jul 2026 12:00:00 GMT\r\n\
+             Connection: close\r\n\r\n",
+        )
+        .await;
+
+        let response = client
+            .files()
+            .download_request("space-1", "file-1")
+            .if_modified_since("Sun, 19 Jul 2026 12:00:00 GMT")
+            .download()
+            .await
+            .expect("conditional response");
+
+        assert_eq!(response.status, StatusCode::NOT_MODIFIED);
+        assert!(response.is_not_modified());
+        assert!(response.bytes.is_empty());
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_sets_skip_bin_query() {
+        let (client, server) =
+            mock_file_client("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;
+
+        client
+            .files()
+            .delete_request("space-1", "file-1")
+            .permanently()
+            .delete()
+            .await
+            .expect("permanent delete");
+
+        let request = server.await.expect("mock server task");
+        assert!(
+            request.starts_with("DELETE /v1/spaces/space-1/files/file-1?skip_bin=true HTTP/1.1")
+        );
     }
 }

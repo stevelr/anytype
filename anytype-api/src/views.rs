@@ -31,7 +31,6 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use snafu::prelude::*;
 
 use crate::{
     Result,
@@ -171,28 +170,19 @@ impl ViewListObjectsRequest {
         self.limits.validate_id(&self.space_id, "space_id")?;
         self.limits.validate_id(&self.list_id, "list_id")?;
 
+        let view_id = self.view_id.ok_or_else(|| AnytypeError::Validation {
+            message: "You must set the view with `.view(view_id)` before .list()".to_string(),
+        })?;
+
         let query = Query::default()
             .set_limit_opt(self.limit)
             .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
-        let path = if let Some(ref view_id) = self.view_id {
-            ensure!(
-                !view_id.is_empty(),
-                ValidationSnafu {
-                    message: "view_id is empty".to_string(),
-                }
-            );
-            format!(
-                "/v1/spaces/{}/lists/{}/views/{}/objects",
-                self.space_id, self.list_id, view_id
-            )
-        } else {
-            format!(
-                "/v1/spaces/{}/lists/{}/objects",
-                self.space_id, self.list_id
-            )
-        };
+        let path = format!(
+            "/v1/spaces/{}/lists/{}/views/{view_id}/objects",
+            self.space_id, self.list_id
+        );
 
         self.client.get_request_paged(&path, query).await
     }

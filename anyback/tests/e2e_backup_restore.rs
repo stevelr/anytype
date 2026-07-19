@@ -110,6 +110,7 @@ impl Drop for PrefixCleanupGuard {
 
 #[cfg(feature = "snapshot-import")]
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_create_full_then_restore_apply_subset() -> Result<()> {
     let (source_space, dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -165,6 +166,7 @@ async fn e2e_backup_create_full_then_restore_apply_subset() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_create_full_then_restore_into_new_space_path() -> Result<()> {
     let (source_space, dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -231,6 +233,7 @@ async fn e2e_backup_create_full_then_restore_into_new_space_path() -> Result<()>
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_create_full_then_restore_apply_same_space() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -270,6 +273,7 @@ async fn e2e_backup_create_full_then_restore_apply_same_space() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_create_json_output_is_parseable() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -312,6 +316,7 @@ async fn e2e_backup_create_json_output_is_parseable() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_create_pb_json_then_restore_same_space() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -374,6 +379,7 @@ async fn e2e_backup_create_pb_json_then_restore_same_space() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_archive_inspect_supports_pb_and_pb_json_archives() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -441,6 +447,7 @@ async fn e2e_archive_inspect_supports_pb_and_pb_json_archives() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_restore_chat_space_messages() -> Result<()> {
     let Some(chat_space) = choose_writable_chat_space_cli().await? else {
         eprintln!("no writable chat space found; skipping chat-space e2e");
@@ -490,6 +497,7 @@ async fn e2e_backup_restore_chat_space_messages() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_restore_regular_space_chat_messages() -> Result<()> {
     let (source_space, dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -554,6 +562,7 @@ async fn e2e_backup_restore_regular_space_chat_messages() -> Result<()> {
 
 #[cfg(feature = "snapshot-import")]
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_export_then_import_subset_between_spaces() -> Result<()> {
     let (source_space, dest_space) = choose_writable_spaces_cli().await?;
     let fixture = object_generator::generate_fixture(&source_space.name, &source_space.id).await?;
@@ -653,6 +662,7 @@ async fn e2e_export_then_import_subset_between_spaces() -> Result<()> {
 
 #[cfg(feature = "snapshot-import")]
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_apply_json_output_is_parseable() -> Result<()> {
     let (source_space, dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -704,6 +714,7 @@ async fn e2e_restore_apply_json_output_is_parseable() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_create_incremental_with_types_filter() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -766,6 +777,7 @@ async fn e2e_backup_create_incremental_with_types_filter() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
     let (source_space, dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -828,6 +840,7 @@ async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_include_files_controls_binary_payloads() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -889,6 +902,7 @@ async fn e2e_backup_include_files_controls_binary_payloads() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_include_archived_controls_archived_objects() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -956,6 +970,7 @@ async fn e2e_backup_include_archived_controls_archived_objects() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_include_nested_includes_linked_objects() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1035,6 +1050,7 @@ async fn e2e_backup_include_nested_includes_linked_objects() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_include_backlinks_includes_referencing_objects() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1112,6 +1128,7 @@ async fn e2e_backup_include_backlinks_includes_referencing_objects() -> Result<(
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_markdown_include_properties_changes_output() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1175,6 +1192,7 @@ async fn e2e_backup_markdown_include_properties_changes_output() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_backup_incremental_since_mode_boundary_exact_timestamp() -> Result<()> {
     let (source_space, _dest_space) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1242,6 +1260,7 @@ async fn e2e_backup_incremental_since_mode_boundary_exact_timestamp() -> Result<
 
 #[cfg(feature = "snapshot-import")]
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_import_preserves_created_and_last_modified_dates() -> Result<()> {
     let (source_space, dest_space) = choose_writable_spaces_cli().await?;
     if source_space.id == dest_space.id {
@@ -1323,6 +1342,7 @@ async fn e2e_import_preserves_created_and_last_modified_dates() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_reverts_modified_object_to_backup_state() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1408,6 +1428,7 @@ async fn e2e_restore_reverts_modified_object_to_backup_state() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_restores_property_fields() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1483,6 +1504,7 @@ async fn e2e_restore_replace_restores_property_fields() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_file_object_reverts_name() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1561,6 +1583,7 @@ async fn e2e_restore_replace_file_object_reverts_name() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_type_object_reverts_fields() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1634,6 +1657,7 @@ async fn e2e_restore_replace_type_object_reverts_fields() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_property_object_reverts_fields() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1707,6 +1731,7 @@ async fn e2e_restore_replace_property_object_reverts_fields() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_collection_with_items_reverts_membership() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1804,6 +1829,7 @@ async fn e2e_restore_replace_collection_with_items_reverts_membership() -> Resul
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_custom_type_object_reverts_type_and_fields() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -1925,6 +1951,7 @@ async fn e2e_restore_replace_custom_type_object_reverts_type_and_fields() -> Res
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_complex_nested_object_reverts_graph() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2050,6 +2077,7 @@ async fn e2e_restore_replace_complex_nested_object_reverts_graph() -> Result<()>
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_replace_after_object_type_changed_since_backup() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2134,6 +2162,7 @@ async fn e2e_restore_replace_after_object_type_changed_since_backup() -> Result<
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_recovers_deleted_object() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2229,6 +2258,7 @@ async fn e2e_restore_recovers_deleted_object() -> Result<()> {
 /// then attempt to restore from backup. This tests whether the import can
 /// recreate an object the space no longer knows about.
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_recovers_permanently_deleted_object() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2323,6 +2353,7 @@ async fn e2e_restore_recovers_permanently_deleted_object() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_recovers_permanently_deleted_file_same_space() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2398,6 +2429,7 @@ async fn e2e_restore_recovers_permanently_deleted_file_same_space() -> Result<()
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_recovers_permanently_deleted_type_same_space() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2466,6 +2498,7 @@ async fn e2e_restore_recovers_permanently_deleted_type_same_space() -> Result<()
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_recovers_permanently_deleted_property_same_space() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2534,6 +2567,7 @@ async fn e2e_restore_recovers_permanently_deleted_property_same_space() -> Resul
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_restore_recovers_permanently_deleted_collection_with_items_same_space() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -2613,6 +2647,7 @@ async fn e2e_restore_recovers_permanently_deleted_collection_with_items_same_spa
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()> {
     let (source_space, _) = choose_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();

@@ -1,194 +1,154 @@
-use std::net::SocketAddr;
-
-use anyhow::Result;
-use anytype::prelude::*;
-use chrono::Utc;
-use tokio::{
-    net::TcpStream,
-    time::{Duration, sleep},
+use anytype::{
+    prelude::*,
+    test_util::{TestResult, unique_suffix, with_test_context},
 };
+use tokio::time::{Duration, sleep};
 
-const DEFAULT_CHAT_ID: &str = "chat-default";
-const DEFAULT_SPACE_ID: &str = "space-default";
-const DEFAULT_CHAT_NAME: &str = "General";
+#[tokio::test]
+async fn test_chat_discovery_requests() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let name = format!("chat-discovery-{}", unique_suffix());
+        let chat = ctx
+            .client
+            .chats()
+            .in_space(&ctx.space_id)
+            .create(
+                &name,
+                Icon::Emoji {
+                    emoji: "🔎".to_string(),
+                },
+            )
+            .create()
+            .await?;
+        ctx.register_object(&chat.id);
 
-async fn setup_client(token: &str) -> Result<(AnytypeClient, anytype::mock::MockChatServerHandle)> {
-    let temp_path = std::env::temp_dir().join(format!(
-        "anytype_chat_discovery_test_{}.db",
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
-    drop(listener);
+        let chats = ctx
+            .client
+            .chats()
+            .list_chats_in(&ctx.space_id)
+            .list()
+            .await?;
+        assert!(
+            chats.items.iter().any(|item| item.id == chat.id),
+            "REST chat listing should include the created chat"
+        );
 
-    let handle = anytype::mock::MockChatServer::start(addr)?;
-    wait_for_server(addr).await?;
+        let search = ctx
+            .client
+            .chats()
+            .search_chats_in(&ctx.space_id)
+            .text(&name)
+            .search()
+            .await?;
+        assert!(
+            search.items.iter().any(|item| item.id == chat.id),
+            "gRPC chat-object search should include the created chat"
+        );
 
-    let mut config = ClientConfig::default().app_name("anytype-chat-discovery-test");
-    config.keystore = Some(format!("file:path={}", temp_path.display()));
-    config.keystore_service = Some("anytype-chat-discovery".to_string());
-    config.grpc_endpoint = Some(format!("http://{}", addr));
+        let resolved = ctx
+            .client
+            .chats()
+            .resolve_chat_by_name(&ctx.space_id, &name)
+            .resolve()
+            .await?;
+        assert_eq!(resolved, chat.id);
 
-    let client = AnytypeClient::with_config(config)?;
-    let keystore = client.get_key_store();
-    keystore.update_grpc_credentials(&GrpcCredentials::from_token(token))?;
-
-    Ok((client, handle))
+        let fetched = ctx
+            .client
+            .chats()
+            .get_chat(&ctx.space_id, &chat.id)
+            .get()
+            .await?;
+        assert_eq!(fetched.id, chat.id);
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
-#[ignore] // fixme: broken - probably a limitation of the mock server
-async fn test_chat_discovery_requests() -> Result<()> {
-    let (client, handle) = setup_client("token-alice").await?;
+async fn test_rest_chat_messages_reactions_search_and_reads() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let name = format!("chat-rest-{}", unique_suffix());
+        let chat = ctx
+            .client
+            .chats()
+            .in_space(&ctx.space_id)
+            .create(
+                name,
+                Icon::Emoji {
+                    emoji: "💬".to_string(),
+                },
+            )
+            .create()
+            .await?;
+        ctx.register_object(&chat.id);
 
-    let chats = client
-        .chats()
-        .list_chats_in(DEFAULT_SPACE_ID)
-        .list()
-        .await?;
-    assert!(
-        chats.items.iter().any(|chat| chat.id == DEFAULT_CHAT_ID),
-        "expected default chat to be returned"
-    );
-    let chat = chats
-        .items
-        .iter()
-        .find(|chat| chat.id == DEFAULT_CHAT_ID)
-        .expect("default chat");
-    assert!(
-        chat.get_property_date("last_modified_date").is_some(),
-        "expected last_modified_date property"
-    );
+        // Publishing remains gRPC so structured blocks are not discarded.
+        let message_id = ctx
+            .client
+            .chats()
+            .add_message(&chat.id)
+            .content(MessageContent::new().bold("migration coverage"))
+            .blocks(vec![MessageBlock::Text(MessageBlockText {
+                text: "structured heading".to_string(),
+                style: MessageTextStyle::Header2,
+                ..MessageBlockText::default()
+            })])
+            .send()
+            .await?;
 
-    let search = client
-        .chats()
-        .search_chats_in(DEFAULT_SPACE_ID)
-        .text(DEFAULT_CHAT_NAME)
-        .search()
-        .await?;
-    assert!(
-        search.items.iter().any(|chat| chat.id == DEFAULT_CHAT_ID),
-        "expected search results to include default chat"
-    );
+        let rich = ctx
+            .client
+            .chats()
+            .get_messages(&chat.id, [&message_id])
+            .get()
+            .await?;
+        assert_eq!(rich.len(), 1);
+        assert_eq!(rich[0].content.text, "migration coverage");
+        assert!(!rich[0].content.marks.is_empty());
+        assert!(!rich[0].blocks.is_empty());
 
-    let resolved = client
-        .chats()
-        .resolve_chat_by_name(DEFAULT_SPACE_ID, DEFAULT_CHAT_NAME)
-        .resolve()
-        .await?;
-    assert_eq!(resolved, DEFAULT_CHAT_ID);
+        let chats = ctx.client.chats().in_space(&ctx.space_id);
+        let plain = chats.get_message(&chat.id, &message_id).get().await?;
+        assert_eq!(plain.content.text, "migration coverage");
+        assert!(plain.blocks.is_empty(), "REST does not expose blocks");
 
-    let chat = client
-        .chats()
-        .get_chat(DEFAULT_SPACE_ID, DEFAULT_CHAT_ID)
-        .get()
-        .await?;
-    assert_eq!(chat.id, DEFAULT_CHAT_ID);
+        let listed = chats.list_messages(&chat.id).limit(20).list().await?;
+        assert!(listed.iter().any(|message| message.id == message_id));
 
-    let space_chat = client.chats().space_chat(DEFAULT_SPACE_ID).get().await?;
-    assert_eq!(space_chat.id, DEFAULT_CHAT_ID);
-
-    handle.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_chat_convenience_reactions_and_read_all() -> Result<()> {
-    let (client, handle) = setup_client("token-alice").await?;
-
-    let message_id = client
-        .chats()
-        .send_text(DEFAULT_CHAT_ID, "hello")
-        .send()
-        .await?;
-
-    client
-        .chats()
-        .edit_text(DEFAULT_CHAT_ID, &message_id, "updated")
-        .send()
-        .await?;
-
-    let messages = client
-        .chats()
-        .get_messages(DEFAULT_CHAT_ID, [&message_id])
-        .get()
-        .await?;
-    assert_eq!(messages[0].content.text, "updated");
-
-    let added = client
-        .chats()
-        .toggle_reaction(DEFAULT_CHAT_ID, &message_id, "👍")
-        .send()
-        .await?;
-    assert!(added, "expected reaction to be added");
-
-    let messages = client
-        .chats()
-        .get_messages(DEFAULT_CHAT_ID, [&message_id])
-        .get()
-        .await?;
-    assert!(
-        messages[0]
-            .reactions
-            .iter()
-            .any(|reaction| reaction.emoji == "👍"),
-        "expected reaction to be present"
-    );
-
-    let removed = client
-        .chats()
-        .toggle_reaction(DEFAULT_CHAT_ID, &message_id, "👍")
-        .send()
-        .await?;
-    assert!(!removed, "expected reaction to be removed");
-
-    let temp_path = std::env::temp_dir().join(format!(
-        "anytype_chat_discovery_bob_{}.db",
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let mut config = ClientConfig::default().app_name("anytype-chat-discovery-bob-test");
-    config.keystore = Some(format!("file:path={}", temp_path.display()));
-    config.keystore_service = Some("anytype-chat-discovery".to_string());
-    config.grpc_endpoint = Some(format!("http://{}", handle.addr()));
-
-    let bob_client = AnytypeClient::with_config(config)?;
-    let keystore = bob_client.get_key_store();
-    keystore.update_grpc_credentials(&GrpcCredentials::from_token("token-bob"))?;
-
-    let page = bob_client
-        .chats()
-        .list_messages(DEFAULT_CHAT_ID)
-        .list_page()
-        .await?;
-    assert!(
-        page.state.oldest_unread_order_id().is_some(),
-        "expected unread state for bob"
-    );
-
-    bob_client
-        .chats()
-        .read_all(DEFAULT_SPACE_ID)
-        .mark_read()
-        .await?;
-
-    let unread = bob_client
-        .chats()
-        .list_messages(DEFAULT_CHAT_ID)
-        .unread_only(ChatReadType::Messages)
-        .list_page()
-        .await?;
-    assert!(unread.messages.is_empty(), "expected all messages read");
-
-    handle.shutdown().await;
-    Ok(())
-}
-
-async fn wait_for_server(addr: SocketAddr) -> Result<()> {
-    for _ in 0..20 {
-        if TcpStream::connect(addr).await.is_ok() {
-            return Ok(());
+        let mut search_found = false;
+        for _ in 0..40 {
+            let matches = chats
+                .search_messages(&chat.id, "migration coverage")
+                .limit(20)
+                .search()
+                .await?;
+            if matches
+                .items
+                .iter()
+                .any(|result| result.message.id == message_id)
+            {
+                search_found = true;
+                break;
+            }
+            sleep(Duration::from_millis(250)).await;
         }
-        sleep(Duration::from_millis(50)).await;
-    }
-    anyhow::bail!("mock server failed to start on {addr}");
+        assert!(search_found, "message did not become searchable");
+
+        chats.toggle_reaction(&chat.id, &message_id, "👍").await?;
+        let reacted = chats.get_message(&chat.id, &message_id).get().await?;
+        assert!(
+            reacted
+                .reactions
+                .iter()
+                .any(|reaction| reaction.emoji == "👍")
+        );
+
+        chats.read_messages(&chat.id).mark_read().await?;
+        chats.read_reactions(&chat.id).mark_read().await?;
+        chats.read_all(&chat.id).await?;
+        chats.delete_message(&chat.id, &message_id).await?;
+        Ok(())
+    })
+    .await
 }

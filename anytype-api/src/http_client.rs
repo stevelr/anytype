@@ -173,6 +173,14 @@ pub struct HttpRequest {
     pub body: Option<Bytes>,
 }
 
+/// Raw response data for endpoints whose status and headers are part of the
+/// public contract, such as ranged and conditional file downloads.
+pub(crate) struct RawHttpResponse {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Bytes,
+}
+
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpRequest")
@@ -343,6 +351,64 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// Opens an authenticated streaming GET request.
+    ///
+    /// Unlike [`get_request`](Self::get_request), this returns the live
+    /// response without buffering its body so callers can incrementally
+    /// consume endpoints such as Server-Sent Events.
+    pub(crate) async fn get_streaming_request(
+        &self,
+        path: &str,
+        query: QueryWithFilters,
+        headers: HeaderMap,
+    ) -> Result<reqwest::Response> {
+        query.validate().map_err(|err| AnytypeError::Validation {
+            message: format!("get_streaming_request {path} {err}"),
+        })?;
+        self.limits.validate_query(&query.params)?;
+
+        let api_key = self.get_api_key();
+        let Some(token) = api_key.token() else {
+            return Err(AnytypeError::Auth {
+                message: format!(
+                    "HTTP credentials missing token. Client is not authenticated. url={}",
+                    self.base_url,
+                ),
+            });
+        };
+        let full_url = format!("{}{}", self.base_url, path);
+        debug!("get_streaming_request {full_url}");
+        self.metrics.increment_requests();
+        let response = self
+            .client
+            .get(&full_url)
+            .query(&query.params)
+            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+            .bearer_auth(token)
+            .headers(headers)
+            .send()
+            .await
+            .context(HttpSnafu {
+                method: "get",
+                url: &full_url,
+            })?;
+
+        if !response.status().is_success() {
+            self.metrics.increment_errors();
+            let code = response.status().as_u16();
+            let message = response.text().await.unwrap_or_default();
+            return Err(AnytypeError::ApiError {
+                code,
+                method: "get".to_string(),
+                url: full_url,
+                message,
+            });
+        }
+
+        self.metrics.increment_success();
+        Ok(response)
+    }
+
     /// Makes an authenticated PATCH request with JSON body.
     pub(crate) async fn patch_request<T: DeserializeOwned, B: Serialize + Sync>(
         &self,
@@ -454,13 +520,19 @@ impl HttpClient {
         Ok(())
     }
 
-    /// Makes an authenticated GET request and returns the raw response body.
+    /// Makes an authenticated file request while preserving response metadata.
     ///
-    /// Used for binary endpoints (for example file download,
-    /// `GET /v1/spaces/{space_id}/files/{file_id}`) whose body is not JSON.
-    /// Unlike [`send`](Self::send) this does not attempt to deserialize the
-    /// response; it returns the bytes as received.
-    pub(crate) async fn get_bytes(&self, path: &str) -> Result<Bytes> {
+    /// In addition to successful responses, the statuses produced by HTTP
+    /// range and precondition handling are returned to the caller. Other
+    /// non-success statuses retain the client's usual [`AnytypeError::ApiError`]
+    /// behavior.
+    pub(crate) async fn file_request(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        headers: HeaderMap,
+    ) -> Result<RawHttpResponse> {
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
@@ -471,35 +543,56 @@ impl HttpClient {
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!("get_bytes {full_url}");
+        debug!(method = %method, "file_request {full_url}");
         self.metrics.increment_requests();
         let response = self
             .client
-            .get(&full_url)
+            .request(method.clone(), &full_url)
+            .query(query)
             .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
             .bearer_auth(token)
+            .headers(headers)
             .send()
             .await
             .context(HttpSnafu {
-                method: "get",
+                method: method.as_str(),
                 url: &full_url,
             })?;
-        if !response.status().is_success() {
-            self.metrics.increment_errors();
-            return Err(AnytypeError::ApiError {
-                code: response.status().as_u16(),
-                method: "get".to_string(),
-                url: full_url,
-                message: response.text().await.unwrap_or_default(),
-            });
-        }
-        let data = response.bytes().await.context(HttpSnafu {
-            method: "get",
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let body = response.bytes().await.context(HttpSnafu {
+            method: method.as_str(),
             url: &full_url,
         })?;
-        self.metrics.increment_success();
-        self.metrics.add_bytes_received(data.len() as u64);
-        Ok(data)
+
+        if status.is_success() {
+            self.metrics.increment_success();
+        } else {
+            self.metrics.increment_errors();
+        }
+        self.metrics.add_bytes_received(body.len() as u64);
+
+        if !(status.is_success()
+            || matches!(
+                status,
+                StatusCode::NOT_MODIFIED
+                    | StatusCode::PRECONDITION_FAILED
+                    | StatusCode::RANGE_NOT_SATISFIABLE
+            ))
+        {
+            return Err(AnytypeError::ApiError {
+                code: status.as_u16(),
+                method: method.as_str().to_ascii_lowercase(),
+                url: full_url,
+                message: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+
+        Ok(RawHttpResponse {
+            status,
+            headers: response_headers,
+            body,
+        })
     }
 
     /// Makes an authenticated `multipart/form-data` POST request.
@@ -873,6 +966,10 @@ fn log_response(path: &str, body: &Bytes) {
 // deserialize, reporting errors with 'serde_path_to_error', which provides
 // detailed json path to the error
 fn deserialize_json<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
+    // Successful mutation endpoints in anytype-heart commonly return an empty
+    // 200 response. Treat that as JSON null so callers can deserialize it as
+    // `()` while response types that require an entity still fail normally.
+    let body = if body.is_empty() { b"null" } else { body };
     let mut deserializer = serde_json::Deserializer::from_slice(body);
     match serde_path_to_error::deserialize(&mut deserializer) {
         Ok(value) => Ok(value),
@@ -921,7 +1018,12 @@ mod tests {
         header::{HeaderMap, HeaderValue},
     };
 
-    use super::parse_retry_after;
+    use super::{deserialize_json, parse_retry_after};
+
+    #[test]
+    fn empty_success_body_deserializes_as_unit() {
+        deserialize_json::<()>(b"").expect("empty mutation response");
+    }
 
     #[test]
     fn test_retry_for_status() {

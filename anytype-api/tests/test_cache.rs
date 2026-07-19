@@ -36,7 +36,7 @@
 //!
 //! Required environment variables (see .test-env):
 //! - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
-//! - `ANYTYPE_TEST_KEY_FILE` - Path to file containing API key
+//! - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
 //! - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
 //!
 //! ## Running
@@ -565,12 +565,10 @@ mod cache_disabled {
             .unwrap_or_else(|_| "http://127.0.0.1:31012".to_string());
         let space_id =
             std::env::var("ANYTYPE_TEST_SPACE_ID").expect("ANYTYPE_TEST_SPACE_ID required");
-        let keystore = if let Ok(key_file) = std::env::var("ANYTYPE_TEST_KEY_FILE") {
-            format!("file:path={key_file}")
-        } else if let Ok(store) = std::env::var("ANYTYPE_KEYSTORE") {
+        let keystore = if let Ok(store) = std::env::var("ANYTYPE_KEYSTORE") {
             store
         } else {
-            panic!("set ANYTYPE_TEST_KEY_FILE or ANYTYPE_KEYSTORE");
+            panic!("set ANYTYPE_KEYSTORE");
         };
 
         let config = ClientConfig {

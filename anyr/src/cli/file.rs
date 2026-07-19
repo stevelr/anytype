@@ -131,10 +131,7 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             let space_id = ctx.client.resolve_space_id(&space).await?;
             if http {
                 // REST delete (`DELETE /v1/spaces/{space}/files/{id}`) returns 204.
-                ctx.client
-                    .files()
-                    .http_delete(&space_id, &object_id)
-                    .await?;
+                ctx.client.files().delete(&space_id, &object_id).await?;
                 if ctx.output.format() == OutputFormat::Table {
                     return ctx.output.emit_text(&format!("deleted {object_id}"));
                 }
@@ -190,8 +187,8 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
                 let response = ctx
                     .client
                     .files()
-                    .http_upload(&space_id)
-                    .path(&file)
+                    .upload(&space_id)
+                    .from_path(&file)
                     .upload()
                     .await?;
                 return ctx.output.emit_json(&response);
@@ -224,7 +221,7 @@ async fn download_http(
     let bytes = ctx
         .client
         .files()
-        .http_download(&space_id, object_id)
+        .download_bytes(&space_id, object_id)
         .await?;
     let out_path = match (dir, file) {
         (_, Some(path)) => path,

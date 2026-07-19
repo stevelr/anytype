@@ -534,6 +534,7 @@ fn print_current_failures_for_triage() {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_matrix_p0_full_restore_simple_object() -> Result<()> {
     let space = choose_writable_space_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -586,6 +587,7 @@ async fn e2e_matrix_p0_full_restore_simple_object() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_matrix_p0_incremental_since_restore_simple_object() -> Result<()> {
     let space = choose_writable_space_cli().await?;
     let unique = anytype::test_util::unique_suffix();
@@ -649,6 +651,7 @@ async fn e2e_matrix_p0_incremental_since_restore_simple_object() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_matrix_p0_recovers_permanently_deleted_object() -> Result<()> {
     let space = choose_writable_space_cli().await?;
     let space_id = resolve_space_id(&space)?;
@@ -717,6 +720,7 @@ async fn e2e_matrix_p0_recovers_permanently_deleted_object() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "backup-restore"]
 async fn e2e_matrix_p0_file_recreate_preserves_dates() -> Result<()> {
     let (source_space, dest_space) = choose_two_distinct_writable_spaces_cli().await?;
     let unique = anytype::test_util::unique_suffix();

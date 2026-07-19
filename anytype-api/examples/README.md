@@ -5,8 +5,8 @@ Set environment flags
 ```sh
 # headless cli uses port 31012. desktop port 31009
 export ANYTYPE_URL=http://127.0.0.1:31012
-# path to file containing api key
-export ANYTYPE_KEY_FILE=$HOME/.config/anytype/api.key
+# file-backed keystore database
+export ANYTYPE_KEYSTORE=file:path=$HOME/.config/anytype/keys.db
 # set space id for testing. If not set, uses first space with "test" in the name
 export ANYTYPE_SPACE_ID=
 # optional: enable debug logging
@@ -46,6 +46,6 @@ cargo run --example list_spaces
 - `retry_eventual_consistency` - enable read-after-write verification.
 - `pagination_stream` - collect all pages or stream results.
 - `views_list_objects` - list views and objects in a collection/query.
-- `files` - list, upload, and download files (gRPC).
-- `chat_messages` - list messages, filter, and send a chat message (gRPC).
+- `files` - REST file transfer plus gRPC listing and rich upload options.
+- `chat_messages` - full-fidelity gRPC message listing, filtering, and publishing.
 - `chat_listener` - stream chat messages and updates (gRPC).

@@ -1,7 +1,7 @@
-// Demonstrates gRPC-backed file operations.
+// Demonstrates combined REST and gRPC file operations.
 //
-// Before running this example, update the two file paths to local files,
-// 
+// Before running this example, update the two file paths to absolute path to local files,
+//
 // and set file_type to FileType::(File, Image, Video, Audio, Pdf, or Other)
 //
 
@@ -27,21 +27,20 @@ async fn main() -> Result<()> {
     let mut files = Vec::new();
 
     // TODO: update path and file_type
-    let path = "./README.md";
+    let path = "/home/user/project/anytype/README.md";
     if PathBuf::from(path).is_file() {
-      let file = client
-          .files()
-          .upload(&space_id)
-          .from_path(path)
-          .file_type(FileType::File)
-          .upload()
-          .await?;
-      println!(
-          "Uploaded file {} id:{}",
-          file.name.as_deref().unwrap_or("unnamed"),
-          file.id
-      );
-      files.push(file);
+        let file = client
+            .files()
+            .upload(&space_id)
+            .from_path(path)
+            .upload()
+            .await?;
+        println!(
+            "Uploaded file {} id:{}",
+            file.name.as_deref().unwrap_or("unnamed"),
+            file.id
+        );
+        files.push(file);
     } else {
         println!("Missing file: {path}");
     }
@@ -80,15 +79,12 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&download_dir).context(format!("create downloads {download_dir:?}"))?;
 
     for (i, file) in files.iter().enumerate() {
-        let download = client
-            .files()
-            .download(&file.id)
-            .to_path(&download_dir)
-            .download()
-            .await?;
+        let bytes = client.files().download_bytes(&space_id, &file.id).await?;
+        let download = download_dir.join(&file.id);
+        tokio::fs::write(&download, bytes).await?;
         eprintln!(
             "download {i} {} to {download:?}",
-            &file.name.as_deref().unwrap_or("unnamed")
+            file.name.as_deref().unwrap_or("unnamed")
         );
     }
 

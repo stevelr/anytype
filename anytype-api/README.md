@@ -10,14 +10,14 @@ An ergonomic Anytype API client in Rust.
 
 ## Overview
 
-`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, and Views, with optional key storage and caching. gRPC extensions (enabled by default) add file operations and chat streaming.
+`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, Views, Files, and Chats, with optional key storage and caching. REST is preferred when it has equivalent functionality; gRPC supplies richer file metadata/upload options, structured chat messages, and event streaming.
 
 Applications authenticate with Anytype servers using access tokens. One token is required for http apis, and if gRPC apis are used (for files or chats), an additional gRPC token is required. The `anytype` library helps generate tokens and store them in a KeyStore.
 
 ### Features
 
 - 100% coverage of Anytype API 2025-11-08
-- Optional gRPC back-end provides API extensions for features not available in the REST api (Files and Chats)
+- gRPC back-end provides extensions not available in REST (rich file operations, structured chat blocks, and full event streaming)
 - Paginated responses and async Streams
 - Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
 - Http middleware with debug logging, retries, and rate limit handling
@@ -131,31 +131,96 @@ println!("deleted archived objects: {deleted}");
 # }
 ```
 
-## Files (gRPC)
+## Files
 
-File operations require the `grpc` feature (enabled by default).
+Simple uploads, byte downloads, and deletion use REST. File listing, search,
+metadata, preload, URL upload, and uploads with style/context options use gRPC.
 
 ```rust
+let space_id = "space_id";
 let file_id = "file_object_id";
-let path = client
-    .files()
-    .download(file_id)
-    .to_dir("/tmp")
-    .download()
-    .await?;
-println!("downloaded to {}", path.display());
+let bytes = client.files().download_bytes(space_id, file_id).await?;
+tokio::fs::write("/tmp/download", bytes).await?;
 ```
 
-## Chat Streaming (gRPC)
+For image variants, byte ranges, cache validators, or response metadata, use
+the configurable request API. It preserves `206 Partial Content`,
+`304 Not Modified`, `412 Precondition Failed`, and `416 Range Not Satisfiable`
+statuses for the caller to handle:
 
-Streaming chat updates requires the `grpc` feature (enabled by default).
+```rust
+let response = client
+    .files()
+    .download_request(space_id, file_id)
+    .width(640)
+    .range("bytes=0-4095")
+    .if_none_match("\"cached-etag\"")
+    .download()
+    .await?;
+
+println!("status: {}, type: {:?}", response.status, response.metadata.content_type);
+```
+
+Use `files().metadata(space_id, file_id)` for a simple `HEAD` request. File
+deletion moves the object to the bin by default; permanent deletion is explicit:
+
+```rust
+client
+    .files()
+    .delete_request(space_id, file_id)
+    .permanently()
+    .delete()
+    .await?;
+```
+
+`files().upload(space).from_path(path).upload()` selects REST for a simple
+path upload and returns a normalized `FileObject`. Adding `file_type`, `style`,
+`details`, or creation-context options selects the richer gRPC upload.
+
+## Chats
+
+Space-scoped chat listing, creation, plain-message CRUD, lookup/search,
+reactions, read state, and per-chat SSE streams use REST:
+
+```rust
+use futures::StreamExt;
+
+let chats = client.chats().in_space("space_id");
+let page = chats
+    .list()
+    .filter(Filter::text_contains("name", "team"))
+    .limit(20)
+    .list()
+    .await?;
+let message_id = chats
+    .add_message("chat_id", MessageContent::new().bold("Hello"))
+    .send()
+    .await?;
+let mut events = chats
+    .message_stream("chat_id")
+    .limit(20)
+    .heartbeat_seconds(15)
+    .open()
+    .await?;
+while let Some(event) = events.next().await {
+    if let ChatHttpEvent::MessageAdded { message } = event? {
+        println!("{}", message.content.text);
+    }
+}
+```
+
+Structured message blocks, full-fidelity reads, cross-chat previews, reconnect
+watermarks, and dynamic subscription control remain available as gRPC
+extensions because the REST representation omits blocks and per-user state.
+
+## Rich Chat Streaming (gRPC)
 
 ```rust
 use anytype::prelude::*;
 use futures::StreamExt;
 
 // print chat messages as they arrive
-async fn follow_chat(client: AnytypeClient, chat__obj_id: &str) -> Result<(), AnytypeError> {
+async fn follow_chat(client: AnytypeClient, chat_obj_id: &str) -> Result<(), AnytypeError> {
     let ChatStreamHandle { mut events, .. } = client
         .chat_stream()
         .subscribe_chat(chat_obj_id)
@@ -179,15 +244,16 @@ Plus:
 - View Layouts (grid, kanban, calendar, gallery, graph) implemented in the desktop app but not in the api spec 2025-11-08.
 
 - gRPC back-end provides API extensions for features not available in the REST api:
-  - Files api for listings, search, upload, and download.
-  - Chat message operations and streaming subscriptions.
+  - File metadata, listing/search, preload, URL upload, and rich upload options.
+  - Structured chat blocks, full-fidelity message reads, chat-object search,
+    name resolution, cross-chat previews, and reconnecting subscriptions.
 
 ### Apis not covered
 
 The current Anytype http backend api does not provide access to some data in Anytype vaults.
 
-- ~~Files~~ _Update (as of v0.3.0):_ Files support now available with the gRPC back-end
-- ~~Chats and Messages~~ _Update (as of v0.3.0):_ Chat operations and streaming now available with the gRPC back-end
+- ~~Files~~ _Update:_ REST supports basic transfer; gRPC supplies richer file operations.
+- ~~Chats and Messages~~ _Update:_ REST supports chat management and plain message operations; gRPC supplies structured messages and richer streams.
 - Blocks. Pages and other document-like objects can be exported as markdown, but markdown export is somewhat lossy, for example, in tables, markdown export preserves table layout, with bold and italic styling, but foreground and background colors are lost.
 - Relationships - only a subset of relation types are available in the REST api.
 

@@ -70,7 +70,7 @@ impl TestContext {
     ///
     /// Required environment variables:
     /// - `ANYTYPE_TEST_URL` - API endpoint (default: <http://127.0.0.1:31012>)
-    /// - `ANYTYPE_KEYSTORE=file` - Path to file containing API key
+    /// - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
     /// - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
     ///
     pub async fn new() -> TestResult<Self> {
@@ -102,6 +102,9 @@ impl TestContext {
 
     pub fn register_object(&self, obj_id: &str) {
         self.cleanup.add_object(&self.space_id, obj_id);
+    }
+    pub fn register_file(&self, file_id: &str) {
+        self.cleanup.add_object(&self.space_id, file_id);
     }
     pub fn register_property(&self, prop_id: &str) {
         self.cleanup.add_property(&self.space_id, prop_id);
@@ -282,16 +285,21 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
     let base_url = std::env::var(crate::config::ANYTYPE_TEST_URL_ENV)
         .unwrap_or_else(|_| crate::config::ANYTYPE_TEST_URL.to_string());
 
-    let default_key_db = db_keystore::default_path()
-        .map_err(|err| TestError::Config {
-            message: err.to_string(),
-        })?
-        .parent()
-        .context(ConfigSnafu {
-            message: "invalid default path (check $XDG_STATE_HOME or $HOME)",
-        })?
-        .join("anytype-test-keys.db");
-    let keystore_spec = format!("file:path={}", default_key_db.display());
+    let keystore_spec = match std::env::var("ANYTYPE_KEYSTORE") {
+        Ok(spec) => spec,
+        Err(_) => {
+            let default_key_db = db_keystore::default_path()
+                .map_err(|err| TestError::Config {
+                    message: err.to_string(),
+                })?
+                .parent()
+                .context(ConfigSnafu {
+                    message: "invalid default path (check $XDG_STATE_HOME or $HOME)",
+                })?
+                .join("anytype-test-keys.db");
+            format!("file:path={}", default_key_db.display())
+        }
+    };
     let config = ClientConfig {
         base_url: Some(base_url),
         app_name: app_name.to_string(),

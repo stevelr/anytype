@@ -7,7 +7,7 @@
 //!
 //! Required environment variables (see .test-env):
 //! - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
-//! - `ANYTYPE_TEST_KEY_FILE` - Path to file containing API key
+//! - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
 //! - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
 //!
 //! ## Running

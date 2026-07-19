@@ -181,6 +181,7 @@ async fn test_view_list_objects() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
+#[ignore = "requires a configured Set with an internal set_of source"]
 #[serial]
 async fn test_views_list_collection_and_set() -> TestResult<()> {
     with_test_context(|ctx| async move {
@@ -217,6 +218,7 @@ async fn test_views_list_collection_and_set() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
+#[ignore = "requires a configured Set with an internal set_of source"]
 #[serial]
 async fn test_view_list_objects_collection_and_set() -> TestResult<()> {
     with_test_context(|ctx| async move {

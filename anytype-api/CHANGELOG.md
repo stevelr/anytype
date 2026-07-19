@@ -6,8 +6,35 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- view_list_objects() requires setting `.view(view_id)` before invoking `.list()`.
+
+- integration-test clients now honor `ANYTYPE_KEYSTORE` instead of always using
+  a separate default test database without the configured HTTP credentials
+- chat event streams continue polling when callers keep the event stream but
+  drop the optional control handle, avoiding reconnect spins and missed events
+- integration tests accept the current missing-token authentication error, and
+  known-broken boolean/numeric filter cases reference
+  [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
+- Set view integration cases that require a preconfigured internal `set_of`
+  source are ignored in environments where REST cannot create that fixture
+
 ### Added
 
+- REST file download/delete APIs (`download_bytes`, `delete`) and unified file
+  upload selection: simple path/byte uploads use REST, while URL uploads and
+  uploads with style, details, or creation context retain the richer gRPC path
+- configurable REST file requests with image widths, `HEAD` metadata, byte
+  ranges, conditional headers and preserved HTTP control statuses, plus
+  permanent deletion through the `skip_bin` option
+- space-scoped REST chat APIs for chat listing/creation, plain message listing,
+  single-message lookup, message search, deletion, reactions, and read state
+- direct REST chat message add/edit builders, dynamic filters for chat listings,
+  and typed SSE message streams with configurable initial-message limits and
+  heartbeat intervals
+- structured gRPC chat message blocks, pin state, unread-reaction state, and
+  attachment replacement for rich message publishing and full-fidelity reads
 - new `resolve` module: name and id resolution helpers as `AnytypeClient` methods —
   `resolve_space_id`, `resolve_type`, `resolve_type_id`, `resolve_type_ids`,
   `resolve_type_key`, `resolve_view_id`, `resolve_property_id`, `resolve_chat_target`
@@ -19,6 +46,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- `list_chats_in` now uses REST; cross-space chat discovery, structured message
+  publishing/full-fidelity reads, and reconnecting multi-chat subscriptions
+  continue to use gRPC
+- chat discovery, CRUD, REST overlap, and normal streaming tests now exercise
+  the configured real server; only disconnect/reconnect fault injection retains
+  the mock gRPC server
+- successful REST mutation endpoints may return an empty body, which is now
+  handled as a unit response
 - removed skia as dependency (was used to generate image file for the files example)
 - files example requires setting path and file type to path and type of existing
   local files, instead of generating them locally

@@ -1438,6 +1438,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires samples"]
     fn convert_sample_pb_object_to_markdown_contains_headings() {
         let archive = Path::new("samples/getting-started-pb");
         let object_id = "bafyreidgyug7rj6lweslb5rbeavhc44ytr5osfwj6w5snlspnjnsqa6ytm";
@@ -1449,6 +1450,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires samples"]
     fn convert_sample_pb_object_renders_markdown_tables() {
         let archive = Path::new("samples/getting-started-pb");
         let object_id = "bafyreihs3oyibcjqhwjuynp6j6aaqjhz6quijsy4vgakv4223exvruc5wi";
@@ -1459,6 +1461,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires samples"]
     fn convert_sample_pb_json_object_to_markdown_contains_headings() {
         let archive = Path::new("samples/getting-started-json");
         let object_id = "bafyreidgyug7rj6lweslb5rbeavhc44ytr5osfwj6w5snlspnjnsqa6ytm";
@@ -1469,6 +1472,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires samples"]
     fn save_sample_pb_json_document_writes_markdown() {
         let archive = Path::new("samples/getting-started-json");
         let object_id = "bafyreidgyug7rj6lweslb5rbeavhc44ytr5osfwj6w5snlspnjnsqa6ytm";

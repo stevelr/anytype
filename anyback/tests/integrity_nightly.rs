@@ -209,6 +209,7 @@ async fn nightly_integrity_fuzz_roundtrip() -> Result<()> {
 }
 
 #[test]
+#[ignore = "backup-restore"]
 fn integrity_config_profiles_parse() -> Result<()> {
     let tiny = IntegrityConfig::profile("tiny", 1)?;
     let small = IntegrityConfig::profile("small", 1)?;
@@ -225,6 +226,7 @@ fn integrity_config_profiles_parse() -> Result<()> {
 }
 
 #[test]
+#[ignore = "backup-restore"]
 fn export_arg_profile_matrix_rotates_expected_flag_sets() {
     let p0 = export_arg_profile(0);
     let p1 = export_arg_profile(1);

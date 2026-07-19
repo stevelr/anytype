@@ -7,7 +7,7 @@
 //!
 //! Required environment variables (see .test-env):
 //! - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
-//! - `ANYTYPE_TEST_KEY_FILE` - Path to file containing API key
+//! - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
 //! - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
 //!
 //! ## Running
@@ -521,8 +521,10 @@ async fn test_request_without_api_key() {
         match result.unwrap_err() {
             AnytypeError::Auth { message } => {
                 assert!(
-                    message.contains("API key") || message.contains("not set"),
-                    "Error message should mention API key: {}",
+                    message.contains("API key")
+                        || message.contains("token")
+                        || message.contains("not set"),
+                    "Error message should mention missing credentials: {}",
                     message
                 );
                 println!("✓ Correctly rejected request without API key: {}", message);

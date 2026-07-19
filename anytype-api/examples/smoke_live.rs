@@ -11,8 +11,9 @@ use anytype::prelude::*;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key = std::env::var("API_KEY").expect("set API_KEY");
-    let url = std::env::var("URL").unwrap_or_else(|_| "http://127.0.0.1:31009".into());
-    let ks = std::env::var("KS").unwrap_or_else(|_| "file:path=/tmp/anytype-smoke-ks".into());
+    let url = std::env::var("ANYTYPE_URL").unwrap_or_else(|_| "http://127.0.0.1:31009".into());
+    let ks = std::env::var("ANYTYPE_KEYSTORE")
+        .unwrap_or_else(|_| "file:path=/tmp/anytype-smoke-ks".into());
 
     let mut config = ClientConfig::default().app_name("smoke");
     config.base_url = Some(url);
@@ -36,20 +37,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let payload = b"hello from smoke_live at 2026-07-17".to_vec();
     let uploaded = client
         .files()
-        .http_upload(&space_id)
-        .file_name("smoke.txt")
+        .upload(&space_id)
+        .bytes("smoke.txt", payload.clone())
         .mime("text/plain")
-        .bytes(payload.clone())
         .upload()
         .await?;
     println!(
         "uploaded: object_id={} name={:?} media={:?} size={:?}",
-        uploaded.object_id, uploaded.name, uploaded.media, uploaded.size_in_bytes
+        uploaded.id, uploaded.name, uploaded.mime, uploaded.size
     );
 
     let downloaded = client
         .files()
-        .http_download(&space_id, &uploaded.object_id)
+        .download_bytes(&space_id, &uploaded.id)
         .await?;
     println!("downloaded {} bytes", downloaded.len());
     assert_eq!(
@@ -59,10 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("round-trip OK");
 
-    client
-        .files()
-        .http_delete(&space_id, &uploaded.object_id)
-        .await?;
+    client.files().delete(&space_id, &uploaded.id).await?;
     println!("deleted OK");
 
     println!("SMOKE PASS");

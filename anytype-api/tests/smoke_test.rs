@@ -8,7 +8,7 @@
 //!
 //! Required environment variables (see .test-env):
 //! - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
-//! - `ANYTYPE_TEST_KEY_FILE` - Path to file containing API key
+//! - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
 //! - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
 //!
 //! ## Running
@@ -50,7 +50,7 @@ async fn smoke_test() {
             eprintln!("\nPlease ensure:");
             eprintln!("  1. Anytype server is running");
             eprintln!("  2. Environment variables are set (source .test-env)");
-            eprintln!("  3. API key file exists and is valid");
+            eprintln!("  3. ANYTYPE_KEYSTORE is configured and contains valid credentials");
             panic!("Setup failed: {}", e);
         }
     };

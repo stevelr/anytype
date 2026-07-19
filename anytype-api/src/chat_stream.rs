@@ -418,7 +418,7 @@ impl ChatStreamWorker {
         let delay = self.backoff.delay(attempt);
         tokio::select! {
             () = sleep(delay) => {},
-            message = self.control_rx.recv() => {
+            message = self.control_rx.recv(), if !self.control_rx.is_closed() => {
                 if let Some(message) = message {
                     self.handle_control_message(message, None).await;
                 }
@@ -436,14 +436,12 @@ impl ChatStreamWorker {
                 return false;
             }
             tokio::select! {
-                message = self.control_rx.recv() => {
+                message = self.control_rx.recv(), if !self.control_rx.is_closed() => {
                     if let Some(message) = message {
                         self.handle_control_message(message, Some(&grpc)).await;
                         if self.is_shutdown() {
                             return false;
                         }
-                    } else {
-                        return false;
                     }
                 }
                 message = stream.message() => {
