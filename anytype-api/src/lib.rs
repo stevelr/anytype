@@ -157,28 +157,23 @@
 
 pub mod auth;
 pub mod cache;
-#[cfg(feature = "grpc")]
 pub mod chat_stream;
-#[cfg(feature = "grpc")]
 pub mod chats;
 pub mod client;
 pub mod error;
-#[cfg(feature = "grpc")]
 pub mod files;
 pub mod filters;
-#[cfg(feature = "grpc")]
 pub(crate) mod grpc_util;
 mod http_client;
 pub mod keystore;
 pub mod members;
-#[cfg(feature = "grpc")]
 #[doc(hidden)]
 pub mod mock;
 pub mod objects;
 pub mod paged;
-#[cfg(feature = "grpc")]
 pub mod process_watcher;
 pub mod properties;
+pub mod resolve;
 pub mod search;
 pub mod spaces;
 pub mod tags;
@@ -216,6 +211,8 @@ pub mod prelude {
         paged::{PagedResult, PaginatedResponse, PaginationMeta},
         // Properties
         properties::{Property, PropertyFormat, PropertyValue, PropertyWithValue, SetProperty},
+        // Name and id resolution
+        resolve::{ChatTarget, DEFAULT_CHAT_NAME},
         // Spaces
         spaces::{Space, SpaceModel},
         // Property tags
@@ -229,7 +226,6 @@ pub mod prelude {
         // Views (Lists, Collections, Queries)
         views::{View, ViewLayout},
     };
-    #[cfg(feature = "grpc")]
     pub use crate::{
         chat_stream::{
             BackoffPolicy, ChatEvent, ChatEventStream, ChatStreamBuilder, ChatStreamControl,
@@ -243,7 +239,9 @@ pub mod prelude {
             MessageTextMark, MessageTextMarkType, MessageTextRange, MessageTextStyle,
         },
         client::find_grpc,
-        files::{FileObject, FileStyle, FileType, FilesClient},
+        files::{
+            FileHttpUploadRequest, FileObject, FileStyle, FileType, FileUploadResponse, FilesClient,
+        },
         keystore::GrpcCredentials,
         process_watcher::{
             ProcessCompletionFallback, ProcessKind, ProcessWatchCancelToken, ProcessWatchProgress,

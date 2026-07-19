@@ -80,7 +80,7 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global=true)]
     pub verbose: u8,
 
-    /// keystore type or configuraion
+    /// keystore type or configuration
     #[arg(long, env = "ANYTYPE_KEYSTORE")]
     pub keystore: Option<String>,
 
@@ -326,6 +326,10 @@ pub enum FileCommands {
 
         /// id of file object to delete
         object_id: String,
+
+        /// use the REST HTTP API instead of gRPC
+        #[arg(long)]
+        http: bool,
     },
     #[command(
         alias = "down",
@@ -344,6 +348,14 @@ pub enum FileCommands {
         /// output file path (optional)
         #[arg(short = 'f', long, value_name = "FILE")]
         file: Option<PathBuf>,
+
+        /// space id or name (required with --http)
+        #[arg(long)]
+        space: Option<String>,
+
+        /// use the REST HTTP API instead of gRPC
+        #[arg(long)]
+        http: bool,
     },
     #[command(alias = "up")]
     Upload {
@@ -357,6 +369,10 @@ pub enum FileCommands {
         /// file type hint
         #[arg(long, value_enum)]
         file_type: Option<FileTypeArg>,
+
+        /// use the REST HTTP API instead of gRPC (ignores --file-type)
+        #[arg(long)]
+        http: bool,
     },
 }
 
@@ -729,6 +745,7 @@ pub enum MemberCommands {
 pub enum MemberRoleArg {
     Viewer,
     Editor,
+    Admin,
     Owner,
 }
 
@@ -1419,6 +1436,7 @@ impl MemberRoleArg {
         match self {
             Self::Viewer => MemberRole::Viewer,
             Self::Editor => MemberRole::Editor,
+            Self::Admin => MemberRole::Admin,
             Self::Owner => MemberRole::Owner,
         }
     }

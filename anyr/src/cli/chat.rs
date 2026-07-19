@@ -8,10 +8,7 @@ use futures::StreamExt;
 use crate::{
     cli::{
         AppContext,
-        common::{
-            MemberCache, load_member_cache, resolve_chat_ids, resolve_chat_name,
-            resolve_chat_target, resolve_member_name, resolve_space_id, resolve_type_key,
-        },
+        common::{MemberCache, load_member_cache, resolve_member_name},
         pagination_limit, pagination_offset,
     },
     output::{OutputFormat, render_table_dynamic},
@@ -26,7 +23,7 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             pagination,
         } => {
             let (space_id, result) = if let Some(space) = space.as_deref() {
-                let space_id = resolve_space_id(ctx, space).await?;
+                let space_id = ctx.client.resolve_space_id(space).await?;
                 if let Some(text) = text {
                     let mut request = ctx
                         .client
@@ -105,10 +102,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             }
         }
         super::ChatCommands::Create { space, name } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let chat_type_key = match resolve_type_key(ctx, &space_id, "Chat").await {
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let chat_type_key = match ctx.client.resolve_type_key(&space_id, "Chat").await {
                 Ok(key) => key,
-                Err(first_err) => resolve_type_key(ctx, &space_id, "chat")
+                Err(first_err) => ctx
+                    .client
+                    .resolve_type_key(&space_id, "chat")
                     .await
                     .map_err(|_| first_err)?,
             };
@@ -121,8 +120,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             ctx.output.emit_json(&chat)
         }
         super::ChatCommands::Get { space, chat } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let chat_id = ctx
+                .client
+                .resolve_chat_target(Some(&space_id), &chat)
+                .await?
+                .chat_id;
             let chat = ctx
                 .client
                 .chats()
@@ -141,8 +144,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 limit,
                 unread_only,
             } => {
-                let space_id = resolve_space_id(ctx, &space).await?;
-                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+                let space_id = ctx.client.resolve_space_id(&space).await?;
+                let chat_id = ctx
+                    .client
+                    .resolve_chat_target(Some(&space_id), &chat)
+                    .await?
+                    .chat_id;
                 let mut request = ctx.client.chats().list_messages(&chat_id).limit(limit);
 
                 if let Some(after) = after {
@@ -199,8 +206,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 chat,
                 message_ids,
             } => {
-                let space_id = resolve_space_id(ctx, &space).await?;
-                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+                let space_id = ctx.client.resolve_space_id(&space).await?;
+                let chat_id = ctx
+                    .client
+                    .resolve_chat_target(Some(&space_id), &chat)
+                    .await?
+                    .chat_id;
                 let message_ids = resolve_message_ids(ctx, &chat_id, &message_ids).await?;
                 let mut messages = ctx
                     .client
@@ -254,8 +265,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 content_text,
                 text_args,
             } => {
-                let space_id = resolve_space_id(ctx, &space).await?;
-                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+                let space_id = ctx.client.resolve_space_id(&space).await?;
+                let chat_id = ctx
+                    .client
+                    .resolve_chat_target(Some(&space_id), &chat)
+                    .await?
+                    .chat_id;
                 let attachments = parse_message_attachments(&attachment)?;
 
                 let message_id = if let Some(content_json) = content_json {
@@ -302,8 +317,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 mark,
                 content_json,
             } => {
-                let space_id = resolve_space_id(ctx, &space).await?;
-                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+                let space_id = ctx.client.resolve_space_id(&space).await?;
+                let chat_id = ctx
+                    .client
+                    .resolve_chat_target(Some(&space_id), &chat)
+                    .await?
+                    .chat_id;
                 let message_id = resolve_message_id_for_order(ctx, &chat_id, &message_id).await?;
 
                 if let Some(content_json) = content_json {
@@ -334,8 +353,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 chat,
                 message_id,
             } => {
-                let space_id = resolve_space_id(ctx, &space).await?;
-                let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+                let space_id = ctx.client.resolve_space_id(&space).await?;
+                let chat_id = ctx
+                    .client
+                    .resolve_chat_target(Some(&space_id), &chat)
+                    .await?
+                    .chat_id;
                 let message_id = resolve_message_id_for_order(ctx, &chat_id, &message_id).await?;
                 ctx.client
                     .chats()
@@ -353,8 +376,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             before,
             last_state_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let chat_id = ctx
+                .client
+                .resolve_chat_target(Some(&space_id), &chat)
+                .await?
+                .chat_id;
             let mut request = ctx.client.chats().read_messages(&chat_id);
             if let Some(read_type) = read_type {
                 request = request.read_type(read_type.to_read_type());
@@ -377,8 +404,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             read_type,
             after,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let (_space_id, chat_id) = resolve_chat_target(ctx, Some(&space_id), &chat).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let chat_id = ctx
+                .client
+                .resolve_chat_target(Some(&space_id), &chat)
+                .await?
+                .chat_id;
             let mut request = ctx.client.chats().unread_messages(&chat_id);
             if let Some(read_type) = read_type {
                 request = request.read_type(read_type.to_read_type());
@@ -397,10 +428,13 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             show_events,
         } => {
             let space_id = match space.as_deref() {
-                Some(space) => Some(resolve_space_id(ctx, space).await?),
+                Some(space) => Some(ctx.client.resolve_space_id(space).await?),
                 None => None,
             };
-            let chat_ids = resolve_chat_ids(ctx, space_id.as_deref(), &chats).await?;
+            let chat_ids = ctx
+                .client
+                .resolve_chat_ids(space_id.as_deref(), &chats)
+                .await?;
             if chat_ids.is_empty() {
                 bail!("at least one --chat is required");
             }
@@ -830,7 +864,7 @@ async fn resolve_chat_label(
     if let Some(label) = cache.get(chat_id) {
         return Ok(label.clone());
     }
-    let name = resolve_chat_name(ctx, space_id, chat_id).await?;
+    let name = ctx.client.resolve_chat_name(space_id, chat_id).await?;
     cache.insert(chat_id.to_string(), name.clone());
     Ok(name)
 }

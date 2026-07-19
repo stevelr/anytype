@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use anytype::prelude::*;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::time::sleep;

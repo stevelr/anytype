@@ -15,13 +15,9 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "grpc")]
 use anytype_rpc::client::default_grpc_endpoint;
-#[cfg(feature = "grpc")]
 use anytype_rpc::client::{AnytypeGrpcClient, AnytypeGrpcConfig};
-#[cfg(feature = "grpc")]
 use snafu::prelude::*;
-#[cfg(feature = "grpc")]
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -95,7 +91,6 @@ pub struct ClientConfig {
     pub verify: Option<VerifyConfig>,
 
     /// Optional gRPC endpoint (overrides default).
-    #[cfg(feature = "grpc")]
     pub grpc_endpoint: Option<String>,
 }
 
@@ -113,7 +108,6 @@ impl Default for ClientConfig {
             verify: None,
             keystore: None,
             keystore_service: None,
-            #[cfg(feature = "grpc")]
             grpc_endpoint: None,
         }
     }
@@ -158,7 +152,6 @@ impl ClientConfig {
     }
 
     /// Sets the gRPC endpoint (override default)
-    #[cfg(feature = "grpc")]
     #[must_use]
     pub fn grpc_endpoint(mut self, endpoint: String) -> Self {
         self.grpc_endpoint = Some(endpoint);
@@ -183,7 +176,6 @@ pub struct AnytypeClient {
     pub(crate) config: ClientConfig,
     pub(crate) keystore: KeyStore,
     pub(crate) cache: Arc<AnytypeCache>,
-    #[cfg(feature = "grpc")]
     pub(crate) grpc: Arc<Mutex<Option<AnytypeGrpcClient>>>,
 }
 
@@ -252,7 +244,6 @@ impl AnytypeClient {
             .keystore_service
             .unwrap_or_else(|| config.app_name.clone());
         let keystore = KeyStore::new(&keystore_service, config.keystore.as_deref().unwrap_or(""))?;
-        #[cfg(feature = "grpc")]
         let grpc_endpoint = config.grpc_endpoint.unwrap_or_else(default_grpc_endpoint);
 
         // ask keystore for http creds: this may trigger user auth for os keyring keystore
@@ -287,14 +278,12 @@ impl AnytypeClient {
                 // ... None values were replaced with defaults from environment or constants
                 base_url: Some(base_url),
                 keystore_service: Some(keystore_service),
-                #[cfg(feature = "grpc")]
                 grpc_endpoint: Some(grpc_endpoint),
                 // other values unchanged
                 ..config
             },
             keystore,
             cache: Arc::new(cache),
-            #[cfg(feature = "grpc")]
             grpc: Arc::new(Mutex::new(None)),
         })
     }
@@ -323,7 +312,6 @@ impl AnytypeClient {
     }
 
     /// Returns the configured grpc endpoint
-    #[cfg(feature = "grpc")]
     #[must_use]
     pub fn get_grpc_endpoint(&self) -> Option<String> {
         self.config.grpc_endpoint.clone()
@@ -348,7 +336,6 @@ impl AnytypeClient {
     /// Returns a gRPC client authorized using credentials stored in the keystore.
     ///
     /// Requires the "grpc" feature and gRPC credentials saved to the keystore.
-    #[cfg(feature = "grpc")]
     pub async fn grpc_client(&self) -> Result<AnytypeGrpcClient> {
         let guard = self.grpc.lock().await;
         if let Some(client) = guard.as_ref() {
@@ -378,7 +365,6 @@ impl AnytypeClient {
     }
 
     /// Create and cache a gRPC client using credentials stored in the keystore.
-    #[cfg(feature = "grpc")]
     async fn create_grpc_client(&self, config: &AnytypeGrpcConfig) -> Result<()> {
         let creds = self.keystore.get_grpc_credentials()?;
         let client = if let Some(token) = creds.session_token() {
@@ -404,7 +390,6 @@ impl AnytypeClient {
     }
 
     /// Minimal authenticated gRPC ping (list apps).
-    #[cfg(feature = "grpc")]
     pub async fn ping_grpc(&self) -> Result<()> {
         use anytype_rpc::{
             anytype::rpc::account::local_link::list_apps::Request as ListAppsRequest,
@@ -506,7 +491,6 @@ impl AnytypeClient {
 /// Returns the first port that responds, or `None`.
 ///
 /// Only supported on macOS and Linux.
-#[cfg(feature = "grpc")]
 pub async fn find_grpc(program: Option<impl Into<String>>) -> Option<u16> {
     let prefix = program.map_or_else(|| "anytype".to_string(), Into::into);
 
@@ -527,7 +511,6 @@ pub async fn find_grpc(program: Option<impl Into<String>>) -> Option<u16> {
 }
 
 /// Run `lsof -Pni` and extract unique listening ports for the given program prefix.
-#[cfg(feature = "grpc")]
 async fn lsof_listen_ports(prefix: &str) -> std::result::Result<Vec<u16>, String> {
     let output = tokio::process::Command::new("lsof")
         .args(["-Pni"])
@@ -565,7 +548,6 @@ async fn lsof_listen_ports(prefix: &str) -> std::result::Result<Vec<u16>, String
 
 /// Extract a port number from an lsof NAME column like `*:31010 (LISTEN)`
 /// or `127.0.0.1:31010 (LISTEN)` or `[::1]:31010 (LISTEN)`.
-#[cfg(feature = "grpc")]
 fn extract_port(line: &str) -> Option<u16> {
     // Find the portion before "(LISTEN)" and work backwards to the last ':'
     let before_listen = line.split("(LISTEN)").next()?;
@@ -575,7 +557,6 @@ fn extract_port(line: &str) -> Option<u16> {
 }
 
 /// Try an unauthenticated `AppGetVersion` call on the given port.
-#[cfg(feature = "grpc")]
 async fn probe_grpc_port(port: u16) -> bool {
     use anytype_rpc::anytype::{
         ClientCommandsClient, rpc::app::get_version::Request as AppGetVersionRequest,
@@ -600,9 +581,9 @@ async fn probe_grpc_port(port: u16) -> bool {
         .is_ok()
 }
 
-#[cfg(all(feature = "grpc", test))]
+#[cfg(test)]
 mod find_grpc_tests {
-    use super::*;
+    use super::{extract_port, lsof_listen_ports};
 
     #[test]
     fn extract_port_ipv4() {

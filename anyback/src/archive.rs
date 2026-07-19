@@ -205,10 +205,8 @@ pub fn infer_object_id_from_snapshot_path(path: &str) -> Option<String> {
     let file_name = Path::new(path).file_name().and_then(|s| s.to_str())?;
     let stem = if let Some(stem) = file_name.strip_suffix(".pb.json") {
         stem
-    } else if let Some(stem) = file_name.strip_suffix(".pb") {
-        stem
     } else {
-        return None;
+        file_name.strip_suffix(".pb")?
     };
     looks_like_content_id(stem).then(|| stem.to_string())
 }

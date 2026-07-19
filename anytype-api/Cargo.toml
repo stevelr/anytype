@@ -2,35 +2,33 @@
 #
 # SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
 # SPDX-License-Identifier: Apache-2.0
-# 
+
 [package]
 name = "anytype"
-version = "0.3.2"
-authors = ["Steve Schoettler <stevelr-git@pm.me>"]
-description = "An ergonomic Anytype API client in rust"
-repository = "https://github.com/stevelr/anytype"
-homepage = "https://github.com/stevelr/anytype"
-edition = "2024"
-license = "Apache-2.0"
-keywords = ["anytype", "api", "client"]
+version.workspace = true
+authors.workspace = true
 categories = ["api-bindings"]
+edition.workspace = true
+homepage.workspace = true
+keywords = ["anytype", "api", "client"]
+license.workspace = true
 readme = "README.md"
+repository.workspace = true
+description = "An ergonomic Anytype API client in rust"
 
 [features]
-default = ["grpc"]
-# gRPC support
-grpc = ["dep:anytype-rpc", "dep:tonic", "dep:tonic-prost"]
+default = []
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-anytype-rpc = { version = "0.3.1", path = "../anytype-rpc", optional = true }
+anytype-rpc.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-db-keystore = "0.4.1"
+db-keystore.workspace = true
 futures.workspace = true
-keyring-core = { version = "0.7.2", features = ["sample"] }
+keyring-core.workspace = true
 parking_lot.workspace = true
 prost-types.workspace = true
 reqwest.workspace = true
@@ -40,29 +38,25 @@ serde_path_to_error.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
-tonic = { version = "0.14.4", optional = true }
-tonic-prost = { version = "0.14.4", optional = true }
+tonic.workspace = true
+tonic-prost.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 
 # these only needed if we don't directly import keyring
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "0.2.2", features = ["keychain", "protected"] }
+apple-native-keyring-store = { version = "1.0.1", features = ["keychain", "protected"] }
 [target.'cfg(target_os = "linux")'.dependencies]
-linux-keyutils-keyring-store = { version = "0.2.1" }
+linux-keyutils-keyring-store = { version = "1.0.0" }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-dbus-secret-service-keyring-store = { version = "0.3.3", features = ["crypto-rust", "vendored"] }
-zbus-secret-service-keyring-store = { version = "0.3.0", features = ["rt-async-io-crypto-rust"] }
+dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust", "vendored"] }
+zbus-secret-service-keyring-store = { version = "1.0.0", features = ["rt-async-io-crypto-rust"] }
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-native-keyring-store = "0.5.1"
+windows-native-keyring-store = "1.1.0"
 
 [dev-dependencies]
+anyhow.workspace = true
 clap.workspace = true
 png = "0.18"
-serial_test = "3.3.1"
+serial_test = "3.5.0"
 test-log.workspace = true
-anyhow.workspace = true
-
-# [patch.crates-io]
-# db-keystore = "0.4.1"
-# regex = "1.12.3"

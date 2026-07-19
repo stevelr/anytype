@@ -5,16 +5,16 @@
 
 [package]
 name = "anyback"
-version = "0.4.0-alpha.2"
-edition = "2024"
-description = "Backup and restore CLI for Anytype"
-license = "Apache-2.0"
-authors = ["Steve Schoettler <stevelr-git@pm.me>"]
-repository = "https://github.com/stevelr/anytype"
-homepage = "https://github.com/stevelr/anytype"
-keywords = ["anytype", "backup", "cli"]
+version = "0.5.0-pre.1"
+authors.workspace = true
 categories = ["command-line-utilities"]
+edition.workspace = true
+homepage.workspace = true
+keywords = ["anytype", "backup", "cli"]
+license.workspace = true
 readme = "README.md"
+repository.workspace = true
+description = "Backup and restore CLI for Anytype"
 
 [[bin]]
 name = "anyback"
@@ -27,8 +27,8 @@ path = "src/lib.rs"
 [features]
 default = ["cli"]
 cli = [
-  "dep:anytype",
-  "dep:anytype-rpc",
+  # "dep:anytype",
+  # "dep:anytype-rpc",
   "dep:chrono",
   "dep:clap",
   "dep:crossterm",
@@ -52,35 +52,30 @@ snapshot-import = []
 
 [dependencies]
 anyhow.workspace = true
-anytype = { version = "0.3.2", path = "../anytype-api", features = ["grpc"], optional = true }
-anytype-rpc = { version = "0.3.1", path = "../anytype-rpc", optional = true }
+anytype.workspace = true
+anytype-rpc.workspace = true
+arboard = { version = "3.6", optional = true }
 chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
-image = { version = "0.25.9", optional = true }
-ratatui = { version = "0.30.0", optional = true }
-ratatui-image = { version = "10.0.5", default-features = false, features = [
-  "crossterm",
-  "image-defaults",
-  "tokio",
-], optional = true }
+image = { version = "0.25.10", optional = true }
+indicatif = { version = "0.18.6", optional = true }
+lru = { version = "0.18.1", optional = true }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true }
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm", "image-defaults", "tokio"], optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
-prost-types = { workspace = true, optional = true }
+tempfile = { version = "3.27.0", optional = true }
 tokio = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
-indicatif = { version = "0.18", optional = true }
-tempfile = { version = "3.25.0", optional = true }
-tonic = { version = "0.14.4", optional = true }
-prost = { version = "0.14.3", optional = true }
-lru = { version = "0.16.3", optional = true }
-arboard = { version = "3.6", optional = true }
-zip = "8.1.0"
+zip = "8.6.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 nix = { version = "0.31.1", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
-tempfile = "3.25.0"
-rand = "0.10.0"
+rand = "0.10.2"

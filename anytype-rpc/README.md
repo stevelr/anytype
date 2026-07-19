@@ -16,10 +16,11 @@ The gRPC api isn't officially supported (by Anytype) for third party clients. Ho
 
 ## Compatibility
 
-| anytype-rpc version       | anytype-heart version |
-| ------------------------- | --------------------- |
-| 0.3.0-beta.1 (unreleased) | 0.48.0-rc.2           |
-| 0.2.1                     | 0.44                  |
+| anytype-rpc version | anytype-heart version |
+| ------------------- | --------------------- |
+| 0.4.0-pre.1         | 0.50.15               |
+| 0.3.0 – 0.3.1       | 0.48.0                |
+| 0.2.1               | 0.44                  |
 
 ## Related projects
 

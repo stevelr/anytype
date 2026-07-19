@@ -2,11 +2,7 @@ use anyhow::{Context, Result};
 use anytype::{prelude::*, validation::looks_like_object_id};
 
 use crate::{
-    cli::{
-        AppContext,
-        common::{resolve_property_id, resolve_space_id},
-        pagination_limit, pagination_offset,
-    },
+    cli::{AppContext, pagination_limit, pagination_offset},
     filter::parse_filters,
     output::OutputFormat,
 };
@@ -19,7 +15,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             filter,
             format,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx
                 .client
                 .properties(space_id)
@@ -52,7 +48,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::PropertyCommands::Get { space, property } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let item = if looks_like_object_id(&property) {
                 ctx.client.property(space_id, property).get().await?
             } else {
@@ -69,7 +65,7 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             key,
             tags,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx.client.new_property(space_id, name, format.to_format());
 
             if let Some(key) = key {
@@ -93,8 +89,8 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             name,
             key,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let property = resolve_property_id(ctx, &space_id, &property).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let property = ctx.client.resolve_property_id(&space_id, &property).await?;
             let mut request = ctx.client.update_property(space_id, property);
 
             if let Some(name) = name {
@@ -108,8 +104,8 @@ pub async fn handle(ctx: &AppContext, args: super::PropertyArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::PropertyCommands::Delete { space, property } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let property_id = resolve_property_id(ctx, &space_id, &property).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let property_id = ctx.client.resolve_property_id(&space_id, &property).await?;
             let item = ctx.client.property(space_id, &property_id).delete().await?;
             ctx.output.emit_json(&item)
         }

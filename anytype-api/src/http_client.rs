@@ -411,6 +411,148 @@ impl HttpClient {
         deserialize_json(&data)
     }
 
+    /// Makes an authenticated DELETE request that expects an empty
+    /// (`204 No Content`) response body.
+    ///
+    /// The JSON [`delete_request`](Self::delete_request) helper deserializes a
+    /// response entity; file deletion (`DELETE /v1/spaces/{space_id}/files/{file_id}`)
+    /// returns `204` with no body, so it needs this no-content variant.
+    pub(crate) async fn delete_no_content(&self, path: &str) -> Result<()> {
+        let api_key = self.get_api_key();
+        let Some(token) = api_key.token() else {
+            return Err(AnytypeError::Auth {
+                message: format!(
+                    "HTTP credentials missing token. Client is not authenticated. url={}",
+                    self.base_url,
+                ),
+            });
+        };
+        let full_url = format!("{}{}", self.base_url, path);
+        debug!("delete_no_content {full_url}");
+        self.metrics.increment_requests();
+        let response = self
+            .client
+            .delete(&full_url)
+            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context(HttpSnafu {
+                method: "delete",
+                url: &full_url,
+            })?;
+        if !response.status().is_success() {
+            self.metrics.increment_errors();
+            return Err(AnytypeError::ApiError {
+                code: response.status().as_u16(),
+                method: "delete".to_string(),
+                url: full_url,
+                message: response.text().await.unwrap_or_default(),
+            });
+        }
+        self.metrics.increment_success();
+        Ok(())
+    }
+
+    /// Makes an authenticated GET request and returns the raw response body.
+    ///
+    /// Used for binary endpoints (for example file download,
+    /// `GET /v1/spaces/{space_id}/files/{file_id}`) whose body is not JSON.
+    /// Unlike [`send`](Self::send) this does not attempt to deserialize the
+    /// response; it returns the bytes as received.
+    pub(crate) async fn get_bytes(&self, path: &str) -> Result<Bytes> {
+        let api_key = self.get_api_key();
+        let Some(token) = api_key.token() else {
+            return Err(AnytypeError::Auth {
+                message: format!(
+                    "HTTP credentials missing token. Client is not authenticated. url={}",
+                    self.base_url,
+                ),
+            });
+        };
+        let full_url = format!("{}{}", self.base_url, path);
+        debug!("get_bytes {full_url}");
+        self.metrics.increment_requests();
+        let response = self
+            .client
+            .get(&full_url)
+            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context(HttpSnafu {
+                method: "get",
+                url: &full_url,
+            })?;
+        if !response.status().is_success() {
+            self.metrics.increment_errors();
+            return Err(AnytypeError::ApiError {
+                code: response.status().as_u16(),
+                method: "get".to_string(),
+                url: full_url,
+                message: response.text().await.unwrap_or_default(),
+            });
+        }
+        let data = response.bytes().await.context(HttpSnafu {
+            method: "get",
+            url: &full_url,
+        })?;
+        self.metrics.increment_success();
+        self.metrics.add_bytes_received(data.len() as u64);
+        Ok(data)
+    }
+
+    /// Makes an authenticated `multipart/form-data` POST request.
+    ///
+    /// Used for file upload (`POST /v1/spaces/{space_id}/files`). The JSON
+    /// response body is deserialized into `T`.
+    pub(crate) async fn post_multipart<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: reqwest::multipart::Form,
+    ) -> Result<T> {
+        let api_key = self.get_api_key();
+        let Some(token) = api_key.token() else {
+            return Err(AnytypeError::Auth {
+                message: format!(
+                    "HTTP credentials missing token. Client is not authenticated. url={}",
+                    self.base_url,
+                ),
+            });
+        };
+        let full_url = format!("{}{}", self.base_url, path);
+        debug!("post_multipart {full_url}");
+        self.metrics.increment_requests();
+        let response = self
+            .client
+            .post(&full_url)
+            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+            .bearer_auth(token)
+            .multipart(form)
+            .send()
+            .await
+            .context(HttpSnafu {
+                method: "post",
+                url: &full_url,
+            })?;
+        if !response.status().is_success() {
+            self.metrics.increment_errors();
+            return Err(AnytypeError::ApiError {
+                code: response.status().as_u16(),
+                method: "post".to_string(),
+                url: full_url,
+                message: response.text().await.unwrap_or_default(),
+            });
+        }
+        let data = response.bytes().await.context(HttpSnafu {
+            method: "post",
+            url: &full_url,
+        })?;
+        self.metrics.increment_success();
+        self.metrics.add_bytes_received(data.len() as u64);
+        deserialize_json(&data)
+    }
+
     /// This function handles all authenticated anytype rest api requests (http: get,post,patch,delete)
     /// - handles 429 rate limit feedback
     /// - retries up to N(=3) times for connection failures or server timeout
@@ -430,14 +572,14 @@ impl HttpClient {
         self.limits.validate_query(&req.query)?;
         if let Some(ref body) = req.body {
             self.limits
-                .validate_body(body, &format!("http {} {}", &req.method, &req.path))?;
+                .validate_body(body, &format!("http {} {}", req.method, req.path))?;
         }
         let api_key = self.get_api_key();
         if api_key.token().is_none() {
             return Err(AnytypeError::Auth {
                 message: format!(
                     "HTTP credentials missing token. Client is not authenticated. url={}",
-                    &self.base_url,
+                    self.base_url,
                 ),
             });
         }

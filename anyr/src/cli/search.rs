@@ -2,18 +2,14 @@ use anyhow::Result;
 use anytype::prelude::*;
 
 use crate::{
-    cli::{
-        AppContext,
-        common::{resolve_space_id, resolve_type_ids},
-        pagination_limit, pagination_offset,
-    },
+    cli::{AppContext, pagination_limit, pagination_offset},
     filter::parse_filters,
     output::OutputFormat,
 };
 
 pub async fn handle(ctx: &AppContext, args: super::SearchArgs) -> Result<()> {
     let resolved_space_id = match args.space.as_deref() {
-        Some(space_id) => Some(resolve_space_id(ctx, space_id).await?),
+        Some(space_id) => Some(ctx.client.resolve_space_id(space_id).await?),
         None => None,
     };
     let mut request = resolved_space_id.as_deref().map_or_else(
@@ -27,7 +23,7 @@ pub async fn handle(ctx: &AppContext, args: super::SearchArgs) -> Result<()> {
 
     if !args.types.is_empty() {
         if let Some(space_id) = resolved_space_id.as_deref() {
-            let resolved = resolve_type_ids(ctx, space_id, &args.types).await?;
+            let resolved = ctx.client.resolve_type_ids(space_id, &args.types).await?;
             request = request.types(resolved);
         } else {
             request = request.types(args.types);

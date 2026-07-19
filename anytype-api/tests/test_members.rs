@@ -259,6 +259,11 @@ async fn test_member_role_values() -> TestResult<()> {
                     assert!(!member.is_owner(), "is_owner() should be false for Editor");
                     assert!(member.can_edit(), "can_edit() should be true for Editor");
                 }
+                MemberRole::Admin => {
+                    assert!(!member.is_owner(), "is_owner() should be false for Admin");
+                    assert!(member.is_admin(), "is_admin() should be true for Admin");
+                    assert!(member.can_edit(), "can_edit() should be true for Admin");
+                }
                 MemberRole::Viewer => {
                     assert!(!member.is_owner(), "is_owner() should be false for Viewer");
                     assert!(!member.can_edit(), "can_edit() should be false for Viewer");

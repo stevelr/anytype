@@ -10,6 +10,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - program used to generate test vectors for account key generation
 
+### Changed
+
+- name and id resolution (space, type, chat, view, property) moved into the
+  anytype crate (`anytype::resolve`); anyr now calls the shared
+  `AnytypeClient::resolve_*` methods. Behavior is unchanged, except: a type
+  lookup that matches nothing now reports "not found" instead of "ambiguous",
+  and not-found/ambiguous messages use the shared `AnytypeError` formats.
+
 ## [0.4.1]
 
 ### Added

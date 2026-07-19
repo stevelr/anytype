@@ -16,8 +16,7 @@ ANYTYPE_CLI_BIN="${ANYTYPE_CLI_BIN:-anytype}"
 # user to run as
 user=$(whoami)
 # command to execute
-cmd=( "/home/steve/.local/bin/serve" )
-#cmd=( "$ANYTYPE_CLI_BIN" "serve" )
+cmd=( "$ANYTYPE_CLI_BIN" "serve" )
 # listen ports forwarded to localhost in the namespace
 PORTS_FORWARDED="31009,31010,31012"
 #RUNUSER_FLAGS=R{RUNUSER_FLAGS:=""}

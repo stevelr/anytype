@@ -5,6 +5,12 @@
 //! - list 10 most recent documents containing the text "meeting notes"
 //! - send the lists in a rich-text chat message with colors and hyperlinks
 //!
+//! Setup:
+//!  - set PROJECT_SPACE below to the name of your project space
+//!  - set CHAT_SPACE to name of a chat-style space
+//! Run:
+//!  cargo run --example agenda
+//!
 use anytype::prelude::*;
 
 const PROJECT_SPACE: &str = "Projects";

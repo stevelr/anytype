@@ -1,5 +1,3 @@
-#![cfg(feature = "grpc")]
-
 use std::net::SocketAddr;
 
 use anyhow::Result;

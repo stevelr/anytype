@@ -827,10 +827,12 @@ impl tonic::server::UnaryService<get_messages::Request> for ChatGetMessagesSvc {
             let chat_state = build_chat_state(chat, &user);
             drop(state_guard);
 
+            let message_count = i32::try_from(messages.len()).unwrap_or(i32::MAX);
             Ok(Response::new(get_messages::Response {
                 error: None,
                 messages,
                 chat_state: Some(chat_state),
+                message_count,
             }))
         })
     }
@@ -916,6 +918,8 @@ impl tonic::server::UnaryService<subscribe_last_messages::Request>
             #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
             let num_messages_before = start as i32;
             let chat_state = build_chat_state(chat, &user);
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let message_count = total as i32;
             drop(state_guard);
 
             Ok(Response::new(subscribe_last_messages::Response {
@@ -923,6 +927,7 @@ impl tonic::server::UnaryService<subscribe_last_messages::Request>
                 messages,
                 num_messages_before,
                 chat_state: Some(chat_state),
+                message_count,
             }))
         })
     }
@@ -1333,6 +1338,9 @@ impl StoredMessage {
             mention_read: self.mention_read_by.contains(viewer),
             has_mention: self.has_mention,
             synced: self.synced,
+            pinned: false,
+            unread_reaction: false,
+            blocks: Vec::new(),
         }
     }
 }
@@ -1534,6 +1542,7 @@ fn build_chat_state(chat: &ChatRoom, viewer: &str) -> model::ChatState {
         }),
         last_state_id: chat.state_id.clone(),
         order: chat.state_counter,
+        unread_reaction_order_id: String::new(),
     }
 }
 

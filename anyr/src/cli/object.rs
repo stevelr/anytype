@@ -2,11 +2,7 @@ use anyhow::Result;
 use anytype::prelude::*;
 
 use crate::{
-    cli::{
-        AppContext,
-        common::{resolve_space_id, resolve_type, resolve_type_ids, resolve_type_key},
-        must_have_body, pagination_limit, pagination_offset, resolve_icon_exists,
-    },
+    cli::{AppContext, must_have_body, pagination_limit, pagination_offset, resolve_icon_exists},
     filter::{parse_filters, parse_property},
     output::OutputFormat,
 };
@@ -20,7 +16,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             filter,
             types,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx
                 .client
                 .objects(&space_id)
@@ -28,7 +24,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
                 .offset(pagination_offset(&pagination));
 
             if !types.is_empty() {
-                let resolved = resolve_type_ids(ctx, &space_id, &types).await?;
+                let resolved = ctx.client.resolve_type_ids(&space_id, &types).await?;
                 request = request.filter(Filter::Objects {
                     condition: Condition::In,
                     property_key: "type".to_string(),
@@ -55,7 +51,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::ObjectCommands::Get { space, object_id } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let object = ctx.client.object(space_id, object_id).get().await?;
             ctx.output.emit_json(&object)
         }
@@ -65,7 +61,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             cid,
             key,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let link = match (cid, key) {
                 (Some(cid), Some(key)) => object_link_shared(&space_id, &object_id, &cid, &key),
                 (None, None) => object_link(&space_id, &object_id),
@@ -87,8 +83,8 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             properties,
             property_args,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let type_key = resolve_type_key(ctx, &space_id, type_key).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let type_key = ctx.client.resolve_type_key(&space_id, type_key).await?;
             let mut request = ctx.client.new_object(&space_id, type_key);
 
             if let Some(name) = name {
@@ -118,7 +114,10 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             let props = merge_properties(properties, property_args);
             if !props.is_empty() {
                 let parsed = parse_properties(&props)?;
-                let typ = resolve_type(ctx, &space_id, request.get_type_key()).await?;
+                let typ = ctx
+                    .client
+                    .resolve_type(&space_id, request.get_type_key())
+                    .await?;
                 request = ctx
                     .client
                     .set_properties(&space_id, request, &typ, &parsed)
@@ -140,7 +139,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             properties,
             property_args,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx.client.update_object(&space_id, &object_id);
 
             if let Some(name) = name {
@@ -156,7 +155,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             }
 
             if let Some(type_key) = type_key {
-                let type_key = resolve_type_key(ctx, &space_id, type_key).await?;
+                let type_key = ctx.client.resolve_type_key(&space_id, type_key).await?;
                 request = request.type_key(type_key);
             }
 
@@ -164,7 +163,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             if !props.is_empty() {
                 let parsed = parse_properties(&props)?;
                 let typ = if let Some(type_key) = request.get_type_key() {
-                    resolve_type(ctx, &space_id, &type_key).await?
+                    ctx.client.resolve_type(&space_id, &type_key).await?
                 } else {
                     let object = ctx.client.object(&space_id, &object_id).get().await?;
                     object.get_type().ok_or_else(|| {
@@ -181,7 +180,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             ctx.output.emit_json(&object)
         }
         super::ObjectCommands::Delete { space, object_id } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let object = ctx.client.object(space_id, object_id).delete().await?;
             ctx.output.emit_json(&object)
         }

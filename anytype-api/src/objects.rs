@@ -58,15 +58,12 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "grpc")]
 use crate::grpc_util::{grpc_status, with_token_request};
-#[cfg(feature = "grpc")]
 use anytype_rpc::anytype::rpc::object::share_by_link;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use snafu::prelude::*;
-#[cfg(feature = "grpc")]
 use tonic::Request;
 
 use crate::{
@@ -115,6 +112,7 @@ pub enum ObjectLayout {
     /// Participant layout - space member representation
     Participant,
     //
+    Chat,
     // undocumented: seen in go source (models.pb.go)
     // Should we add an Other(String) variant to handle deserialization?
     // ============
@@ -1276,7 +1274,6 @@ impl AnytypeClient {
     }
 
     /// Get a share link for an object by id.
-    #[cfg(feature = "grpc")]
     pub async fn get_share_link(&self, object_id: impl AsRef<str>) -> Result<String> {
         let object_id = object_id.as_ref();
         self.config.limits.validate_id(object_id, "object_id")?;

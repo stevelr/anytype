@@ -1,11 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    cli::{
-        AppContext,
-        common::{resolve_space_id, resolve_type_id},
-        pagination_limit, pagination_offset,
-    },
+    cli::{AppContext, pagination_limit, pagination_offset},
     filter::parse_filters,
     output::OutputFormat,
 };
@@ -18,8 +14,8 @@ pub async fn handle(ctx: &AppContext, args: super::TemplateArgs) -> Result<()> {
             pagination,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let type_id = ctx.client.resolve_type_id(&space_id, &type_id).await?;
             let mut request = ctx
                 .client
                 .templates(space_id, type_id)
@@ -49,8 +45,8 @@ pub async fn handle(ctx: &AppContext, args: super::TemplateArgs) -> Result<()> {
             type_id,
             template_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let type_id = ctx.client.resolve_type_id(&space_id, &type_id).await?;
             let item = ctx
                 .client
                 .template(space_id, type_id, template_id)

@@ -47,6 +47,8 @@ pub enum MemberRole {
     Viewer,
     /// Can view and edit
     Editor,
+    /// Can manage members and content, but is not the space owner
+    Admin,
     /// Full control including admin
     Owner,
     /// No access
@@ -110,9 +112,17 @@ impl Member {
         self.role == MemberRole::Owner
     }
 
+    /// Returns true if the member is a space administrator (or owner).
+    pub fn is_admin(&self) -> bool {
+        matches!(self.role, MemberRole::Admin | MemberRole::Owner)
+    }
+
     /// Returns true if the member can edit.
     pub fn can_edit(&self) -> bool {
-        matches!(self.role, MemberRole::Editor | MemberRole::Owner)
+        matches!(
+            self.role,
+            MemberRole::Editor | MemberRole::Admin | MemberRole::Owner
+        )
     }
 
     /// Returns the display name, falling back to `global_name` or "Unknown".

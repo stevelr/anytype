@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    cli::{AppContext, common::resolve_space_id, pagination_limit, pagination_offset},
+    cli::{AppContext, pagination_limit, pagination_offset},
     filter::parse_filters,
     output::OutputFormat,
 };
@@ -34,7 +34,7 @@ pub async fn handle(ctx: &AppContext, args: super::SpaceArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::SpaceCommands::Get { space } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let space = ctx.client.space(space_id).get().await?;
             ctx.output.emit_json(&space)
         }
@@ -51,7 +51,7 @@ pub async fn handle(ctx: &AppContext, args: super::SpaceArgs) -> Result<()> {
             name,
             description,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx.client.update_space(space_id);
             if let Some(name) = name {
                 request = request.name(name);
@@ -63,12 +63,12 @@ pub async fn handle(ctx: &AppContext, args: super::SpaceArgs) -> Result<()> {
             ctx.output.emit_json(&space)
         }
         super::SpaceCommands::CountArchived { space } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let count = ctx.client.count_archived(&space_id).await?;
             ctx.output.emit_text(&format!("{count} archived object(s)"))
         }
         super::SpaceCommands::DeleteArchived { space, confirm } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             if !confirm {
                 let count = ctx.client.count_archived(&space_id).await?;
                 if count == 0 {

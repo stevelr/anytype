@@ -5,7 +5,6 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "grpc")]
 use anytype_rpc::{
     anytype::rpc::{
         file::{discard_preload, download, upload},
@@ -13,6 +12,7 @@ use anytype_rpc::{
     },
     model,
 };
+use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
 use prost_types::{ListValue, Struct, Value};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,29 @@ pub enum FileStyle {
     Auto,
     Link,
     Embed,
+}
+
+/// Response from an HTTP file upload (`POST /v1/spaces/{space_id}/files`).
+///
+/// This is the subset of file metadata the REST upload endpoint returns. The
+/// gRPC [`upload`](FilesClient::upload) path returns a richer [`FileObject`];
+/// see `docs/http-grpc-overlap.md` for the mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileUploadResponse {
+    /// File object ID
+    pub object_id: String,
+    /// Original file name as stored
+    #[serde(default)]
+    pub name: Option<String>,
+    /// File extension without the leading dot, when known
+    #[serde(default)]
+    pub extension: Option<String>,
+    /// MIME type (for example `image/png`)
+    #[serde(default)]
+    pub media: Option<String>,
+    /// Size of the uploaded file, in bytes
+    #[serde(default)]
+    pub size_in_bytes: Option<i64>,
 }
 
 // ============================================================================
@@ -165,6 +188,160 @@ impl<'a> FilesClient<'a> {
             space_id: space_id.into(),
             file_id: file_id.into(),
         }
+    }
+}
+
+// ============================================================================
+// HTTP (REST) file transfer
+//
+// Added in the 2025-11-08 / anytype-heart 0.50.15 REST surface. These wrap the
+// REST endpoints directly (no gRPC channel required). See the capability
+// mapping and combined-API recommendation in `docs/http-grpc-overlap.md`.
+// ============================================================================
+
+impl<'a> FilesClient<'a> {
+    /// Upload a file over the REST API (`POST /v1/spaces/{space_id}/files`).
+    ///
+    /// This is the REST equivalent of the gRPC [`upload`](Self::upload): simpler
+    /// (multipart bytes in, minimal metadata out) and it needs no gRPC channel.
+    /// For richer uploads (`style`, `details`, created-in-context), use the gRPC
+    /// [`upload`](Self::upload) path.
+    ///
+    /// Provide the bytes with [`FileHttpUploadRequest::bytes`] or a filesystem
+    /// path with [`FileHttpUploadRequest::path`], then call
+    /// [`FileHttpUploadRequest::upload`].
+    #[must_use]
+    pub fn http_upload(&self, space_id: impl Into<String>) -> FileHttpUploadRequest<'a> {
+        FileHttpUploadRequest {
+            client: self.client,
+            space_id: space_id.into(),
+            file_name: None,
+            mime: None,
+            data: None,
+            source_path: None,
+        }
+    }
+
+    /// Download a file's raw bytes over the REST API
+    /// (`GET /v1/spaces/{space_id}/files/{file_id}`).
+    ///
+    /// Returns the file contents. This is the REST equivalent of the gRPC
+    /// [`download`](Self::download); both stream the same raw bytes.
+    pub async fn http_download(
+        &self,
+        space_id: impl Into<String>,
+        file_id: impl Into<String>,
+    ) -> Result<Bytes> {
+        let path = format!("/v1/spaces/{}/files/{}", space_id.into(), file_id.into());
+        self.client.client.get_bytes(&path).await
+    }
+
+    /// Delete a file over the REST API
+    /// (`DELETE /v1/spaces/{space_id}/files/{file_id}`).
+    ///
+    /// The REST API is the only transport with a first-class file delete; the
+    /// gRPC path removes files via generic object deletion.
+    pub async fn http_delete(
+        &self,
+        space_id: impl Into<String>,
+        file_id: impl Into<String>,
+    ) -> Result<()> {
+        let path = format!("/v1/spaces/{}/files/{}", space_id.into(), file_id.into());
+        self.client.client.delete_no_content(&path).await
+    }
+}
+
+/// Builder for an HTTP (REST) file upload. Created by
+/// [`FilesClient::http_upload`].
+pub struct FileHttpUploadRequest<'a> {
+    client: &'a AnytypeClient,
+    space_id: String,
+    file_name: Option<String>,
+    mime: Option<String>,
+    data: Option<Bytes>,
+    source_path: Option<PathBuf>,
+}
+
+impl FileHttpUploadRequest<'_> {
+    /// Set the file name reported to the server. When uploading from a
+    /// [`path`](Self::path) this defaults to the path's file name.
+    #[must_use]
+    pub fn file_name(mut self, name: impl Into<String>) -> Self {
+        self.file_name = Some(name.into());
+        self
+    }
+
+    /// Set an explicit MIME type for the multipart part. When omitted the
+    /// server infers it from the content and file name.
+    #[must_use]
+    pub fn mime(mut self, mime: impl Into<String>) -> Self {
+        self.mime = Some(mime.into());
+        self
+    }
+
+    /// Upload from an in-memory byte buffer.
+    #[must_use]
+    pub fn bytes(mut self, data: impl Into<Bytes>) -> Self {
+        self.data = Some(data.into());
+        self
+    }
+
+    /// Upload from a file on disk. The bytes are read when
+    /// [`upload`](Self::upload) is called.
+    #[must_use]
+    pub fn path(mut self, path: impl AsRef<Path>) -> Self {
+        self.source_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Perform the upload, returning the server's [`FileUploadResponse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if neither [`bytes`](Self::bytes) nor [`path`](Self::path)
+    /// was set, if the source file cannot be read, or if the request fails.
+    pub async fn upload(self) -> Result<FileUploadResponse> {
+        let (bytes, name) = match (self.data, self.source_path) {
+            (Some(data), path) => (
+                data,
+                self.file_name.or_else(|| {
+                    path.as_ref()
+                        .and_then(|path| path.file_name())
+                        .and_then(|fname| fname.to_str())
+                        .map(String::from)
+                }),
+            ),
+            (None, Some(path)) => {
+                let data = tokio::fs::read(&path)
+                    .await
+                    .map_err(|err| AnytypeError::Other {
+                        message: format!("failed to read {}: {err}", path.display()),
+                    })?;
+                let name = self.file_name.or_else(|| {
+                    path.file_name()
+                        .and_then(|fname| fname.to_str())
+                        .map(String::from)
+                });
+                (Bytes::from(data), name)
+            }
+            (None, None) => {
+                return Err(AnytypeError::Validation {
+                    message: "http_upload requires bytes() or path()".to_string(),
+                });
+            }
+        };
+        let name = name.unwrap_or_else(|| "file".to_string());
+        let mut part = reqwest::multipart::Part::bytes(bytes.to_vec()).file_name(name);
+        if let Some(mime) = self.mime {
+            part = part
+                .mime_str(&mime)
+                .map_err(|err| AnytypeError::Validation {
+                    message: format!("invalid mime type: {err}"),
+                })?;
+        }
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let path = format!("/v1/spaces/{}/files", self.space_id);
+        self.client.client.post_multipart(&path, form).await
     }
 }
 

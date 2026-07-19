@@ -1,7 +1,11 @@
 [package]
 name = "gen-protos"
-version = "0.1.0"
-edition = "2024"
+version = "0.1.1"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tonic-prost-build = "0.14.2"

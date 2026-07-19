@@ -529,7 +529,7 @@ impl AnytypeClient {
                 }
             } else {
                 return ValidationSnafu {
-                    message: format!("invalid property {key} for type {}", &typ.key),
+                    message: format!("invalid property {key} for type {}", typ.key),
                 }
                 .fail();
             }
@@ -1067,7 +1067,7 @@ impl NewPropertyRequest {
             ValidationSnafu {
                 message: format!(
                     "Property {} format {} cannot be created with tags, because tags are only supported for formats Select and MultiSelect",
-                    &self.name, &self.format
+                    self.name, self.format
                 ),
             }
         );

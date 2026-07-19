@@ -493,10 +493,8 @@ impl<'a, 'b> MarksWriter<'a, 'b> {
                     }
                 }
             }
-            Some(MarkType::Emoji) => {
-                if start {
-                    out.push_str(&mark.param);
-                }
+            Some(MarkType::Emoji) if start => {
+                out.push_str(&mark.param);
             }
             _ => {}
         }

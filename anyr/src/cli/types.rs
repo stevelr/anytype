@@ -4,11 +4,7 @@ use anyhow::{Result, bail};
 use anytype::validation::looks_like_object_id;
 
 use crate::{
-    cli::{
-        AppContext,
-        common::{resolve_space_id, resolve_type_id},
-        pagination_limit, pagination_offset, resolve_icon_exists,
-    },
+    cli::{AppContext, pagination_limit, pagination_offset, resolve_icon_exists},
     filter::{parse_filters, parse_type_property},
     output::OutputFormat,
 };
@@ -30,7 +26,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             pagination,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx
                 .client
                 .types(space_id)
@@ -56,8 +52,8 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::TypeCommands::Get { space, type_id } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let type_id = ctx.client.resolve_type_id(&space_id, &type_id).await?;
             let item = ctx.client.get_type(space_id, type_id).get().await?;
             ctx.output.emit_json(&item)
         }
@@ -70,7 +66,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             layout,
             properties,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx.client.new_type(space_id, name).key(key);
             if let Some(plural) = plural {
                 request = request.plural_name(plural);
@@ -98,8 +94,8 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             layout,
             add_properties,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let type_id = ctx.client.resolve_type_id(&space_id, &type_id).await?;
             let mut request = ctx.client.update_type(&space_id, &type_id);
 
             if let Some(key) = key {
@@ -165,8 +161,8 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
         super::TypeCommands::Delete { space, type_id } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let type_id = ctx.client.resolve_type_id(&space_id, &type_id).await?;
             let item = ctx.client.get_type(space_id, type_id).delete().await?;
             ctx.output.emit_json(&item)
         }

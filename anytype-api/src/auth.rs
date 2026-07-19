@@ -62,7 +62,6 @@ struct CreateApiKeyResponse {
 pub struct AuthStatus {
     pub keystore: KeyStoreStatus,
     pub http: HttpStatus,
-    #[cfg(feature = "grpc")]
     pub grpc: GrpcStatus,
 }
 
@@ -86,7 +85,6 @@ impl HttpStatus {
 
 /// gRPC auth status
 /// Contents subject to change
-#[cfg(feature = "grpc")]
 #[doc(hidden)]
 #[derive(Clone, Debug, Serialize)]
 pub struct GrpcStatus {
@@ -95,7 +93,6 @@ pub struct GrpcStatus {
     pub has_session_token: bool,
 }
 
-#[cfg(feature = "grpc")]
 impl GrpcStatus {
     /// Returns true if the grpc client has either an account key or session token
     /// To check whether the credentials are valid, use `client.ping_grpc()`
@@ -345,7 +342,6 @@ impl AnytypeClient {
     pub fn auth_status(&self) -> Result<AuthStatus, AnytypeError> {
         let keystore = self.get_key_store();
         let http_creds = keystore.get_http_credentials()?;
-        #[cfg(feature = "grpc")]
         let grpc_creds = keystore.get_grpc_credentials()?;
         let path = keystore
             .store()
@@ -363,7 +359,6 @@ impl AnytypeClient {
                 url: self.get_http_endpoint().to_string(),
                 has_token: http_creds.has_creds(),
             },
-            #[cfg(feature = "grpc")]
             grpc: GrpcStatus {
                 endpoint: self.get_grpc_endpoint(),
                 has_account_key: grpc_creds.has_account_key(),

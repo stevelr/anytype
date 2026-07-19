@@ -13,7 +13,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(feature = "grpc")]
 use anytype_rpc::{
     anytype::rpc::chat::{
         get_messages, subscribe_last_messages, subscribe_to_message_previews, unsubscribe,

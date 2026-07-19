@@ -20,7 +20,7 @@ test:
     
 run-examples:
     #!/usr/bin/env bash
-    source ../.test-example
+    source ../.test-env
     cargo run --example list_spaces
     #cargo run --example interactive_auth
     cargo run --example list_types_and_properties
@@ -35,6 +35,23 @@ run-examples:
     cargo run --example retry_eventual_consistency
     cargo run --example pagination_stream
     cargo run --example views_list_objects
+
+ex:
+    #!/usr/bin/env bash
+    source ../.test-env
+    # agenda chat_listener chat_messages
+    examples=(
+        create_object files filter_expressions filters_basic
+        #interactive_auth list_spaces list_tasks list_types_and_properties pagination_stream
+        #retry_eventual_consistency search_global search_in_space smoke_live templates
+        #update_markdown_body update_object_properties views_list_objects
+    )
+    for example in "${examples[@]}"; do
+        sleep 1
+        echo "=== $example ==="
+        cargo run --example $example
+    done
+
 
 # check for typos
 spellcheck:

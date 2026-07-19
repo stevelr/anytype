@@ -276,8 +276,8 @@ async fn check_auth_status(client: AnytypeClient) -> Result<()> {
     let status = client.auth_status()?;
     let is_authenticated = status.http.is_authenticated();
     println!("Authenticated: {is_authenticated}");
-    println!("Service:       {}", &status.keystore.service);
-    println!("Keystore:      {:?}", &status.keystore.id);
+    println!("Service:       {}", status.keystore.service);
+    println!("Keystore:      {:?}", status.keystore.id);
     Ok(())
 }
 
@@ -335,7 +335,7 @@ async fn get_command(
     };
     let output = format!(
         "---\n{}---\n{}",
-        &serde_yaml_ng::to_string(&header)?,
+        serde_yaml_ng::to_string(&header)?,
         object.markdown.unwrap_or_default()
     );
     // Write output to file or stdout
@@ -588,7 +588,7 @@ fn sha256_body_hash(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(body.as_bytes());
     let digest = hasher.finalize();
-    Ok(format!("{:x}", digest))
+    Ok(format!("{:x}", base16ct::HexDisplay(&digest)))
 }
 
 fn temp_markdown_path() -> Result<PathBuf> {

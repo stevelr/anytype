@@ -46,35 +46,24 @@
 //! - [`BackupSpaceRequest`] - Builder for backing up a space (requires `grpc` feature)
 //! - [`BackupExportFormat`] - Export format for backups (requires `grpc` feature)
 
-#[cfg(feature = "grpc")]
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
-#[cfg(feature = "grpc")]
 use tracing::debug;
 
-#[cfg(feature = "grpc")]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "grpc")]
 use std::time::Duration;
 
-#[cfg(feature = "grpc")]
 use anytype_rpc::anytype::rpc::object::list_delete;
-#[cfg(feature = "grpc")]
 pub use anytype_rpc::backup::SpaceBackupResult;
-#[cfg(feature = "grpc")]
 use anytype_rpc::backup::{ExportFormat, SpaceBackupOptions};
-#[cfg(feature = "grpc")]
 use anytype_rpc::{anytype::rpc::object::search_with_meta, model};
-#[cfg(feature = "grpc")]
 use prost_types::{ListValue, Value};
-#[cfg(feature = "grpc")]
 use tonic::Request;
 
-#[cfg(feature = "grpc")]
 use crate::grpc_util::{ensure_error_ok, grpc_status, with_token_request};
 use crate::{
     Result,
@@ -97,9 +86,17 @@ use crate::{
 pub enum SpaceModel {
     /// Regular workspace for organizing objects
     #[default]
+    #[serde(alias = "anytype.space")]
     Space,
     /// Chat-based space for messaging
+    #[serde(alias = "anytype.chatspace", alias = "chatspace")]
     Chat,
+    /// Direct one-to-one messaging space
+    #[serde(alias = "anytype.onetoone", alias = "onetoone")]
+    OneToOne,
+    /// Technical/system space used for account bookkeeping (not user-facing)
+    #[serde(alias = "anytype.techspace", alias = "techspace")]
+    TechSpace,
 }
 
 /// Represents an Anytype space (workspace).
@@ -611,7 +608,6 @@ impl ListSpacesRequest {
 }
 
 /// Result of [`AnytypeClient::delete_all_archived`].
-#[cfg(feature = "grpc")]
 #[derive(Debug, Clone)]
 pub struct DeleteAllArchivedResult {
     /// Number of objects successfully deleted.
@@ -673,7 +669,6 @@ impl<'a> ListArchivedRequest<'a> {
     /// Executes the archived-list request.
     pub async fn list(self) -> Result<PagedResult<Object>> {
         self.limits.validate_id(&self.space_id, "space_id")?;
-        #[cfg(feature = "grpc")]
         {
             return search_archived_objects(
                 self.client,
@@ -684,21 +679,12 @@ impl<'a> ListArchivedRequest<'a> {
             )
             .await;
         }
-
-        #[cfg(not(feature = "grpc"))]
-        {
-            return GrpcUnavailableSnafu {
-                message: "list_archived requires grpc feature".to_string(),
-            }
-            .fail();
-        }
     }
 }
 
 /// Export format for space backups.
 ///
 // This exposes a subset of the internal export formats that are suitable for backups.
-#[cfg(feature = "grpc")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::EnumString)]
 pub enum BackupExportFormat {
     /// Markdown format
@@ -715,7 +701,6 @@ pub enum BackupExportFormat {
     Json,
 }
 
-#[cfg(feature = "grpc")]
 impl BackupExportFormat {
     /// Converts to the internal gRPC export format.
     fn to_export_format(self) -> ExportFormat {
@@ -745,7 +730,6 @@ impl BackupExportFormat {
 /// # Ok(())
 /// # }
 /// ```
-#[cfg(feature = "grpc")]
 #[derive(Debug)]
 pub struct BackupSpaceRequest<'a> {
     client: &'a AnytypeClient,
@@ -764,7 +748,6 @@ pub struct BackupSpaceRequest<'a> {
     md_include_properties_and_schema: Option<bool>,
 }
 
-#[cfg(feature = "grpc")]
 impl BackupSpaceRequest<'_> {
     /// Sets the backup output directory.
     ///
@@ -1086,7 +1069,6 @@ impl AnytypeClient {
     }
 
     /// Permanently deletes archived objects by object id in batches of 200.
-    #[cfg(feature = "grpc")]
     pub async fn delete_archived(
         &self,
         space_id: impl AsRef<str>,
@@ -1130,7 +1112,6 @@ impl AnytypeClient {
     /// sub-batches of 200 via [`Self::delete_archived`].
     ///
     /// Between batches, waits 2 seconds to allow server-side state to settle.
-    #[cfg(feature = "grpc")]
     pub async fn delete_all_archived(
         &self,
         space_id: impl AsRef<str>,
@@ -1239,7 +1220,6 @@ impl AnytypeClient {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "grpc")]
     pub fn backup_space(&self, space_id: impl Into<String>) -> BackupSpaceRequest<'_> {
         BackupSpaceRequest {
             client: self,
@@ -1260,7 +1240,6 @@ impl AnytypeClient {
     }
 }
 
-#[cfg(feature = "grpc")]
 async fn search_archived_objects(
     client: &AnytypeClient,
     space_id: &str,
@@ -1303,7 +1282,6 @@ async fn search_archived_objects(
     Ok(PagedResult::from_response(response))
 }
 
-#[cfg(feature = "grpc")]
 fn archived_search_request(
     space_id: &str,
     archived_relation_key: &str,
@@ -1332,7 +1310,6 @@ fn archived_search_request(
     }
 }
 
-#[cfg(feature = "grpc")]
 async fn run_archived_search(
     client: &AnytypeClient,
     request: search_with_meta::Request,
@@ -1351,7 +1328,6 @@ async fn run_archived_search(
     Ok(response)
 }
 
-#[cfg(feature = "grpc")]
 fn archived_relation_not_found(err: &AnytypeError, key: &str) -> bool {
     match err {
         AnytypeError::Other { message } => {
@@ -1362,7 +1338,6 @@ fn archived_relation_not_found(err: &AnytypeError, key: &str) -> bool {
     }
 }
 
-#[cfg(feature = "grpc")]
 fn dataview_filter_checkbox_equal(
     key: &str,
     value: bool,
@@ -1383,7 +1358,6 @@ fn dataview_filter_checkbox_equal(
     }
 }
 
-#[cfg(feature = "grpc")]
 fn dataview_filter_type_in(type_ids: &[String]) -> model::block::content::dataview::Filter {
     model::block::content::dataview::Filter {
         id: String::new(),
@@ -1408,7 +1382,6 @@ fn dataview_filter_type_in(type_ids: &[String]) -> model::block::content::datavi
     }
 }
 
-#[cfg(feature = "grpc")]
 fn archived_object_from_search_result(
     space_id: &str,
     result: model::search::Result,
@@ -1435,7 +1408,6 @@ fn archived_object_from_search_result(
     })
 }
 
-#[cfg(feature = "grpc")]
 fn struct_bool_field(details: &prost_types::Struct, key: &str) -> Option<bool> {
     details
         .fields
@@ -1447,7 +1419,6 @@ fn struct_bool_field(details: &prost_types::Struct, key: &str) -> Option<bool> {
         })
 }
 
-#[cfg(feature = "grpc")]
 fn struct_string_field(details: &prost_types::Struct, key: &str) -> Option<String> {
     details
         .fields
@@ -1459,7 +1430,6 @@ fn struct_string_field(details: &prost_types::Struct, key: &str) -> Option<Strin
         })
 }
 
-#[cfg(feature = "grpc")]
 fn normalized_search_result_id(object_id: String, details: &prost_types::Struct) -> Option<String> {
     if !object_id.is_empty() {
         return Some(object_id);
@@ -1472,14 +1442,12 @@ fn normalized_search_result_id(object_id: String, details: &prost_types::Struct)
     }
 }
 
-#[cfg(feature = "grpc")]
 #[derive(Debug)]
 struct DeleteBestEffortResult {
     deleted: u64,
     failed_ids: Vec<String>,
 }
 
-#[cfg(feature = "grpc")]
 async fn delete_archived_best_effort(
     client: &AnytypeClient,
     space_id: &str,

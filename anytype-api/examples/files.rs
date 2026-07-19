@@ -1,6 +1,7 @@
 // Demonstrates gRPC-backed file operations.
 //
-// Before running this example, update the file paths to local files,
+// Before running this example, update the two file paths to local files,
+// 
 // and set file_type to FileType::(File, Image, Video, Audio, Pdf, or Other)
 //
 
@@ -8,8 +9,7 @@ use anyhow::{Context, Result};
 
 mod example_lib;
 use anytype::prelude::*;
-
-const NUM_FILES: usize = 2;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,36 +27,44 @@ async fn main() -> Result<()> {
     let mut files = Vec::new();
 
     // TODO: update path and file_type
-    let path = "./document.pdf";
-    let file = client
-        .files()
-        .upload(&space_id)
-        .from_path(path)
-        .file_type(FileType::Pdf)
-        .upload()
-        .await?;
-    println!(
-        "Uploaded file {} id:{}",
-        file.name.as_deref().unwrap_or("unnamed"),
-        file.id
-    );
-    files.push(file);
+    let path = "./README.md";
+    if PathBuf::from(path).is_file() {
+      let file = client
+          .files()
+          .upload(&space_id)
+          .from_path(path)
+          .file_type(FileType::File)
+          .upload()
+          .await?;
+      println!(
+          "Uploaded file {} id:{}",
+          file.name.as_deref().unwrap_or("unnamed"),
+          file.id
+      );
+      files.push(file);
+    } else {
+        println!("Missing file: {path}");
+    }
 
     // TODO: update path and file_type
     let path = "./picture.png";
-    let file = client
-        .files()
-        .upload(&space_id)
-        .from_path(path)
-        .file_type(FileType::Image)
-        .upload()
-        .await?;
-    println!(
-        "Uploaded file {} id:{}",
-        file.name.as_deref().unwrap_or("unnamed"),
-        file.id
-    );
-    files.push(file);
+    if PathBuf::from(path).is_file() {
+        let file = client
+            .files()
+            .upload(&space_id)
+            .from_path(path)
+            .file_type(FileType::Image)
+            .upload()
+            .await?;
+        println!(
+            "Uploaded file {} id:{}",
+            file.name.as_deref().unwrap_or("unnamed"),
+            file.id
+        );
+        files.push(file);
+    } else {
+        println!("Missing file: {path}");
+    }
 
     let files = client.files().list(&space_id).limit(20).list().await?;
     println!("First {} file(s) in space:", files.items.len());

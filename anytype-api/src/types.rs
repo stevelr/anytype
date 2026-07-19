@@ -939,7 +939,7 @@ impl AnytypeClient {
     /// ```
     pub fn new_type(&self, space_id: impl Into<String>, name: impl Into<String>) -> NewTypeRequest {
         let name = name.into();
-        let plural_name = format!("{}s", &name);
+        let plural_name = format!("{name}s");
         NewTypeRequest::new(
             self.client.clone(),
             self.config.limits.clone(),

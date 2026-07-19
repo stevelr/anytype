@@ -6,7 +6,7 @@
  */
 
 use anyhow::Result;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha512;
 
 type HmacSha512 = Hmac<Sha512>;

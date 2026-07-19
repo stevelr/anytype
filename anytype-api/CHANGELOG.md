@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- new `resolve` module: name and id resolution helpers as `AnytypeClient` methods —
+  `resolve_space_id`, `resolve_type`, `resolve_type_id`, `resolve_type_ids`,
+  `resolve_type_key`, `resolve_view_id`, `resolve_property_id`, `resolve_chat_target`
+  (returns the new `ChatTarget` struct), `resolve_chat_ids`, and `resolve_chat_name`.
+  Moved from the anyr cli so all clients share the same "name or id" conventions.
+  `ChatTarget` and `DEFAULT_CHAT_NAME` are exported in the prelude.
+- new error variant `AnytypeError::Ambiguous`, returned by the `resolve_*` helpers
+  when a space, type, chat, or view name matches more than one item
+
 ### Changed
 
 - removed skia as dependency (was used to generate image file for the files example)

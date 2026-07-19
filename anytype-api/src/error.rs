@@ -2,7 +2,6 @@
 //!
 use std::path::PathBuf;
 
-#[cfg(feature = "grpc")]
 use anytype_rpc::error::AnytypeGrpcError;
 use snafu::prelude::*;
 
@@ -50,6 +49,13 @@ pub enum AnytypeError {
     #[snafu(display("{obj_type} {key} not found"))]
     NotFound { obj_type: String, key: String },
 
+    /// A name matched more than one item. Returned by the `resolve_*` helpers
+    /// (see the [`resolve`](crate::resolve) module) when a space, type, chat,
+    /// or view name is not unique in its scope. Use the id (or, for types,
+    /// the `@key` form) to disambiguate.
+    #[snafu(display("{obj_type} name is ambiguous: {key}"))]
+    Ambiguous { obj_type: String, key: String },
+
     /// Client is not authenticated.
     #[snafu(display("Client is not authenticated. Log in first."))]
     Unauthorized,
@@ -83,14 +89,12 @@ pub enum AnytypeError {
     NoKeyStore,
 
     /// gRPC auth or transport error.
-    #[cfg(feature = "grpc")]
     #[snafu(display("gRPC error: {source}"))]
     Grpc {
         source: anytype_rpc::error::AnytypeGrpcError,
     },
 
     /// gRPC auth is unavailable (missing config or account key).
-    #[cfg(feature = "grpc")]
     #[snafu(display("gRPC service unavailable: {message}"))]
     GrpcUnavailable { message: String },
 
@@ -167,7 +171,6 @@ impl From<KeyStoreError> for AnytypeError {
     }
 }
 
-#[cfg(feature = "grpc")]
 impl From<AnytypeGrpcError> for AnytypeError {
     fn from(source: AnytypeGrpcError) -> Self {
         Self::Grpc { source }

@@ -162,7 +162,7 @@ impl SearchRequest {
             self.limits.validate_id(&space_id, "space_id")?;
             self.client
                 .post_request_paged(
-                    &format!("/v1/spaces/{}/search", &space_id),
+                    &format!("/v1/spaces/{space_id}/search"),
                     &self.body,
                     query.into(),
                 )

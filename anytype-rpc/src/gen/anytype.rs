@@ -20,7 +20,7 @@ pub mod event {
         pub space_id: ::prost::alloc::string::String,
         #[prost(
             oneof = "message::Value",
-            tags = "1, 201, 202, 203, 204, 205, 16, 50, 51, 52, 53, 54, 65, 55, 60, 61, 62, 63, 64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 17, 21, 25, 36, 37, 40, 19, 20, 29, 35, 38, 39, 124, 123, 125, 126, 127, 24, 23, 31, 32, 33, 34, 100, 101, 102, 103, 110, 111, 112, 113, 118, 114, 115, 116, 117, 137, 119, 120, 121, 128, 129, 130, 134, 135, 136, 131, 133, 138, 139"
+            tags = "1, 201, 202, 203, 204, 205, 16, 50, 51, 52, 53, 54, 65, 55, 60, 61, 62, 63, 64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 17, 21, 25, 36, 37, 40, 19, 20, 29, 35, 38, 39, 124, 123, 125, 126, 127, 24, 23, 31, 32, 33, 34, 100, 101, 102, 103, 110, 111, 112, 113, 118, 114, 115, 116, 117, 137, 119, 120, 121, 128, 129, 130, 134, 135, 136, 140, 141, 142, 143, 146, 145, 144, 131, 133, 138, 139"
         )]
         pub value: ::core::option::Option<message::Value>,
     }
@@ -192,6 +192,21 @@ pub mod event {
             /// to highlight the unread mentions in the UI)
             #[prost(message, tag = "136")]
             ChatUpdateMessageSyncStatus(super::chat::UpdateMessageSyncStatus),
+            #[prost(message, tag = "140")]
+            ChatUpdatePinnedStatus(super::chat::UpdatePinnedStatus),
+            #[prost(message, tag = "141")]
+            ChatUpdateReactionReadStatus(super::chat::UpdateReactionReadStatus),
+            #[prost(message, tag = "142")]
+            ObjectAutoArchive(super::object::AutoArchive),
+            #[prost(message, tag = "143")]
+            ObjectAutoRestore(super::object::AutoRestore),
+            #[prost(message, tag = "146")]
+            ObjectCleanupSuggestion(super::object::CleanupSuggestion),
+            #[prost(message, tag = "145")]
+            DebugProfileCreated(super::debug::ProfileCreated),
+            /// received whenever the total number of non-deleted messages in
+            #[prost(message, tag = "144")]
+            ChatUpdateMessageCount(super::chat::UpdateMessageCount),
             #[prost(message, tag = "131")]
             ChatDelete(super::chat::Delete),
             /// in case new unread messages received or chat state changed
@@ -278,6 +293,32 @@ pub mod event {
         pub struct UpdateState {
             #[prost(message, optional, tag = "1")]
             pub state: ::core::option::Option<crate::model::ChatState>,
+            #[prost(string, repeated, tag = "2")]
+            pub sub_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct UpdatePinnedStatus {
+            #[prost(message, optional, tag = "1")]
+            pub message: ::core::option::Option<crate::model::ChatMessage>,
+            #[prost(bool, tag = "2")]
+            pub is_pinned: bool,
+            #[prost(string, repeated, tag = "3")]
+            pub sub_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct UpdateReactionReadStatus {
+            #[prost(string, repeated, tag = "1")]
+            pub ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            #[prost(bool, tag = "2")]
+            pub is_unread: bool,
+            #[prost(string, repeated, tag = "3")]
+            pub sub_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct UpdateMessageCount {
+            /// total number of non-deleted messages (includes replies)
+            #[prost(int32, tag = "1")]
+            pub message_count: i32,
             #[prost(string, repeated, tag = "2")]
             pub sub_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
         }
@@ -520,6 +561,61 @@ pub mod event {
         pub struct Close {
             #[prost(string, tag = "1")]
             pub id: ::prost::alloc::string::String,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct AutoArchive {
+            #[prost(string, repeated, tag = "1")]
+            pub object_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct AutoRestore {
+            #[prost(string, repeated, tag = "1")]
+            pub object_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        }
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct CleanupSuggestion {
+            /// orphan ids (objects at any level + files at level >= 2) created within contextId
+            #[prost(string, repeated, tag = "1")]
+            pub object_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            /// the object that was archived / deleted / had a link removed
+            #[prost(string, tag = "2")]
+            pub context_id: ::prost::alloc::string::String,
+            #[prost(enumeration = "cleanup_suggestion::Trigger", tag = "3")]
+            pub trigger: i32,
+        }
+        /// Nested message and enum types in `CleanupSuggestion`.
+        pub mod cleanup_suggestion {
+            #[derive(
+                Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+            )]
+            #[repr(i32)]
+            pub enum Trigger {
+                Archive = 0,
+                Delete = 1,
+                LinkRemoval = 2,
+            }
+            impl Trigger {
+                /// String value of the enum field names used in the ProtoBuf definition.
+                ///
+                /// The values are not transformed in any way and thus are considered stable
+                /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                pub fn as_str_name(&self) -> &'static str {
+                    match self {
+                        Self::Archive => "archive",
+                        Self::Delete => "delete",
+                        Self::LinkRemoval => "linkRemoval",
+                    }
+                }
+                /// Creates an enum from field names used in the ProtoBuf definition.
+                pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                    match value {
+                        "archive" => Some(Self::Archive),
+                        "delete" => Some(Self::Delete),
+                        "linkRemoval" => Some(Self::LinkRemoval),
+                        _ => None,
+                    }
+                }
+            }
         }
     }
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1328,6 +1424,9 @@ pub mod event {
                         tag = "18"
                     )]
                     pub list_size: i32,
+                    /// Alternate row background colors in grid view
+                    #[prost(bool, tag = "19")]
+                    pub alternate_rows: bool,
                 }
                 #[derive(Clone, PartialEq, ::prost::Message)]
                 pub struct Filter {
@@ -2110,6 +2209,46 @@ pub mod event {
             pub objects_count: i64,
             #[prost(enumeration = "crate::model::import::Type", tag = "3")]
             pub import_type: i32,
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct Debug {}
+    /// Nested message and enum types in `Debug`.
+    pub mod debug {
+        /// ProfileCreated is emitted whenever the middleware writes a snapshot
+        /// archive on its own (e.g. the memory-growth detector), so clients can
+        /// surface it or queue the archive for upload without polling the
+        /// profiles directory. Archives produced as a result of a client RPC
+        /// (DebugRunProfiler) are NOT re-announced via this event — the RPC
+        /// response already carries the path.
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct ProfileCreated {
+            /// reason is a short, stable, UPPER_SNAKE_CASE label describing why the
+            /// middleware produced this report. It is NOT the DebugRunProfiler
+            /// Reason enum — values come from the internal call sites:
+            ///
+            /// * "MEMORY_GROWTH"  : the desktop memory-growth detector tripped
+            /// * "LONG_RPC"       : an RPC exceeded the long-execution threshold
+            /// * "DB_CORRUPTION"  : an anystore/spacestore database failed to open
+            ///   More reasons may be added over time; clients should forward unknown
+            ///   values to Sentry as-is.
+            #[prost(string, tag = "1")]
+            pub reason: ::prost::alloc::string::String,
+            /// jsonInfo is JSON-encoded context produced by the middleware (reason-
+            /// specific keys like "sysMemory", "method", "durationMs", "db", "code").
+            /// Clients forward it verbatim to Sentry as the event context.
+            #[prost(string, tag = "2")]
+            pub json_info: ::prost::alloc::string::String,
+            /// path is the absolute path to the snapshot archive on disk; empty
+            /// when the reason is event-only (e.g. DB_CORRUPTION) and no artifact
+            /// was produced.
+            #[prost(string, tag = "3")]
+            pub path: ::prost::alloc::string::String,
+            /// full is true when the archive carries a timed CPU profile + trace
+            /// in addition to heap and goroutines. False for fast snapshots and
+            /// for event-only reports.
+            #[prost(bool, tag = "4")]
+            pub full: bool,
         }
     }
 }
@@ -3151,6 +3290,8 @@ pub mod rpc {
                 pub space_icon_option: u32,
                 #[prost(uint32, tag = "9")]
                 pub space_ux_type: u32,
+                #[prost(enumeration = "crate::model::SpaceType", tag = "11")]
+                pub space_type: i32,
                 /// deprecated, use inviteType
                 #[prost(bool, tag = "6")]
                 pub is_guest_user_invite: bool,
@@ -4135,6 +4276,98 @@ pub mod rpc {
                 }
             }
         }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct ParticipantsAddList {}
+        /// Nested message and enum types in `ParticipantsAddList`.
+        pub mod participants_add_list {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub space_id: ::prost::alloc::string::String,
+                #[prost(string, repeated, tag = "2")]
+                pub identities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+                #[prost(enumeration = "crate::model::ParticipantPermissions", tag = "3")]
+                pub permissions: i32,
+            }
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        BadInput = 2,
+                        SendInviteFailed = 3,
+                        NoSuchSpace = 101,
+                        SpaceIsDeleted = 102,
+                        RequestFailed = 103,
+                        LimitReached = 104,
+                        NotShareable = 105,
+                        IncorrectPermissions = 106,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                                Self::SendInviteFailed => "SEND_INVITE_FAILED",
+                                Self::NoSuchSpace => "NO_SUCH_SPACE",
+                                Self::SpaceIsDeleted => "SPACE_IS_DELETED",
+                                Self::RequestFailed => "REQUEST_FAILED",
+                                Self::LimitReached => "LIMIT_REACHED",
+                                Self::NotShareable => "NOT_SHAREABLE",
+                                Self::IncorrectPermissions => "INCORRECT_PERMISSIONS",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                "SEND_INVITE_FAILED" => Some(Self::SendInviteFailed),
+                                "NO_SUCH_SPACE" => Some(Self::NoSuchSpace),
+                                "SPACE_IS_DELETED" => Some(Self::SpaceIsDeleted),
+                                "REQUEST_FAILED" => Some(Self::RequestFailed),
+                                "LIMIT_REACHED" => Some(Self::LimitReached),
+                                "NOT_SHAREABLE" => Some(Self::NotShareable),
+                                "INCORRECT_PERMISSIONS" => Some(Self::IncorrectPermissions),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
     pub struct Wallet {}
@@ -4990,6 +5223,75 @@ pub mod rpc {
             }
         }
         #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct PreloadRemainingSpaces {}
+        /// Nested message and enum types in `PreloadRemainingSpaces`.
+        pub mod preload_remaining_spaces {
+            #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {}
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        /// No error
+                        Null = 0,
+                        /// Any other errors
+                        UnknownError = 1,
+                        BadInput = 2,
+                        AccountIsNotRunning = 101,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                                Self::AccountIsNotRunning => "ACCOUNT_IS_NOT_RUNNING",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                "ACCOUNT_IS_NOT_RUNNING" => Some(Self::AccountIsNotRunning),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct Migrate {}
         /// Nested message and enum types in `Migrate`.
         pub mod migrate {
@@ -5191,6 +5493,9 @@ pub mod rpc {
                 /// optional, default is false
                 #[prost(bool, tag = "10")]
                 pub enable_membership_v2: bool,
+                /// optional. If set and resolvable, only this space + tech space load eagerly at start; the rest are deferred until AccountPreloadRemainingSpaces, a 10s timer, or this space fails. Empty = today's eager behavior.
+                #[prost(string, tag = "11")]
+                pub preferred_space_id: ::prost::alloc::string::String,
             }
             /// *
             ///
@@ -6592,7 +6897,7 @@ pub mod rpc {
                     tag = "2"
                 )]
                 pub use_case: i32,
-                /// deprecated, use spaceUxType
+                /// deprecated, use spaceType
                 #[prost(bool, tag = "3")]
                 pub with_chat: bool,
             }
@@ -7002,6 +7307,75 @@ pub mod rpc {
                         Null = 0,
                         UnknownError = 1,
                         /// ...
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct SetHomepage {}
+        /// Nested message and enum types in `SetHomepage`.
+        pub mod set_homepage {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub space_id: ::prost::alloc::string::String,
+                #[prost(string, tag = "2")]
+                pub homepage: ::prost::alloc::string::String,
+            }
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
                         BadInput = 2,
                     }
                     impl Code {
@@ -8575,6 +8949,76 @@ pub mod rpc {
             }
         }
         #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct DiscussionAdd {}
+        /// Nested message and enum types in `DiscussionAdd`.
+        pub mod discussion_add {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub object_id: ::prost::alloc::string::String,
+            }
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(string, tag = "2")]
+                pub discussion_id: ::prost::alloc::string::String,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        /// ...
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct BookmarkFetch {}
         /// Nested message and enum types in `BookmarkFetch`.
         pub mod bookmark_fetch {
@@ -8963,6 +9407,9 @@ pub mod rpc {
                 /// needed keys in details for return, when empty - will return all
                 #[prost(string, repeated, tag = "7")]
                 pub keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+                /// when true, response.total is filled with the count of all objects matching the filters, ignoring limit/offset
+                #[prost(bool, tag = "9")]
+                pub need_total: bool,
             }
             #[derive(Clone, PartialEq, ::prost::Message)]
             pub struct Response {
@@ -8970,6 +9417,9 @@ pub mod rpc {
                 pub error: ::core::option::Option<response::Error>,
                 #[prost(message, repeated, tag = "2")]
                 pub records: ::prost::alloc::vec::Vec<::prost_types::Struct>,
+                /// total number of objects matching the filters, ignoring limit/offset; filled only when request.needTotal is true
+                #[prost(int64, tag = "3")]
+                pub total: i64,
             }
             /// Nested message and enum types in `Response`.
             pub mod response {
@@ -9933,11 +10383,18 @@ pub mod rpc {
                 pub context_id: ::prost::alloc::string::String,
                 #[prost(bool, tag = "2")]
                 pub is_archived: bool,
+                /// when true, skip the orphan cascade entirely (no file auto-archive, no
+                /// CleanupSuggestion event). Used by the client when archiving objects the user
+                /// confirmed in the popup, to avoid re-prompting.
+                #[prost(bool, tag = "3")]
+                pub skip_cascade: bool,
             }
-            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            #[derive(Clone, PartialEq, ::prost::Message)]
             pub struct Response {
                 #[prost(message, optional, tag = "1")]
                 pub error: ::core::option::Option<response::Error>,
+                #[prost(message, optional, tag = "2")]
+                pub event: ::core::option::Option<super::super::super::ResponseEvent>,
             }
             /// Nested message and enum types in `Response`.
             pub mod response {
@@ -10010,79 +10467,6 @@ pub mod rpc {
                 pub error: ::core::option::Option<response::Error>,
                 #[prost(message, optional, tag = "4")]
                 pub event: ::core::option::Option<super::super::super::ResponseEvent>,
-            }
-            /// Nested message and enum types in `Response`.
-            pub mod response {
-                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-                pub struct Error {
-                    #[prost(enumeration = "error::Code", tag = "1")]
-                    pub code: i32,
-                    #[prost(string, tag = "2")]
-                    pub description: ::prost::alloc::string::String,
-                }
-                /// Nested message and enum types in `Error`.
-                pub mod error {
-                    #[derive(
-                        Clone,
-                        Copy,
-                        Debug,
-                        PartialEq,
-                        Eq,
-                        Hash,
-                        PartialOrd,
-                        Ord,
-                        ::prost::Enumeration,
-                    )]
-                    #[repr(i32)]
-                    pub enum Code {
-                        Null = 0,
-                        UnknownError = 1,
-                        BadInput = 2,
-                    }
-                    impl Code {
-                        /// String value of the enum field names used in the ProtoBuf definition.
-                        ///
-                        /// The values are not transformed in any way and thus are considered stable
-                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-                        pub fn as_str_name(&self) -> &'static str {
-                            match self {
-                                Self::Null => "NULL",
-                                Self::UnknownError => "UNKNOWN_ERROR",
-                                Self::BadInput => "BAD_INPUT",
-                            }
-                        }
-                        /// Creates an enum from field names used in the ProtoBuf definition.
-                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-                            match value {
-                                "NULL" => Some(Self::Null),
-                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
-                                "BAD_INPUT" => Some(Self::BadInput),
-                                _ => None,
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-        pub struct WorkspaceSetDashboard {}
-        /// Nested message and enum types in `WorkspaceSetDashboard`.
-        pub mod workspace_set_dashboard {
-            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-            pub struct Request {
-                #[prost(string, tag = "1")]
-                pub context_id: ::prost::alloc::string::String,
-                #[prost(string, tag = "2")]
-                pub object_id: ::prost::alloc::string::String,
-            }
-            #[derive(Clone, PartialEq, ::prost::Message)]
-            pub struct Response {
-                #[prost(message, optional, tag = "1")]
-                pub error: ::core::option::Option<response::Error>,
-                #[prost(message, optional, tag = "2")]
-                pub event: ::core::option::Option<super::super::super::ResponseEvent>,
-                #[prost(string, tag = "3")]
-                pub object_id: ::prost::alloc::string::String,
             }
             /// Nested message and enum types in `Response`.
             pub mod response {
@@ -10809,6 +11193,210 @@ pub mod rpc {
                 pub object_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
                 #[prost(bool, tag = "2")]
                 pub is_archived: bool,
+                /// when true, skip the orphan cascade entirely (see SetIsArchived.Request).
+                #[prost(bool, tag = "3")]
+                pub skip_cascade: bool,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, optional, tag = "2")]
+                pub event: ::core::option::Option<super::super::super::ResponseEvent>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        /// ...
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct CleanupSuggestions {}
+        /// Nested message and enum types in `CleanupSuggestions`.
+        pub mod cleanup_suggestions {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub space_id: ::prost::alloc::string::String,
+                /// relation keys to return; empty => a default set.
+                /// id, createdInContext and resolvedLayout are always included.
+                #[prost(string, repeated, tag = "2")]
+                pub keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, repeated, tag = "2")]
+                pub items: ::prost::alloc::vec::Vec<response::Item>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, ::prost::Message)]
+                pub struct Item {
+                    #[prost(message, optional, tag = "1")]
+                    pub details: ::core::option::Option<::prost_types::Struct>,
+                    /// true for forest roots (createdInContext parent is outside the orphan set)
+                    #[prost(bool, tag = "2")]
+                    pub is_root: bool,
+                    /// set on roots only; none for descendants
+                    #[prost(enumeration = "item::Reason", tag = "3")]
+                    pub reason: i32,
+                }
+                /// Nested message and enum types in `Item`.
+                pub mod item {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Reason {
+                        None = 0,
+                        ContextArchived = 1,
+                        ContextDeleted = 2,
+                        ContextUnlinked = 3,
+                    }
+                    impl Reason {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::None => "none",
+                                Self::ContextArchived => "contextArchived",
+                                Self::ContextDeleted => "contextDeleted",
+                                Self::ContextUnlinked => "contextUnlinked",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "none" => Some(Self::None),
+                                "contextArchived" => Some(Self::ContextArchived),
+                                "contextDeleted" => Some(Self::ContextDeleted),
+                                "contextUnlinked" => Some(Self::ContextUnlinked),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct CleanupSuggestionIgnore {}
+        /// Nested message and enum types in `CleanupSuggestionIgnore`.
+        pub mod cleanup_suggestion_ignore {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, repeated, tag = "1")]
+                pub object_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+                #[prost(bool, tag = "2")]
+                pub ignored: bool,
             }
             #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
             pub struct Response {
@@ -10841,7 +11429,6 @@ pub mod rpc {
                     pub enum Code {
                         Null = 0,
                         UnknownError = 1,
-                        /// ...
                         BadInput = 2,
                     }
                     impl Code {
@@ -14507,6 +15094,11 @@ pub mod rpc {
                 pub style: i32,
                 #[prost(string, repeated, tag = "4")]
                 pub local_file_paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+                /// used when contextId is empty to identify target space
+                #[prost(string, tag = "6")]
+                pub space_id: ::prost::alloc::string::String,
+                #[prost(enumeration = "crate::model::block::content::file::Type", tag = "7")]
+                pub r#type: i32,
             }
             #[derive(Clone, PartialEq, ::prost::Message)]
             pub struct Response {
@@ -14514,6 +15106,8 @@ pub mod rpc {
                 pub error: ::core::option::Option<response::Error>,
                 #[prost(message, optional, tag = "2")]
                 pub event: ::core::option::Option<super::super::super::ResponseEvent>,
+                #[prost(int64, tag = "3")]
+                pub files_count: i64,
             }
             /// Nested message and enum types in `Response`.
             pub mod response {
@@ -15404,6 +15998,217 @@ pub mod rpc {
                         Null = 0,
                         UnknownError = 1,
                         /// ...
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct SetPlaceholders {}
+        /// Nested message and enum types in `SetPlaceholders`.
+        pub mod set_placeholders {
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub template_id: ::prost::alloc::string::String,
+                #[prost(message, repeated, tag = "2")]
+                pub placeholders: ::prost::alloc::vec::Vec<crate::model::Placeholder>,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, optional, tag = "2")]
+                pub event: ::core::option::Option<super::super::super::ResponseEvent>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct GetPlaceholders {}
+        /// Nested message and enum types in `GetPlaceholders`.
+        pub mod get_placeholders {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub template_id: ::prost::alloc::string::String,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, repeated, tag = "2")]
+                pub placeholders: ::prost::alloc::vec::Vec<crate::model::Placeholder>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct DeletePlaceholders {}
+        /// Nested message and enum types in `DeletePlaceholders`.
+        pub mod delete_placeholders {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub template_id: ::prost::alloc::string::String,
+                #[prost(string, repeated, tag = "2")]
+                pub relation_keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, optional, tag = "2")]
+                pub event: ::core::option::Option<super::super::super::ResponseEvent>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
                         BadInput = 2,
                     }
                     impl Code {
@@ -16680,6 +17485,9 @@ pub mod rpc {
                 pub blocks: ::prost::alloc::vec::Vec<crate::model::Block>,
                 #[prost(message, optional, tag = "3")]
                 pub selected_text_range: ::core::option::Option<crate::model::Range>,
+                /// optional. when set and the request contains multiple blocks, selectedTextRange is applied to the first block and selectedTextRangeLastBlock to the last block. {0,0} range means the whole block
+                #[prost(message, optional, tag = "4")]
+                pub selected_text_range_last_block: ::core::option::Option<crate::model::Range>,
             }
             #[derive(Clone, PartialEq, ::prost::Message)]
             pub struct Response {
@@ -16824,8 +17632,8 @@ pub mod rpc {
                     pub enum Code {
                         Null = 0,
                         UnknownError = 1,
-                        /// ...
                         BadInput = 2,
+                        AllSlotsEmpty = 3,
                     }
                     impl Code {
                         /// String value of the enum field names used in the ProtoBuf definition.
@@ -16837,6 +17645,7 @@ pub mod rpc {
                                 Self::Null => "NULL",
                                 Self::UnknownError => "UNKNOWN_ERROR",
                                 Self::BadInput => "BAD_INPUT",
+                                Self::AllSlotsEmpty => "ALL_SLOTS_EMPTY",
                             }
                         }
                         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -16845,6 +17654,7 @@ pub mod rpc {
                                 "NULL" => Some(Self::Null),
                                 "UNKNOWN_ERROR" => Some(Self::UnknownError),
                                 "BAD_INPUT" => Some(Self::BadInput),
+                                "ALL_SLOTS_EMPTY" => Some(Self::AllSlotsEmpty),
                                 _ => None,
                             }
                         }
@@ -16864,6 +17674,9 @@ pub mod rpc {
                 pub blocks: ::prost::alloc::vec::Vec<crate::model::Block>,
                 #[prost(message, optional, tag = "3")]
                 pub selected_text_range: ::core::option::Option<crate::model::Range>,
+                /// optional. when set and the request contains multiple blocks, selectedTextRange is applied to the first block and selectedTextRangeLastBlock to the last block. {0,0} range means the whole block
+                #[prost(message, optional, tag = "4")]
+                pub selected_text_range_last_block: ::core::option::Option<crate::model::Range>,
             }
             #[derive(Clone, PartialEq, ::prost::Message)]
             pub struct Response {
@@ -22690,6 +23503,9 @@ pub mod rpc {
                     pub error: ::core::option::Option<response::Error>,
                     #[prost(message, optional, tag = "2")]
                     pub event: ::core::option::Option<super::super::super::super::ResponseEvent>,
+                    /// ID of added filter
+                    #[prost(string, tag = "3")]
+                    pub filter_id: ::prost::alloc::string::String,
                 }
                 /// Nested message and enum types in `Response`.
                 pub mod response {
@@ -22847,6 +23663,9 @@ pub mod rpc {
                     pub error: ::core::option::Option<response::Error>,
                     #[prost(message, optional, tag = "2")]
                     pub event: ::core::option::Option<super::super::super::super::ResponseEvent>,
+                    /// ID of new filter
+                    #[prost(string, tag = "3")]
+                    pub filter_id: ::prost::alloc::string::String,
                 }
                 /// Nested message and enum types in `Response`.
                 pub mod response {
@@ -24497,10 +25316,71 @@ pub mod rpc {
         pub struct RunProfiler {}
         /// Nested message and enum types in `RunProfiler`.
         pub mod run_profiler {
-            #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
             pub struct Request {
+                /// 0 = save heap snapshot only; >0 = run timed profiler (CPU, heap, goroutines) for this many seconds. Set includeTrace to also capture the runtime execution trace.
                 #[prost(int32, tag = "1")]
                 pub duration_in_seconds: i32,
+                #[prost(enumeration = "request::Reason", tag = "2")]
+                pub reason: i32,
+                /// Optional free-form description to attach to the profile
+                #[prost(string, tag = "3")]
+                pub reason_desc: ::prost::alloc::string::String,
+                /// Also capture the runtime execution trace (runtime/trace). Off by default: it is the heaviest artifact in both archive size and runtime overhead. Only applies when durationInSeconds > 0.
+                #[prost(bool, tag = "4")]
+                pub include_trace: bool,
+            }
+            /// Nested message and enum types in `Request`.
+            pub mod request {
+                #[derive(
+                    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+                )]
+                #[repr(i32)]
+                pub enum Reason {
+                    Unknown = 0,
+                    /// Triggered explicitly by the user
+                    UserRequest = 1,
+                    /// iOS: DISPATCH_MEMORYPRESSURE_WARN
+                    /// Android: onTrimMemory(RUNNING_LOW)
+                    MemoryPressureWarn = 2,
+                    /// iOS: DISPATCH_MEMORYPRESSURE_CRITICAL / applicationDidReceiveMemoryWarning
+                    /// Android: onTrimMemory(RUNNING_CRITICAL)
+                    MemoryPressureCritical = 3,
+                    /// iOS: ProcessInfo.thermalState == .serious
+                    /// Android: THERMAL_STATUS_SEVERE
+                    ThermalSerious = 4,
+                    /// iOS: ProcessInfo.thermalState == .critical
+                    /// Android: THERMAL_STATUS_CRITICAL or higher
+                    ThermalCritical = 5,
+                }
+                impl Reason {
+                    /// String value of the enum field names used in the ProtoBuf definition.
+                    ///
+                    /// The values are not transformed in any way and thus are considered stable
+                    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                    pub fn as_str_name(&self) -> &'static str {
+                        match self {
+                            Self::Unknown => "UNKNOWN",
+                            Self::UserRequest => "USER_REQUEST",
+                            Self::MemoryPressureWarn => "MEMORY_PRESSURE_WARN",
+                            Self::MemoryPressureCritical => "MEMORY_PRESSURE_CRITICAL",
+                            Self::ThermalSerious => "THERMAL_SERIOUS",
+                            Self::ThermalCritical => "THERMAL_CRITICAL",
+                        }
+                    }
+                    /// Creates an enum from field names used in the ProtoBuf definition.
+                    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                        match value {
+                            "UNKNOWN" => Some(Self::Unknown),
+                            "USER_REQUEST" => Some(Self::UserRequest),
+                            "MEMORY_PRESSURE_WARN" => Some(Self::MemoryPressureWarn),
+                            "MEMORY_PRESSURE_CRITICAL" => Some(Self::MemoryPressureCritical),
+                            "THERMAL_SERIOUS" => Some(Self::ThermalSerious),
+                            "THERMAL_CRITICAL" => Some(Self::ThermalCritical),
+                            _ => None,
+                        }
+                    }
+                }
             }
             #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
             pub struct Response {
@@ -24633,14 +25513,18 @@ pub mod rpc {
             }
         }
         #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-        pub struct ExportLog {}
-        /// Nested message and enum types in `ExportLog`.
-        pub mod export_log {
+        pub struct ExportReport {}
+        /// Nested message and enum types in `ExportReport`.
+        pub mod export_report {
             #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
             pub struct Request {
                 /// empty means using OS-provided temp dir
                 #[prost(string, tag = "1")]
                 pub dir: ::prost::alloc::string::String,
+                /// When false (default) the report includes only the 2 newest log files
+                /// (active + most recent rotated). When true, all logs are included.
+                #[prost(bool, tag = "2")]
+                pub full: bool,
             }
             #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
             pub struct Response {
@@ -24648,6 +25532,12 @@ pub mod rpc {
                 pub error: ::core::option::Option<response::Error>,
                 #[prost(string, tag = "2")]
                 pub path: ::prost::alloc::string::String,
+                /// JSON summary with profile counts by reason and log count
+                #[prost(string, tag = "3")]
+                pub summary: ::prost::alloc::string::String,
+                /// Unix timestamp (seconds) of the newest source file in this report. Pass to DebugCleanupReport after the report is successfully uploaded to the reporter server.
+                #[prost(int64, tag = "4")]
+                pub last_modified_ts: i64,
             }
             /// Nested message and enum types in `Response`.
             pub mod response {
@@ -24698,6 +25588,74 @@ pub mod rpc {
                                 "UNKNOWN_ERROR" => Some(Self::UnknownError),
                                 "BAD_INPUT" => Some(Self::BadInput),
                                 "NO_FOLDER" => Some(Self::NoFolder),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct CleanupReport {}
+        /// Nested message and enum types in `CleanupReport`.
+        pub mod cleanup_report {
+            #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                /// Unix timestamp (seconds); files with lastModified \< ts will be removed
+                #[prost(int64, tag = "1")]
+                pub ts: i64,
+            }
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
                                 _ => None,
                             }
                         }
@@ -27338,6 +28296,8 @@ pub mod rpc {
                 pub product_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
                 #[prost(bool, tag = "2")]
                 pub is_yearly: bool,
+                #[prost(bool, tag = "3")]
+                pub is_lifetime: bool,
             }
             #[derive(Clone, PartialEq, ::prost::Message)]
             pub struct Response {
@@ -28421,6 +29381,146 @@ pub mod rpc {
             }
         }
         #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct AddNotificationSubscriber {}
+        /// Nested message and enum types in `AddNotificationSubscriber`.
+        pub mod add_notification_subscriber {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub chat_object_id: ::prost::alloc::string::String,
+                #[prost(string, tag = "2")]
+                pub identity: ::prost::alloc::string::String,
+            }
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        /// ...
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct RemoveNotificationSubscriber {}
+        /// Nested message and enum types in `RemoveNotificationSubscriber`.
+        pub mod remove_notification_subscriber {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub chat_object_id: ::prost::alloc::string::String,
+                #[prost(string, tag = "2")]
+                pub identity: ::prost::alloc::string::String,
+            }
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        /// ...
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct GetMessages {}
         /// Nested message and enum types in `GetMessages`.
         pub mod get_messages {
@@ -28448,6 +29548,9 @@ pub mod rpc {
                 pub messages: ::prost::alloc::vec::Vec<crate::model::ChatMessage>,
                 #[prost(message, optional, tag = "3")]
                 pub chat_state: ::core::option::Option<crate::model::ChatState>,
+                /// Total number of non-deleted messages in the chat
+                #[prost(int32, tag = "4")]
+                pub message_count: i32,
             }
             /// Nested message and enum types in `Response`.
             pub mod response {
@@ -28603,6 +29706,9 @@ pub mod rpc {
                 /// Chat state
                 #[prost(message, optional, tag = "4")]
                 pub chat_state: ::core::option::Option<crate::model::ChatState>,
+                /// Total number of non-deleted messages in the chat
+                #[prost(int32, tag = "5")]
+                pub message_count: i32,
             }
             /// Nested message and enum types in `Response`.
             pub mod response {
@@ -29160,6 +30266,77 @@ pub mod rpc {
             }
         }
         #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct ReadReactions {}
+        /// Nested message and enum types in `ReadReactions`.
+        pub mod read_reactions {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub chat_object_id: ::prost::alloc::string::String,
+                #[prost(string, tag = "2")]
+                pub order_id: ::prost::alloc::string::String,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, optional, tag = "2")]
+                pub event: ::core::option::Option<super::super::super::ResponseEvent>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct Search {}
         /// Nested message and enum types in `Search`.
         pub mod search {
@@ -29211,6 +30388,150 @@ pub mod rpc {
                     pub enum Code {
                         Null = 0,
                         UnknownError = 1,
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct SetPinnedMessages {}
+        /// Nested message and enum types in `SetPinnedMessages`.
+        pub mod set_pinned_messages {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub chat_object_id: ::prost::alloc::string::String,
+                #[prost(string, repeated, tag = "2")]
+                pub message_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+                #[prost(bool, tag = "3")]
+                pub pinned: bool,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, optional, tag = "2")]
+                pub event: ::core::option::Option<super::super::super::ResponseEvent>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        /// ...
+                        BadInput = 2,
+                    }
+                    impl Code {
+                        /// String value of the enum field names used in the ProtoBuf definition.
+                        ///
+                        /// The values are not transformed in any way and thus are considered stable
+                        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+                        pub fn as_str_name(&self) -> &'static str {
+                            match self {
+                                Self::Null => "NULL",
+                                Self::UnknownError => "UNKNOWN_ERROR",
+                                Self::BadInput => "BAD_INPUT",
+                            }
+                        }
+                        /// Creates an enum from field names used in the ProtoBuf definition.
+                        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                            match value {
+                                "NULL" => Some(Self::Null),
+                                "UNKNOWN_ERROR" => Some(Self::UnknownError),
+                                "BAD_INPUT" => Some(Self::BadInput),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct GetPinnedMessages {}
+        /// Nested message and enum types in `GetPinnedMessages`.
+        pub mod get_pinned_messages {
+            #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+            pub struct Request {
+                #[prost(string, tag = "1")]
+                pub chat_object_id: ::prost::alloc::string::String,
+            }
+            #[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct Response {
+                #[prost(message, optional, tag = "1")]
+                pub error: ::core::option::Option<response::Error>,
+                #[prost(message, repeated, tag = "2")]
+                pub messages: ::prost::alloc::vec::Vec<crate::model::ChatMessage>,
+            }
+            /// Nested message and enum types in `Response`.
+            pub mod response {
+                #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+                pub struct Error {
+                    #[prost(enumeration = "error::Code", tag = "1")]
+                    pub code: i32,
+                    #[prost(string, tag = "2")]
+                    pub description: ::prost::alloc::string::String,
+                }
+                /// Nested message and enum types in `Error`.
+                pub mod error {
+                    #[derive(
+                        Clone,
+                        Copy,
+                        Debug,
+                        PartialEq,
+                        Eq,
+                        Hash,
+                        PartialOrd,
+                        Ord,
+                        ::prost::Enumeration,
+                    )]
+                    #[repr(i32)]
+                    pub enum Code {
+                        Null = 0,
+                        UnknownError = 1,
+                        /// ...
                         BadInput = 2,
                     }
                     impl Code {
@@ -30114,6 +31435,27 @@ pub mod client_commands_client {
             ));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn workspace_set_homepage(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::workspace::set_homepage::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::workspace::set_homepage::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/WorkspaceSetHomepage",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "WorkspaceSetHomepage",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn workspace_export(
             &mut self,
             request: impl tonic::IntoRequest<super::rpc::workspace::export::Request>,
@@ -30226,6 +31568,27 @@ pub mod client_commands_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("anytype.ClientCommands", "AccountDelete"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn account_preload_remaining_spaces(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::account::preload_remaining_spaces::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::account::preload_remaining_spaces::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/AccountPreloadRemainingSpaces",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "AccountPreloadRemainingSpaces",
+            ));
             self.inner.unary(req, path, codec).await
         }
         pub async fn account_revert_deletion(
@@ -30792,6 +32155,27 @@ pub mod client_commands_client {
             req.extensions_mut().insert(GrpcMethod::new(
                 "anytype.ClientCommands",
                 "SpaceDeleteCorruptedBackup",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn space_participants_add_list(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::space::participants_add_list::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::space::participants_add_list::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/SpaceParticipantsAddList",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "SpaceParticipantsAddList",
             ));
             self.inner.unary(req, path, codec).await
         }
@@ -31373,27 +32757,6 @@ pub mod client_commands_client {
                 .insert(GrpcMethod::new("anytype.ClientCommands", "ObjectSetSource"));
             self.inner.unary(req, path, codec).await
         }
-        pub async fn object_workspace_set_dashboard(
-            &mut self,
-            request: impl tonic::IntoRequest<super::rpc::object::workspace_set_dashboard::Request>,
-        ) -> std::result::Result<
-            tonic::Response<super::rpc::object::workspace_set_dashboard::Response>,
-            tonic::Status,
-        > {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
-            })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/anytype.ClientCommands/ObjectWorkspaceSetDashboard",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new(
-                "anytype.ClientCommands",
-                "ObjectWorkspaceSetDashboard",
-            ));
-            self.inner.unary(req, path, codec).await
-        }
         pub async fn object_list_duplicate(
             &mut self,
             request: impl tonic::IntoRequest<super::rpc::object::list_duplicate::Request>,
@@ -31452,6 +32815,48 @@ pub mod client_commands_client {
             req.extensions_mut().insert(GrpcMethod::new(
                 "anytype.ClientCommands",
                 "ObjectListSetIsArchived",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn object_cleanup_suggestions(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::object::cleanup_suggestions::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::object::cleanup_suggestions::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/ObjectCleanupSuggestions",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ObjectCleanupSuggestions",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn object_cleanup_suggestion_ignore(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::object::cleanup_suggestion_ignore::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::object::cleanup_suggestion_ignore::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/ObjectCleanupSuggestionIgnore",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ObjectCleanupSuggestionIgnore",
             ));
             self.inner.unary(req, path, codec).await
         }
@@ -32716,6 +34121,69 @@ pub mod client_commands_client {
             req.extensions_mut().insert(GrpcMethod::new(
                 "anytype.ClientCommands",
                 "TemplateExportAll",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn template_set_placeholders(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::template::set_placeholders::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::template::set_placeholders::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/TemplateSetPlaceholders",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "TemplateSetPlaceholders",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn template_get_placeholders(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::template::get_placeholders::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::template::get_placeholders::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/TemplateGetPlaceholders",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "TemplateGetPlaceholders",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn template_delete_placeholders(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::template::delete_placeholders::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::template::delete_placeholders::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/TemplateDeletePlaceholders",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "TemplateDeletePlaceholders",
             ));
             self.inner.unary(req, path, codec).await
         }
@@ -34877,6 +36345,8 @@ pub mod client_commands_client {
             ));
             self.inner.unary(req, path, codec).await
         }
+        /// When DurationInSeconds=0, saves a heap memory profile to the logs directory and returns the file path.
+        /// When DurationInSeconds>0, runs a full profiler (CPU, heap, trace, goroutines) for the given duration.
         pub async fn debug_run_profiler(
             &mut self,
             request: impl tonic::IntoRequest<super::rpc::debug::run_profiler::Request>,
@@ -34957,11 +36427,11 @@ pub mod client_commands_client {
                 .insert(GrpcMethod::new("anytype.ClientCommands", "DebugNetCheck"));
             self.inner.unary(req, path, codec).await
         }
-        pub async fn debug_export_log(
+        pub async fn debug_export_report(
             &mut self,
-            request: impl tonic::IntoRequest<super::rpc::debug::export_log::Request>,
+            request: impl tonic::IntoRequest<super::rpc::debug::export_report::Request>,
         ) -> std::result::Result<
-            tonic::Response<super::rpc::debug::export_log::Response>,
+            tonic::Response<super::rpc::debug::export_report::Response>,
             tonic::Status,
         > {
             self.inner.ready().await.map_err(|e| {
@@ -34969,10 +36439,32 @@ pub mod client_commands_client {
             })?;
             let codec = tonic_prost::ProstCodec::default();
             let path =
-                http::uri::PathAndQuery::from_static("/anytype.ClientCommands/DebugExportLog");
+                http::uri::PathAndQuery::from_static("/anytype.ClientCommands/DebugExportReport");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("anytype.ClientCommands", "DebugExportLog"));
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "DebugExportReport",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn debug_cleanup_report(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::debug::cleanup_report::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::debug::cleanup_report::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/anytype.ClientCommands/DebugCleanupReport");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "DebugCleanupReport",
+            ));
             self.inner.unary(req, path, codec).await
         }
         pub async fn initial_set_parameters(
@@ -35916,6 +37408,26 @@ pub mod client_commands_client {
                 .insert(GrpcMethod::new("anytype.ClientCommands", "ObjectChatAdd"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn object_add_discussion(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::object::discussion_add::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::object::discussion_add::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/anytype.ClientCommands/ObjectAddDiscussion");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ObjectAddDiscussion",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn chat_read_all(
             &mut self,
             request: impl tonic::IntoRequest<super::rpc::chat::read_all::Request>,
@@ -35931,6 +37443,26 @@ pub mod client_commands_client {
                 .insert(GrpcMethod::new("anytype.ClientCommands", "ChatReadAll"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn chat_read_reactions(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::chat::read_reactions::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::chat::read_reactions::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/anytype.ClientCommands/ChatReadReactions");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ChatReadReactions",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn chat_search(
             &mut self,
             request: impl tonic::IntoRequest<super::rpc::chat::search::Request>,
@@ -35944,6 +37476,90 @@ pub mod client_commands_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("anytype.ClientCommands", "ChatSearch"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn chat_set_pinned_messages(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::chat::set_pinned_messages::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::chat::set_pinned_messages::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/ChatSetPinnedMessages",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ChatSetPinnedMessages",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn chat_get_pinned_messages(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::chat::get_pinned_messages::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::chat::get_pinned_messages::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/ChatGetPinnedMessages",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ChatGetPinnedMessages",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn chat_add_notification_subscriber(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::chat::add_notification_subscriber::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::chat::add_notification_subscriber::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/ChatAddNotificationSubscriber",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ChatAddNotificationSubscriber",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn chat_remove_notification_subscriber(
+            &mut self,
+            request: impl tonic::IntoRequest<super::rpc::chat::remove_notification_subscriber::Request>,
+        ) -> std::result::Result<
+            tonic::Response<super::rpc::chat::remove_notification_subscriber::Response>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/anytype.ClientCommands/ChatRemoveNotificationSubscriber",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "anytype.ClientCommands",
+                "ChatRemoveNotificationSubscriber",
+            ));
             self.inner.unary(req, path, codec).await
         }
         /// mock AI RPCs for compatibility between branches. Not implemented in main
@@ -36495,6 +38111,7 @@ pub struct Profile {
     pub avatar: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub address: ::prost::alloc::string::String,
+    /// aka homepage
     #[prost(string, tag = "5")]
     pub space_dashboard_id: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]

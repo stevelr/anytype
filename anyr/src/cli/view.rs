@@ -8,10 +8,7 @@ use serde_json::Value;
 use crate::{
     cli::{
         AppContext,
-        common::{
-            MemberCache, load_member_cache, resolve_member_name, resolve_space_id, resolve_type_id,
-            resolve_view_id,
-        },
+        common::{MemberCache, load_member_cache, resolve_member_name},
     },
     output::{OutputFormat, render_table_dynamic},
 };
@@ -44,9 +41,12 @@ pub async fn handle(ctx: &AppContext, args: super::ViewArgs) -> Result<()> {
             type_id,
             limit,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let type_id = resolve_type_id(ctx, &space_id, &type_id).await?;
-            let view_id = resolve_view_id(ctx, &space_id, &type_id, &view).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let type_id = ctx.client.resolve_type_id(&space_id, &type_id).await?;
+            let view_id = ctx
+                .client
+                .resolve_view_id(&space_id, &type_id, &view)
+                .await?;
             let base_columns = default_columns();
             let request = ctx
                 .client

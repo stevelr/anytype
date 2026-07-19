@@ -889,6 +889,9 @@ pub mod block {
                 /// List view size setting
                 #[prost(enumeration = "view::ListSize", tag = "18")]
                 pub list_size: i32,
+                /// Alternate row background colors in grid view
+                #[prost(bool, tag = "19")]
+                pub alternate_rows: bool,
             }
             /// Nested message and enum types in `View`.
             pub mod view {
@@ -2295,6 +2298,7 @@ pub mod object_type {
         Notification = 24,
         MissingObject = 25,
         Devices = 26,
+        Discussion = 27,
     }
     impl Layout {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -2330,6 +2334,7 @@ pub mod object_type {
                 Self::Notification => "notification",
                 Self::MissingObject => "missingObject",
                 Self::Devices => "devices",
+                Self::Discussion => "discussion",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -2362,6 +2367,7 @@ pub mod object_type {
                 "notification" => Some(Self::Notification),
                 "missingObject" => Some(Self::MissingObject),
                 "devices" => Some(Self::Devices),
+                "discussion" => Some(Self::Discussion),
                 _ => None,
             }
         }
@@ -3122,8 +3128,11 @@ pub struct InvitePayload {
     pub space_icon_cid: ::prost::alloc::string::String,
     #[prost(uint32, tag = "10")]
     pub space_icon_option: u32,
+    /// deprecated
     #[prost(uint32, tag = "11")]
     pub space_ux_type: u32,
+    #[prost(uint32, tag = "14")]
+    pub space_type: u32,
     #[prost(message, repeated, tag = "7")]
     pub space_icon_encryption_keys: ::prost::alloc::vec::Vec<FileEncryptionKey>,
     #[prost(enumeration = "InviteType", tag = "8")]
@@ -3514,6 +3523,8 @@ pub mod membership_v2 {
         pub offer: ::prost::alloc::string::String,
         #[prost(message, optional, tag = "12")]
         pub features: ::core::option::Option<Features>,
+        #[prost(message, repeated, tag = "13")]
+        pub prices_lifetime: ::prost::alloc::vec::Vec<Amount>,
     }
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
     pub struct PurchaseInfo {
@@ -3585,13 +3596,18 @@ pub mod membership_v2 {
     pub struct CartProduct {
         #[prost(message, optional, tag = "1")]
         pub product: ::core::option::Option<Product>,
-        /// otherwise - monthly
+        /// otherwise - monthly or isLifetime
         #[prost(bool, tag = "2")]
         pub is_yearly: bool,
         /// set to true if you want to remove this item from the customer
         /// it's like setting -1 to some product
         #[prost(bool, tag = "3")]
         pub remove: bool,
+        /// if true - then this is lifetime product (no matter what isYearly above is)
+        /// unfortunately we do not use Period here to keep compatibility with old versions
+        /// that still use isYearly!
+        #[prost(bool, tag = "4")]
+        pub is_lifetime: bool,
     }
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Cart {
@@ -3608,6 +3624,17 @@ pub mod membership_v2 {
         pub total_next_invoice: ::core::option::Option<Amount>,
         #[prost(uint64, tag = "4")]
         pub next_invoice_date: u64,
+        #[prost(string, repeated, tag = "5")]
+        pub applied_promocodes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    }
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct CryptoCheckout {
+        #[prost(string, tag = "1")]
+        pub invoice_url: ::prost::alloc::string::String,
+        #[prost(message, optional, tag = "2")]
+        pub total: ::core::option::Option<Amount>,
+        #[prost(bool, tag = "3")]
+        pub is_can_cancel: bool,
     }
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Data {
@@ -3619,6 +3646,8 @@ pub mod membership_v2 {
         pub team_owner_id: ::prost::alloc::string::String,
         #[prost(enumeration = "PaymentProvider", tag = "4")]
         pub payment_provider: i32,
+        #[prost(string, repeated, tag = "5")]
+        pub applied_promocodes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
@@ -3696,10 +3725,12 @@ pub mod membership_v2 {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum Period {
+        #[deprecated]
         Unlimited = 0,
         Monthly = 1,
         Yearly = 2,
         ThreeYears = 3,
+        Lifetime = 4,
     }
     impl Period {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -3708,19 +3739,25 @@ pub mod membership_v2 {
         /// (if the ProtoBuf definition does not change) and safe for programmatic use.
         pub fn as_str_name(&self) -> &'static str {
             match self {
+                #[allow(deprecated)]
                 Self::Unlimited => "Unlimited",
                 Self::Monthly => "Monthly",
                 Self::Yearly => "Yearly",
                 Self::ThreeYears => "ThreeYears",
+                Self::Lifetime => "Lifetime",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
         pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
             match value {
-                "Unlimited" => Some(Self::Unlimited),
+                "Unlimited" => Some(
+                    #[allow(deprecated)]
+                    Self::Unlimited,
+                ),
                 "Monthly" => Some(Self::Monthly),
                 "Yearly" => Some(Self::Yearly),
                 "ThreeYears" => Some(Self::ThreeYears),
+                "Lifetime" => Some(Self::Lifetime),
                 _ => None,
             }
         }
@@ -3761,6 +3798,9 @@ pub struct ChatState {
     /// Order is serial number of this state. Client should apply chat state only if its order is greater than previously saved order
     #[prost(int64, tag = "4")]
     pub order: i64,
+    /// order id of the newest message with any unread reactions
+    #[prost(string, tag = "5")]
+    pub unread_reaction_order_id: ::prost::alloc::string::String,
 }
 /// Nested message and enum types in `ChatState`.
 pub mod chat_state {
@@ -3813,6 +3853,13 @@ pub struct ChatMessage {
     pub has_mention: bool,
     #[prost(bool, tag = "13")]
     pub synced: bool,
+    #[prost(bool, tag = "15")]
+    pub pinned: bool,
+    #[prost(bool, tag = "16")]
+    pub unread_reaction: bool,
+    /// Ordered list of content blocks
+    #[prost(message, repeated, tag = "17")]
+    pub blocks: ::prost::alloc::vec::Vec<chat_message::MessageBlock>,
 }
 /// Nested message and enum types in `ChatMessage`.
 pub mod chat_message {
@@ -3890,6 +3937,158 @@ pub mod chat_message {
             pub ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
         }
     }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct MessageBlock {
+        #[prost(oneof = "message_block::ContentValue", tags = "1, 2, 3, 4, 5")]
+        pub content_value: ::core::option::Option<message_block::ContentValue>,
+    }
+    /// Nested message and enum types in `MessageBlock`.
+    pub mod message_block {
+        #[derive(Clone, PartialEq, ::prost::Oneof)]
+        pub enum ContentValue {
+            #[prost(message, tag = "1")]
+            Text(super::MessageBlockText),
+            #[prost(message, tag = "2")]
+            Link(super::MessageBlockLink),
+            #[prost(message, tag = "3")]
+            Embed(super::MessageBlockEmbed),
+            #[prost(message, tag = "4")]
+            EditorQuote(super::MessageBlockEditorQuote),
+            #[prost(message, tag = "5")]
+            MessageQuote(super::MessageBlockMessageQuote),
+        }
+    }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct MessageBlockText {
+        #[prost(string, tag = "1")]
+        pub text: ::prost::alloc::string::String,
+        #[prost(enumeration = "super::block::content::text::Style", tag = "2")]
+        pub style: i32,
+        #[prost(message, repeated, tag = "3")]
+        pub marks: ::prost::alloc::vec::Vec<super::block::content::text::Mark>,
+        #[prost(bool, tag = "4")]
+        pub checked: bool,
+        #[prost(string, tag = "5")]
+        pub lang: ::prost::alloc::string::String,
+    }
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct MessageBlockLink {
+        #[prost(string, tag = "1")]
+        pub target_object_id: ::prost::alloc::string::String,
+        #[prost(enumeration = "message_block_link::LinkType", tag = "2")]
+        pub r#type: i32,
+    }
+    /// Nested message and enum types in `MessageBlockLink`.
+    pub mod message_block_link {
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum LinkType {
+            Object = 0,
+            File = 1,
+            Image = 2,
+            Bookmark = 3,
+        }
+        impl LinkType {
+            /// String value of the enum field names used in the ProtoBuf definition.
+            ///
+            /// The values are not transformed in any way and thus are considered stable
+            /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    Self::Object => "Object",
+                    Self::File => "File",
+                    Self::Image => "Image",
+                    Self::Bookmark => "Bookmark",
+                }
+            }
+            /// Creates an enum from field names used in the ProtoBuf definition.
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "Object" => Some(Self::Object),
+                    "File" => Some(Self::File),
+                    "Image" => Some(Self::Image),
+                    "Bookmark" => Some(Self::Bookmark),
+                    _ => None,
+                }
+            }
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct MessageBlockEmbed {
+        #[prost(string, tag = "1")]
+        pub text: ::prost::alloc::string::String,
+        #[prost(enumeration = "super::block::content::latex::Processor", tag = "2")]
+        pub processor: i32,
+    }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct MessageBlockEditorQuote {
+        /// id of the quoted block in the source object
+        #[prost(string, tag = "1")]
+        pub block_id: ::prost::alloc::string::String,
+        /// quoted block content (text, style, marks, ...)
+        #[prost(message, optional, tag = "2")]
+        pub content: ::core::option::Option<MessageBlockText>,
+    }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct MessageBlockMessageQuote {
+        /// id of the quoted chat message
+        #[prost(string, tag = "1")]
+        pub message_id: ::prost::alloc::string::String,
+        /// id of the participant who authored the quoted message
+        #[prost(string, tag = "2")]
+        pub participant_id: ::prost::alloc::string::String,
+        /// quoted message content (text, style, marks, ...)
+        #[prost(message, optional, tag = "3")]
+        pub content: ::core::option::Option<MessageBlockText>,
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Placeholder {
+    #[prost(string, tag = "1")]
+    pub relation_key: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub values: ::prost::alloc::vec::Vec<placeholder::Value>,
+}
+/// Nested message and enum types in `Placeholder`.
+pub mod placeholder {
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Value {
+        #[prost(enumeration = "Type", tag = "1")]
+        pub r#type: i32,
+        #[prost(message, optional, tag = "2")]
+        pub value: ::core::option::Option<::prost_types::Value>,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Type {
+        PlaceholderValue = 0,
+        PlaceholderToday = 1,
+        PlaceholderCurrentUser = 2,
+    }
+    impl Type {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::PlaceholderValue => "PlaceholderValue",
+                Self::PlaceholderToday => "PlaceholderToday",
+                Self::PlaceholderCurrentUser => "PlaceholderCurrentUser",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "PlaceholderValue" => Some(Self::PlaceholderValue),
+                "PlaceholderToday" => Some(Self::PlaceholderToday),
+                "PlaceholderCurrentUser" => Some(Self::PlaceholderCurrentUser),
+                _ => None,
+            }
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -3928,6 +4127,12 @@ pub enum SmartBlockType {
     ChatDerivedObject = 544,
     /// Container for account data in tech space
     AccountObject = 545,
+    /// Any-store based object for discussion
+    DiscussionObject = 546,
+    /// Any-store based object in tech space for cross-device sync
+    TechSpaceObject = 547,
+    /// Per-space virtual object backed by a tech space CRDT document
+    TechSpaceVirtualObject = 548,
 }
 impl SmartBlockType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -3964,6 +4169,9 @@ impl SmartBlockType {
             Self::ChatObjectDeprecated => "ChatObjectDeprecated",
             Self::ChatDerivedObject => "ChatDerivedObject",
             Self::AccountObject => "AccountObject",
+            Self::DiscussionObject => "DiscussionObject",
+            Self::TechSpaceObject => "TechSpaceObject",
+            Self::TechSpaceVirtualObject => "TechSpaceVirtualObject",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -3997,6 +4205,9 @@ impl SmartBlockType {
             "ChatObjectDeprecated" => Some(Self::ChatObjectDeprecated),
             "ChatDerivedObject" => Some(Self::ChatDerivedObject),
             "AccountObject" => Some(Self::AccountObject),
+            "DiscussionObject" => Some(Self::DiscussionObject),
+            "TechSpaceObject" => Some(Self::TechSpaceObject),
+            "TechSpaceVirtualObject" => Some(Self::TechSpaceVirtualObject),
             _ => None,
         }
     }
@@ -4033,6 +4244,8 @@ pub enum RelationFormat {
     Object = 100,
     /// base64-encoded relation pb model
     Relations = 101,
+    /// relation that handle map of values
+    Map = 102,
 }
 impl RelationFormat {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -4055,6 +4268,7 @@ impl RelationFormat {
             Self::Emoji => "emoji",
             Self::Object => "object",
             Self::Relations => "relations",
+            Self::Map => "map",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -4074,6 +4288,7 @@ impl RelationFormat {
             "emoji" => Some(Self::Emoji),
             "object" => Some(Self::Object),
             "relations" => Some(Self::Relations),
+            "map" => Some(Self::Map),
             _ => None,
         }
     }
@@ -4199,6 +4414,7 @@ pub enum ParticipantPermissions {
     Writer = 1,
     Owner = 2,
     NoPermissions = 3,
+    Admin = 4,
 }
 impl ParticipantPermissions {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -4211,6 +4427,7 @@ impl ParticipantPermissions {
             Self::Writer => "Writer",
             Self::Owner => "Owner",
             Self::NoPermissions => "NoPermissions",
+            Self::Admin => "Admin",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -4220,6 +4437,7 @@ impl ParticipantPermissions {
             "Writer" => Some(Self::Writer),
             "Owner" => Some(Self::Owner),
             "NoPermissions" => Some(Self::NoPermissions),
+            "Admin" => Some(Self::Admin),
             _ => None,
         }
     }
@@ -4332,7 +4550,7 @@ pub enum SpaceUxType {
     Data = 1,
     /// stream UX (chat with limited amount of owners)
     Stream = 2,
-    /// chat UX
+    /// chat UX, deprecated
     Chat = 3,
     /// onetoone UX (space with chat and immutable ACL between two participants)
     OneToOne = 4,
@@ -4359,6 +4577,41 @@ impl SpaceUxType {
             "Stream" => Some(Self::Stream),
             "Chat" => Some(Self::Chat),
             "OneToOne" => Some(Self::OneToOne),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SpaceType {
+    Unknown = 0,
+    Regular = 1,
+    Tech = 2,
+    Chat = 3,
+    OneToOne = 4,
+}
+impl SpaceType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "SpaceTypeUnknown",
+            Self::Regular => "SpaceTypeRegular",
+            Self::Tech => "SpaceTypeTech",
+            Self::Chat => "SpaceTypeChat",
+            Self::OneToOne => "SpaceTypeOneToOne",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SpaceTypeUnknown" => Some(Self::Unknown),
+            "SpaceTypeRegular" => Some(Self::Regular),
+            "SpaceTypeTech" => Some(Self::Tech),
+            "SpaceTypeChat" => Some(Self::Chat),
+            "SpaceTypeOneToOne" => Some(Self::OneToOne),
             _ => None,
         }
     }
@@ -4709,4 +4962,6 @@ pub struct ObjectStoreChecksums {
     pub reindex_fulltext_chat_messages: i32,
     #[prost(int32, tag = "20")]
     pub invalidate_objects_index: i32,
+    #[prost(int32, tag = "21")]
+    pub reindex_discussions: i32,
 }

@@ -2,19 +2,19 @@
 #
 # SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
 # SPDX-License-Identifier: Apache-2.0
-# 
+#
 [package]
 name = "anytype-rpc"
-version = "0.3.1"
-edition = "2024"
-description = "Anytype gRPC client"
-authors = ["Steve Schoettler <stevelr-git@pm.me>"]
-repository = "https://github.com/stevelr/anytype"
-homepage = "https://github.com/stevelr/anytype"
-license = "Apache-2.0"
-keywords = ["anytype", "client", "grpc"]
+version.workspace = true
+authors.workspace = true
 categories = ["api-bindings"]
+edition.workspace = true
+homepage.workspace = true
+keywords = ["anytype", "client", "grpc"]
+license.workspace = true
 readme = "README.md"
+repository.workspace = true
+description = "Anytype gRPC client"
 
 [dependencies]
 chrono.workspace = true
@@ -22,14 +22,14 @@ clap.workspace = true
 prost-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-snafu.workspace = true
 serde_yaml_ng = "0.10.0"
+snafu.workspace = true
 tokio.workspace = true
 
 # grpc
-prost = "0.14.3"
-tonic = "0.14.4"
-tonic-prost = "0.14.4"
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
 
 [[bin]]
 name = "anytype-rpc"

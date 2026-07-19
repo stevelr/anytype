@@ -4,7 +4,6 @@
 //! - **Keyring**: OS-native secure credential stores (Keychain/Secret Service/Credential Manager)
 //! - **File**: File-based storage in user config directory (less secure, for compatibility)
 
-#[cfg(feature = "grpc")]
 use std::path::Path;
 use std::{collections::HashMap, fmt, sync::Arc};
 
@@ -53,7 +52,6 @@ impl fmt::Debug for KeyStoreType {
     }
 }
 
-#[cfg(feature = "grpc")]
 #[derive(Clone, Default)]
 pub struct GrpcCredentials {
     account_id: Option<String>,
@@ -61,7 +59,6 @@ pub struct GrpcCredentials {
     session_token: Option<String>,
 }
 
-#[cfg(feature = "grpc")]
 impl GrpcCredentials {
     pub fn new(
         account_id: Option<String>,
@@ -96,7 +93,6 @@ fn fmt_masked(val: Option<&String>) -> String {
     .to_string()
 }
 
-#[cfg(feature = "grpc")]
 impl fmt::Debug for GrpcCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrpcCredentials")
@@ -136,7 +132,6 @@ impl HttpCredentials {
     }
 }
 
-#[cfg(feature = "grpc")]
 impl GrpcCredentials {
     pub fn from_token(token: impl Into<String>) -> Self {
         Self {
@@ -193,7 +188,6 @@ impl Zeroize for HttpCredentials {
     }
 }
 
-#[cfg(feature = "grpc")]
 impl Zeroize for GrpcCredentials {
     fn zeroize(&mut self) {
         if let Some(token) = self.session_token.as_mut() {
@@ -344,8 +338,8 @@ impl fmt::Debug for KeyStore {
         f.write_fmt(format_args!(
             "KeyStore(id:{} service:{} spec:{})",
             self.id(),
-            &self.service,
-            &self.spec
+            self.service,
+            self.spec
         ))
     }
 }
@@ -473,7 +467,6 @@ impl KeyStore {
     /// Returns Err if keystore was not correctly configured or there was an error
     /// connecting with the keystore (such as user biometric auth failure for os keyring,
     /// or file permission error for file-based keystore)
-    #[cfg(feature = "grpc")]
     pub fn get_grpc_credentials(&self) -> Result<GrpcCredentials, KeyStoreError> {
         Ok(GrpcCredentials {
             account_id: self.get_key(KEY_ACCOUNT_ID)?,
@@ -495,7 +488,6 @@ impl KeyStore {
 
     /// Saves gRPC credentials (read-modify-write).
     /// Fails if credentials are empty (use clear_* to remove).
-    #[cfg(feature = "grpc")]
     pub fn update_grpc_credentials(&self, creds: &GrpcCredentials) -> Result<(), KeyStoreError> {
         if let Some(account_id) = &creds.account_id {
             self.put_key(KEY_ACCOUNT_ID, account_id)?;
@@ -516,7 +508,6 @@ impl KeyStore {
     }
 
     /// Clear gRPC credentials.
-    #[cfg(feature = "grpc")]
     pub fn clear_grpc_credentials(&self) -> Result<(), KeyStoreError> {
         self.remove_key(KEY_ACCOUNT_ID)?;
         self.remove_key(KEY_ACCOUNT_KEY)?;
@@ -527,13 +518,11 @@ impl KeyStore {
     /// Clear all credentials (for the service associated with this `KeyStore`).
     pub fn clear_all_credentials(&self) -> Result<(), KeyStoreError> {
         self.clear_http_credentials()?;
-        #[cfg(feature = "grpc")]
         self.clear_grpc_credentials()?;
         Ok(())
     }
 
     /// Update gRPC credentials from the headless CLI config.json.
-    #[cfg(feature = "grpc")]
     pub fn update_grpc_from_cli_config(&self, path: Option<&Path>) -> Result<(), KeyStoreError> {
         use anytype_rpc::config::load_headless_config;
         let config = load_headless_config(path).map_err(|err| KeyStoreError::External {

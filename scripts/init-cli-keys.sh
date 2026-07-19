@@ -26,6 +26,17 @@
 set -euo pipefail
 
 ANYTYPE_CLI_BIN="${ANYTYPE_CLI_BIN:-anytype}"
+ANYR_BIN=${ANYR_BIN:-$(command -v anyr || true)}
+if [ -z "$ANYR_BIN" ]; then
+  if [ -e target/release/anyr ]; then
+    ANYR_BIN=target/release/anyr
+  elif [ -e target/debug/anyr ]; then
+    ANYR_BIN=target/debug/anyr
+  else
+    echo "Cannot find 'anyr'">&2
+    exit 1
+  fi
+fi
 
 #################
 #   SETUP
@@ -63,8 +74,8 @@ export ANYTYPE_GRPC_ENDPOINT=http://127.0.0.1:31010
 #    (or use args `--url`, `--grpc`, and `--keystore`, respectively)
  
 # 7. Make sure your path contains
-#  - `any` (aka `anytype`) (headless cli server)
-#  - `anyr` (`https://github.com/stevelr/anytype/tree/main/anyr#install`)
+#  - `anytype` (headless cli server)
+#  - `anyr` (`https://github.com/stevelr/anytype/tree/main/anyr#install`) - or set ANYR_BIN
 #  - `jq`, `sed`
   
 
@@ -98,7 +109,7 @@ init_cli_and_keystore() {
 
     account_key=$("$ANYTYPE_CLI_BIN" auth create "$ANY_USER" 2>/dev/null | extract_account_key)
     if [ -z "$account_key" ]; then
-      echo "acctount_key failed. exiting. Make sure headless server is running ('"$ANYTYPE_CLI_BIN" service start' or '"$ANYTYPE_CLI_BIN" serve')"
+      echo "acctount_key failed. exiting. Make sure headless server is running ('$ANYTYPE_CLI_BIN service start' or '$ANYTYPE_CLI_BIN serve')"
       exit 1
     fi
       
@@ -108,9 +119,9 @@ init_cli_and_keystore() {
       exit 1
     fi
     
-    anyr auth set-http  <<<"$http_token"
-    anyr auth set-grpc --account-key <<<"$account_key"
-    anyr auth status
+    "$ANYR_BIN" auth set-http  <<<"$http_token"
+    "$ANYR_BIN" auth set-grpc --account-key <<<"$account_key"
+    "$ANYR_BIN" auth status
 }
 
 # headless cli - join space
@@ -121,7 +132,7 @@ join_space() {
     "$ANYTYPE_CLI_BIN" space list
 
     sleep 4
-    anyr space list -t
+    "$ANYR_BIN" space list -t
 }
 
 init_cli_and_keystore

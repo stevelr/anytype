@@ -1,12 +1,13 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use anytype::prelude::*;
 use serde_json::json;
 
 use crate::{
     cli::{
-        AppContext, FileArgs, FileCommands, FileFilterArgs, FileTypeArg,
-        common::{resolve_space_id, resolve_type},
-        pagination_limit, pagination_offset,
+        AppContext, FileArgs, FileCommands, FileFilterArgs, FileTypeArg, pagination_limit,
+        pagination_offset,
     },
     filter::{parse_filters, parse_property},
     output::OutputFormat,
@@ -21,7 +22,7 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             filters,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx
                 .client
                 .files()
@@ -55,7 +56,7 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             filters,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx
                 .client
                 .files()
@@ -87,7 +88,7 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         FileCommands::Get { space, object_id } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let file = ctx.client.files().get(&space_id, &object_id).get().await?;
             ctx.output.emit_json(&file)
         }
@@ -98,7 +99,7 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             properties,
             property_args,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx.client.update_object(&space_id, &object_id);
 
             if let Some(name) = name {
@@ -112,7 +113,7 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
                 let typ = object.get_type().ok_or_else(|| {
                     anyhow::anyhow!("file object has no type; cannot set properties")
                 })?;
-                let typ = resolve_type(ctx, &space_id, &typ.key).await?;
+                let typ = ctx.client.resolve_type(&space_id, &typ.key).await?;
                 request = ctx
                     .client
                     .set_properties(&space_id, request, &typ, &parsed)
@@ -122,8 +123,25 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             let object = request.update().await?;
             ctx.output.emit_json(&object)
         }
-        FileCommands::Delete { space, object_id } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+        FileCommands::Delete {
+            space,
+            object_id,
+            http,
+        } => {
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            if http {
+                // REST delete (`DELETE /v1/spaces/{space}/files/{id}`) returns 204.
+                ctx.client
+                    .files()
+                    .http_delete(&space_id, &object_id)
+                    .await?;
+                if ctx.output.format() == OutputFormat::Table {
+                    return ctx.output.emit_text(&format!("deleted {object_id}"));
+                }
+                return ctx
+                    .output
+                    .emit_json(&json!({ "id": object_id, "deleted": true }));
+            }
             let object = ctx.client.object(space_id, object_id).delete().await?;
             ctx.output.emit_json(&object)
         }
@@ -131,7 +149,12 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             object_id,
             dir,
             file,
+            space,
+            http,
         } => {
+            if http {
+                return download_http(ctx, &object_id, space.as_deref(), dir, file).await;
+            }
             let mut request = ctx.client.files().download(&object_id);
             match (&dir, &file) {
                 (Some(path), None) => {
@@ -159,8 +182,20 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             space,
             file,
             file_type,
+            http,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            if http {
+                // REST upload; `--file-type` is a gRPC-only hint and is ignored here.
+                let response = ctx
+                    .client
+                    .files()
+                    .http_upload(&space_id)
+                    .path(&file)
+                    .upload()
+                    .await?;
+                return ctx.output.emit_json(&response);
+            }
             let mut request = ctx.client.files().upload(&space_id).from_path(&file);
             if let Some(file_type) = file_type {
                 request = request.file_type(file_type.into());
@@ -172,6 +207,36 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             ctx.output.emit_json(&file)
         }
     }
+}
+
+/// Download a file over the REST HTTP API, writing the bytes to `--file`, into
+/// `--dir`, or to `<object_id>` in the current directory.
+async fn download_http(
+    ctx: &AppContext,
+    object_id: &str,
+    space: Option<&str>,
+    dir: Option<PathBuf>,
+    file: Option<PathBuf>,
+) -> Result<()> {
+    let space =
+        space.ok_or_else(|| anyhow::anyhow!("--space is required when downloading with --http"))?;
+    let space_id = ctx.client.resolve_space_id(space).await?;
+    let bytes = ctx
+        .client
+        .files()
+        .http_download(&space_id, object_id)
+        .await?;
+    let out_path = match (dir, file) {
+        (_, Some(path)) => path,
+        (Some(path), None) => path.join(object_id),
+        (None, None) => PathBuf::from(object_id),
+    };
+    std::fs::write(&out_path, &bytes)?;
+    if ctx.output.format() == OutputFormat::Table {
+        return ctx.output.emit_text(&format!("{}", out_path.display()));
+    }
+    ctx.output
+        .emit_json(&json!({ "path": out_path, "bytes": bytes.len() }))
 }
 
 fn apply_file_filters_list<'a>(

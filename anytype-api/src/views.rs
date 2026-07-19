@@ -43,8 +43,9 @@ use crate::{
 
 /// View layout for list types
 ///
-/// The 2025-11-08 openapi spec defined only grid and table.
-/// Current implementation (as of 2026-Jan) removed table and adds calendar, gallery, graph, kanban, and list.
+/// As of anytype-heart 0.50.15 the `2025-11-08` spec enumerates all six
+/// layouts (`grid`, `list`, `gallery`, `kanban`, `calendar`, `graph`); earlier
+/// spec revisions only documented `grid` and `table`.
 #[derive(
     Debug, Deserialize, Serialize, Clone, PartialEq, Eq, strum::Display, strum::EnumString,
 )]

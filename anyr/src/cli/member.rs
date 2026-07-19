@@ -2,7 +2,7 @@ use anyhow::Result;
 use anytype::prelude::Filter;
 
 use crate::{
-    cli::{AppContext, common::resolve_space_id, pagination_limit, pagination_offset},
+    cli::{AppContext, pagination_limit, pagination_offset},
     filter::parse_filters,
     output::OutputFormat,
 };
@@ -16,7 +16,7 @@ pub async fn handle(ctx: &AppContext, args: super::MemberArgs) -> Result<()> {
             role,
             status,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let mut request = ctx
                 .client
                 .members(space_id)
@@ -53,7 +53,7 @@ pub async fn handle(ctx: &AppContext, args: super::MemberArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::MemberCommands::Get { space, member_id } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let item = ctx.client.member(space_id, member_id).get().await?;
             ctx.output.emit_json(&item)
         }

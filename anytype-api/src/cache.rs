@@ -541,7 +541,7 @@ impl std::fmt::Debug for AnytypeCache {
 
         f.debug_struct("AnytypeCache")
             .field("enabled", &self.is_enabled())
-            .field("spaces", &format!("keys: {}", &spaces_keys))
+            .field("spaces", &format!("keys: {spaces_keys}"))
             .field("properties", &format!("count: {}", self.num_properties()))
             .field("types", &format!("count: {}", self.num_types()))
             .finish()

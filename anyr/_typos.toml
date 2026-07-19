@@ -6,3 +6,6 @@
 [default.extend-identifiers]
 # overrides: if right side of equals is same as left side, no change is made
 nin = "nin" # serialize-key for NotIn
+
+[default.extend-words]
+nin = "nin" # word-split of ext_nin identifiers

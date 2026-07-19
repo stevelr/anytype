@@ -1706,7 +1706,8 @@ async fn execute_object_import(
     space_id: &str,
     archive_path: &Path,
     explicit_object_selection: bool,
-    _selected_ids: &[String],
+    #[allow(unused_variables)]
+    selected_ids: &[String],
     import_mode: ImportModeArg,
     replace_existing: bool,
     interactive_output: bool,
@@ -1715,7 +1716,7 @@ async fn execute_object_import(
     #[cfg(feature = "snapshot-import")]
     if explicit_object_selection {
         let limits = import_chunk_limits_from_env()?;
-        let snapshots = collect_import_snapshots(archive_path, _selected_ids)?;
+        let snapshots = collect_import_snapshots(archive_path, selected_ids)?;
         let batches = plan_snapshot_batches(&snapshots, limits)?;
         return execute_object_import_batches(
             ctx,

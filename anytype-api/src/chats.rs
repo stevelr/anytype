@@ -38,7 +38,6 @@
 //! - Is `last_state_id` stable enough for resume, or should we use `order_id` only?
 //! - Should previews and message subscriptions use separate `sub_id`s or a shared registry?
 
-#[cfg(feature = "grpc")]
 use anytype_rpc::anytype::rpc::{
     chat::{
         add_message, delete_message, edit_message_content, get_messages, get_messages_by_ids,
@@ -1103,6 +1102,9 @@ impl ChatAddMessageRequest<'_> {
             mention_read: false,
             has_mention: false,
             synced: false,
+            pinned: false,
+            unread_reaction: false,
+            blocks: Vec::new(),
         };
         let request = add_message::Request {
             chat_object_id: self.chat_object_id,
@@ -1194,6 +1196,9 @@ impl ChatEditMessageRequest<'_> {
             mention_read: false,
             has_mention: false,
             synced: false,
+            pinned: false,
+            unread_reaction: false,
+            blocks: Vec::new(),
         };
         let request = edit_message_content::Request {
             chat_object_id: self.chat_object_id,

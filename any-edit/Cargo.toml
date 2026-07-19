@@ -2,19 +2,19 @@
 #
 # SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
 # SPDX-License-Identifier: Apache-2.0
-# 
+#
 [package]
 name = "any-edit"
-version = "0.1.5"
-edition = "2024"
-description = "Edit Anytype documents in an external editor"
-authors = ["Steve Schoettler <stevelr-git@pm.me>"]
-repository = "https://github.com/stevelr/anytype"
-homepage = "https://github.com/stevelr/anytype"
-license = "Apache-2.0"
-keywords = ["anytype", "raycast"]
+version = "0.1.6"
+authors.workspace = true
 categories = ["command-line-utilities"]
+edition.workspace = true
+homepage.workspace = true
+keywords = ["anytype", "raycast"]
+license.workspace = true
 readme = "README.md"
+repository.workspace = true
+description = "Edit Anytype documents in an external editor"
 
 [[bin]]
 name = "any-edit"
@@ -22,11 +22,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-anytype = { version = "0.3.2", path = "../anytype-api" }
+anytype.workspace = true
+base16ct.workspace = true
 clap.workspace = true
-regex = "1.12"
+regex.workspace = true
 serde.workspace = true
-serde_yaml_ng = "0.10.0"
+serde_yaml_ng.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -2,11 +2,7 @@ use anyhow::Result;
 use anytype::{error::AnytypeError, validation::looks_like_object_id};
 
 use crate::{
-    cli::{
-        AppContext,
-        common::{resolve_property_id, resolve_space_id},
-        pagination_limit, pagination_offset,
-    },
+    cli::{AppContext, pagination_limit, pagination_offset},
     filter::parse_filters,
     output::OutputFormat,
 };
@@ -20,8 +16,11 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             pagination,
             filter,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let property_id = ctx
+                .client
+                .resolve_property_id(&space_id, &property_id)
+                .await?;
             let mut request = ctx
                 .client
                 .tags(space_id, property_id)
@@ -51,8 +50,11 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             property_id,
             tag_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let property_id = ctx
+                .client
+                .resolve_property_id(&space_id, &property_id)
+                .await?;
             let item = if looks_like_object_id(&tag_id) {
                 ctx.client.tag(space_id, property_id, tag_id).get().await?
             } else {
@@ -81,8 +83,11 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             color,
             key,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let property_id = ctx
+                .client
+                .resolve_property_id(&space_id, &property_id)
+                .await?;
             let mut request = ctx
                 .client
                 .new_tag(space_id, property_id)
@@ -104,8 +109,11 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             key,
             color,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
-            let property_id = resolve_property_id(ctx, &space_id, &property_id).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let property_id = ctx
+                .client
+                .resolve_property_id(&space_id, &property_id)
+                .await?;
             let tag_id = ctx
                 .client
                 .lookup_property_tag(&space_id, &property_id, &tag_id)
@@ -132,11 +140,14 @@ pub async fn handle(ctx: &AppContext, args: super::TagArgs) -> Result<()> {
             property_id,
             tag_id,
         } => {
-            let space_id = resolve_space_id(ctx, &space).await?;
+            let space_id = ctx.client.resolve_space_id(&space).await?;
             let item = if looks_like_object_id(&property_id) && looks_like_object_id(&tag_id) {
                 ctx.client.tag(space_id, property_id, tag_id)
             } else {
-                let property_id = resolve_property_id(ctx, &space_id, property_id).await?;
+                let property_id = ctx
+                    .client
+                    .resolve_property_id(&space_id, property_id)
+                    .await?;
                 let tag = ctx
                     .client
                     .lookup_property_tag(&space_id, &property_id, &tag_id)

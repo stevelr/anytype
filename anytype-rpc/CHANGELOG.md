@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+- 0.4.0-pre.1
+
+**Added:**
+
+| Name                                        | --                         |
+| ------------------------------------------- | -------------------------- |
+| block::dataview::View::alternate_rows: bool | new field                  |
+| object_type::Layout::Discussion             | new variant in Layout enum |
+| import::InvitePayload::space_type           | new field                  |
+| membership_v2::Product::prices_lifetime     | new field                  |
+| membership_v2::CartProduct::is_lifetime     | new field                  |
+| membership_v2::Cart::applied_promocodes     | new field                  |
+| membership_v2::CryptoCheckout               | new struct                 |
+| membershiip_v2::Period::Lifetime            | new variant                |
+
+**Deprecated:**
+
+| Name                                 | --                      |
+| ------------------------------------ | ----------------------- |
+| import::InvitePayload::space_ux_type | now deprecated          |
+| product_status::Period::Unlimited    | deprecated enum variant |
+
 ## [0.3.1]
 
 - no change, re-releasing to use new release tag format
