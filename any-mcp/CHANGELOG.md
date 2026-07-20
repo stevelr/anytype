@@ -16,3 +16,5 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Harden runtime shutdown to cancel active and queued operations on EOF, emit
   safe structured operation outcomes, and deny payload-bearing dependency
   tracing targets independently of `RUST_LOG` directives.
+- Enable operation diagnostics by default with server-generated correlation
+  IDs and variant-only Anytype error categories/status codes.

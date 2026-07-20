@@ -8,11 +8,14 @@
 use std::{
     fmt,
     future::Future,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
-use anytype::prelude::AnytypeClient;
+use anytype::prelude::{AnytypeClient, AnytypeError};
 use rmcp::{
     RoleServer, ServiceExt,
     service::{QuitReason, RxJsonRpcMessage, TxJsonRpcMessage},
@@ -42,6 +45,7 @@ pub struct RuntimeContext {
     client: Arc<AnytypeClient>,
     permits: Arc<Semaphore>,
     shutdown: CancellationToken,
+    next_correlation_id: Arc<AtomicU64>,
     request_timeout: Duration,
     startup_status: StartupStatus,
 }
@@ -127,18 +131,24 @@ impl RuntimeContext {
     /// A handler should pass the cancellation token from its rmcp
     /// `RequestContext`, which rmcp cancels on `notifications/cancelled`.
     /// Until concrete handlers land, this explicit token parameter is the
-    /// tested integration seam. Request identifiers are intentionally omitted
-    /// from diagnostics because they are controlled by the MCP peer.
-    pub async fn execute<F, T, E>(
+    /// tested integration seam. Diagnostics use a server-generated correlation
+    /// ID and never the peer-controlled raw MCP request ID.
+    pub async fn execute<F, T>(
         &self,
         context: OperationContext,
         cancellation: &CancellationToken,
         operation: F,
-    ) -> Result<T, RuntimeError<E>>
+    ) -> Result<T, RuntimeError>
     where
-        F: Future<Output = Result<T, E>>,
+        F: Future<Output = Result<T, AnytypeError>>,
     {
         let started = Instant::now();
+        let correlation_id = self
+            .next_correlation_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(1))
+            })
+            .expect("correlation update always returns a value");
         let controlled = async {
             let permit = tokio::select! {
                 biased;
@@ -162,7 +172,7 @@ impl RuntimeContext {
         let result = tokio::time::timeout(self.request_timeout, controlled)
             .await
             .unwrap_or(Err(RuntimeError::TimedOut));
-        log_operation(context, started.elapsed(), &result);
+        log_operation(context, correlation_id, started.elapsed(), &result);
         result
     }
 
@@ -176,6 +186,7 @@ impl RuntimeContext {
             client: Arc::new(client),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             shutdown: CancellationToken::new(),
+            next_correlation_id: Arc::new(AtomicU64::new(1)),
             request_timeout,
             startup_status,
         }
@@ -244,8 +255,9 @@ enum StartupCheckError {
 ///
 /// Operation names should be short lowercase identifiers such as
 /// `object_get`. Invalid names are replaced with `invalid_operation` rather
-/// than logged. MCP request IDs are deliberately omitted because they are
-/// peer-controlled and may contain sensitive text.
+/// than logged. The runtime adds a monotonic server correlation ID; it never
+/// records the peer-controlled raw MCP request ID, which may contain sensitive
+/// text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperationContext {
     operation: &'static str,
@@ -274,32 +286,77 @@ impl OperationContext {
     }
 }
 
-fn log_operation<T, E>(
+fn log_operation<T>(
     context: OperationContext,
+    correlation_id: u64,
     duration: Duration,
-    result: &Result<T, RuntimeError<E>>,
+    result: &Result<T, RuntimeError>,
 ) {
-    let (outcome, upstream_status) = match result {
-        Ok(_) => ("success", "success"),
-        Err(RuntimeError::Cancelled) => ("cancelled", "not_observed"),
-        Err(RuntimeError::TimedOut) => ("timeout", "not_observed"),
-        Err(RuntimeError::ShuttingDown) => ("shutdown", "not_observed"),
-        Err(RuntimeError::Upstream(_)) => ("upstream_error", "error"),
+    let (outcome, upstream) = match result {
+        Ok(_) => ("success", UpstreamDiagnostic::new("success")),
+        Err(RuntimeError::Cancelled) => ("cancelled", UpstreamDiagnostic::new("not_observed")),
+        Err(RuntimeError::TimedOut) => ("timeout", UpstreamDiagnostic::new("not_observed")),
+        Err(RuntimeError::ShuttingDown) => ("shutdown", UpstreamDiagnostic::new("not_observed")),
+        Err(RuntimeError::Upstream(error)) => {
+            ("upstream_error", UpstreamDiagnostic::from_error(error))
+        }
     };
     let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
         target: "any_mcp::operation",
         operation = context.safe_operation(),
-        request_id = "omitted",
+        correlation_id,
         duration_ms,
         outcome,
-        upstream_status,
+        upstream_status = upstream.category,
+        upstream_http_status = upstream.http_status.unwrap_or_default(),
+        upstream_http_status_present = upstream.http_status.is_some(),
         "Anytype operation completed"
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UpstreamDiagnostic {
+    category: &'static str,
+    http_status: Option<u16>,
+}
+
+impl UpstreamDiagnostic {
+    const fn new(category: &'static str) -> Self {
+        Self {
+            category,
+            http_status: None,
+        }
+    }
+
+    fn from_error(error: &AnytypeError) -> Self {
+        match error {
+            AnytypeError::Http { .. } => Self::new("http_transport"),
+            AnytypeError::ApiError { code, .. } => Self {
+                category: "http_status",
+                http_status: Some(*code),
+            },
+            AnytypeError::TooManyRetries { .. } => Self::new("http_retries"),
+            AnytypeError::Auth { .. } | AnytypeError::Unauthorized => Self::new("auth"),
+            AnytypeError::Forbidden => Self::new("permission"),
+            AnytypeError::Deserialization { .. } | AnytypeError::Serialization { .. } => {
+                Self::new("codec")
+            }
+            AnytypeError::NotFound { .. } => Self::new("not_found"),
+            AnytypeError::Ambiguous { .. } => Self::new("ambiguous"),
+            AnytypeError::RateLimitExceeded { .. } => Self::new("rate_limit"),
+            AnytypeError::Validation { .. } => Self::new("validation"),
+            AnytypeError::NoKeyStore | AnytypeError::KeyStore { .. } => Self::new("keystore"),
+            AnytypeError::Grpc { .. } | AnytypeError::GrpcUnavailable { .. } => Self::new("grpc"),
+            AnytypeError::CacheDisabled => Self::new("cache"),
+            AnytypeError::VerifyTimeout { .. } => Self::new("verification"),
+            AnytypeError::Other { .. } => Self::new("other"),
+        }
+    }
+}
+
 /// A controlled upstream operation failure.
-pub enum RuntimeError<E> {
+pub enum RuntimeError {
     /// The MCP client cancelled this request.
     Cancelled,
     /// The end-to-end operation timeout elapsed.
@@ -307,10 +364,10 @@ pub enum RuntimeError<E> {
     /// The server is shutting down and no more permits can be acquired.
     ShuttingDown,
     /// The upstream Anytype operation failed.
-    Upstream(E),
+    Upstream(AnytypeError),
 }
 
-impl<E> fmt::Debug for RuntimeError<E> {
+impl fmt::Debug for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => formatter.write_str("RuntimeError::Cancelled"),
@@ -321,7 +378,7 @@ impl<E> fmt::Debug for RuntimeError<E> {
     }
 }
 
-impl<E> fmt::Display for RuntimeError<E> {
+impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => formatter.write_str("request cancelled"),
@@ -332,7 +389,7 @@ impl<E> fmt::Display for RuntimeError<E> {
     }
 }
 
-impl<E> std::error::Error for RuntimeError<E> {}
+impl std::error::Error for RuntimeError {}
 
 /// A redacted authenticated-startup failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -481,16 +538,55 @@ impl std::error::Error for ServeError {}
 #[cfg(test)]
 mod tests {
     use std::{
-        convert::Infallible,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         time::Duration,
     };
 
     use anytype::prelude::ClientConfig;
+    use rmcp::{
+        ErrorData as McpError, ServerHandler,
+        model::{CallToolRequestParams, CallToolResult, ServerCapabilities, ServerInfo},
+        service::RequestContext,
+    };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
     use tracing::instrument::WithSubscriber;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct CancellationToolServer {
+        runtime: RuntimeContext,
+        started: Arc<tokio::sync::Notify>,
+        cancelled: Arc<tokio::sync::Notify>,
+    }
+
+    impl ServerHandler for CancellationToolServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        async fn call_tool(
+            &self,
+            _request: CallToolRequestParams,
+            context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResult, McpError> {
+            let started = self.started.clone();
+            let result = self
+                .runtime
+                .execute(
+                    OperationContext::new("cancellation_probe"),
+                    &context.ct,
+                    async move {
+                        started.notify_one();
+                        std::future::pending::<Result<(), AnytypeError>>().await
+                    },
+                )
+                .await;
+            assert!(matches!(result, Err(RuntimeError::Cancelled)));
+            self.cancelled.notify_one();
+            Ok(CallToolResult::success(Vec::new()))
+        }
+    }
 
     fn runtime(max_concurrency: usize, timeout: Duration) -> RuntimeContext {
         let config = ClientConfig {
@@ -510,6 +606,18 @@ mod tests {
                 grpc_available: false,
             },
         )
+    }
+
+    fn run_trace_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let _guard = crate::logging::test_support::trace_test_guard();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("trace test runtime")
+            .block_on(future)
     }
 
     #[tokio::test]
@@ -622,11 +730,125 @@ mod tests {
 
         let result = runtime
             .execute(OperationContext::new("test_cancel"), &cancellation, async {
-                std::future::pending::<Result<(), Infallible>>().await
+                std::future::pending::<Result<(), AnytypeError>>().await
             })
             .await;
 
         assert!(matches!(result, Err(RuntimeError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn rmcp_cancel_notification_cancels_upstream_and_releases_permit() {
+        let runtime = runtime(1, Duration::from_secs(2));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        let handler = CancellationToolServer {
+            runtime: runtime.clone(),
+            started: started.clone(),
+            cancelled: cancelled.clone(),
+        };
+        let (client_transport, server_transport) = duplex(4096);
+        let server = tokio::spawn(async move {
+            handler
+                .serve(server_transport)
+                .await
+                .expect("test server initialize")
+                .waiting()
+                .await
+                .expect("test server task")
+        });
+        let (reader, mut writer) = split(client_transport);
+        let mut reader = BufReader::new(reader);
+
+        writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"cancel-test","version":"0.0.0"}}}
+"#,
+            )
+            .await
+            .expect("write initialize");
+        writer.flush().await.expect("flush initialize");
+        let mut initialize = String::new();
+        reader
+            .read_line(&mut initialize)
+            .await
+            .expect("read initialize");
+        assert!(initialize.contains("\"id\":1"));
+
+        writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cancel-test","arguments":{}}}
+"#,
+            )
+            .await
+            .expect("write tool call");
+        writer.flush().await.expect("flush tool call");
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("tool operation started");
+
+        writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2,"reason":"test cancellation"}}
+"#,
+            )
+            .await
+            .expect("write cancellation");
+        writer.flush().await.expect("flush cancellation");
+        tokio::time::timeout(Duration::from_secs(1), cancelled.notified())
+            .await
+            .expect("tool operation cancelled");
+
+        runtime
+            .execute(
+                OperationContext::new("after_rmcp_cancel"),
+                &CancellationToken::new(),
+                async { Ok::<_, AnytypeError>(()) },
+            )
+            .await
+            .expect("permit released after rmcp cancellation");
+
+        writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":3,"method":"ping"}
+"#,
+            )
+            .await
+            .expect("write ping");
+        writer.flush().await.expect("flush ping");
+        let mut saw_cancelled_response = false;
+        let ping_seen = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let mut response = String::new();
+                if reader
+                    .read_line(&mut response)
+                    .await
+                    .expect("read response")
+                    == 0
+                {
+                    return false;
+                }
+                let value: rmcp::serde_json::Value =
+                    rmcp::serde_json::from_str(&response).expect("protocol JSON");
+                if value["id"] == 2 {
+                    saw_cancelled_response = true;
+                }
+                if value["id"] == 3 {
+                    return true;
+                }
+            }
+        })
+        .await
+        .expect("ping response deadline");
+        assert!(ping_seen);
+        assert!(!saw_cancelled_response);
+
+        drop(writer);
+        drop(reader);
+        assert!(matches!(
+            server.await.expect("test server join"),
+            QuitReason::Closed | QuitReason::Cancelled
+        ));
     }
 
     #[tokio::test]
@@ -640,7 +862,7 @@ mod tests {
                 &cancellation,
                 async {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    Ok::<_, Infallible>(())
+                    Ok::<_, AnytypeError>(())
                 },
             )
             .await;
@@ -663,7 +885,7 @@ mod tests {
                     &cancellation,
                     async move {
                         operation_started.notify_one();
-                        std::future::pending::<Result<(), Infallible>>().await
+                        std::future::pending::<Result<(), AnytypeError>>().await
                     },
                 )
                 .await
@@ -679,7 +901,7 @@ mod tests {
             .execute(
                 OperationContext::new("after_cancel"),
                 &CancellationToken::new(),
-                async { Ok::<_, Infallible>(()) },
+                async { Ok::<_, AnytypeError>(()) },
             )
             .await;
         assert!(next.is_ok());
@@ -692,7 +914,7 @@ mod tests {
             .execute(
                 OperationContext::new("timeout_release"),
                 &CancellationToken::new(),
-                std::future::pending::<Result<(), Infallible>>(),
+                std::future::pending::<Result<(), AnytypeError>>(),
             )
             .await;
         assert!(matches!(timed_out, Err(RuntimeError::TimedOut)));
@@ -701,7 +923,7 @@ mod tests {
             .execute(
                 OperationContext::new("after_timeout"),
                 &CancellationToken::new(),
-                async { Ok::<_, Infallible>(()) },
+                async { Ok::<_, AnytypeError>(()) },
             )
             .await;
         assert!(next.is_ok());
@@ -723,7 +945,7 @@ mod tests {
                     async move {
                         started.notify_one();
                         release.notified().await;
-                        Ok::<_, Infallible>(())
+                        Ok::<_, AnytypeError>(())
                     },
                 )
                 .await
@@ -742,7 +964,7 @@ mod tests {
                     &second_cancellation,
                     async move {
                         executed.store(true, Ordering::SeqCst);
-                        Ok::<_, Infallible>(())
+                        Ok::<_, AnytypeError>(())
                     },
                 )
                 .await
@@ -765,7 +987,9 @@ mod tests {
         let cancellation = CancellationToken::new();
         let result = runtime
             .execute(OperationContext::new("test_error"), &cancellation, async {
-                Err::<(), _>("secret-token-and-upstream-body")
+                Err::<(), _>(AnytypeError::Other {
+                    message: "secret-token-and-upstream-body".to_string(),
+                })
             })
             .await
             .expect_err("upstream failure");
@@ -774,101 +998,147 @@ mod tests {
         assert!(!format!("{result:?}").contains("secret-token"));
     }
 
-    #[tokio::test]
-    async fn operation_diagnostic_contains_only_safe_bounded_context() {
-        let runtime = runtime(1, Duration::from_secs(1));
-        let secret = "secret-token-and-upstream-body";
-        let (dispatch, output) = crate::logging::test_support::capture("any_mcp::operation=trace");
+    #[test]
+    fn operation_diagnostic_contains_only_safe_bounded_context() {
+        run_trace_test(async {
+            let runtime = runtime(1, Duration::from_secs(1));
+            let secret = "secret-token-and-upstream-body";
+            let (dispatch, output) =
+                crate::logging::test_support::capture("any_mcp::operation=trace");
 
-        let result = runtime
-            .execute(
-                OperationContext::new("diagnostic_test"),
-                &CancellationToken::new(),
-                async { Err::<(), _>(secret) },
-            )
-            .with_subscriber(dispatch)
-            .await;
-        assert!(matches!(result, Err(RuntimeError::Upstream(_))));
+            let result = runtime
+                .execute(
+                    OperationContext::new("diagnostic_test"),
+                    &CancellationToken::new(),
+                    async {
+                        Err::<(), _>(AnytypeError::ApiError {
+                            code: 503,
+                            method: secret.to_string(),
+                            url: secret.to_string(),
+                            message: secret.to_string(),
+                        })
+                    },
+                )
+                .with_subscriber(dispatch)
+                .await;
+            assert!(matches!(result, Err(RuntimeError::Upstream(_))));
 
-        let output = output.contents();
-        assert!(output.contains("operation=\"diagnostic_test\""));
-        assert!(output.contains("request_id=\"omitted\""));
-        assert!(output.contains("outcome=\"upstream_error\""));
-        assert!(output.contains("upstream_status=\"error\""));
-        assert!(output.contains("duration_ms="));
-        assert!(!output.contains(secret));
+            let output = output.contents();
+            assert!(output.contains("operation=\"diagnostic_test\""));
+            assert!(output.contains("correlation_id=1"));
+            assert!(!output.contains("request_id="));
+            assert!(output.contains("outcome=\"upstream_error\""));
+            assert!(output.contains("upstream_status=\"http_status\""));
+            assert!(output.contains("upstream_http_status=503"));
+            assert!(output.contains("upstream_http_status_present=true"));
+            assert!(output.contains("duration_ms="));
+            assert!(!output.contains(secret));
+        });
     }
 
-    #[tokio::test]
-    async fn operation_diagnostic_classifies_every_outcome() {
-        let (dispatch, output) = crate::logging::test_support::capture("any_mcp::operation=trace");
-        let active_runtime = runtime(1, Duration::from_millis(20));
+    #[test]
+    fn operation_diagnostic_classifies_every_outcome() {
+        run_trace_test(async {
+            let (dispatch, output) =
+                crate::logging::test_support::capture("any_mcp::operation=trace");
+            let active_runtime = runtime(1, Duration::from_millis(20));
 
-        active_runtime
-            .execute(
-                OperationContext::new("outcome_success"),
-                &CancellationToken::new(),
-                async { Ok::<_, Infallible>(()) },
-            )
-            .with_subscriber(dispatch.clone())
-            .await
-            .expect("successful operation");
+            active_runtime
+                .execute(
+                    OperationContext::new("outcome_success"),
+                    &CancellationToken::new(),
+                    async { Ok::<_, AnytypeError>(()) },
+                )
+                .with_subscriber(dispatch.clone())
+                .await
+                .expect("successful operation");
 
-        let cancelled = CancellationToken::new();
-        cancelled.cancel();
-        let _ = active_runtime
-            .execute(
-                OperationContext::new("outcome_cancel"),
-                &cancelled,
-                std::future::pending::<Result<(), Infallible>>(),
-            )
-            .with_subscriber(dispatch.clone())
-            .await;
-        let _ = active_runtime
-            .execute(
-                OperationContext::new("outcome_timeout"),
-                &CancellationToken::new(),
-                std::future::pending::<Result<(), Infallible>>(),
-            )
-            .with_subscriber(dispatch.clone())
-            .await;
-        let _ = active_runtime
-            .execute(
-                OperationContext::new("outcome_upstream"),
-                &CancellationToken::new(),
-                async { Err::<(), _>("SECRET_UPSTREAM_ERROR") },
-            )
-            .with_subscriber(dispatch.clone())
-            .await;
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            let _ = active_runtime
+                .execute(
+                    OperationContext::new("outcome_cancel"),
+                    &cancelled,
+                    std::future::pending::<Result<(), AnytypeError>>(),
+                )
+                .with_subscriber(dispatch.clone())
+                .await;
+            let _ = active_runtime
+                .execute(
+                    OperationContext::new("outcome_timeout"),
+                    &CancellationToken::new(),
+                    std::future::pending::<Result<(), AnytypeError>>(),
+                )
+                .with_subscriber(dispatch.clone())
+                .await;
+            let _ = active_runtime
+                .execute(
+                    OperationContext::new("outcome_upstream"),
+                    &CancellationToken::new(),
+                    async {
+                        Err::<(), _>(AnytypeError::Other {
+                            message: "SECRET_UPSTREAM_ERROR".to_string(),
+                        })
+                    },
+                )
+                .with_subscriber(dispatch.clone())
+                .await;
 
-        let shutdown_runtime = runtime(1, Duration::from_secs(1));
-        shutdown_runtime.begin_shutdown();
-        let _ = shutdown_runtime
-            .execute(
-                OperationContext::new("outcome_shutdown"),
-                &CancellationToken::new(),
-                std::future::pending::<Result<(), Infallible>>(),
-            )
-            .with_subscriber(dispatch)
-            .await;
+            let shutdown_runtime = runtime(1, Duration::from_secs(1));
+            shutdown_runtime.begin_shutdown();
+            let _ = shutdown_runtime
+                .execute(
+                    OperationContext::new("outcome_shutdown"),
+                    &CancellationToken::new(),
+                    std::future::pending::<Result<(), AnytypeError>>(),
+                )
+                .with_subscriber(dispatch)
+                .await;
 
-        let output = output.contents();
-        for outcome in [
-            "success",
-            "cancelled",
-            "timeout",
-            "upstream_error",
-            "shutdown",
-        ] {
-            assert!(output.contains(&format!("outcome=\"{outcome}\"")));
-        }
-        assert!(!output.contains("SECRET_UPSTREAM_ERROR"));
+            let output = output.contents();
+            for outcome in [
+                "success",
+                "cancelled",
+                "timeout",
+                "upstream_error",
+                "shutdown",
+            ] {
+                assert!(output.contains(&format!("outcome=\"{outcome}\"")));
+            }
+            assert!(output.contains("correlation_id=1"));
+            assert!(output.contains("correlation_id=4"));
+            assert!(!output.contains("SECRET_UPSTREAM_ERROR"));
+        });
     }
 
     #[test]
     fn unsafe_operation_name_is_omitted_from_diagnostics() {
         let unsafe_name = OperationContext::new("secret/value");
         assert_eq!(unsafe_name.safe_operation(), "invalid_operation");
+    }
+
+    #[test]
+    fn upstream_diagnostic_uses_variants_and_status_code_only() {
+        let secret = "SECRET_ERROR_TEXT";
+        let api = UpstreamDiagnostic::from_error(&AnytypeError::ApiError {
+            code: 502,
+            method: secret.to_string(),
+            url: secret.to_string(),
+            message: secret.to_string(),
+        });
+        assert_eq!(api.category, "http_status");
+        assert_eq!(api.http_status, Some(502));
+
+        let auth = UpstreamDiagnostic::from_error(&AnytypeError::Auth {
+            message: secret.to_string(),
+        });
+        assert_eq!(auth, UpstreamDiagnostic::new("auth"));
+
+        let grpc = UpstreamDiagnostic::from_error(&AnytypeError::GrpcUnavailable {
+            message: secret.to_string(),
+        });
+        assert_eq!(grpc, UpstreamDiagnostic::new("grpc"));
+        assert!(!format!("{api:?}{auth:?}{grpc:?}").contains(secret));
     }
 
     #[tokio::test]
@@ -884,7 +1154,7 @@ mod tests {
                     &CancellationToken::new(),
                     async move {
                         started.notify_one();
-                        std::future::pending::<Result<(), Infallible>>().await
+                        std::future::pending::<Result<(), AnytypeError>>().await
                     },
                 )
                 .await
@@ -901,7 +1171,7 @@ mod tests {
                     &CancellationToken::new(),
                     async move {
                         executed.store(true, Ordering::SeqCst);
-                        Ok::<_, Infallible>(())
+                        Ok::<_, AnytypeError>(())
                     },
                 )
                 .await
@@ -950,7 +1220,7 @@ mod tests {
                     &CancellationToken::new(),
                     async move {
                         started.notify_one();
-                        std::future::pending::<Result<(), Infallible>>().await
+                        std::future::pending::<Result<(), AnytypeError>>().await
                     },
                 )
                 .await
@@ -966,7 +1236,7 @@ mod tests {
                     &CancellationToken::new(),
                     async move {
                         executed.store(true, Ordering::SeqCst);
-                        Ok::<_, Infallible>(())
+                        Ok::<_, AnytypeError>(())
                     },
                 )
                 .await
