@@ -433,12 +433,14 @@ runtime and advertises their static capability alongside the tool catalog.
 
 The unit suite locks every Phase 1 tool input schema, output schema, and exact
 annotation in deterministic normal and read-only catalog snapshots. A separate
-recursive audit rejects any catalog string without `maxLength`, array without
-`maxItems`, or object schema that permits unknown map keys. Security-focused
-tests also cover cursor tamper/expiry/capacity, exact Unicode character and
-response-byte boundaries, zero-write mutation conflicts, complete Anytype
-error classification, redaction across protocol/error/diagnostic surfaces,
-and read-only defense in depth.
+fail-closed graph audit resolves only local `#/$defs` references with explicit
+cycle tracking, validates every reachable composition branch, and rejects
+unknown schema forms, strings without `maxLength`, arrays without `maxItems`,
+or object schemas that permit unknown map keys. Security-focused tests also
+cover cursor tamper/expiry/capacity, exact Unicode character and response-byte
+boundaries, zero-write mutation conflicts, complete Anytype error
+classification, redaction across protocol/error/diagnostic surfaces, and
+read-only defense in depth.
 
 Catalog changes are never accepted through an environment variable. Follow
 the explicit regeneration and review procedure in

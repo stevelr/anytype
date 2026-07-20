@@ -102,10 +102,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add strict `ANY_MCP_READ_ONLY=0|1` configuration. Read-only mode omits all
   four mutation tools and rejects stale direct mutation calls before argument
   decoding, resolver work, or upstream I/O.
-- Add reviewed deterministic normal/read-only catalog snapshots, independent
-  recursive schema-bound and exact annotation audits, exact character/byte
-  boundary coverage, exhaustive Anytype error-classifier assertions, and
-  cross-surface secret-redaction checks.
+- Add reviewed deterministic normal/read-only catalog snapshots, an independent
+  fail-closed local-reference graph audit for recursive schema bounds and exact
+  annotation audits, exact character/byte boundary coverage, exhaustive Anytype
+  error-classifier assertions, and cross-surface secret-redaction checks.
 
 ### Changed
 
