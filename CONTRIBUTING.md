@@ -41,7 +41,7 @@ Questions are welcome!
 
 > First, please make sure you checked the available [Documentation](#documentation), and looked at open [Issues](https://github.com/stevelr/anytype/issues) that might be related. If you find an existing issue that still need clarification, you can add your question to that issue.
 
-To submmit a question,
+To submit a question,
 
 - Open an [Issue](https://github.com/stevelr/anytype/issues/new).
 - Provide as much context as you can about what you're running into.

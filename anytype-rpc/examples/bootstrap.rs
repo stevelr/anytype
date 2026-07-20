@@ -42,10 +42,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?
         .into_inner();
-    if let Some(err) = &wc.error {
-        if err.code != 0 {
-            return Err(format!("WalletCreate error {}: {}", err.code, err.description).into());
-        }
+    if let Some(err) = &wc.error
+        && err.code != 0
+    {
+        return Err(format!("WalletCreate error {}: {}", err.code, err.description).into());
     }
     println!("MNEMONIC={}", wc.mnemonic);
 
@@ -62,10 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?
         .into_inner();
-    if let Some(err) = &ac.error {
-        if err.code != 0 {
-            return Err(format!("AccountCreate error {}: {}", err.code, err.description).into());
-        }
+    if let Some(err) = &ac.error
+        && err.code != 0
+    {
+        return Err(format!("AccountCreate error {}: {}", err.code, err.description).into());
     }
     let account_id = ac
         .account
@@ -139,10 +139,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?)
         .await?
         .into_inner();
-    if let Some(err) = &solved.error {
-        if err.code != 0 {
-            return Err(format!("SolveChallenge error {}: {}", err.code, err.description).into());
-        }
+    if let Some(err) = &solved.error
+        && err.code != 0
+    {
+        return Err(format!("SolveChallenge error {}: {}", err.code, err.description).into());
     }
     println!("APP_KEY={}", solved.app_key);
     Ok(())

@@ -983,7 +983,7 @@ async fn test_create_property_duplicate_key() -> TestResult<()> {
             .client
             .new_property(
                 &ctx.space_id,
-                format!("{} Second", &prop_name),
+                format!("{} Second", prop_name),
                 PropertyFormat::Text,
             )
             .key(&prop_key)

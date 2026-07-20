@@ -8,6 +8,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- examples and integration-test helpers now satisfy workspace rustdoc and lint
+  checks without needless borrows
 - property updates now reject key-only requests before sending them because the
   REST API requires `name`; type updates now expose full property replacement
   and explicit clearing while preserving omission when properties are unchanged
