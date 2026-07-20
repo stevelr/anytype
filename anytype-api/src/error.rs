@@ -95,13 +95,15 @@ pub enum AnytypeError {
 
     /// Too many requests occurred. See the anytype rate limit documentation.
     ///
-    /// When the anytype server rate limit is exceeded and responds with http 429 status,
-    /// the http client in this library throttles requests (to 1 per second)
+    /// When the Anytype server responds with HTTP 429, the HTTP client
+    /// throttles and retries only replay-safe methods
     /// until the server stops returning errors, or up to `rate_limit_max_retries` times
     /// before giving up and returning this error to the client. The config setting
     /// `rate_limit_max_retries` can be increased to handle arbitrary-sized
     /// bursts, with the result that the app may spend more time waiting.
-    /// If `rate_limit_max_retries` is zero, the http client will always wait and retry.
+    /// If `rate_limit_max_retries` is zero, replay-safe requests wait and retry
+    /// without a retry-count cap. Non-idempotent mutation requests are never
+    /// replayed automatically and instead return their original 429 failure.
     #[snafu(display("Rate limit exceeded: \"{header}\" (parsed wait_time: {} secs)"))]
     RateLimitExceeded {
         header: String,

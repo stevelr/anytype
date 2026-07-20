@@ -179,7 +179,13 @@ redacted upstream result. Once a write may have been dispatched, the same
 controlled failures return a fixed `conflict` result stating that the mutation
 may have applied and requiring a reread before retry. The marker is cloneable,
 atomic, sticky, and created once per invocation; normal operation errors remain
-the handler's responsibility to classify explicitly.
+the handler's responsibility to classify explicitly. Create and update share a
+conservative rejection classifier: local validation and authorization failures
+and a small allowlist of definitive HTTP rejection statuses may return their
+ordinary error, while timeouts, transport failures, malformed or oversized
+responses, exhausted retries, HTTP 408 and unrecognized 4xx/5xx statuses are
+indeterminate after dispatch. The classifier uses only variants and status
+codes and never incorporates upstream text.
 
 ### View discovery workflows
 
