@@ -21,6 +21,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add strict JSON Schema 2020-12 input/output contracts, bounded object
   summaries and resource URIs, standard tool annotations, structured results
   with compact JSON text fallbacks, and stable secret-safe execution errors.
+- Convert candidate-rich `anytype-api` resolver ambiguities directly into
+  bounded MCP errors while refusing empty or wire-invalid alternatives.
 
 ### Changed
 

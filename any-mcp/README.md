@@ -68,8 +68,9 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   encoder and select only the exact read, create, or destructive-update
   annotation profile;
 - compact JSON text fallbacks matching each typed `structuredContent` result;
-  and stable, bounded, secret-safe execution error bodies that require
-  candidate enrichment before an ambiguity can be returned; and
+  and stable, bounded, secret-safe execution error bodies that convert
+  resolver-provided candidate ids and names while refusing empty or invalid
+  ambiguity output; and
 - diagnostics use a tracing subscriber whose writer is always stderr; verbose
   `anytype` and `rmcp` target prefixes that can expose protocol or upstream
   payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.

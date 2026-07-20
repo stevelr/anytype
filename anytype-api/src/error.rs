@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anytype_rpc::error::AnytypeGrpcError;
 use snafu::prelude::*;
 
+use crate::resolve::ResolveCandidate;
+
 /// Errors returned by anytype crate
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -54,7 +56,13 @@ pub enum AnytypeError {
     /// or view name is not unique in its scope. Use the id (or, for types,
     /// the `@key` form) to disambiguate.
     #[snafu(display("{obj_type} name is ambiguous: {key}"))]
-    Ambiguous { obj_type: String, key: String },
+    Ambiguous {
+        obj_type: String,
+        key: String,
+        /// Deterministically ordered, deduplicated alternatives that callers
+        /// can present when asking the user to disambiguate.
+        candidates: Vec<ResolveCandidate>,
+    },
 
     /// Client is not authenticated.
     #[snafu(display("Client is not authenticated. Log in first."))]
@@ -122,6 +130,21 @@ pub enum AnytypeError {
     /// Some other error occurred
     #[snafu(display("{message}"))]
     Other { message: String },
+}
+
+impl AnytypeError {
+    /// Returns bounded alternatives for an ambiguous resolver lookup.
+    ///
+    /// The slice contains at most
+    /// [`MAX_RESOLVE_CANDIDATES`](crate::resolve::MAX_RESOLVE_CANDIDATES)
+    /// entries. Other error variants return `None`.
+    #[must_use]
+    pub fn resolve_candidates(&self) -> Option<&[ResolveCandidate]> {
+        match self {
+            Self::Ambiguous { candidates, .. } => Some(candidates),
+            _ => None,
+        }
+    }
 }
 
 /// Errors arising from `KeyStore`

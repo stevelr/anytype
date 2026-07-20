@@ -4,3 +4,4 @@
 [gotcha] Parallel tracing capture tests need both serialization and a stable global callsite-interest subscriber; per-future dispatch alone can race callsite interest rebuilds under default-thread cargo test.
 [pattern] rmcp 2.2.0 `schema_for_input`/`schema_for_output` emits JSON Schema 2020-12 and strips only root title/description; `serde(deny_unknown_fields)` produces `additionalProperties: false`.
 [gotcha] Schemars 1.2 emits documented string enums as `oneOf` constant branches and bounded `Option<Vec<T>>` as `type: ["array", "null"]`; strict validation must distinguish those finite/nullable shapes from open untagged unions.
+[pattern] anytype-api resolver ambiguity errors carry deterministic `ResolveCandidate` values capped at 10; MCP adapters must validate them into `EntityId`/bounded names and refuse empty or invalid candidate sets.

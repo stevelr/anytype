@@ -22,7 +22,9 @@ Applications authenticate with Anytype servers using access tokens. One token is
 - Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
 - Http middleware with debug logging, retries, and rate limit handling
 - Client-side caching (spaces, properties, types)
-- Name and id resolution helpers (`resolve` module): accept a space, type, chat, view, or property by name, key, or id
+- Name and id resolution helpers (`resolve` module): accept a space, type,
+  chat, view, or property by name, key, or id; ambiguous names return up to 10
+  deterministic candidate ids and display names for an actionable retry
 - Nested filter expression builder
 - Parameter validation
 - Metrics

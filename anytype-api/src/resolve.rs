@@ -18,8 +18,7 @@
 //!
 //! Shared conventions:
 //!
-//! - A value that already looks like an object id
-//!   ([`looks_like_object_id`](crate::validation::looks_like_object_id)) is
+//! - A value that already looks like an object id ([`looks_like_object_id`]) is
 //!   passed through without a server round trip.
 //! - For types, a leading `@` forces key interpretation (`@page` means the
 //!   type with key `page`), and a value starting with an uppercase ascii
@@ -46,11 +45,49 @@ use crate::{
     validation::looks_like_object_id,
 };
 
+/// Maximum number of alternatives retained for an ambiguous resolution.
+pub const MAX_RESOLVE_CANDIDATES: usize = 10;
+
 /// Name of the default chat created in every space.
 ///
 /// [`resolve_chat_target`](AnytypeClient::resolve_chat_target) falls back to
 /// the chat with this name when given only a space.
 pub const DEFAULT_CHAT_NAME: &str = "General";
+
+/// One safe, bounded-list alternative for an ambiguous resolver lookup.
+///
+/// The identifier and display name remain ordinary strings in the API client;
+/// protocol adapters must validate them for their own wire constraints before
+/// exposing them. Resolver errors cap the containing list at
+/// [`MAX_RESOLVE_CANDIDATES`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveCandidate {
+    id: String,
+    name: String,
+}
+
+impl ResolveCandidate {
+    /// Creates a resolver alternative from its stable id and display name.
+    #[must_use]
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    /// Borrows the stable identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Borrows the display name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 /// A resolved chat reference: the chat object id, plus the containing
 /// space id when it could be determined.
@@ -98,7 +135,13 @@ impl AnytypeClient {
         match matches.len() {
             0 => Err(not_found("space", space_id_or_name)),
             1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous("space", space_id_or_name)),
+            _ => Err(ambiguous(
+                "space",
+                space_id_or_name,
+                matches
+                    .iter()
+                    .map(|space| ResolveCandidate::new(&space.id, &space.name)),
+            )),
         }
     }
 
@@ -124,7 +167,13 @@ impl AnytypeClient {
         match matches.len() {
             0 => Err(not_found("type", type_key_or_id)),
             1 => Ok(matches[0].clone()),
-            _ => Err(ambiguous("type", type_key_or_id)),
+            _ => Err(ambiguous(
+                "type",
+                type_key_or_id,
+                matches.iter().map(|typ| {
+                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
+                }),
+            )),
         }
     }
 
@@ -156,7 +205,13 @@ impl AnytypeClient {
         match matches.len() {
             0 => Err(not_found("type", &key_or_id)),
             1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous("type", &key_or_id)),
+            _ => Err(ambiguous(
+                "type",
+                &key_or_id,
+                matches.iter().map(|typ| {
+                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
+                }),
+            )),
         }
     }
 
@@ -204,7 +259,13 @@ impl AnytypeClient {
         match matches.len() {
             0 => Err(not_found("type", &key_or_name)),
             1 => Ok(matches[0].key.clone()),
-            _ => Err(ambiguous("type", &key_or_name)),
+            _ => Err(ambiguous(
+                "type",
+                &key_or_name,
+                matches.iter().map(|typ| {
+                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
+                }),
+            )),
         }
     }
 
@@ -243,7 +304,13 @@ impl AnytypeClient {
             return Ok(exact[0].id.clone());
         }
         if exact.len() > 1 {
-            return Err(ambiguous("view", view_id_or_name));
+            return Err(ambiguous(
+                "view",
+                view_id_or_name,
+                exact.iter().map(|view| {
+                    ResolveCandidate::new(&view.id, view.name.as_deref().unwrap_or(&view.id))
+                }),
+            ));
         }
 
         let needle = view_id_or_name.to_lowercase();
@@ -254,7 +321,13 @@ impl AnytypeClient {
         match matches.len() {
             0 => Err(not_found("view", view_id_or_name)),
             1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous("view", view_id_or_name)),
+            _ => Err(ambiguous(
+                "view",
+                view_id_or_name,
+                matches.iter().map(|view| {
+                    ResolveCandidate::new(&view.id, view.name.as_deref().unwrap_or(&view.id))
+                }),
+            )),
         }
     }
 
@@ -414,7 +487,13 @@ impl AnytypeClient {
         match matches.len() {
             0 => Err(not_found("chat", chat_id_or_name)),
             1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous("chat", chat_id_or_name)),
+            _ => Err(ambiguous(
+                "chat",
+                chat_id_or_name,
+                matches.iter().map(|chat| {
+                    ResolveCandidate::new(&chat.id, chat.name.as_deref().unwrap_or(&chat.id))
+                }),
+            )),
         }
     }
 
@@ -445,7 +524,13 @@ impl AnytypeClient {
         match matches.len() {
             0 => Ok(None),
             1 => Ok(Some(matches[0].id.clone())),
-            _ => Err(ambiguous("space", space_name)),
+            _ => Err(ambiguous(
+                "space",
+                space_name,
+                matches
+                    .iter()
+                    .map(|space| ResolveCandidate::new(&space.id, &space.name)),
+            )),
         }
     }
 
@@ -460,7 +545,13 @@ impl AnytypeClient {
         match filtered.len() {
             0 => Err(not_found("type", name)),
             1 => Ok(filtered[0].clone()),
-            _ => Err(ambiguous("type", name)),
+            _ => Err(ambiguous(
+                "type",
+                name,
+                filtered.iter().map(|typ| {
+                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
+                }),
+            )),
         }
     }
 }
@@ -479,11 +570,33 @@ fn not_found(obj_type: &str, key: &str) -> AnytypeError {
     }
 }
 
-fn ambiguous(obj_type: &str, key: &str) -> AnytypeError {
+fn ambiguous(
+    obj_type: &str,
+    key: &str,
+    candidates: impl IntoIterator<Item = ResolveCandidate>,
+) -> AnytypeError {
     AnytypeError::Ambiguous {
         obj_type: obj_type.to_string(),
         key: key.to_string(),
+        candidates: bounded_candidates(candidates),
     }
+}
+
+fn bounded_candidates(
+    candidates: impl IntoIterator<Item = ResolveCandidate>,
+) -> Vec<ResolveCandidate> {
+    let mut candidates: Vec<_> = candidates.into_iter().collect();
+    candidates.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut seen_ids = std::collections::HashSet::new();
+    candidates.retain(|candidate| seen_ids.insert(candidate.id.clone()));
+    candidates.truncate(MAX_RESOLVE_CANDIDATES);
+    candidates
 }
 
 #[cfg(test)]
@@ -509,6 +622,70 @@ mod tests {
         assert!(!starts_with_uppercase("task"));
         assert!(!starts_with_uppercase(""));
         assert!(!starts_with_uppercase("@Task"));
+    }
+
+    #[test]
+    fn candidate_collection_preserves_zero_and_one_items() {
+        assert!(bounded_candidates(Vec::new()).is_empty());
+
+        let one = bounded_candidates([ResolveCandidate::new("id-1", "Only")]);
+        assert_eq!(one, vec![ResolveCandidate::new("id-1", "Only")]);
+    }
+
+    #[test]
+    fn candidate_collection_is_deterministic_and_deduplicates_ids() {
+        let candidates = bounded_candidates([
+            ResolveCandidate::new("id-3", "Gamma"),
+            ResolveCandidate::new("id-2", "alpha"),
+            ResolveCandidate::new("id-1", "Alpha"),
+            ResolveCandidate::new("id-2", "Beta"),
+        ]);
+
+        assert_eq!(
+            candidates,
+            vec![
+                ResolveCandidate::new("id-1", "Alpha"),
+                ResolveCandidate::new("id-2", "alpha"),
+                ResolveCandidate::new("id-3", "Gamma"),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidate_collection_caps_large_ambiguities() {
+        let candidates = bounded_candidates(
+            (0..25)
+                .rev()
+                .map(|index| ResolveCandidate::new(format!("id-{index:02}"), "Same")),
+        );
+
+        assert_eq!(candidates.len(), MAX_RESOLVE_CANDIDATES);
+        assert_eq!(candidates[0].id(), "id-00");
+        assert_eq!(candidates[9].id(), "id-09");
+    }
+
+    #[test]
+    fn ambiguity_error_exposes_only_bounded_candidates() {
+        let error = ambiguous(
+            "space",
+            "Work",
+            (0..12).map(|index| {
+                ResolveCandidate::new(format!("id-{index:02}"), format!("Work {index:02}"))
+            }),
+        );
+
+        let AnytypeError::Ambiguous {
+            obj_type,
+            key,
+            candidates,
+        } = &error
+        else {
+            panic!("expected ambiguity error");
+        };
+        assert_eq!(obj_type, "space");
+        assert_eq!(key, "Work");
+        assert_eq!(candidates.len(), MAX_RESOLVE_CANDIDATES);
+        assert_eq!(error.resolve_candidates(), Some(candidates.as_slice()));
     }
 
     #[tokio::test]
