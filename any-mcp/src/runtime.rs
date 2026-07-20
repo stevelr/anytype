@@ -345,6 +345,7 @@ impl UpstreamDiagnostic {
             AnytypeError::NotFound { .. } => Self::new("not_found"),
             AnytypeError::Ambiguous { .. } => Self::new("ambiguous"),
             AnytypeError::ResolutionLimitExceeded { .. } => Self::new("resolution_limit"),
+            AnytypeError::ResponseTooLarge { .. } => Self::new("response_too_large"),
             AnytypeError::RateLimitExceeded { .. } => Self::new("rate_limit"),
             AnytypeError::Validation { .. } => Self::new("validation"),
             AnytypeError::NoKeyStore | AnytypeError::KeyStore { .. } => Self::new("keystore"),

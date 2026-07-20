@@ -29,6 +29,18 @@ pub enum AnytypeError {
         message: String,
     },
 
+    /// A buffered HTTP response exceeded its configured byte ceiling.
+    ///
+    /// The error intentionally contains no response body, URL, request body,
+    /// or credential-bearing value, so callers may classify it safely.
+    #[snafu(display("HTTP response exceeds the configured {limit}-byte limit"))]
+    ResponseTooLarge {
+        /// Maximum response bytes permitted for this operation.
+        limit: u64,
+        /// Server-declared length when one was available.
+        declared: Option<u64>,
+    },
+
     /// Encountered server error on "retryable" request, but all retry attempts failed.
     #[snafu(display("server api request: failed {n} times"))]
     TooManyRetries { n: u32 },

@@ -538,6 +538,7 @@ pub struct ObjectRequest {
     limits: ValidationLimits,
     space_id: String,
     object_id: String,
+    response_limit_bytes: Option<u64>,
 }
 
 impl ObjectRequest {
@@ -553,7 +554,19 @@ impl ObjectRequest {
             limits,
             space_id: space_id.into(),
             object_id: object_id.into(),
+            response_limit_bytes: None,
         }
+    }
+
+    /// Sets a finite response ceiling for this object read.
+    ///
+    /// The value must be non-zero and cannot exceed the client's configured
+    /// [`ResponseLimits::document_bytes`](crate::client::ResponseLimits::document_bytes)
+    /// ceiling. When omitted, that configured document ceiling is used.
+    #[must_use]
+    pub const fn response_limit_bytes(mut self, response_limit_bytes: u64) -> Self {
+        self.response_limit_bytes = Some(response_limit_bytes);
+        self
     }
 
     /// Retrieves the object by ID.
@@ -564,15 +577,21 @@ impl ObjectRequest {
     /// # Errors
     /// - [`AnytypeError::NotFound`] if the object doesn't exist
     /// - [`AnytypeError::Validation`] if IDs are invalid
+    /// - [`AnytypeError::ResponseTooLarge`] if the response exceeds the
+    ///   configured or per-request document ceiling
     pub async fn get(self) -> Result<Object> {
         self.limits.validate_id(&self.space_id, "space_id")?;
         self.limits.validate_id(&self.object_id, "object_id")?;
 
+        let response_limit = self
+            .response_limit_bytes
+            .unwrap_or_else(|| self.client.document_response_limit());
         let response: ObjectResponse = self
             .client
-            .get_request(
+            .get_request_with_limit(
                 &format!("/v1/spaces/{}/objects/{}", self.space_id, self.object_id),
                 QueryWithFilters::default(),
+                response_limit,
             )
             .await?;
         Ok(response.object)
@@ -594,7 +613,7 @@ impl ObjectRequest {
 
         let response: ObjectResponse = self
             .client
-            .delete_request(&format!(
+            .delete_document_request(&format!(
                 "/v1/spaces/{}/objects/{}",
                 self.space_id, self.object_id
             ))
@@ -780,7 +799,7 @@ impl NewObjectRequest {
 
         let response: ObjectResponse = self
             .client
-            .post_request(
+            .post_document_request(
                 &format!("/v1/spaces/{}/objects", self.space_id),
                 &request_body,
                 QueryWithFilters::default(),
@@ -792,9 +811,10 @@ impl NewObjectRequest {
             return verify_available(&config, "Object", &object.id, || async {
                 let response: ObjectResponse = self
                     .client
-                    .get_request(
+                    .get_request_with_limit(
                         &format!("/v1/spaces/{}/objects/{}", self.space_id, object.id),
                         QueryWithFilters::default(),
+                        self.client.document_response_limit(),
                     )
                     .await?;
                 Ok(response.object)
@@ -988,7 +1008,7 @@ impl UpdateObjectRequest {
 
         let response: ObjectResponse = self
             .client
-            .patch_request(
+            .patch_document_request(
                 &format!("/v1/spaces/{}/objects/{}", self.space_id, self.object_id),
                 &request_body,
             )
@@ -999,9 +1019,10 @@ impl UpdateObjectRequest {
             return verify_available(&config, "Object", &object.id, || async {
                 let response: ObjectResponse = self
                     .client
-                    .get_request(
+                    .get_request_with_limit(
                         &format!("/v1/spaces/{}/objects/{}", self.space_id, object.id),
                         QueryWithFilters::default(),
+                        self.client.document_response_limit(),
                     )
                     .await?;
                 Ok(response.object)

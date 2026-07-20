@@ -7,7 +7,9 @@
 
 use std::{fmt, time::Duration};
 
-use anytype::prelude::ClientConfig;
+use anytype::prelude::{
+    ClientConfig, MAX_DOCUMENT_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseLimits,
+};
 
 const DEFAULT_KEYSTORE_SERVICE: &str = "anyr";
 const DEFAULT_MAX_CONCURRENCY: usize = 8;
@@ -16,6 +18,8 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_REQUEST_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 15;
 const MAX_STARTUP_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_JSON_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const DEFAULT_DOCUMENT_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Validated configuration for one `any-mcp` process.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +30,10 @@ pub struct RuntimeConfig {
     pub request_timeout: Duration,
     /// Timeout applied independently to each startup health check.
     pub startup_timeout: Duration,
+    /// Maximum bytes buffered for ordinary Anytype JSON responses.
+    pub json_response_bytes: u64,
+    /// Maximum bytes buffered for a document/object JSON response.
+    pub document_response_bytes: u64,
     anytype_url: Option<String>,
     grpc_endpoint: Option<String>,
     keystore: Option<String>,
@@ -37,8 +45,9 @@ impl RuntimeConfig {
     ///
     /// Anytype settings use `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
     /// `ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE`. Operational limits
-    /// use `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`, and
-    /// `ANY_MCP_STARTUP_TIMEOUT_SECS`.
+    /// use `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
+    /// `ANY_MCP_STARTUP_TIMEOUT_SECS`, `ANY_MCP_JSON_RESPONSE_BYTES`, and
+    /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`.
     ///
     /// # Errors
     ///
@@ -62,6 +71,11 @@ impl RuntimeConfig {
             keystore: self.keystore.clone(),
             keystore_service: Some(self.keystore_service.clone()),
             app_name: env!("CARGO_PKG_NAME").to_string(),
+            response_limits: ResponseLimits {
+                json_bytes: self.json_response_bytes,
+                document_bytes: self.document_response_bytes,
+                ..ResponseLimits::default()
+            },
             ..ClientConfig::default()
         }
     }
@@ -88,11 +102,31 @@ impl RuntimeConfig {
             DEFAULT_STARTUP_TIMEOUT_SECS,
             MAX_STARTUP_TIMEOUT_SECS,
         )?;
+        let json_response_bytes = parse_bounded(
+            "ANY_MCP_JSON_RESPONSE_BYTES",
+            lookup("ANY_MCP_JSON_RESPONSE_BYTES")?,
+            DEFAULT_JSON_RESPONSE_BYTES,
+            MAX_JSON_RESPONSE_BYTES,
+        )?;
+        let document_response_bytes = parse_bounded(
+            "ANY_MCP_DOCUMENT_RESPONSE_BYTES",
+            lookup("ANY_MCP_DOCUMENT_RESPONSE_BYTES")?,
+            DEFAULT_DOCUMENT_RESPONSE_BYTES,
+            MAX_DOCUMENT_RESPONSE_BYTES,
+        )?;
+        if document_response_bytes < json_response_bytes {
+            return Err(ConfigError::invalid(
+                "ANY_MCP_DOCUMENT_RESPONSE_BYTES",
+                "must be at least ANY_MCP_JSON_RESPONSE_BYTES",
+            ));
+        }
 
         Ok(Self {
             max_concurrency,
             request_timeout: Duration::from_secs(request_timeout_secs),
             startup_timeout: Duration::from_secs(startup_timeout_secs),
+            json_response_bytes,
+            document_response_bytes,
             anytype_url: non_empty(lookup("ANYTYPE_URL")?),
             grpc_endpoint: non_empty(lookup("ANYTYPE_GRPC_ENDPOINT")?),
             keystore: non_empty(lookup("ANYTYPE_KEYSTORE")?),
@@ -177,6 +211,8 @@ mod tests {
         assert_eq!(config.max_concurrency, 8);
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.startup_timeout, Duration::from_secs(15));
+        assert_eq!(config.json_response_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.document_response_bytes, 16 * 1024 * 1024);
         assert_eq!(
             config.client_config().keystore_service.as_deref(),
             Some("anyr")
@@ -193,6 +229,8 @@ mod tests {
             ("ANY_MCP_MAX_CONCURRENCY", "16"),
             ("ANY_MCP_REQUEST_TIMEOUT_SECS", "45"),
             ("ANY_MCP_STARTUP_TIMEOUT_SECS", "20"),
+            ("ANY_MCP_JSON_RESPONSE_BYTES", "1048576"),
+            ("ANY_MCP_DOCUMENT_RESPONSE_BYTES", "2097152"),
         ])
         .expect("valid configuration");
         let client = config.client_config();
@@ -203,6 +241,8 @@ mod tests {
         assert_eq!(client.keystore_service.as_deref(), Some("custom-service"));
         assert_eq!(config.max_concurrency, 16);
         assert_eq!(config.request_timeout, Duration::from_secs(45));
+        assert_eq!(client.response_limits.json_bytes, 1_048_576);
+        assert_eq!(client.response_limits.document_bytes, 2_097_152);
     }
 
     #[test]
@@ -222,5 +262,14 @@ mod tests {
         assert!(config(&[("ANY_MCP_MAX_CONCURRENCY", "65")]).is_err());
         assert!(config(&[("ANY_MCP_REQUEST_TIMEOUT_SECS", "301")]).is_err());
         assert!(config(&[("ANY_MCP_STARTUP_TIMEOUT_SECS", "121")]).is_err());
+        assert!(config(&[("ANY_MCP_JSON_RESPONSE_BYTES", "0")]).is_err());
+        assert!(config(&[("ANY_MCP_JSON_RESPONSE_BYTES", "67108865")]).is_err());
+        assert!(
+            config(&[
+                ("ANY_MCP_JSON_RESPONSE_BYTES", "2097152"),
+                ("ANY_MCP_DOCUMENT_RESPONSE_BYTES", "1048576"),
+            ])
+            .is_err()
+        );
     }
 }

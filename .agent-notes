@@ -9,3 +9,4 @@
 [gotcha] Cursor token parsing must validate ASCII grammar before decoding; byte-index slicing an arbitrary UTF-8 token creates a remotely triggerable panic even when total byte length is bounded.
 [pattern] Resolver scans use an explicit 1,000-row policy: unique/not-found requires complete bounded evidence, ambiguity retains a deterministic safe top ten, and view resolution scans for a later exact ID before classifying names.
 [gotcha] Handler-side pagination/projection does not bound upstream allocation when the HTTP client first calls `response.bytes().await`; enforce response-byte ceilings while reading the Anytype JSON body.
+[pattern] Body-bearing object create/get/delete/update and template-get responses use the document JSON ceiling; lists/search/views use the generic ceiling, errors and raw files have separate policies, and HEAD/304 representation lengths do not imply buffered bodies.

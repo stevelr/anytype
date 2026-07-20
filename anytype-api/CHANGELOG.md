@@ -27,6 +27,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- finite, incrementally enforced HTTP response ceilings for generic JSON,
+  document JSON, bounded error bodies, and separately governed raw file
+  downloads; object reads support a per-request ceiling within the configured
+  document allowance, and oversized responses return the secret-safe
+  `ResponseTooLarge` error
+
 - REST file download/delete APIs (`download_bytes`, `delete`) and unified file
   upload selection: simple path/byte uploads use REST, while URL uploads and
   uploads with style, details, or creation context retain the richer gRPC path

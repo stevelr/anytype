@@ -34,6 +34,49 @@ Applications authenticate with Anytype servers using access tokens. One token is
   - [anyr](https://github.com/stevelr/anytype/tree/main/anyr) - list, search, and manipulate anytype objects
   - [any-edit](https://github.com/stevelr/anytype/tree/main/any-edit) - edit anytype docs in markdown in external editor
 
+### Bounded HTTP responses
+
+Buffered REST responses have finite byte ceilings. Ordinary JSON defaults to
+8 MiB, single-object/document JSON to 64 MiB, bounded error bodies to 64 KiB,
+and raw file downloads to a separate 256 MiB policy. Truthful oversized
+`Content-Length` responses are rejected before their body is read; responses
+without a usable length are stopped at the first byte over the ceiling. SSE
+chat events remain incremental streams and are not buffered as JSON.
+
+Applications can lower or raise the defaults within the library's hard
+maxima. An individual object read can choose a smaller ceiling but cannot
+exceed the configured document allowance:
+
+```rust,no_run
+use anytype::prelude::*;
+
+# async fn example() -> Result<(), AnytypeError> {
+let config = ClientConfig {
+    response_limits: ResponseLimits {
+        json_bytes: 4 * 1024 * 1024,
+        document_bytes: 24 * 1024 * 1024,
+        error_bytes: 32 * 1024,
+        file_bytes: 128 * 1024 * 1024,
+    },
+    ..ClientConfig::default()
+};
+let client = AnytypeClient::with_config(config)?;
+let object = client
+    .object("space-id", "object-id")
+    .response_limit_bytes(12 * 1024 * 1024)
+    .get()
+    .await?;
+# let _ = object;
+# Ok(())
+# }
+```
+
+The 64 MiB document default accommodates worst-case JSON escaping of a valid
+10 MiB outgoing markdown body. The hard maxima are 64 MiB for ordinary and document JSON, 1 MiB for error
+bodies, and 1 GiB for raw files. `AnytypeError::ResponseTooLarge` contains only
+the selected ceiling and optional declared length; it never retains a response
+body, URL, request payload, or credential.
+
 ## Quick start
 
 ```rust

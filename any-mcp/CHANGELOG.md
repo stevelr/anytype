@@ -26,6 +26,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Convert candidate-rich `anytype-api` resolver ambiguities directly into
   bounded MCP errors, retaining valid alternatives alongside malformed ones;
   resolver scan-limit failures map to the stable `bounded_result` code.
+- Enforce configurable finite Anytype JSON and document response budgets while
+  chunks arrive, and map secret-safe oversized-response failures to
+  `bounded_result`.
 
 ### Changed
 
