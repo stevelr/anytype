@@ -110,12 +110,9 @@ impl<R, W> LegacyStdioTransport<R, W>
 where
     R: AsyncBufRead + Unpin,
 {
-    async fn queue_decoder_message(
-        &mut self,
-        item: TxJsonRpcMessage<RoleServer>,
-    ) -> io::Result<()> {
+    async fn queue_decoder_message(&mut self, item: Value) -> io::Result<()> {
         debug_assert!(self.pending_decoder_frame.is_none());
-        self.pending_decoder_frame = Some(encode_legacy_message(item)?);
+        self.pending_decoder_frame = Some(encode_bounded_legacy_frame(&item)?);
         self.flush_pending_decoder_frame().await
     }
 
@@ -225,11 +222,9 @@ where
                 Ok(Some(frame)) => frame,
                 Ok(None) | Err(FrameReadError::Io) => return None,
                 Err(FrameReadError::TooLarge) => {
-                    let error = TxJsonRpcMessage::<RoleServer>::error(
-                        ErrorData::invalid_request("Invalid request", None),
-                        None,
-                    );
-                    self.queue_decoder_message(error).await.ok()?;
+                    self.queue_decoder_message(invalid_request(Value::Null))
+                        .await
+                        .ok()?;
                     continue;
                 }
             };
@@ -241,25 +236,20 @@ where
             let value = match serde_json::from_slice::<Value>(frame) {
                 Ok(value) => value,
                 Err(_) => {
-                    let error = TxJsonRpcMessage::<RoleServer>::error(
-                        ErrorData::parse_error("Parse error", None),
-                        None,
-                    );
-                    self.queue_decoder_message(error).await.ok()?;
+                    self.queue_decoder_message(parse_error()).await.ok()?;
                     continue;
                 }
             };
-            if should_ignore_legacy_notification(&value) {
-                continue;
-            }
+            let is_notification = is_jsonrpc_notification(&value);
             match serde_json::from_value(value) {
                 Ok(message) => return Some(message),
                 Err(_) => {
-                    let error = TxJsonRpcMessage::<RoleServer>::error(
-                        ErrorData::invalid_request("Invalid request", None),
-                        None,
-                    );
-                    self.queue_decoder_message(error).await.ok()?;
+                    if is_notification {
+                        continue;
+                    }
+                    self.queue_decoder_message(invalid_request(Value::Null))
+                        .await
+                        .ok()?;
                 }
             }
         }
@@ -280,7 +270,11 @@ where
 }
 
 fn encode_legacy_message(item: TxJsonRpcMessage<RoleServer>) -> io::Result<Vec<u8>> {
-    let encoded = serde_json::to_vec(&item)
+    encode_bounded_legacy_frame(&item)
+}
+
+fn encode_bounded_legacy_frame(item: &impl serde::Serialize) -> io::Result<Vec<u8>> {
+    let encoded = serde_json::to_vec(item)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "JSON-RPC encoding failed"))?;
     if encoded.len().saturating_add(1) > MAX_FRAME_BYTES {
         return Err(io::Error::new(
@@ -306,51 +300,12 @@ where
     writer.shutdown().await
 }
 
-fn should_ignore_legacy_notification(value: &Value) -> bool {
-    let Some(method) = value.get("method").and_then(Value::as_str) else {
-        return false;
-    };
-    if value.get("id").is_some() {
-        return false;
-    }
-    !is_standard_legacy_method(method)
-        || (method.starts_with("notifications/") && !is_standard_legacy_notification(method))
-}
-
-fn is_standard_legacy_method(method: &str) -> bool {
-    matches!(
-        method,
-        "initialize"
-            | "ping"
-            | "prompts/get"
-            | "prompts/list"
-            | "resources/list"
-            | "resources/read"
-            | "resources/subscribe"
-            | "resources/unsubscribe"
-            | "resources/templates/list"
-            | "tools/call"
-            | "tools/list"
-            | "completion/complete"
-            | "logging/setLevel"
-            | "roots/list"
-            | "sampling/createMessage"
-    ) || is_standard_legacy_notification(method)
-}
-
-fn is_standard_legacy_notification(method: &str) -> bool {
-    matches!(
-        method,
-        "notifications/cancelled"
-            | "notifications/initialized"
-            | "notifications/message"
-            | "notifications/progress"
-            | "notifications/prompts/list_changed"
-            | "notifications/resources/list_changed"
-            | "notifications/resources/updated"
-            | "notifications/roots/list_changed"
-            | "notifications/tools/list_changed"
-    )
+fn is_jsonrpc_notification(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        !object.contains_key("id")
+            && object.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && object.get("method").and_then(Value::as_str).is_some()
+    })
 }
 
 enum FirstFrame {

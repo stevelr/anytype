@@ -15,8 +15,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   cancellation, clean EOF, and the full normal/read-only tool and resource
   surface. Validate real modern process exchanges against the official draft
   schema. The legacy decoder now emits exactly one JSON-RPC parse error for
-  each syntactically malformed newline frame, distinguishes oversized and
-  well-formed invalid requests, and remains usable for subsequent requests.
+  each syntactically malformed newline frame with an explicit null response
+  ID, distinguishes oversized and well-formed invalid requests, never replies
+  to valid JSON-RPC notification shapes, and remains usable for subsequent
+  requests.
   Decoder errors and rmcp service responses share one bounded stdout writer;
   input framing is cancellation-safe and capped at 2 MiB. Treat client identity
   as optional per the locked schema and preserve empty-string request IDs
