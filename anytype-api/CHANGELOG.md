@@ -49,7 +49,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - new error variant `AnytypeError::Ambiguous`, returned by the `resolve_*` helpers
   when a space, type, chat, or view name matches more than one item; ambiguity
   errors now include up to 10 deterministic, deduplicated candidate ids and
-  display names through the new `ResolveCandidate` type
+  display names through the new `ResolveCandidate` type; resolver scans use a
+  hard 1,000-row limit and return `ResolutionLimitExceeded` rather than a
+  possibly false unique/not-found result
 
 ### Changed
 
