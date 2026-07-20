@@ -25,7 +25,8 @@ Applications authenticate with Anytype servers using access tokens. One token is
 - Name and id resolution helpers (`resolve` module): accept a space, type,
   chat, view, or property by name, key, or id; ambiguous names return up to 10
   deterministic candidate ids and display names for an actionable retry, and
-  bounded scans fail explicitly instead of guessing from partial results
+  bounded scans fail explicitly instead of guessing from partial results;
+  candidate ordering is independent of upstream page order
 - Nested filter expression builder
 - Parameter validation
 - Metrics
