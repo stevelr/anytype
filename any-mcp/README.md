@@ -187,6 +187,30 @@ responses, exhausted retries, HTTP 408 and unrecognized 4xx/5xx statuses are
 indeterminate after dispatch. The classifier uses only variants and status
 codes and never incorporates upstream text.
 
+### Object update workflow
+
+The transport-neutral `object_update` handler replaces only fields explicitly
+supplied by the caller. Omitted name, body, properties, type, and icon fields
+remain unchanged, and JSON `null` is rejected rather than treated as omission.
+`body_markdown` is a complete body replacement; an empty string is its explicit
+clear form. Name and icon clearing are not advertised because the upstream
+object-update API has no distinct supported clear form.
+
+Callers can supply the complete-body SHA-256 returned by `object_get` as
+`expected_body_sha256`, including when guarding a non-body mutation. The
+handler reads and hashes the complete current body under the document response
+ceiling and returns `conflict` before the single update request when it is
+stale. A body replacement without this precondition is allowed, but can
+overwrite a concurrent edit. Anytype does not provide an atomic compare-and-
+swap primitive, so a best-effort race remains between the precondition read and
+the update.
+
+After one update request, the handler performs an explicit read-after-write
+GET and verifies safe object/space identity, every requested observable field,
+and the relevant complete body hash. Results contain only the bounded updated
+summary, canonical resource link, and body hash when a body or hash
+precondition was supplied; they never echo the document body.
+
 ### View discovery workflows
 
 The transport-neutral `view_list` and `view_object_list` handlers provide one
@@ -288,6 +312,8 @@ the final catalog integration phase.
 - `src/object_read.rs` — typed one-page object search and chunked object-get
   handlers.
 - `src/object_archive.rs` — single-object soft archive contract and handler.
+- `src/object_update.rs` — conflict-aware whole-field update contract and
+  read-after-write verifier.
 - `src/validation.rs` — reusable collection, filter, and body chunk bounds.
 - `src/pagination.rs` — bounded pagination inputs and result pages.
 - `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.

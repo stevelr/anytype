@@ -21,6 +21,7 @@ pub mod mutation_value;
 pub mod object_archive;
 pub mod object_output;
 pub mod object_read;
+pub mod object_update;
 pub mod pagination;
 pub mod protocol;
 pub mod resources;
