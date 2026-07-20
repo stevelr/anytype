@@ -283,7 +283,7 @@ impl fmt::Display for CreateInputError {
 
 impl std::error::Error for CreateInputError {}
 
-/// Builds the strict create contract; registration is performed by the catalog ticket.
+/// Builds the strict create contract consumed by the static catalog.
 pub fn object_create_tool() -> Result<WorkflowTool<ObjectCreateOutput>, SchemaContractError> {
     workflow_tool::<ObjectCreateInput, ObjectCreateOutput>(
         "object_create",

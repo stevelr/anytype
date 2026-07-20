@@ -51,3 +51,22 @@ fn invalid_operational_setting_does_not_echo_its_value() {
     assert!(stderr.contains("ANY_MCP_MAX_CONCURRENCY"));
     assert!(!stderr.contains(secret_like_value));
 }
+
+#[test]
+fn invalid_read_only_setting_fails_before_auth_without_echoing_its_value() {
+    let secret_like_value = "secret-value-that-is-not-zero-or-one";
+    let output = unauthenticated_command()
+        .env("ANY_MCP_READ_ONLY", secret_like_value)
+        .output()
+        .expect("run any-mcp test binary");
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "stdout is reserved for MCP frames"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("ANY_MCP_READ_ONLY"));
+    assert!(!stderr.contains(secret_like_value));
+    assert!(!stderr.contains("HTTP credentials are missing"));
+}

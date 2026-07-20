@@ -24,6 +24,8 @@ const DEFAULT_DOCUMENT_RESPONSE_BYTES: u64 = MAX_DOCUMENT_RESPONSE_BYTES;
 /// Validated configuration for one `any-mcp` process.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
+    /// Whether the production catalog omits and rejects mutating workflows.
+    pub read_only: bool,
     /// Maximum number of concurrent Anytype operations.
     pub max_concurrency: usize,
     /// End-to-end timeout for one Anytype operation, including permit wait.
@@ -45,14 +47,15 @@ impl RuntimeConfig {
     ///
     /// Anytype settings use `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
     /// `ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE`. Operational limits
-    /// use `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
+    /// use `ANY_MCP_READ_ONLY`, `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
     /// `ANY_MCP_STARTUP_TIMEOUT_SECS`, `ANY_MCP_JSON_RESPONSE_BYTES`, and
     /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when an environment value is non-Unicode,
-    /// non-numeric, zero, or above its defensive maximum.
+    /// violates the exact read-only switch grammar, is non-numeric or zero,
+    /// or exceeds its defensive maximum.
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)),
@@ -84,6 +87,7 @@ impl RuntimeConfig {
     where
         F: Fn(&'static str) -> Result<Option<String>, ConfigError>,
     {
+        let read_only = parse_read_only(lookup("ANY_MCP_READ_ONLY")?)?;
         let max_concurrency = parse_bounded(
             "ANY_MCP_MAX_CONCURRENCY",
             lookup("ANY_MCP_MAX_CONCURRENCY")?,
@@ -122,6 +126,7 @@ impl RuntimeConfig {
         }
 
         Ok(Self {
+            read_only,
             max_concurrency,
             request_timeout: Duration::from_secs(request_timeout_secs),
             startup_timeout: Duration::from_secs(startup_timeout_secs),
@@ -133,6 +138,17 @@ impl RuntimeConfig {
             keystore_service: non_empty(lookup("ANYTYPE_KEYSTORE_SERVICE")?)
                 .unwrap_or_else(|| DEFAULT_KEYSTORE_SERVICE.to_string()),
         })
+    }
+}
+
+fn parse_read_only(value: Option<String>) -> Result<bool, ConfigError> {
+    match value.as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(ConfigError::invalid(
+            "ANY_MCP_READ_ONLY",
+            "must be exactly 0 or 1",
+        )),
     }
 }
 
@@ -209,6 +225,7 @@ mod tests {
         let config = config(&[]).expect("default configuration");
 
         assert_eq!(config.max_concurrency, 8);
+        assert!(!config.read_only);
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.startup_timeout, Duration::from_secs(15));
         assert_eq!(config.json_response_bytes, 8 * 1024 * 1024);
@@ -238,6 +255,7 @@ mod tests {
             ("ANYTYPE_GRPC_ENDPOINT", "127.0.0.1:31013"),
             ("ANYTYPE_KEYSTORE", "env"),
             ("ANYTYPE_KEYSTORE_SERVICE", "custom-service"),
+            ("ANY_MCP_READ_ONLY", "1"),
             ("ANY_MCP_MAX_CONCURRENCY", "16"),
             ("ANY_MCP_REQUEST_TIMEOUT_SECS", "45"),
             ("ANY_MCP_STARTUP_TIMEOUT_SECS", "20"),
@@ -252,6 +270,7 @@ mod tests {
         assert_eq!(client.keystore.as_deref(), Some("env"));
         assert_eq!(client.keystore_service.as_deref(), Some("custom-service"));
         assert_eq!(config.max_concurrency, 16);
+        assert!(config.read_only);
         assert_eq!(config.request_timeout, Duration::from_secs(45));
         assert_eq!(client.response_limits.json_bytes, 1_048_576);
         assert_eq!(client.response_limits.document_bytes, 2_097_152);
@@ -283,5 +302,17 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn read_only_parser_is_exact_and_fails_closed() {
+        assert!(!config(&[]).unwrap().read_only);
+        assert!(!config(&[("ANY_MCP_READ_ONLY", "0")]).unwrap().read_only);
+        assert!(config(&[("ANY_MCP_READ_ONLY", "1")]).unwrap().read_only);
+        for invalid in ["", "true", "TRUE", "01", " 1", "1 ", "2", "-1"] {
+            let error = config(&[("ANY_MCP_READ_ONLY", invalid)]).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("ANY_MCP_READ_ONLY"));
+        }
     }
 }

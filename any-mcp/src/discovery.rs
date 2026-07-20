@@ -378,7 +378,7 @@ pub struct TagSummary {
     color: ProjectedColor,
 }
 
-/// Constructs the `server_status` contract without registering it.
+/// Constructs the strict `server_status` contract consumed by the static catalog.
 pub fn server_status_tool() -> Result<WorkflowTool<ServerStatusOutput>, SchemaContractError> {
     workflow_tool::<ServerStatusInput, ServerStatusOutput>(
         "server_status",
@@ -387,7 +387,7 @@ pub fn server_status_tool() -> Result<WorkflowTool<ServerStatusOutput>, SchemaCo
     )
 }
 
-/// Constructs the `space_list` contract without registering it.
+/// Constructs the strict `space_list` contract consumed by the static catalog.
 pub fn space_list_tool() -> Result<WorkflowTool<Page<SpaceSummary>>, SchemaContractError> {
     workflow_tool::<SpaceListInput, Page<SpaceSummary>>(
         "space_list",
@@ -396,7 +396,7 @@ pub fn space_list_tool() -> Result<WorkflowTool<Page<SpaceSummary>>, SchemaContr
     )
 }
 
-/// Constructs the `type_list` contract without registering it.
+/// Constructs the strict `type_list` contract consumed by the static catalog.
 pub fn type_list_tool() -> Result<WorkflowTool<Page<TypeSummary>>, SchemaContractError> {
     workflow_tool::<TypeListInput, Page<TypeSummary>>(
         "type_list",
@@ -405,7 +405,7 @@ pub fn type_list_tool() -> Result<WorkflowTool<Page<TypeSummary>>, SchemaContrac
     )
 }
 
-/// Constructs the `property_list` contract without registering it.
+/// Constructs the strict `property_list` contract consumed by the static catalog.
 pub fn property_list_tool() -> Result<WorkflowTool<Page<PropertySummary>>, SchemaContractError> {
     workflow_tool::<PropertyListInput, Page<PropertySummary>>(
         "property_list",
@@ -414,7 +414,7 @@ pub fn property_list_tool() -> Result<WorkflowTool<Page<PropertySummary>>, Schem
     )
 }
 
-/// Constructs the `tag_list` contract without registering it.
+/// Constructs the strict `tag_list` contract consumed by the static catalog.
 pub fn tag_list_tool() -> Result<WorkflowTool<Page<TagSummary>>, SchemaContractError> {
     workflow_tool::<TagListInput, Page<TagSummary>>(
         "tag_list",
@@ -423,7 +423,7 @@ pub fn tag_list_tool() -> Result<WorkflowTool<Page<TagSummary>>, SchemaContractE
     )
 }
 
-/// Constructs the `template_list` contract without registering it.
+/// Constructs the strict `template_list` contract consumed by the static catalog.
 pub fn template_list_tool() -> Result<WorkflowTool<Page<ObjectSummary>>, SchemaContractError> {
     workflow_tool::<TemplateListInput, Page<ObjectSummary>>(
         "template_list",

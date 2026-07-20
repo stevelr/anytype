@@ -202,7 +202,7 @@ pub struct ViewReadHandlers {
 }
 
 impl ViewReadHandlers {
-    /// Constructs both strict read-tool contracts without registering them.
+    /// Constructs both strict read-tool contracts consumed by the static catalog.
     ///
     /// # Errors
     ///
@@ -231,13 +231,13 @@ impl ViewReadHandlers {
         })
     }
 
-    /// Returns the typed `view_list` tool contract for later catalog wiring.
+    /// Returns the typed `view_list` tool contract used by the static catalog.
     #[must_use]
     pub const fn view_list_contract(&self) -> &WorkflowTool<Page<ViewSummary>> {
         &self.view_list_contract
     }
 
-    /// Returns the typed `view_object_list` contract for later catalog wiring.
+    /// Returns the typed `view_object_list` contract used by the static catalog.
     #[must_use]
     pub const fn view_object_list_contract(
         &self,
