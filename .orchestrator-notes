@@ -1,7 +1,6 @@
 # Orchestrator Notes
 
-- Final scoped query `br ready -l mcp -p 0 -p 1 -p 2 -t bug -t chore -t task --json` returned `[]`.
-- `any-cut` and `any-g8g` remain in progress; 18 other scoped MCP issues are dependency-blocked.
-- `any-cut` has an implementation on divergent jj commit `4e6597c1dccb` with its crate changelog updated, but this session recorded no integration. Reconcile that head through the normal review/integration lifecycle before starting dependents.
-- Process follow-ups: `any-8b1` covers dirty orchestration metadata blocking workspace setup; `any-i5l` covers tracker/integration outcome reconciliation.
-- Next: integrate and close through the designated lifecycle, then rerun the scoped ready query.
+- Audited `any-g8g`: the canonical filtered ready query and tracker-ready/session-deferred/blocked classifications are present in `AGENTS.md`; the final query returned `[]`.
+- `any-g8g` is verified but remains in progress for the designated closer; no crate files changed, so no crate CHANGELOG entry applies.
+- Blocked state: 18 scoped MCP issues remain dependency-blocked. `any-cut` is still in progress, and its scaffold change is on a divergent head rather than in the current ancestry.
+- Next: integrate and verify `any-cut`, let the designated closer close verified tickets, then rerun the exact scoped ready query.
