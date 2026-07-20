@@ -1248,7 +1248,12 @@ impl ChatHttpMessageStreamRequest<'_> {
     }
 
     /// Open the SSE response and return a typed asynchronous event stream.
+    ///
+    /// Space and chat IDs must be nonempty path-safe identifiers containing
+    /// only ASCII letters, digits, `.`, `_`, `~`, or `-`.
     pub async fn open(self) -> Result<ChatHttpEventStream> {
+        validate_chat_stream_path_id("space_id", &self.space_id)?;
+        validate_chat_stream_path_id("chat_id", &self.chat_id)?;
         if self.limit == Some(0) || self.limit.is_some_and(|limit| limit > 1000) {
             return Err(AnytypeError::Validation {
                 message: "chat message stream limit must be between 1 and 1000".to_string(),
@@ -1299,13 +1304,6 @@ impl ChatHttpMessageStreamRequest<'_> {
         };
         let inner = futures::stream::unfold(state, |mut state| async move {
             loop {
-                if let Some(frame) = take_sse_frame(&mut state.buffer, state.finished) {
-                    match parse_chat_http_event(&frame) {
-                        Ok(Some(event)) => return Some((Ok(event), state)),
-                        Ok(None) => continue,
-                        Err(err) => return Some((Err(err), state)),
-                    }
-                }
                 if state.finished {
                     return None;
                 }
@@ -1316,9 +1314,22 @@ impl ChatHttpMessageStreamRequest<'_> {
                     .copied()
                 {
                     state.pending_offset += 1;
-                    if let Err(err) = append_sse_byte(&mut state.buffer, byte, state.event_limit) {
-                        state.terminate();
-                        return Some((Err(err), state));
+                    match append_sse_byte(&mut state.buffer, byte, state.event_limit) {
+                        Ok(Some(delimiter_len)) => {
+                            let frame_end = state.buffer.len() - delimiter_len;
+                            let parsed = parse_chat_http_event(&state.buffer[..frame_end]);
+                            state.buffer.clear();
+                            match parsed {
+                                Ok(Some(event)) => return Some((Ok(event), state)),
+                                Ok(None) => continue,
+                                Err(err) => return Some((Err(err), state)),
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            state.terminate();
+                            return Some((Err(err), state));
+                        }
                     }
                     continue;
                 }
@@ -1341,7 +1352,18 @@ impl ChatHttpMessageStreamRequest<'_> {
                             state,
                         ));
                     }
-                    None => state.finished = true,
+                    None => {
+                        state.finished = true;
+                        if !state.buffer.is_empty() {
+                            let parsed = parse_chat_http_event(&state.buffer);
+                            state.buffer.clear();
+                            match parsed {
+                                Ok(Some(event)) => return Some((Ok(event), state)),
+                                Ok(None) => continue,
+                                Err(err) => return Some((Err(err), state)),
+                            }
+                        }
+                    }
                 }
             }
         })
@@ -1363,7 +1385,7 @@ struct ChatHttpSseState {
 impl ChatHttpSseState {
     fn terminate(&mut self) {
         self.finished = true;
-        self.buffer.clear();
+        self.buffer = Vec::new();
         self.pending = None;
         self.pending_offset = 0;
         self.chunks = futures::stream::empty().boxed();
@@ -1849,27 +1871,7 @@ fn http_reactions(
     reactions
 }
 
-fn take_sse_frame(buffer: &mut Vec<u8>, finished: bool) -> Option<Vec<u8>> {
-    let lf = buffer.windows(2).position(|window| window == b"\n\n");
-    let crlf = buffer.windows(4).position(|window| window == b"\r\n\r\n");
-    let boundary = match (lf, crlf) {
-        (Some(lf), Some(crlf)) if lf < crlf => Some((lf, 2)),
-        (Some(_), Some(crlf)) | (None, Some(crlf)) => Some((crlf, 4)),
-        (Some(lf), None) => Some((lf, 2)),
-        (None, None) => None,
-    };
-    if let Some((end, delimiter_len)) = boundary {
-        let frame = buffer[..end].to_vec();
-        buffer.drain(..end + delimiter_len);
-        return Some(frame);
-    }
-    if finished && !buffer.is_empty() {
-        return Some(std::mem::take(buffer));
-    }
-    None
-}
-
-fn append_sse_byte(buffer: &mut Vec<u8>, byte: u8, limit: u64) -> Result<()> {
+fn append_sse_byte(buffer: &mut Vec<u8>, byte: u8, limit: u64) -> Result<Option<usize>> {
     let current =
         u64::try_from(buffer.len()).map_err(|_| AnytypeError::ChatSseEventTooLarge { limit })?;
     let next = current
@@ -1879,6 +1881,28 @@ fn append_sse_byte(buffer: &mut Vec<u8>, byte: u8, limit: u64) -> Result<()> {
         return Err(AnytypeError::ChatSseEventTooLarge { limit });
     }
     buffer.push(byte);
+    if buffer.ends_with(b"\r\n\r\n") {
+        Ok(Some(4))
+    } else if buffer.ends_with(b"\n\n") {
+        Ok(Some(2))
+    } else {
+        Ok(None)
+    }
+}
+
+fn validate_chat_stream_path_id(name: &'static str, id: &str) -> Result<()> {
+    const MAX_PATH_ID_CHARS: usize = 256;
+    if id.is_empty()
+        || matches!(id, "." | "..")
+        || id.chars().count() > MAX_PATH_ID_CHARS
+        || !id
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || b"._~-".contains(&character))
+    {
+        return Err(AnytypeError::Validation {
+            message: format!("{name} must be a nonempty safe path identifier"),
+        });
+    }
     Ok(())
 }
 
@@ -3706,11 +3730,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        ChatHttpEvent, ChatMessage, HttpChatMessage, MessageAttachment, MessageAttachmentType,
-        MessageBlock, MessageBlockLink, MessageBlockLinkType, MessageBlockText, MessageContent,
-        MessageTextMarkType, MessageTextStyle, ReadMessagesBody, append_sse_byte,
-        chat_message_from_grpc, chat_message_path, chat_stream_diagnostic_path, grpc_message_block,
-        message_block_from_grpc, take_sse_frame,
+        ChatHttpEvent, ChatHttpSseState, ChatMessage, HttpChatMessage, MessageAttachment,
+        MessageAttachmentType, MessageBlock, MessageBlockLink, MessageBlockLinkType,
+        MessageBlockText, MessageContent, MessageTextMarkType, MessageTextStyle, ReadMessagesBody,
+        append_sse_byte, chat_message_from_grpc, chat_message_path, chat_stream_diagnostic_path,
+        grpc_message_block, message_block_from_grpc,
     };
     use anytype_rpc::model;
     use futures::StreamExt;
@@ -3981,14 +4005,15 @@ mod tests {
         let mut frames = Vec::new();
         for chunk in chunks {
             for byte in *chunk {
-                append_sse_byte(&mut buffer, *byte, limit)?;
-                if let Some(frame) = take_sse_frame(&mut buffer, false) {
-                    frames.push(frame);
+                if let Some(delimiter_len) = append_sse_byte(&mut buffer, *byte, limit)? {
+                    let frame_end = buffer.len() - delimiter_len;
+                    frames.push(buffer[..frame_end].to_vec());
+                    buffer.clear();
                 }
             }
         }
-        if let Some(frame) = take_sse_frame(&mut buffer, true) {
-            frames.push(frame);
+        if !buffer.is_empty() {
+            frames.push(buffer);
         }
         Ok(frames)
     }
@@ -4004,7 +4029,7 @@ mod tests {
         let secret = b"token-and-body-must-not-leak";
         let mut buffer = Vec::new();
         for byte in &secret[..8] {
-            append_sse_byte(&mut buffer, *byte, 8).unwrap();
+            let _ = append_sse_byte(&mut buffer, *byte, 8).unwrap();
         }
         let error = append_sse_byte(&mut buffer, secret[8], 8).unwrap_err();
         assert_eq!(buffer.len(), 8, "one-over byte is rejected before growth");
@@ -4027,6 +4052,77 @@ mod tests {
             error,
             AnytypeError::ChatSseEventTooLarge { limit: 8 }
         ));
+    }
+
+    #[test]
+    fn delimiter_free_megabyte_uses_incremental_boundary_detection() {
+        let body = vec![b'x'; 1024 * 1024];
+        let frames = collect_sse_frames(&[&body], body.len() as u64).unwrap();
+        assert_eq!(frames, vec![body]);
+    }
+
+    #[test]
+    fn terminating_stream_releases_event_buffer_allocation() {
+        let mut state = ChatHttpSseState {
+            chunks: futures::stream::empty().boxed(),
+            buffer: Vec::with_capacity(1024 * 1024),
+            pending: None,
+            pending_offset: 0,
+            finished: false,
+            path: "/v1/spaces/s/chats/c/messages/stream".to_string(),
+            event_limit: 1024 * 1024,
+        };
+        state.buffer.extend_from_slice(b"delimiter-free prefix");
+        assert!(state.buffer.capacity() >= 1024 * 1024);
+
+        state.terminate();
+
+        assert_eq!(state.buffer.capacity(), 0);
+        assert!(state.finished);
+    }
+
+    #[tokio::test]
+    async fn stream_path_ids_are_validated_before_url_construction() {
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-chat-path-validation-unit-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("chat-path-validation-unit");
+        config.base_url = Some("http://alice:authority-secret@127.0.0.1:1".to_string());
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("chat-path-validation-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("create path validation client");
+        client.set_api_key(HttpCredentials::new("bearer-secret"));
+
+        for (space_id, chat_id) in [
+            ("space?space-query#space-fragment", "chat-id"),
+            ("space-id", "chat?chat-query#chat-fragment"),
+        ] {
+            let error = match client
+                .chats()
+                .in_space(space_id)
+                .message_stream(chat_id)
+                .open()
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("unsafe path identifier must fail before transport"),
+            };
+            assert!(matches!(error, AnytypeError::Validation { .. }));
+            assert!(std::error::Error::source(&error).is_none());
+            let rendered = format!("{error} {error:?}");
+            for secret in [
+                "space-query",
+                "space-fragment",
+                "chat-query",
+                "chat-fragment",
+                "authority-secret",
+                "bearer-secret",
+            ] {
+                assert!(!rendered.contains(secret));
+            }
+        }
     }
 
     #[test]

@@ -65,7 +65,8 @@ event (including its delimiter) has a separate 1 MiB default ceiling. Incoming
 transport chunks are consumed without copying them into the event buffer, and
 one chunk may contain several independently bounded events. Overflow terminates
 the stream with `AnytypeError::ChatSseEventTooLarge` before the one-over byte is
-appended.
+appended. Stream space and chat IDs are validated as path-safe before URL
+construction or diagnostic logging.
 
 Applications can lower or raise the defaults within the library's hard
 maxima. An individual object read can choose a smaller ceiling but cannot

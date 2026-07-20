@@ -14,10 +14,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   request targets fail closed to a fixed marker. Standard error/config debug
   output and transport error source chains apply the same redaction policy.
 - REST chat SSE streams now enforce a configurable finite per-event buffer
-  ceiling incrementally with checked arithmetic before growth. Transport chunks
-  are not copied into that buffer and may carry multiple bounded events. Exact
-  limits and split delimiters remain valid; delimiter-free or one-over streams
-  terminate with a typed secret-safe error. Stream transport failures retain
+  ceiling incrementally with checked arithmetic before growth and constant-work
+  delimiter detection per byte. Transport chunks are not copied into that
+  buffer and may carry multiple bounded events. Exact limits and split
+  delimiters remain valid; delimiter-free or one-over streams terminate with a
+  typed secret-safe error and release the buffer allocation. Stream path IDs
+  are validated before URL construction or logging. Transport failures retain
   only the response path and discard raw reqwest errors so Display, Debug, and
   source chains cannot expose URL userinfo, queries, fragments, tokens, or
   upstream bodies.
