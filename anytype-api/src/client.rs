@@ -33,9 +33,10 @@ use crate::{
 
 /// Byte ceilings for HTTP response bodies buffered by the client.
 ///
-/// JSON and error bodies are read incrementally and rejected as soon as they
-/// exceed the selected ceiling. File downloads use a separate limit because
-/// their binary payloads are commonly much larger than API JSON responses.
+/// JSON, error bodies, and chat SSE events are read incrementally and rejected
+/// as soon as they exceed the selected ceiling. File downloads use a separate
+/// limit because their binary payloads are commonly much larger than API JSON
+/// responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseLimits {
     /// Default ceiling for buffered JSON API responses (8 MiB).
@@ -46,6 +47,8 @@ pub struct ResponseLimits {
     pub error_bytes: u64,
     /// Ceiling for a buffered raw file-download response (256 MiB).
     pub file_bytes: u64,
+    /// Ceiling for one buffered chat SSE event, including its delimiter (1 MiB).
+    pub chat_sse_event_bytes: u64,
 }
 
 /// Hard maximum accepted for a configured generic JSON response ceiling.
@@ -56,6 +59,8 @@ pub const MAX_DOCUMENT_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ERROR_RESPONSE_BYTES: u64 = 1024 * 1024;
 /// Hard maximum accepted for a configured raw file response ceiling.
 pub const MAX_FILE_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Hard maximum accepted for a configured chat SSE event ceiling.
+pub const MAX_CHAT_SSE_EVENT_BYTES: u64 = 64 * 1024 * 1024;
 
 impl Default for ResponseLimits {
     fn default() -> Self {
@@ -66,6 +71,7 @@ impl Default for ResponseLimits {
             document_bytes: MAX_DOCUMENT_RESPONSE_BYTES,
             error_bytes: 64 * 1024,
             file_bytes: 256 * 1024 * 1024,
+            chat_sse_event_bytes: 1024 * 1024,
         }
     }
 }
@@ -113,8 +119,9 @@ pub struct ClientConfig {
     /// Finite byte ceilings for buffered HTTP response bodies.
     ///
     /// Use [`ResponseLimits::default`] unless the server is known to return
-    /// larger documents or files. Streaming chat events are not buffered and
-    /// therefore do not use these success-response limits.
+    /// larger documents, files, or individual chat events. Chat streams are
+    /// incremental, but each pending SSE event is bounded by
+    /// [`ResponseLimits::chat_sse_event_bytes`].
     pub response_limits: ResponseLimits,
 
     /// Maximum consecutive 429 retries before failing for replay-safe HTTP

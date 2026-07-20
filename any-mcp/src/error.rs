@@ -179,6 +179,8 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         AnytypeError::Grpc { .. } => error.is_authentication(),
         AnytypeError::Http { .. }
         | AnytypeError::ResponseTooLarge { .. }
+        | AnytypeError::ChatSseEventTooLarge { .. }
+        | AnytypeError::ChatSseTransport { .. }
         | AnytypeError::TooManyRetries { .. }
         | AnytypeError::Deserialization { .. }
         | AnytypeError::VerifyTimeout { .. }
@@ -312,7 +314,8 @@ impl ToolError {
                 };
             }
             AnytypeError::ResolutionLimitExceeded { .. }
-            | AnytypeError::ResponseTooLarge { .. } => ToolErrorCode::BoundedResult,
+            | AnytypeError::ResponseTooLarge { .. }
+            | AnytypeError::ChatSseEventTooLarge { .. } => ToolErrorCode::BoundedResult,
             AnytypeError::NotFound { .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
                 code: 400 | 422, ..
@@ -325,6 +328,7 @@ impl ToolError {
                 code: 409 | 412, ..
             } => ToolErrorCode::Conflict,
             AnytypeError::Http { .. }
+            | AnytypeError::ChatSseTransport { .. }
             | AnytypeError::ApiError { .. }
             | AnytypeError::TooManyRetries { .. }
             | AnytypeError::Deserialization { .. }

@@ -2048,6 +2048,7 @@ mod tests {
             document_bytes: 64,
             error_bytes: 64,
             file_bytes: 64,
+            chat_sse_event_bytes: 64,
         };
         let result = object_update(
             &runtime_with_limits(base_url, Duration::from_secs(1), limits),

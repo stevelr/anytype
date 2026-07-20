@@ -60,7 +60,12 @@ Buffered REST responses have finite byte ceilings. Ordinary JSON defaults to
 and raw file downloads to a separate 256 MiB policy. Truthful oversized
 `Content-Length` responses are rejected before their body is read; responses
 without a usable length are stopped at the first byte over the ceiling. SSE
-chat events remain incremental streams and are not buffered as JSON.
+chat events remain incremental rather than buffered as JSON, but each pending
+event (including its delimiter) has a separate 1 MiB default ceiling. Incoming
+transport chunks are consumed without copying them into the event buffer, and
+one chunk may contain several independently bounded events. Overflow terminates
+the stream with `AnytypeError::ChatSseEventTooLarge` before the one-over byte is
+appended.
 
 Applications can lower or raise the defaults within the library's hard
 maxima. An individual object read can choose a smaller ceiling but cannot
@@ -76,6 +81,7 @@ let config = ClientConfig {
         document_bytes: 24 * 1024 * 1024,
         error_bytes: 32 * 1024,
         file_bytes: 128 * 1024 * 1024,
+        chat_sse_event_bytes: 512 * 1024,
     },
     ..ClientConfig::default()
 };
@@ -91,8 +97,9 @@ let object = client
 ```
 
 The 64 MiB document default accommodates worst-case JSON escaping of a valid
-10 MiB outgoing markdown body. The hard maxima are 64 MiB for ordinary and document JSON, 1 MiB for error
-bodies, and 1 GiB for raw files. `AnytypeError::ResponseTooLarge` contains only
+10 MiB outgoing markdown body. The hard maxima are 64 MiB for ordinary and
+document JSON and chat SSE events, 1 MiB for error bodies, and 1 GiB for raw
+files. `AnytypeError::ResponseTooLarge` contains only
 the selected ceiling and optional declared length; it never retains a response
 body, URL, request payload, or credential.
 

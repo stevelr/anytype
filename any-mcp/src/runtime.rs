@@ -493,6 +493,8 @@ impl UpstreamDiagnostic {
             AnytypeError::Ambiguous { .. } => Self::new("ambiguous"),
             AnytypeError::ResolutionLimitExceeded { .. } => Self::new("resolution_limit"),
             AnytypeError::ResponseTooLarge { .. } => Self::new("response_too_large"),
+            AnytypeError::ChatSseEventTooLarge { .. } => Self::new("chat_sse_event_too_large"),
+            AnytypeError::ChatSseTransport { .. } => Self::new("chat_sse_transport"),
             AnytypeError::RateLimitExceeded { .. } => Self::new("rate_limit"),
             AnytypeError::Validation { .. } => Self::new("validation"),
             AnytypeError::NoKeyStore | AnytypeError::KeyStore { .. } => Self::new("keystore"),

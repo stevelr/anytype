@@ -1286,13 +1286,16 @@ impl ChatHttpMessageStreamRequest<'_> {
             .client
             .get_streaming_request(&path, query.into(), headers)
             .await?;
-        let url = response.url().to_string();
+        let diagnostic_path = chat_stream_diagnostic_path(response.url());
         let chunks = response.bytes_stream().boxed();
         let state = ChatHttpSseState {
             chunks,
             buffer: Vec::new(),
+            pending: None,
+            pending_offset: 0,
             finished: false,
-            url,
+            path: diagnostic_path,
+            event_limit: self.client.config.response_limits.chat_sse_event_bytes,
         };
         let inner = futures::stream::unfold(state, |mut state| async move {
             loop {
@@ -1306,14 +1309,34 @@ impl ChatHttpMessageStreamRequest<'_> {
                 if state.finished {
                     return None;
                 }
+                if let Some(byte) = state
+                    .pending
+                    .as_ref()
+                    .and_then(|chunk| chunk.get(state.pending_offset))
+                    .copied()
+                {
+                    state.pending_offset += 1;
+                    if let Err(err) = append_sse_byte(&mut state.buffer, byte, state.event_limit) {
+                        state.terminate();
+                        return Some((Err(err), state));
+                    }
+                    continue;
+                }
+                state.pending = None;
+                state.pending_offset = 0;
                 match state.chunks.next().await {
-                    Some(Ok(chunk)) => state.buffer.extend_from_slice(&chunk),
-                    Some(Err(source)) => {
+                    Some(Ok(chunk)) => {
+                        // Keep reqwest's immutable transport chunk without
+                        // copying it into another unbounded allocation. The
+                        // event buffer itself grows one checked byte at a time,
+                        // so a chunk may safely contain several bounded events.
+                        state.pending = Some(chunk);
+                    }
+                    Some(Err(_source)) => {
+                        state.terminate();
                         return Some((
-                            Err(AnytypeError::Http {
-                                method: "get".to_string(),
-                                url: state.url.clone(),
-                                source,
+                            Err(AnytypeError::ChatSseTransport {
+                                path: state.path.clone(),
                             }),
                             state,
                         ));
@@ -1330,8 +1353,21 @@ impl ChatHttpMessageStreamRequest<'_> {
 struct ChatHttpSseState {
     chunks: BoxStream<'static, std::result::Result<bytes::Bytes, reqwest::Error>>,
     buffer: Vec<u8>,
+    pending: Option<bytes::Bytes>,
+    pending_offset: usize,
     finished: bool,
-    url: String,
+    path: String,
+    event_limit: u64,
+}
+
+impl ChatHttpSseState {
+    fn terminate(&mut self) {
+        self.finished = true;
+        self.buffer.clear();
+        self.pending = None;
+        self.pending_offset = 0;
+        self.chunks = futures::stream::empty().boxed();
+    }
 }
 
 /// Builder for REST message listing.
@@ -1831,6 +1867,23 @@ fn take_sse_frame(buffer: &mut Vec<u8>, finished: bool) -> Option<Vec<u8>> {
         return Some(std::mem::take(buffer));
     }
     None
+}
+
+fn append_sse_byte(buffer: &mut Vec<u8>, byte: u8, limit: u64) -> Result<()> {
+    let current =
+        u64::try_from(buffer.len()).map_err(|_| AnytypeError::ChatSseEventTooLarge { limit })?;
+    let next = current
+        .checked_add(1)
+        .ok_or(AnytypeError::ChatSseEventTooLarge { limit })?;
+    if next > limit {
+        return Err(AnytypeError::ChatSseEventTooLarge { limit });
+    }
+    buffer.push(byte);
+    Ok(())
+}
+
+fn chat_stream_diagnostic_path(url: &reqwest::Url) -> String {
+    url.path().to_owned()
 }
 
 fn parse_chat_http_event(frame: &[u8]) -> Result<Option<ChatHttpEvent>> {
@@ -3655,8 +3708,9 @@ mod tests {
     use super::{
         ChatHttpEvent, ChatMessage, HttpChatMessage, MessageAttachment, MessageAttachmentType,
         MessageBlock, MessageBlockLink, MessageBlockLinkType, MessageBlockText, MessageContent,
-        MessageTextMarkType, MessageTextStyle, ReadMessagesBody, chat_message_from_grpc,
-        chat_message_path, grpc_message_block, message_block_from_grpc,
+        MessageTextMarkType, MessageTextStyle, ReadMessagesBody, append_sse_byte,
+        chat_message_from_grpc, chat_message_path, chat_stream_diagnostic_path, grpc_message_block,
+        message_block_from_grpc, take_sse_frame,
     };
     use anytype_rpc::model;
     use futures::StreamExt;
@@ -3667,7 +3721,9 @@ mod tests {
     };
 
     use crate::{
+        Result,
         client::{AnytypeClient, ClientConfig},
+        error::AnytypeError,
         filters::{Condition, Filter},
         keystore::HttpCredentials,
     };
@@ -3896,8 +3952,15 @@ mod tests {
 
     #[tokio::test]
     async fn rest_chat_stream_rejects_invalid_configuration_before_connecting() {
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-chat-validation-unit-{}-{id}.db",
+            std::process::id()
+        ));
         let mut config = ClientConfig::default().app_name("chat-stream-validation");
         config.base_url = Some("http://127.0.0.1:1".to_string());
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("chat-stream-validation-{id}"));
         let client = AnytypeClient::with_config(config).expect("create validation client");
         let result = client
             .chats()
@@ -3911,6 +3974,244 @@ mod tests {
             Ok(_) => panic!("invalid heartbeat must fail"),
         };
         assert!(matches!(err, crate::error::AnytypeError::Validation { .. }));
+    }
+
+    fn collect_sse_frames(chunks: &[&[u8]], limit: u64) -> Result<Vec<Vec<u8>>> {
+        let mut buffer = Vec::new();
+        let mut frames = Vec::new();
+        for chunk in chunks {
+            for byte in *chunk {
+                append_sse_byte(&mut buffer, *byte, limit)?;
+                if let Some(frame) = take_sse_frame(&mut buffer, false) {
+                    frames.push(frame);
+                }
+            }
+        }
+        if let Some(frame) = take_sse_frame(&mut buffer, true) {
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+
+    #[test]
+    fn sse_buffer_accepts_exact_limit_and_rejects_one_over_without_growth() {
+        let exact = b"data:x\n\n";
+        assert_eq!(
+            collect_sse_frames(&[exact], exact.len() as u64).unwrap(),
+            vec![b"data:x".to_vec()]
+        );
+
+        let secret = b"token-and-body-must-not-leak";
+        let mut buffer = Vec::new();
+        for byte in &secret[..8] {
+            append_sse_byte(&mut buffer, *byte, 8).unwrap();
+        }
+        let error = append_sse_byte(&mut buffer, secret[8], 8).unwrap_err();
+        assert_eq!(buffer.len(), 8, "one-over byte is rejected before growth");
+        assert!(matches!(
+            error,
+            AnytypeError::ChatSseEventTooLarge { limit: 8 }
+        ));
+        let rendered = error.to_string();
+        assert!(!rendered.contains("token"));
+        assert!(!rendered.contains("body"));
+    }
+
+    #[test]
+    fn sse_buffer_bounds_delimiter_free_chunks_and_accepts_split_delimiters() {
+        let split = collect_sse_frames(&[b"data:a\r", b"\n\r", b"\ndata:b\n", b"\n"], 10).unwrap();
+        assert_eq!(split, vec![b"data:a".to_vec(), b"data:b".to_vec()]);
+
+        let error = collect_sse_frames(&[b"1234", b"5678", b"9"], 8).unwrap_err();
+        assert!(matches!(
+            error,
+            AnytypeError::ChatSseEventTooLarge { limit: 8 }
+        ));
+    }
+
+    #[test]
+    fn chat_stream_diagnostic_omits_url_credentials_query_and_fragment() {
+        let url = reqwest::Url::parse(
+            "https://alice:secret@example.invalid/v1/spaces/s/chats/c/messages/stream?token=hidden#body",
+        )
+        .unwrap();
+        let diagnostic = chat_stream_diagnostic_path(&url);
+        assert_eq!(diagnostic, "/v1/spaces/s/chats/c/messages/stream");
+        for secret in [
+            "alice",
+            "secret",
+            "token",
+            "hidden",
+            "body",
+            "example.invalid",
+        ] {
+            assert!(!diagnostic.contains(secret));
+        }
+        let error = AnytypeError::ChatSseTransport { path: diagnostic };
+        let rendered = format!("{error}");
+        let debug = format!("{error:?}");
+        assert!(std::error::Error::source(&error).is_none());
+        for secret in [
+            "alice",
+            "secret",
+            "token",
+            "hidden",
+            "body",
+            "example.invalid",
+        ] {
+            assert!(!rendered.contains(secret));
+            assert!(!debug.contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_transport_failure_discards_raw_url_and_source() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve closed endpoint");
+        let address = listener.local_addr().expect("closed endpoint address");
+        drop(listener);
+
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-chat-open-error-unit-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("chat-open-error-unit");
+        config.base_url = Some(format!("http://alice:secret@{address}"));
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("chat-open-error-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("create transport error client");
+        client.set_api_key(HttpCredentials::new("test-token"));
+
+        let error = match client
+            .chats()
+            .in_space("space-id")
+            .message_stream("chat-id")
+            .open()
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("closed endpoint must fail"),
+        };
+        assert!(matches!(
+            error,
+            AnytypeError::ChatSseTransport { ref path }
+                if path == "/v1/spaces/space-id/chats/chat-id/messages/stream"
+        ));
+        assert!(std::error::Error::source(&error).is_none());
+        let rendered = format!("{error} {error:?}");
+        let address_secret = address.to_string();
+        for secret in ["alice", "secret", "test-token", &address_secret] {
+            assert!(!rendered.contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn overflowing_stream_terminates_and_releases_transport_state() {
+        let (mut client, server) =
+            mock_http_client("200 OK", "text/event-stream", "123456789").await;
+        client.config.response_limits.chat_sse_event_bytes = 8;
+        let mut events = client
+            .chats()
+            .in_space("space-id")
+            .message_stream("chat-id")
+            .open()
+            .await
+            .expect("open bounded stream");
+        assert!(matches!(
+            events.next().await,
+            Some(Err(AnytypeError::ChatSseEventTooLarge { limit: 8 }))
+        ));
+        assert!(
+            events.next().await.is_none(),
+            "overflow terminates the stream"
+        );
+        drop(events);
+        server
+            .await
+            .expect("mock transport is released after overflow");
+    }
+
+    #[tokio::test]
+    async fn one_transport_chunk_can_carry_multiple_exact_limit_events() {
+        let event = "data: {\"type\":\"bounded\",\"payload\":null}\n\n";
+        let body = format!("{event}{event}");
+        let (mut client, server) = mock_http_client("200 OK", "text/event-stream", &body).await;
+        client.config.response_limits.chat_sse_event_bytes = event.len() as u64;
+        let mut events = client
+            .chats()
+            .in_space("space-id")
+            .message_stream("chat-id")
+            .open()
+            .await
+            .expect("open bounded stream");
+
+        for _ in 0..2 {
+            assert!(matches!(
+                events.next().await,
+                Some(Ok(ChatHttpEvent::Unknown { event_type, payload }))
+                    if event_type == "bounded" && payload.is_null()
+            ));
+        }
+        assert!(events.next().await.is_none());
+        server.await.expect("multiple-event transport server");
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_cancels_incomplete_transport() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind cancellation server");
+        let address = listener.local_addr().expect("cancellation server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept stream request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.expect("read stream request");
+                assert_ne!(read, 0, "request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write streaming headers");
+
+            let closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                match socket.read(&mut chunk).await {
+                    Ok(0) | Err(_) => true,
+                    Ok(_) => false,
+                }
+            })
+            .await
+            .expect("dropped response body closes transport");
+            assert!(closed, "stream cancellation must not leave transport live");
+        });
+
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-chat-cancel-unit-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("chat-stream-cancel-unit");
+        config.base_url = Some(format!("http://{address}"));
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("chat-stream-cancel-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("create cancellation client");
+        client.set_api_key(HttpCredentials::new("test-token"));
+
+        let events = client
+            .chats()
+            .in_space("space-id")
+            .message_stream("chat-id")
+            .open()
+            .await
+            .expect("open cancellable stream");
+        drop(events);
+        server.await.expect("cancellation server task");
     }
 
     #[test]

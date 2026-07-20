@@ -68,6 +68,28 @@ pub enum AnytypeError {
         declared: Option<u64>,
     },
 
+    /// A chat SSE event exceeded its configured incremental buffer ceiling.
+    ///
+    /// No event bytes, URL, credentials, or upstream body are retained.
+    #[snafu(display("chat SSE event exceeds the configured {limit}-byte limit"))]
+    ChatSseEventTooLarge {
+        /// Maximum bytes permitted for one buffered event, including delimiter.
+        limit: u64,
+    },
+
+    /// A chat SSE transport failed after the stream was opened.
+    ///
+    /// The raw transport error is deliberately discarded because reqwest may
+    /// retain a credential- or query-bearing URL in its error source.
+    #[snafu(display(
+        "chat SSE transport failed at path {}",
+        crate::http_client::diagnostic_path(path)
+    ))]
+    ChatSseTransport {
+        /// Path-only diagnostic without authority, query, or fragment.
+        path: String,
+    },
+
     /// Encountered server error on "retryable" request, but all retry attempts failed.
     #[snafu(display("server api request: failed {n} times"))]
     TooManyRetries { n: u32 },
@@ -302,6 +324,13 @@ impl AnytypeError {
                 Some(crate::http_client::diagnostic_path(url)),
             ),
             Self::ResponseTooLarge { .. } => ("response_too_large", None, None, None),
+            Self::ChatSseEventTooLarge { .. } => ("chat_sse_event_too_large", None, None, None),
+            Self::ChatSseTransport { path } => (
+                "chat_sse_transport",
+                None,
+                None,
+                Some(crate::http_client::diagnostic_path(path)),
+            ),
             Self::TooManyRetries { .. } => ("too_many_retries", None, None, None),
             Self::Auth { .. } => ("auth", None, None, None),
             Self::Deserialization { .. } => ("deserialization", None, None, None),
@@ -353,6 +382,8 @@ impl AnytypeError {
             Self::Http { .. }
             | Self::ApiError { .. }
             | Self::ResponseTooLarge { .. }
+            | Self::ChatSseEventTooLarge { .. }
+            | Self::ChatSseTransport { .. }
             | Self::TooManyRetries { .. }
             | Self::Deserialization { .. }
             | Self::Serialization { .. }
@@ -516,6 +547,9 @@ mod tests {
             AnytypeError::GrpcUnavailable {
                 message: SECRET.to_owned(),
             },
+            AnytypeError::ChatSseTransport {
+                path: format!("https://{SECRET}.invalid/safe?token={SECRET}"),
+            },
             AnytypeError::KeyStore {
                 source: KeyStoreError::External {
                     message: SECRET.to_owned(),
@@ -599,6 +633,10 @@ mod tests {
             },
             AnytypeError::Other {
                 message: "SECRET_OTHER".to_owned(),
+            },
+            AnytypeError::ChatSseEventTooLarge { limit: 1 },
+            AnytypeError::ChatSseTransport {
+                path: "https://SECRET.invalid/safe?token=SECRET".to_owned(),
             },
         ];
         assert!(
