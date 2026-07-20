@@ -95,7 +95,12 @@ pub struct Page<T: JsonSchema> {
     #[schemars(length(max=MAX_PAGE_LIMIT))]
     items: Vec<T>,
     /// Opaque continuation cursor, absent at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(default, schema_with = "non_null_cursor_schema")]
     next_cursor: Option<CursorToken>,
+}
+fn non_null_cursor_schema(generator: &mut SchemaGenerator) -> Schema {
+    generator.subschema_for::<CursorToken>()
 }
 impl<T: JsonSchema> Page<T> {
     /// Validates and constructs a bounded page.
@@ -134,6 +139,34 @@ mod tests {
     #[test]
     fn pagination_wire_contracts_are_strict() {
         assert!(input_schema::<PaginationInput>().is_ok());
-        assert!(output_schema::<Page<bool>>().is_ok());
+        let schema = output_schema::<Page<bool>>().unwrap();
+        let next_cursor = &schema["properties"]["next_cursor"];
+        assert_eq!(next_cursor["$ref"], "#/$defs/CursorToken");
+        assert_eq!(schema["$defs"]["CursorToken"]["type"], "string");
+        assert!(!next_cursor.to_string().contains("null"));
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "next_cursor")
+        );
+    }
+
+    #[test]
+    fn page_omits_terminal_cursor_from_json() {
+        let terminal = Page::<bool>::new(vec![true], None).unwrap();
+        assert_eq!(
+            serde_json::to_value(terminal).unwrap(),
+            serde_json::json!({"items":[true]})
+        );
+
+        let token =
+            CursorToken::new("c1.0000000000000000.00000000000000000000000000000000").unwrap();
+        let continued = Page::<bool>::new(vec![true], Some(token.clone())).unwrap();
+        assert_eq!(
+            serde_json::to_value(continued).unwrap(),
+            serde_json::json!({"items":[true],"next_cursor":token.as_str()})
+        );
     }
 }
