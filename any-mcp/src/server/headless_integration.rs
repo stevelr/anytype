@@ -109,6 +109,19 @@ async fn assert_cursor_continuation(
     (first, second)
 }
 
+async fn assert_terminal_page(
+    server: &AnyMcpServer,
+    name: &'static str,
+    mut base: JsonObject,
+    limit: u16,
+) -> Value {
+    base.insert("limit".to_owned(), json!(limit));
+    let page = success(server, name, Value::Object(base)).await;
+    assert!(page["items"].is_array());
+    assert!(page.get("next_cursor").is_none(), "{name} must be terminal");
+    page
+}
+
 async fn create_object(ctx: &TestContext, type_key: &str, name: &str, body: &str) -> Object {
     let object = ctx
         .client
@@ -133,6 +146,69 @@ async fn read_body(ctx: &TestContext, object_id: &str) -> String {
         .unwrap_or_default()
 }
 
+async fn active_contains(ctx: &TestContext, object_id: &str) -> bool {
+    for offset in (0..1_000).step_by(100) {
+        let page = ctx
+            .client
+            .objects(&ctx.space_id)
+            .limit(100)
+            .offset(offset)
+            .list()
+            .await
+            .expect("query active object surface");
+        if page
+            .items
+            .iter()
+            .any(|object| object.id == object_id && !object.archived)
+        {
+            return true;
+        }
+        if !page.pagination.has_more {
+            return false;
+        }
+    }
+    panic!("active evidence exceeds the diagnostic 1,000-object bound")
+}
+
+async fn archived_contains(ctx: &TestContext, object_id: &str, type_id: &str) -> bool {
+    for offset in (0..10_000).step_by(1_000) {
+        let page = ctx
+            .client
+            .list_archived(&ctx.space_id)
+            .types([type_id])
+            .limit(1_000)
+            .offset(offset)
+            .list()
+            .await
+            .expect("query archived object surface");
+        if page.items.iter().any(|object| object.id == object_id) {
+            return true;
+        }
+        if page.items.is_empty() || !page.pagination.has_more {
+            return false;
+        }
+    }
+    panic!("archived evidence exceeds the diagnostic 10,000-object bound")
+}
+
+async fn assert_archive_evidence(ctx: &TestContext, object_id: &str, type_id: &str) {
+    let mut last = (true, false);
+    for _ in 0..10 {
+        last = (
+            active_contains(ctx, object_id).await,
+            archived_contains(ctx, object_id, type_id).await,
+        );
+        if !last.0 && last.1 {
+            return;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    panic!(
+        "archive evidence did not converge: active={}, archived={}",
+        last.0, last.1
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires source .test-env and an authenticated headless Anytype server"]
 async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
@@ -143,7 +219,67 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
             assert_eq!(status["http_available"], true);
             assert_eq!(status["grpc_available"], true);
 
-            assert_cursor_continuation(&server, SPACE_LIST, arguments(json!({}))).await;
+            let duplicate_name = format!("MCP ambiguous {}", unique_suffix());
+            let first_type = ctx
+                .client
+                .new_type(&ctx.space_id, &duplicate_name)
+                .key(format!("mcp_ambiguous_a_{}", unique_suffix()))
+                .ensure_available()
+                .create()
+                .await
+                .expect("create first pagination type");
+            ctx.register_type(&first_type.id);
+            let second_type = ctx
+                .client
+                .new_type(&ctx.space_id, &duplicate_name)
+                .key(format!("mcp_ambiguous_b_{}", unique_suffix()))
+                .ensure_available()
+                .create()
+                .await
+                .expect("create second pagination type");
+            ctx.register_type(&second_type.id);
+
+            let property = ctx
+                .client
+                .new_property(
+                    &ctx.space_id,
+                    format!("MCP pagination select {}", unique_suffix()),
+                    PropertyFormat::Select,
+                )
+                .create()
+                .await
+                .expect("create select pagination property");
+            ctx.register_property(&property.id);
+            let text_property = ctx
+                .client
+                .new_property(
+                    &ctx.space_id,
+                    format!("MCP pagination text {}", unique_suffix()),
+                    PropertyFormat::Text,
+                )
+                .create()
+                .await
+                .expect("create text pagination property");
+            ctx.register_property(&text_property.id);
+            for (name, color) in [("First", Color::Blue), ("Second", Color::Red)] {
+                ctx.client
+                    .new_tag(&ctx.space_id, &property.id)
+                    .name(format!("{name} {}", unique_suffix()))
+                    .color(color)
+                    .create()
+                    .await
+                    .expect("create tag fixture");
+            }
+
+            let search_term = format!("McpPagination{}", unique_suffix());
+            let first_object =
+                create_object(ctx.as_ref(), "page", &format!("{search_term} first"), "").await;
+            let second_object =
+                create_object(ctx.as_ref(), "page", &format!("{search_term} second"), "").await;
+            sleep(Duration::from_millis(300)).await;
+
+            let spaces = assert_terminal_page(&server, SPACE_LIST, arguments(json!({})), 100).await;
+            assert!(!spaces["items"].as_array().unwrap().is_empty());
             assert_cursor_continuation(
                 &server,
                 TYPE_LIST,
@@ -156,27 +292,6 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
                 arguments(json!({"space": ctx.space_id.as_str()})),
             )
             .await;
-
-            let property = ctx
-                .client
-                .new_property(
-                    &ctx.space_id,
-                    format!("MCP pagination {}", unique_suffix()),
-                    PropertyFormat::Select,
-                )
-                .create()
-                .await
-                .expect("create select property");
-            ctx.register_property(&property.id);
-            for (name, color) in [("First", Color::Blue), ("Second", Color::Red)] {
-                ctx.client
-                    .new_tag(&ctx.space_id, &property.id)
-                    .name(format!("{name} {}", unique_suffix()))
-                    .color(color)
-                    .create()
-                    .await
-                    .expect("create tag fixture");
-            }
             assert_cursor_continuation(
                 &server,
                 TAG_LIST,
@@ -187,65 +302,35 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
             )
             .await;
 
-            let types = ctx
-                .client
-                .types(&ctx.space_id)
-                .limit(100)
-                .list()
-                .await
-                .expect("discover live types");
-            let mut template_type = None;
-            for typ in &types.items {
-                let templates = ctx
-                    .client
-                    .templates(&ctx.space_id, &typ.id)
-                    .limit(2)
-                    .list()
-                    .await
-                    .expect("inspect live templates");
-                if templates.items.len() >= 2 {
-                    template_type = Some(typ.id.clone());
-                    break;
-                }
-            }
-            let template_type = template_type.expect(
-                "headless fixture requires one discovered and validated type with two templates",
-            );
-            assert_cursor_continuation(
+            let templates = assert_terminal_page(
                 &server,
                 TEMPLATE_LIST,
                 arguments(json!({
                     "space": ctx.space_id.as_str(),
-                    "type": template_type
+                    "type": first_type.id.as_str()
+                })),
+                1,
+            )
+            .await;
+            assert!(templates["items"].as_array().unwrap().is_empty());
+            let (search_first, search_second) = assert_cursor_continuation(
+                &server,
+                OBJECT_SEARCH,
+                arguments(json!({
+                    "space": ctx.space_id.as_str(),
+                    "text": search_term
                 })),
             )
             .await;
-            assert_cursor_continuation(
-                &server,
-                OBJECT_SEARCH,
-                arguments(json!({"space": ctx.space_id.as_str()})),
-            )
-            .await;
-
-            let duplicate_name = format!("MCP ambiguous {}", unique_suffix());
-            let first = ctx
-                .client
-                .new_type(&ctx.space_id, &duplicate_name)
-                .key(format!("mcp_ambiguous_a_{}", unique_suffix()))
-                .ensure_available()
-                .create()
-                .await
-                .expect("create first ambiguous type");
-            ctx.register_type(&first.id);
-            let second = ctx
-                .client
-                .new_type(&ctx.space_id, &duplicate_name)
-                .key(format!("mcp_ambiguous_b_{}", unique_suffix()))
-                .ensure_available()
-                .create()
-                .await
-                .expect("create second ambiguous type");
-            ctx.register_type(&second.id);
+            let searched_ids = [
+                item_id(&search_first["items"][0]).and_then(Value::as_str),
+                item_id(&search_second["items"][0]).and_then(Value::as_str),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<HashSet<_>>();
+            assert!(searched_ids.contains(first_object.id.as_str()));
+            assert!(searched_ids.contains(second_object.id.as_str()));
 
             let ambiguous = failure(
                 &server,
@@ -264,8 +349,8 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
                 .iter()
                 .filter_map(|candidate| candidate["id"].as_str())
                 .collect::<HashSet<_>>();
-            assert!(ids.contains(first.id.as_str()));
-            assert!(ids.contains(second.id.as_str()));
+            assert!(ids.contains(first_type.id.as_str()));
+            assert!(ids.contains(second_type.id.as_str()));
             Ok(())
         })
     }))
@@ -279,18 +364,12 @@ async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
     Box::pin(with_test_context(|ctx| {
         Box::pin(async move {
             let server = live_server(ctx.as_ref()).await;
-            let types = ctx
+            let collection_type = ctx
                 .client
-                .types(&ctx.space_id)
-                .limit(100)
-                .list()
+                .resolve_type(&ctx.space_id, "collection")
                 .await
-                .expect("discover collection type");
-            let collection_type = types
-                .items
-                .iter()
-                .find(|typ| typ.layout == ObjectLayout::Collection)
-                .expect("headless fixture exposes a collection-layout type");
+                .expect("discover and validate collection-layout type");
+            assert_eq!(collection_type.layout, ObjectLayout::Collection);
             let collection = create_object(
                 ctx.as_ref(),
                 &collection_type.key,
@@ -608,31 +687,131 @@ async fn headless_mutations_are_visible_idempotent_and_conflict_safe() {
                     .await
                     .contains("delta concurrent body")
             );
-
-            let archived = success(
-                &server,
-                OBJECT_ARCHIVE,
-                json!({"space": ctx.space_id.as_str(), "object_id": object_id.as_str()}),
-            )
-            .await;
-            assert_eq!(archived["id"], object_id);
-            assert_eq!(archived["archived"], true);
-            let archived_objects = ctx
-                .client
-                .list_archived(&ctx.space_id)
-                .limit(100)
-                .list()
-                .await
-                .expect("read archive after routed mutation");
-            assert!(
-                archived_objects
-                    .items
-                    .iter()
-                    .any(|object| object.id == object_id)
-            );
             Ok(())
         })
     }))
     .await
     .expect("cleanup-safe live mutation suite");
+}
+
+#[tokio::test]
+#[ignore = "diagnostic for any-tme; requires source .test-env and headless Anytype"]
+async fn headless_diagnostic_archive_applies_before_fixed_error() {
+    Box::pin(with_test_context(|ctx| {
+        Box::pin(async move {
+            let server = live_server(ctx.as_ref()).await;
+            let object = create_object(
+                ctx.as_ref(),
+                "page",
+                &format!("MCP archive diagnostic {}", unique_suffix()),
+                "",
+            )
+            .await;
+            let type_id = object
+                .r#type
+                .as_ref()
+                .expect("archive diagnostic type")
+                .id
+                .clone();
+
+            let result = call(
+                &server,
+                OBJECT_ARCHIVE,
+                json!({
+                    "space": ctx.space_id.as_str(),
+                    "object_id": object.id.as_str()
+                }),
+            )
+            .await;
+            assert_eq!(result.is_error, Some(true));
+            let error = result
+                .structured_content
+                .expect("archive diagnostic error body");
+            assert_eq!(error["code"], "upstream");
+
+            assert_archive_evidence(ctx.as_ref(), &object.id, &type_id).await;
+            Ok(())
+        })
+    }))
+    .await
+    .expect("cleanup-safe any-tme diagnostic");
+}
+
+#[tokio::test]
+#[ignore = "diagnostic for any-uvg; requires source .test-env and headless Anytype"]
+async fn headless_diagnostic_create_body_applies_before_indeterminate_error() {
+    Box::pin(with_test_context(|ctx| {
+        Box::pin(async move {
+            let server = live_server(ctx.as_ref()).await;
+            let suffix = unique_suffix();
+            let name = format!("MCP create-body diagnostic {suffix}");
+            let requested_body = "alpha stable body";
+            let result = call(
+                &server,
+                OBJECT_CREATE,
+                json!({
+                    "space": ctx.space_id.as_str(),
+                    "type": "page",
+                    "name": name,
+                    "body_markdown": requested_body,
+                    "idempotency_key": format!("mcp-body-diagnostic-{suffix}")
+                }),
+            )
+            .await;
+            assert_eq!(result.is_error, Some(true));
+            let error = result
+                .structured_content
+                .expect("create-body diagnostic error body");
+            assert_eq!(error["code"], "conflict");
+
+            let mut applied = None;
+            for _ in 0..10 {
+                let page = ctx
+                    .client
+                    .search_in(&ctx.space_id)
+                    .text(&name)
+                    .limit(20)
+                    .execute()
+                    .await
+                    .expect("bounded search for applied create");
+                let matches = page
+                    .items
+                    .iter()
+                    .filter(|object| object.name.as_deref() == Some(name.as_str()))
+                    .filter(|object| !object.archived)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert!(
+                    matches.len() <= 1,
+                    "idempotent create applied more than once"
+                );
+                if let Some(object) = matches.into_iter().next() {
+                    applied = Some(object);
+                    break;
+                }
+                sleep(Duration::from_millis(250)).await;
+            }
+            let applied = applied.expect("indeterminate create was applied exactly once");
+            ctx.register_object(&applied.id);
+            let type_id = applied
+                .r#type
+                .as_ref()
+                .expect("create diagnostic type")
+                .id
+                .clone();
+            let stored_body = read_body(ctx.as_ref(), &applied.id).await;
+            assert_eq!(stored_body, "alpha stable body   \n");
+            assert_ne!(stored_body, requested_body);
+
+            ctx.client
+                .object(&ctx.space_id, &applied.id)
+                .delete()
+                .await
+                .expect("archive applied create diagnostic fixture");
+            assert_archive_evidence(ctx.as_ref(), &applied.id, &type_id).await;
+            Ok(())
+        })
+    }))
+    .await
+    .expect("cleanup-safe any-uvg diagnostic");
 }

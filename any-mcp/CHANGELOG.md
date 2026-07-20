@@ -14,7 +14,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `headless_mutations_are_visible_idempotent_and_conflict_safe`, including
   authenticated dual-protocol prerequisites, cursor binding, explicit view
   selection, complete resources, idempotent create, mutation visibility, and
-  zero-write stale exact-edit conflicts.
+  zero-write stale exact-edit conflicts. Add the cleanup-safe blocked-behavior
+  diagnostics `headless_diagnostic_archive_applies_before_fixed_error` and
+  `headless_diagnostic_create_body_applies_before_indeterminate_error`, which
+  prove applied state and cleanup before accepting their fixed error codes.
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
   2.2.0 and protocol revision `2026-07-28`.
 - Add authenticated long-lived Anytype client startup, bounded and cancellable
