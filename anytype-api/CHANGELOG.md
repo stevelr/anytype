@@ -10,7 +10,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - automatic HTTP retries now apply only to methods already classified as
   replay-safe; `POST` and `PATCH` mutations return 429, timeout-status, server,
-  and transport failures after exactly one send instead of replaying a write
+  and transport failures after exactly one send instead of replaying a write;
+  reqwest redirects and lower-level retry policies are overridden so they
+  cannot bypass method safety, leak credentials across redirects, or skew
+  request-attempt metrics
 - examples and integration-test helpers now satisfy workspace rustdoc and lint
   checks without needless borrows
 - property updates now reject key-only requests before sending them because the
