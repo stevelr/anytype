@@ -73,6 +73,20 @@ const MAX_SCHEMA_STRING_CHARS: u64 = 100_000;
 const MAX_SCHEMA_ARRAY_ITEMS: u64 = 10_000;
 const MAX_SCHEMA_ENUM_VALUES: usize = 128;
 const MAX_SCHEMA_NUMBER_ABS: f64 = 1_000_000_000_000_000.0;
+const MAX_SCHEMA_ANNOTATION_CHARS: usize = 4_096;
+
+const COMMON_SCHEMA_KEYWORDS: &[&str] = &[
+    "$schema",
+    "$defs",
+    "title",
+    "description",
+    "$comment",
+    "default",
+    "examples",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+];
 
 fn strict_wire_schema(value: &serde_json::Value, root: &serde_json::Value) -> bool {
     let serde_json::Value::Object(schema) = value else {
@@ -86,6 +100,9 @@ fn strict_wire_schema(value: &serde_json::Value, root: &serde_json::Value) -> bo
     }
 
     if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) {
+        if !has_only_keywords(schema, &["$ref"]) {
+            return false;
+        }
         return reference
             .strip_prefix("#/$defs/")
             .map(|name| format!("/$defs/{name}"))
@@ -104,7 +121,7 @@ fn strict_wire_schema(value: &serde_json::Value, root: &serde_json::Value) -> bo
             "array" => validate_array_schema(schema, root),
             "string" => validate_string_schema(schema),
             "integer" | "number" => validate_numeric_schema(schema),
-            "boolean" | "null" => true,
+            "boolean" | "null" => validate_scalar_type_schema(schema),
             _ => false,
         },
         Some(serde_json::Value::Array(types)) => validate_nullable_type_array(schema, types, root),
@@ -149,10 +166,16 @@ fn validate_definitions(schema: &JsonObject, root: &serde_json::Value) -> bool {
 }
 
 fn validate_object_schema(schema: &JsonObject, root: &serde_json::Value) -> bool {
+    if !has_only_keywords(
+        schema,
+        &["type", "properties", "required", "additionalProperties"],
+    ) {
+        return false;
+    }
     if schema.get("additionalProperties") != Some(&serde_json::Value::Bool(false)) {
         return false;
     }
-    match schema.get("properties") {
+    let properties_are_strict = match schema.get("properties") {
         None => true,
         Some(serde_json::Value::Object(properties)) => properties.values().all(|property| {
             let documented = property
@@ -163,10 +186,17 @@ fn validate_object_schema(schema: &JsonObject, root: &serde_json::Value) -> bool
             documented && strict_wire_schema(property, root)
         }),
         Some(_) => false,
-    }
+    };
+    properties_are_strict && validate_required_properties(schema)
 }
 
 fn validate_array_schema(schema: &JsonObject, root: &serde_json::Value) -> bool {
+    if !has_only_keywords(
+        schema,
+        &["type", "items", "minItems", "maxItems", "uniqueItems"],
+    ) {
+        return false;
+    }
     let Some(max_items) = schema
         .get("maxItems")
         .and_then(serde_json::Value::as_u64)
@@ -181,10 +211,27 @@ fn validate_array_schema(schema: &JsonObject, root: &serde_json::Value) -> bool 
     let items_are_strict = schema
         .get("items")
         .is_some_and(|items| strict_wire_schema(items, root));
-    minimum_is_valid && items_are_strict
+    let uniqueness_is_valid = schema
+        .get("uniqueItems")
+        .is_none_or(serde_json::Value::is_boolean);
+    minimum_is_valid && items_are_strict && uniqueness_is_valid
 }
 
 fn validate_string_schema(schema: &JsonObject) -> bool {
+    if !has_only_keywords(
+        schema,
+        &[
+            "type",
+            "minLength",
+            "maxLength",
+            "pattern",
+            "format",
+            "const",
+            "enum",
+        ],
+    ) {
+        return false;
+    }
     if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
         return validate_enum_values(values);
     }
@@ -198,13 +245,37 @@ fn validate_string_schema(schema: &JsonObject) -> bool {
     else {
         return false;
     };
-    schema
+    let minimum_is_valid = schema
         .get("minLength")
         .and_then(serde_json::Value::as_u64)
-        .is_none_or(|minimum| minimum <= maximum)
+        .is_none_or(|minimum| minimum <= maximum);
+    let pattern_is_valid = schema.get("pattern").is_none_or(|pattern| {
+        pattern
+            .as_str()
+            .is_some_and(|pattern| pattern.len() <= 1_024)
+    });
+    let format_is_valid = schema
+        .get("format")
+        .is_none_or(serde_json::Value::is_string);
+    minimum_is_valid && pattern_is_valid && format_is_valid
 }
 
 fn validate_numeric_schema(schema: &JsonObject) -> bool {
+    if !has_only_keywords(
+        schema,
+        &[
+            "type",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+            "const",
+            "enum",
+        ],
+    ) {
+        return false;
+    }
     if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
         return validate_enum_values(values);
     }
@@ -219,30 +290,38 @@ fn validate_numeric_schema(schema: &JsonObject) -> bool {
         .get("maximum")
         .or_else(|| schema.get("exclusiveMaximum"))
         .and_then(serde_json::Value::as_f64);
-    matches!((minimum, maximum), (Some(minimum), Some(maximum))
+    let bounds_are_valid = matches!((minimum, maximum), (Some(minimum), Some(maximum))
         if minimum.is_finite()
             && maximum.is_finite()
             && minimum <= maximum
             && minimum.abs() <= MAX_SCHEMA_NUMBER_ABS
-            && maximum.abs() <= MAX_SCHEMA_NUMBER_ABS)
+            && maximum.abs() <= MAX_SCHEMA_NUMBER_ABS);
+    let multiple_is_valid = schema.get("multipleOf").is_none_or(|multiple| {
+        multiple
+            .as_f64()
+            .is_some_and(|value| value.is_finite() && value > 0.0)
+    });
+    bounds_are_valid && multiple_is_valid
 }
 
 fn validate_untyped_schema(schema: &JsonObject, root: &serde_json::Value) -> bool {
     if let Some(value) = schema.get("const") {
-        return validate_scalar(value);
+        return has_only_keywords(schema, &["const"]) && validate_scalar(value);
     }
     if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
-        return validate_enum_values(values);
+        return has_only_keywords(schema, &["enum"]) && validate_enum_values(values);
     }
     if let Some(branches) = schema.get("allOf").and_then(serde_json::Value::as_array) {
-        return !branches.is_empty()
+        return has_only_keywords(schema, &["allOf"])
+            && !branches.is_empty()
             && branches
                 .iter()
                 .all(|branch| strict_wire_schema(branch, root));
     }
     for keyword in ["oneOf", "anyOf"] {
         if let Some(branches) = schema.get(keyword).and_then(serde_json::Value::as_array) {
-            let strict_branches = branches.len() >= 2
+            let strict_branches = has_only_keywords(schema, &[keyword])
+                && branches.len() >= 2
                 && branches
                     .iter()
                     .all(|branch| strict_wire_schema(branch, root));
@@ -253,6 +332,74 @@ fn validate_untyped_schema(schema: &JsonObject, root: &serde_json::Value) -> boo
         }
     }
     false
+}
+
+fn validate_scalar_type_schema(schema: &JsonObject) -> bool {
+    if !has_only_keywords(schema, &["type", "const", "enum"]) {
+        return false;
+    }
+    schema.get("const").is_none_or(validate_scalar)
+        && schema.get("enum").is_none_or(|values| {
+            values
+                .as_array()
+                .is_some_and(|values| validate_enum_values(values))
+        })
+}
+
+fn has_only_keywords(schema: &JsonObject, structural: &[&str]) -> bool {
+    schema.keys().all(|keyword| {
+        COMMON_SCHEMA_KEYWORDS.contains(&keyword.as_str()) || structural.contains(&keyword.as_str())
+    }) && validate_annotations(schema)
+}
+
+fn validate_annotations(schema: &JsonObject) -> bool {
+    if !schema
+        .get("$schema")
+        .is_none_or(|dialect| dialect.as_str() == Some(JSON_SCHEMA_DIALECT))
+    {
+        return false;
+    }
+    for keyword in ["title", "description", "$comment"] {
+        if !schema.get(keyword).is_none_or(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| value.chars().count() <= MAX_SCHEMA_ANNOTATION_CHARS)
+        }) {
+            return false;
+        }
+    }
+    for keyword in ["deprecated", "readOnly", "writeOnly"] {
+        if !schema
+            .get(keyword)
+            .is_none_or(serde_json::Value::is_boolean)
+        {
+            return false;
+        }
+    }
+    if !schema.get("examples").is_none_or(|examples| {
+        examples
+            .as_array()
+            .is_some_and(|examples| examples.len() <= 10)
+    }) {
+        return false;
+    }
+    true
+}
+
+fn validate_required_properties(schema: &JsonObject) -> bool {
+    let Some(required) = schema.get("required") else {
+        return true;
+    };
+    let Some(required) = required.as_array() else {
+        return false;
+    };
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    required.iter().all(|name| {
+        name.as_str()
+            .is_some_and(|name| properties.is_some_and(|properties| properties.contains_key(name)))
+    })
 }
 
 fn is_scalar_enum_union(branches: &[serde_json::Value], root: &serde_json::Value) -> bool {
@@ -467,6 +614,54 @@ mod tests {
     }
 
     #[derive(JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[expect(dead_code, reason = "schema-only patterned map test model")]
+    struct PatternedMapInput {
+        /// A patterned map keyed by object identifiers.
+        values: BTreeMap<ObjectId, DisplayName>,
+    }
+
+    #[derive(JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[expect(dead_code, reason = "schema-only tuple test model")]
+    struct TupleInput {
+        /// A tuple encoded through positional array applicators.
+        value: (ObjectId, DisplayName),
+    }
+
+    struct UnknownApplicatorInput;
+
+    impl JsonSchema for UnknownApplicatorInput {
+        fn schema_name() -> Cow<'static, str> {
+            "UnknownApplicatorInput".into()
+        }
+
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            json_schema!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {},
+                "if": { "type": "object" },
+            })
+        }
+    }
+
+    fn contains_keyword(value: &serde_json::Value, keyword: &str) -> bool {
+        match value {
+            serde_json::Value::Object(object) => {
+                object.contains_key(keyword)
+                    || object
+                        .values()
+                        .any(|value| contains_keyword(value, keyword))
+            }
+            serde_json::Value::Array(values) => {
+                values.iter().any(|value| contains_keyword(value, keyword))
+            }
+            _ => false,
+        }
+    }
+
+    #[derive(JsonSchema)]
     #[serde(untagged, deny_unknown_fields)]
     #[expect(dead_code, reason = "schema-only untagged union test model")]
     enum UntaggedSelector {
@@ -574,6 +769,36 @@ mod tests {
         );
         assert_eq!(
             input_schema::<UnboundedNumericInput>(),
+            Err(SchemaContractError)
+        );
+    }
+
+    #[test]
+    fn patterned_maps_tuple_arrays_and_unknown_applicators_are_rejected() {
+        let map_schema = serde_json::Value::Object(
+            rmcp::handler::server::tool::schema_for_input::<PatternedMapInput>()
+                .unwrap()
+                .as_ref()
+                .clone(),
+        );
+        let tuple_schema = serde_json::Value::Object(
+            rmcp::handler::server::tool::schema_for_input::<TupleInput>()
+                .unwrap()
+                .as_ref()
+                .clone(),
+        );
+        assert!(
+            contains_keyword(&map_schema, "propertyNames")
+                || contains_keyword(&map_schema, "patternProperties")
+        );
+        assert!(contains_keyword(&tuple_schema, "prefixItems"));
+        assert_eq!(
+            input_schema::<PatternedMapInput>(),
+            Err(SchemaContractError)
+        );
+        assert_eq!(input_schema::<TupleInput>(), Err(SchemaContractError));
+        assert_eq!(
+            input_schema::<UnknownApplicatorInput>(),
             Err(SchemaContractError)
         );
     }

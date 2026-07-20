@@ -22,7 +22,8 @@ wire-contract boundaries for later runtime and handler work:
   summaries, and canonical
   `anytype://spaces/<space_id>/objects/<object_id>` resource URIs;
 - fail-closed rejection of free-form JSON/maps, unbounded arrays and strings,
-  impractically bounded numbers, and undiscriminated unions;
+  impractically bounded numbers, undiscriminated unions, and unsupported
+  patterned-object or tuple-array schema applicators;
 - typed tool contracts that link each validated output schema to its success
   encoder and select only the exact read, create, or destructive-update
   annotation profile;

@@ -17,5 +17,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Changed
 
 - Harden schema contracts to reject unconstrained nested values, maps, arrays,
-  numbers, and untagged unions; link success encoding to each declared output
-  type and require bounded candidates before returning ambiguity errors.
+  numbers, untagged unions, and unsupported dynamic schema applicators; link
+  success encoding to each declared output type and require bounded candidates
+  before returning ambiguity errors.
