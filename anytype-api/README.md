@@ -86,6 +86,13 @@ server-status, disconnect, or timeout from one of those mutation methods is
 returned to the caller without replaying its body, because the server may have
 applied a write even when the client did not receive a usable response.
 
+The client disables reqwest's lower-level retry and redirect handling so every
+additional send passes through this method-aware policy and its metrics. A 3xx
+response is returned as an API error without forwarding the bearer credential
+or request body to the `Location`. Consequently, redirect or retry policies
+set on a `ClientBuilder` passed to `AnytypeClient::with_client` are intentionally
+overridden; timeout, proxy, DNS, TLS, and user-agent customization is retained.
+
 `ClientConfig::rate_limit_max_retries` continues to control consecutive 429
 retries for replay-safe requests; zero means no retry-count cap for those
 methods. It does not opt mutation requests into retries.

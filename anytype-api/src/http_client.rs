@@ -289,10 +289,21 @@ impl HttpClient {
         rate_limit_max_retries: u32,
         http_creds: HttpCredentials,
     ) -> Result<Self> {
-        let client = builder.build().context(HttpSnafu {
-            method: "client-init",
-            url: "",
-        })?;
+        // Keep this middleware as the sole retry authority. Reqwest follows
+        // redirects and retries protocol NACKs by default, and callers may
+        // install an even broader policy on ClientBuilder. Either path sits
+        // below send(), where method safety, attempt metrics, and mutation
+        // dispatch state cannot be enforced. A redirect is surfaced as its
+        // original 3xx response so callers can reject it without forwarding
+        // credentials or replaying a body to another endpoint.
+        let client = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()
+            .context(HttpSnafu {
+                method: "client-init",
+                url: "",
+            })?;
         for (name, limit, maximum) in [
             (
                 "json_bytes",
@@ -1257,7 +1268,7 @@ fn is_idempotent_method(method: &Method) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use reqwest::{
         ClientBuilder, Method, StatusCode,
@@ -1265,7 +1276,7 @@ mod tests {
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
         task::JoinHandle,
     };
 
@@ -1335,9 +1346,55 @@ mod tests {
         .into_bytes()
     }
 
+    async fn read_fixture_request(socket: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut expected_len = None;
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.expect("read public request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_len.is_none()
+                && let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let body_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or_default();
+                expected_len = Some(header_end + 4 + body_len);
+            }
+            if expected_len.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("request is UTF-8")
+    }
+
     async fn public_fixture_client(
         responses: Vec<Vec<u8>>,
         rate_limit_max_retries: u32,
+    ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
+        public_fixture_client_with_builder(
+            responses,
+            rate_limit_max_retries,
+            ClientBuilder::new().no_proxy(),
+        )
+        .await
+    }
+
+    async fn public_fixture_client_with_builder(
+        responses: Vec<Vec<u8>>,
+        rate_limit_max_retries: u32,
+        builder: ClientBuilder,
     ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1347,52 +1404,35 @@ mod tests {
             let mut requests = Vec::with_capacity(responses.len());
             for response in responses {
                 let (mut socket, _) = listener.accept().await.expect("accept public request");
-                let mut request = Vec::new();
-                let mut expected_len = None;
-                let mut buffer = [0_u8; 1024];
-                loop {
-                    let read = socket.read(&mut buffer).await.expect("read public request");
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
-                    if expected_len.is_none()
-                        && let Some(header_end) =
-                            request.windows(4).position(|window| window == b"\r\n\r\n")
-                    {
-                        let headers = String::from_utf8_lossy(&request[..header_end]);
-                        let body_len = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())
-                                    .flatten()
-                            })
-                            .unwrap_or_default();
-                        expected_len = Some(header_end + 4 + body_len);
-                    }
-                    if expected_len.is_some_and(|length| request.len() >= length) {
-                        break;
-                    }
-                }
+                let request = read_fixture_request(&mut socket).await;
                 socket
                     .write_all(&response)
                     .await
                     .expect("write public response");
-                requests.push(String::from_utf8(request).expect("request is UTF-8"));
+                requests.push(request);
             }
             requests
         });
 
+        let client =
+            public_client_for(format!("http://{address}"), rate_limit_max_retries, builder);
+        (client, server)
+    }
+
+    fn public_client_for(
+        base_url: String,
+        rate_limit_max_retries: u32,
+        builder: ClientBuilder,
+    ) -> AnytypeClient {
         let mut config = ClientConfig::default().app_name("retry-safety-http-fixture");
-        config.base_url = Some(format!("http://{address}"));
+        config.base_url = Some(base_url);
         config.keystore = Some("env".to_string());
         config.disable_cache = true;
         config.rate_limit_max_retries = rate_limit_max_retries;
-        let client = AnytypeClient::with_config(config).expect("create public fixture client");
+        let client =
+            AnytypeClient::with_client(builder, config).expect("create public fixture client");
         client.set_api_key(HttpCredentials::new("fixture-secret-token"));
-        (client, server)
+        client
     }
 
     async fn assert_public_mutation_sent_once(
@@ -1459,6 +1499,130 @@ mod tests {
         .await;
         assert_public_mutation_sent_once(Method::POST, "500 Internal Server Error", 500, 99).await;
         assert_public_mutation_sent_once(Method::PATCH, "500 Internal Server Error", 500, 0).await;
+    }
+
+    #[tokio::test]
+    async fn public_post_and_patch_408_and_504_are_each_sent_exactly_once() {
+        // These statuses enter the explicit retry_for_status branch and must
+        // still stop after the first non-idempotent send.
+        assert_public_mutation_sent_once(Method::POST, "408 Request Timeout", 408, 0).await;
+        assert_public_mutation_sent_once(
+            Method::PATCH,
+            "408 Request Timeout",
+            408,
+            crate::config::RATE_LIMIT_MAX_RETRIES_DEFAULT,
+        )
+        .await;
+        assert_public_mutation_sent_once(Method::POST, "504 Gateway Timeout", 504, 99).await;
+        assert_public_mutation_sent_once(Method::PATCH, "504 Gateway Timeout", 504, 0).await;
+    }
+
+    async fn assert_public_redirect_is_not_followed(
+        method: Method,
+        status: &'static str,
+        code: u16,
+    ) {
+        let redirect_target = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let target_address = redirect_target
+            .local_addr()
+            .expect("redirect target address");
+        let target = tokio::spawn(async move {
+            let accepted =
+                tokio::time::timeout(Duration::from_millis(150), redirect_target.accept()).await;
+            let Ok(Ok((mut socket, _))) = accepted else {
+                return None;
+            };
+            let request = read_fixture_request(&mut socket).await;
+            socket
+                .write_all(&fixture_response(
+                    "500 Internal Server Error",
+                    "redirect replay reached target",
+                    "",
+                ))
+                .await
+                .expect("write redirect target response");
+            Some(request)
+        });
+
+        let origin = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect origin");
+        let origin_address = origin.local_addr().expect("redirect origin address");
+        let location = format!("Location: http://{target_address}/redirected\r\n");
+        let redirect = fixture_response(status, "redirect response", &location);
+        let source = tokio::spawn(async move {
+            let (mut socket, _) = origin
+                .accept()
+                .await
+                .expect("accept redirect source request");
+            let request = read_fixture_request(&mut socket).await;
+            socket
+                .write_all(&redirect)
+                .await
+                .expect("write redirect response");
+            request
+        });
+
+        // A caller-supplied follow policy is intentionally replaced.
+        let builder = ClientBuilder::new()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::limited(20));
+        let client = public_client_for(format!("http://{origin_address}"), 5, builder);
+        let error = public_mutation(&client, &method)
+            .await
+            .expect_err("redirect must be surfaced without replay");
+        assert!(
+            matches!(&error, AnytypeError::ApiError { code: actual, .. } if *actual == code),
+            "unexpected redirect error: {error:?}"
+        );
+
+        let source_request = source.await.expect("redirect source task");
+        assert!(source_request.starts_with(method.as_str()));
+        assert!(source_request.contains("fixture-secret-token"));
+        assert!(source_request.contains("retry safety"));
+        let redirected_request = target.await.expect("redirect target task");
+        assert!(
+            redirected_request.is_none(),
+            "redirect target received a replayed request body or credentials"
+        );
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.retries, 0);
+    }
+
+    #[tokio::test]
+    async fn public_post_307_and_patch_308_never_follow_or_replay_cross_origin() {
+        assert_public_redirect_is_not_followed(Method::POST, "307 Temporary Redirect", 307).await;
+        assert_public_redirect_is_not_followed(Method::PATCH, "308 Permanent Redirect", 308).await;
+    }
+
+    #[tokio::test]
+    async fn caller_supplied_reqwest_retry_policy_cannot_replay_a_mutation() {
+        let response = fixture_response("408 Request Timeout", "retry policy probe", "");
+        let policy = reqwest::retry::for_host("127.0.0.1")
+            .no_budget()
+            .max_retries_per_request(10)
+            .classify_fn(|request| {
+                if request.status() == Some(StatusCode::REQUEST_TIMEOUT) {
+                    request.retryable()
+                } else {
+                    request.success()
+                }
+            });
+        let builder = ClientBuilder::new().no_proxy().retry(policy);
+        let (client, server) = public_fixture_client_with_builder(vec![response], 0, builder).await;
+
+        let error = public_mutation(&client, &Method::POST)
+            .await
+            .expect_err("caller retry policy must be overridden");
+        assert!(matches!(error, AnytypeError::ApiError { code: 408, .. }));
+        let requests = server.await.expect("custom retry fixture task");
+        assert_eq!(requests.len(), 1);
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.retries, 0);
     }
 
     #[tokio::test]

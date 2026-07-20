@@ -274,7 +274,11 @@ impl AnytypeClient {
     }
 
     /// Creates a client from a `reqwest::ClientBuilder` and configuration.
-    /// `ClientBuilder` can be customized with timeouts, proxies, dns servers, `user_agent`, etc.
+    /// `ClientBuilder` can be customized with timeouts, proxies, DNS servers,
+    /// `user_agent`, and similar transport settings. Redirect and retry
+    /// policies are always replaced: redirects are not followed and reqwest's
+    /// lower-level retries are disabled so [`AnytypeClient`] can enforce its
+    /// method-aware bounded retry policy without replaying mutation bodies.
     /// Configure `ClientConfig.keystore` if you want file-based credential storage.
     ///
     /// # Example
