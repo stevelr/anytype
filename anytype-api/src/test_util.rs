@@ -11,10 +11,13 @@ use std::{
     path::PathBuf,
     slice::Iter,
     sync::{Arc, atomic::AtomicUsize},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use anytype_rpc::{anytype::rpc::object::create_object_type, model::object_type::Layout};
+use anytype_rpc::{
+    anytype::rpc::{object::create_object_type, space::delete as space_delete},
+    model::object_type::Layout,
+};
 use chrono::Utc;
 use futures::FutureExt;
 use parking_lot::Mutex;
@@ -28,9 +31,14 @@ use crate::{
     filters::Filter,
     grpc_util::with_token_request,
     objects::{DataModel, ObjectLayout},
+    spaces::Space,
     types::Type,
     verify::verify_semantic,
 };
+
+const SPACE_FIXTURE_SCAN_LIMIT: u32 = 1_000;
+const SPACE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+const SPACE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
 
 // =============================================================================
 // TestError
@@ -180,6 +188,44 @@ impl TestContext {
         Ok(typ)
     }
 
+    /// Creates a disposable space owned by this test context.
+    ///
+    /// The normal authenticated REST create path is used without its built-in
+    /// follow-up verification. The returned ID is validated and registered for
+    /// teardown immediately, before a complete bounded REST listing verifies
+    /// the exact fixture ID and name. Teardown removes only IDs registered by
+    /// this helper through Anytype's irreversible `SpaceDelete` RPC and then
+    /// proves each ID is absent from a complete bounded REST space listing.
+    ///
+    /// This test-only lifecycle must not be used for pre-existing spaces.
+    pub async fn create_space_fixture(&self, name: impl Into<String>) -> TestResult<Space> {
+        let name = name.into();
+        self.client
+            .config
+            .limits
+            .validate_name(name.clone(), "test space")?;
+        let created = self.client.new_space(&name).no_verify().create().await?;
+        self.client
+            .config
+            .limits
+            .validate_id(&created.id, "test space")?;
+        self.cleanup.add_space_fixture(&created.id);
+
+        let config = space_fixture_verify_config(&self.client);
+        let expected_id = created.id.clone();
+        let expected_name = name.clone();
+        verify_semantic(
+            &config,
+            "Test space",
+            &expected_id,
+            || space_listing_evidence(&self.client, &expected_id, Some(&expected_name)),
+            |evidence| evidence.complete && evidence.present && evidence.name_matches,
+        )
+        .await
+        .map_err(TestError::from)?;
+        Ok(created)
+    }
+
     pub fn temp_dir(&self, prefix: &str) -> TestResult<PathBuf> {
         let dir = std::env::temp_dir().join(format!("anytype_test_{prefix}_{}", unique_suffix()));
         std::fs::create_dir_all(&dir).map_err(|err| TestError::Config {
@@ -195,8 +241,7 @@ impl TestContext {
     }
 
     pub async fn cleanup(&self) -> TestResult<()> {
-        self.cleanup.cleanup(&self.client).await;
-        Ok(())
+        self.cleanup.cleanup(&self.client).await
     }
 }
 
@@ -417,12 +462,15 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
 #[derive(Default)]
 pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
+    space_fixtures: Mutex<Vec<String>>,
     temp_paths: Mutex<Vec<PathBuf>>,
 }
 
 impl TestCleanup {
     pub fn is_empty(&self) -> bool {
         self.objects.lock().is_empty()
+            && self.space_fixtures.lock().is_empty()
+            && self.temp_paths.lock().is_empty()
     }
 
     /// Remembers this object for deletion after the test
@@ -446,6 +494,11 @@ impl TestCleanup {
             .push((space_id.into(), id.into(), DataModel::Type));
     }
 
+    /// Remembers an exact space ID created by `TestContext::create_space_fixture`.
+    fn add_space_fixture(&self, id: &str) {
+        self.space_fixtures.lock().push(id.into());
+    }
+
     /// Deletes this file or folder after the test
     pub fn add_temp_path(&self, path: PathBuf) {
         self.temp_paths.lock().push(path);
@@ -453,8 +506,9 @@ impl TestCleanup {
 
     /// Cleans up all remembered item
     /// Delete in reverse order from creation order, so dependencies should be handled correctly.
-    /// Also, deletes objects before types before properties
-    pub async fn cleanup(&self, client: &AnytypeClient) {
+    /// Also deletes objects before properties before types, and all child
+    /// resources before registered disposable spaces.
+    pub async fn cleanup(&self, client: &AnytypeClient) -> TestResult<()> {
         let mut objects = {
             let mut guard = self.objects.lock();
             std::mem::take(&mut *guard)
@@ -492,6 +546,21 @@ impl TestCleanup {
             let _ = client.get_type(space_id, type_id).delete().await;
         }
 
+        // Delete disposable spaces only after their possible child resources.
+        // SpaceDelete is irreversible, so this registry is private and can be
+        // populated only by the create-and-register helper above.
+        let mut space_fixtures = {
+            let mut guard = self.space_fixtures.lock();
+            std::mem::take(&mut *guard)
+        };
+        space_fixtures.reverse();
+        let mut space_cleanup_failed = false;
+        for space_id in space_fixtures {
+            if delete_space_fixture(client, &space_id).await.is_err() {
+                space_cleanup_failed = true;
+            }
+        }
+
         let mut temp_paths = {
             let mut guard = self.temp_paths.lock();
             std::mem::take(&mut *guard)
@@ -504,11 +573,138 @@ impl TestCleanup {
                 let _ = std::fs::remove_file(&path);
             }
         }
+
+        if space_cleanup_failed {
+            return Err(space_cleanup_error());
+        }
+        Ok(())
+    }
+}
+
+async fn delete_space_fixture(client: &AnytypeClient, space_id: &str) -> TestResult<()> {
+    client
+        .config
+        .limits
+        .validate_id(space_id, "test space")
+        .map_err(|_| space_cleanup_error())?;
+    let grpc = client
+        .grpc_client()
+        .await
+        .map_err(|_| space_cleanup_error())?;
+    let mut commands = grpc.client_commands();
+    let request = with_token_request(
+        Request::new(space_delete::Request {
+            space_id: space_id.to_owned(),
+        }),
+        grpc.token(),
+    )
+    .map_err(|_| space_cleanup_error())?;
+    let response = commands
+        .space_delete(request)
+        .await
+        .map_err(space_cleanup_transport_error)?
+        .into_inner();
+    if !space_delete_succeeded(response.error.as_ref().map(|error| error.code)) {
+        return Err(space_cleanup_error());
+    }
+
+    let config = space_fixture_verify_config(client);
+    verify_semantic(
+        &config,
+        "Deleted test space",
+        space_id,
+        || space_listing_evidence(client, space_id, None),
+        |evidence| evidence.complete && !evidence.present,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| space_cleanup_error())
+}
+
+#[derive(Debug)]
+struct SpaceListingEvidence {
+    complete: bool,
+    present: bool,
+    name_matches: bool,
+}
+
+async fn space_listing_evidence(
+    client: &AnytypeClient,
+    space_id: &str,
+    expected_name: Option<&str>,
+) -> Result<SpaceListingEvidence, AnytypeError> {
+    let response = client
+        .spaces()
+        .limit(SPACE_FIXTURE_SCAN_LIMIT)
+        .offset(0)
+        .list()
+        .await?
+        .into_response();
+    let complete = response.pagination.offset == 0
+        && !response.pagination.has_more
+        && response.pagination.total == response.items.len();
+    let matching_space = response.items.iter().find(|space| space.id == space_id);
+    let present = matching_space.is_some();
+    let name_matches = expected_name
+        .is_none_or(|expected| matching_space.is_some_and(|space| space.name == expected));
+    Ok(SpaceListingEvidence {
+        complete,
+        present,
+        name_matches,
+    })
+}
+
+fn space_delete_succeeded(error_code: Option<i32>) -> bool {
+    error_code == Some(space_delete::response::error::Code::Null as i32)
+}
+
+fn space_fixture_verify_config(client: &AnytypeClient) -> VerifyConfig {
+    let mut config = client.config.verify.clone().unwrap_or_default();
+    config.timeout = config.timeout.max(SPACE_FIXTURE_VERIFY_TIMEOUT);
+    config.max_attempts = config.max_attempts.max(SPACE_FIXTURE_VERIFY_ATTEMPTS);
+    config
+}
+
+fn space_cleanup_error() -> TestError {
+    TestError::Assertion {
+        message: "registered test space cleanup failed".to_owned(),
+    }
+}
+
+fn space_cleanup_transport_error(_: tonic::Status) -> TestError {
+    space_cleanup_error()
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+
+    #[test]
+    fn space_delete_requires_an_explicit_null_error_code() {
+        assert!(space_delete_succeeded(Some(
+            space_delete::response::error::Code::Null as i32
+        )));
+        assert!(!space_delete_succeeded(None));
+        assert!(!space_delete_succeeded(Some(
+            space_delete::response::error::Code::NoSuchSpace as i32
+        )));
+    }
+
+    #[test]
+    fn space_cleanup_transport_error_redacts_tonic_status() {
+        const SECRET: &str = "space-cleanup-secret-sentinel";
+        let error = space_cleanup_transport_error(tonic::Status::internal(SECRET));
+        let rendered = error.to_string();
+        assert_eq!(
+            rendered,
+            "Test assertion failed: registered test space cleanup failed"
+        );
+        assert!(!rendered.contains(SECRET));
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod collection_tests {
     use super::*;
 
     #[test]
