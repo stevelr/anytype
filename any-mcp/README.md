@@ -81,8 +81,8 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   and `transport-io` features;
 - a dual-era stdio adapter: a first-frame `initialize` probe is replayed to
   rmcp 2.2.0 for current clients, while `server/discover` and direct modern
-  requests use stateless MCP `2026-07-28` with required per-request version,
-  client identity, and capability metadata;
+  requests use stateless MCP `2026-07-28` with required per-request version and
+  capability metadata plus optional, validated client identity;
 - modern responses include `resultType: complete`; discovery and the static
   tool/resource catalogs carry positive public cache hints, while authenticated
   document reads are immediately stale and private. Unsupported versions use
@@ -91,6 +91,10 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   64 active requests, one stdout writer, per-request cancellation, and prompt
   EOF shutdown. The separate legacy malformed-frame defect remains tracked by
   `any-m2u` because rmcp still drops syntactically invalid JSON;
+- modern request IDs accept every bounded string, including the schema-valid
+  empty string, plus exactly represented signed/unsigned JSON integers. Strings
+  are capped at 256 bytes and integers at serde_json's exact i64/u64 range as
+  deliberate transport resource/response-correlation bounds;
 - an `anytype-api`-only application dependency through the `anytype` crate;
   `any-mcp` never depends directly on generated `anytype-rpc` support;
 - reusable strict JSON Schema 2020-12 input/output contracts with

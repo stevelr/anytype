@@ -460,16 +460,14 @@ fn validate_meta(params: &Map<String, Value>) -> Result<(), MetaError> {
     let version = meta
         .get(META_PROTOCOL_VERSION)
         .and_then(Value::as_str)
-        .filter(|version| !version.is_empty() && version.len() <= 64)
+        .filter(|version| version.len() <= 64)
         .ok_or(MetaError::Invalid)?;
     if version != MODERN_VERSION {
         return Err(MetaError::Unsupported(version.to_owned()));
     }
-    let client_info = meta
-        .get(META_CLIENT_INFO)
-        .and_then(Value::as_object)
-        .ok_or(MetaError::Invalid)?;
-    validate_client_info(client_info)?;
+    if let Some(client_info) = meta.get(META_CLIENT_INFO) {
+        validate_client_info(client_info.as_object().ok_or(MetaError::Invalid)?)?;
+    }
     let client_capabilities = meta
         .get(META_CLIENT_CAPABILITIES)
         .and_then(Value::as_object)
@@ -510,14 +508,12 @@ fn validate_client_info(client_info: &Map<String, Value>) -> Result<(), MetaErro
         client_info
             .get(field)
             .and_then(Value::as_str)
-            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .filter(|value| value.len() <= 256)
             .ok_or(MetaError::Invalid)?;
     }
     for field in ["title", "description", "websiteUrl"] {
         if let Some(value) = client_info.get(field)
-            && !value
-                .as_str()
-                .is_some_and(|value| !value.is_empty() && value.len() <= 4_096)
+            && !value.as_str().is_some_and(|value| value.len() <= 4_096)
         {
             return Err(MetaError::Invalid);
         }
@@ -544,11 +540,9 @@ fn validate_client_info(client_info: &Map<String, Value>) -> Result<(), MetaErro
             if let Some(sizes) = icon.get("sizes") {
                 let sizes = sizes.as_array().ok_or(MetaError::Invalid)?;
                 if sizes.len() > 32
-                    || sizes.iter().any(|size| {
-                        !size
-                            .as_str()
-                            .is_some_and(|value| !value.is_empty() && value.len() <= 64)
-                    })
+                    || sizes
+                        .iter()
+                        .any(|size| !size.as_str().is_some_and(|value| value.len() <= 64))
                 {
                     return Err(MetaError::Invalid);
                 }
@@ -625,7 +619,7 @@ async fn cancel_all(cancellations: &CancellationMap) {
 
 fn valid_id(id: Option<&Value>) -> Option<Value> {
     match id? {
-        Value::String(id) if !id.is_empty() && id.len() <= 256 => Some(Value::String(id.clone())),
+        Value::String(id) if id.len() <= 256 => Some(Value::String(id.clone())),
         Value::Number(id) if id.is_i64() || id.is_u64() => Some(Value::Number(id.clone())),
         _ => None,
     }
@@ -763,24 +757,50 @@ mod tests {
     }
 
     #[test]
-    fn modern_metadata_requires_identity_capabilities_and_exact_version() {
+    fn modern_metadata_requires_capabilities_and_accepts_optional_identity() {
         assert!(validate_meta(&meta(MODERN_VERSION)).is_ok());
 
         let unsupported = validate_meta(&meta("1900-01-01"));
         assert!(
             matches!(unsupported, Err(MetaError::Unsupported(version)) if version == "1900-01-01")
         );
+        assert!(matches!(
+            validate_meta(&meta("")),
+            Err(MetaError::Unsupported(version)) if version.is_empty()
+        ));
 
-        for field in [META_CLIENT_INFO, META_CLIENT_CAPABILITIES] {
-            let mut params = meta(MODERN_VERSION);
-            params
-                .get_mut("_meta")
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .remove(field);
-            assert!(matches!(validate_meta(&params), Err(MetaError::Invalid)));
-        }
+        let mut without_identity = meta(MODERN_VERSION);
+        without_identity
+            .get_mut("_meta")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(META_CLIENT_INFO);
+        assert!(validate_meta(&without_identity).is_ok());
+
+        let mut empty_identity = meta(MODERN_VERSION);
+        empty_identity
+            .get_mut("_meta")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                META_CLIENT_INFO.to_owned(),
+                json!({"name": "", "version": ""}),
+            );
+        assert!(validate_meta(&empty_identity).is_ok());
+
+        let mut without_capabilities = meta(MODERN_VERSION);
+        without_capabilities
+            .get_mut("_meta")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(META_CLIENT_CAPABILITIES);
+        assert!(matches!(
+            validate_meta(&without_capabilities),
+            Err(MetaError::Invalid)
+        ));
 
         let mut malformed = meta(MODERN_VERSION);
         malformed
@@ -812,12 +832,16 @@ mod tests {
     }
 
     #[test]
-    fn request_ids_are_bounded_integers_or_nonempty_strings() {
+    fn request_ids_are_bounded_integers_or_strings_including_empty() {
         assert_eq!(valid_id(Some(&json!(1))), Some(json!(1)));
         assert_eq!(valid_id(Some(&json!("request"))), Some(json!("request")));
+        assert_eq!(
+            valid_id(Some(&json!("x".repeat(256)))),
+            Some(json!("x".repeat(256)))
+        );
         assert_eq!(valid_id(Some(&Value::Null)), None);
         assert_eq!(valid_id(Some(&json!(1.5))), None);
-        assert_eq!(valid_id(Some(&json!(""))), None);
+        assert_eq!(valid_id(Some(&json!(""))), Some(json!("")));
         assert_eq!(valid_id(Some(&json!("x".repeat(257)))), None);
     }
 }
