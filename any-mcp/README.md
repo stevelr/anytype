@@ -36,7 +36,7 @@ Operational settings are bounded defensively:
 - `ANY_MCP_STARTUP_TIMEOUT_SECS` defaults to 15 and has a maximum of 120;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
-- `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 16 MiB, has a maximum of 64
+- `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
   MiB, and must be at least the ordinary JSON budget.
 
 The response budgets are enforced while chunks arrive, before workflow
@@ -46,6 +46,16 @@ total. Oversized upstream JSON maps to the stable `bounded_result` tool error;
 the error carries no upstream body, URL, or credential. File downloads use
 the separate finite `anytype-api` raw-file policy rather than either MCP JSON
 budget, while SSE chat events remain incremental streams.
+
+The 64 MiB document default is a compatibility ceiling, not a normal
+allocation target: a valid 10 MiB markdown body can approach 60 MiB after JSON
+escaping, and `object_get` must receive that complete upstream JSON before it
+can return character chunks. Buffers grow incrementally. In the worst case,
+the default concurrency of 8 permits roughly 512 MiB of document response
+buffers plus decoding and result overhead. Operators with smaller documents
+or tighter memory limits should lower `ANY_MCP_DOCUMENT_RESPONSE_BYTES` and/or
+`ANY_MCP_MAX_CONCURRENCY`; oversized documents then fail explicitly with
+`bounded_result`.
 
 Every future workflow handler uses the runtime execution seam, which includes
 permit wait in its timeout and observes rmcp request cancellation. The client
