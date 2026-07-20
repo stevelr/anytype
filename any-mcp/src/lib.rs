@@ -39,4 +39,4 @@ pub use runtime::{
     OperationContext, RuntimeContext, RuntimeError, ServeError, StartupError, StartupStatus,
     serve_stdio,
 };
-pub use server::AnyMcpServer;
+pub use server::{AnyMcpServer, ServerBuildError};

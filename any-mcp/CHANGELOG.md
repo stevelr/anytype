@@ -95,6 +95,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   zero-write stale/count conflicts, one whole-body no-verify PATCH, finite
   semantic verification, summary-and-new-hash output, and fixed indeterminate
   handling for every ambiguous post-dispatch outcome.
+- Wire the complete static Phase 1 production catalog with exact typed schemas,
+  annotations, handler routing, document resources, and cursor-free
+  `tools/list`; advertise static capabilities without change notifications or
+  subscriptions.
+- Add strict `ANY_MCP_READ_ONLY=0|1` configuration. Read-only mode omits all
+  four mutation tools and rejects stale direct mutation calls before argument
+  decoding, resolver work, or upstream I/O.
 
 ### Changed
 

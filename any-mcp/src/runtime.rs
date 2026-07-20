@@ -48,6 +48,7 @@ pub struct RuntimeContext {
     next_correlation_id: Arc<AtomicU64>,
     request_timeout: Duration,
     startup_status: StartupStatus,
+    read_only: bool,
 }
 
 impl fmt::Debug for RuntimeContext {
@@ -56,6 +57,7 @@ impl fmt::Debug for RuntimeContext {
             .debug_struct("RuntimeContext")
             .field("request_timeout", &self.request_timeout)
             .field("startup_status", &self.startup_status)
+            .field("read_only", &self.read_only)
             .finish_non_exhaustive()
     }
 }
@@ -88,11 +90,12 @@ impl RuntimeContext {
         )
         .await?;
 
-        Ok(Self::from_parts(
+        Ok(Self::from_parts_with_read_only(
             client,
             config.max_concurrency,
             config.request_timeout,
             startup_status,
+            config.read_only,
         ))
     }
 
@@ -106,6 +109,12 @@ impl RuntimeContext {
     #[must_use]
     pub const fn startup_status(&self) -> StartupStatus {
         self.startup_status
+    }
+
+    /// Returns whether this process must omit and reject mutating workflows.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Starts process shutdown, rejects new work, and cancels running or
@@ -236,11 +245,28 @@ impl RuntimeContext {
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn from_parts(
         client: AnytypeClient,
         max_concurrency: usize,
         request_timeout: Duration,
         startup_status: StartupStatus,
+    ) -> Self {
+        Self::from_parts_with_read_only(
+            client,
+            max_concurrency,
+            request_timeout,
+            startup_status,
+            false,
+        )
+    }
+
+    pub(crate) fn from_parts_with_read_only(
+        client: AnytypeClient,
+        max_concurrency: usize,
+        request_timeout: Duration,
+        startup_status: StartupStatus,
+        read_only: bool,
     ) -> Self {
         Self {
             client: Arc::new(client),
@@ -249,6 +275,7 @@ impl RuntimeContext {
             next_correlation_id: Arc::new(AtomicU64::new(1)),
             request_timeout,
             startup_status,
+            read_only,
         }
     }
 }
@@ -563,7 +590,8 @@ impl std::error::Error for StartupError {}
 /// Returns a redacted [`ServeError`] for protocol initialization or service
 /// task failures. EOF, including EOF before initialization, is a clean exit.
 pub async fn serve_stdio(runtime: RuntimeContext) -> Result<(), ServeError> {
-    serve_transport(AnyMcpServer::new(runtime), rmcp::transport::stdio()).await
+    let server = AnyMcpServer::new(runtime).map_err(|_| ServeError::Catalog)?;
+    serve_transport(server, rmcp::transport::stdio()).await
 }
 
 /// Runs an initialized handler over an arbitrary rmcp transport.
@@ -640,6 +668,8 @@ where
 /// A safe stdio service failure which omits protocol payloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServeError {
+    /// The fixed Phase 1 catalog could not be constructed safely.
+    Catalog,
     /// MCP initialization failed.
     Initialization,
     /// The rmcp service task failed.
@@ -649,6 +679,7 @@ pub enum ServeError {
 impl fmt::Display for ServeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Catalog => formatter.write_str("MCP static catalog construction failed"),
             Self::Initialization => formatter.write_str("MCP stdio initialization failed"),
             Self::ServiceTask => formatter.write_str("MCP stdio service task failed"),
         }
@@ -1320,7 +1351,7 @@ mod tests {
         drop(client_transport);
 
         let result = serve_transport(
-            AnyMcpServer::new(runtime(1, Duration::from_secs(1))),
+            AnyMcpServer::new(runtime(1, Duration::from_secs(1))).expect("static test catalog"),
             server_transport,
         )
         .await;
@@ -1365,7 +1396,7 @@ mod tests {
         });
         tokio::task::yield_now().await;
         let server = tokio::spawn(serve_transport(
-            AnyMcpServer::new(runtime.clone()),
+            AnyMcpServer::new(runtime.clone()).expect("static test catalog"),
             server_transport,
         ));
         let (reader, mut writer) = split(client_transport);

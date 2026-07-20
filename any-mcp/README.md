@@ -8,8 +8,8 @@ mirror of the Anytype API.
 
 ## Phase 1 foundations
 
-The crate now establishes both the authenticated stdio runtime and the shared
-bounded wire contracts used by later workflow handlers.
+The crate provides an authenticated stdio runtime, a complete static Phase 1
+tool and resource catalog, and bounded wire contracts for every workflow.
 
 ### Authenticated stdio runtime
 
@@ -32,8 +32,10 @@ Supported Anytype settings:
 Operational settings are bounded defensively:
 
 - `ANY_MCP_MAX_CONCURRENCY` defaults to 8 and has a maximum of 64;
-- `ANY_MCP_REQUEST_TIMEOUT_SECS` defaults to 30 and has a maximum of 300; and
+- `ANY_MCP_REQUEST_TIMEOUT_SECS` defaults to 30 and has a maximum of 300;
 - `ANY_MCP_STARTUP_TIMEOUT_SECS` defaults to 15 and has a maximum of 120;
+- `ANY_MCP_READ_ONLY` accepts exactly `0` (default) or `1`; `1` omits all
+  mutation tools and rejects stale direct mutation calls before decoding or I/O;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
@@ -115,13 +117,26 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   `anytype` and `rmcp` target prefixes that can expose protocol or upstream
   payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.
 
-The remaining workflow tools and resources are added in subsequent Phase 1
-work.
+### Production catalog and read-only mode
+
+`tools/list` is a static, cursor-free catalog. Normal mode advertises exactly
+14 tools: `object_archive`, `object_create`, `object_edit`, `object_get`,
+`object_search`, `object_update`, `property_list`, `server_status`,
+`space_list`, `tag_list`, `template_list`, `type_list`, `view_list`, and
+`view_object_list`. Read-only mode advertises the same ten read tools while
+omitting the four `object_*` mutations. The catalog is built from the same
+typed contracts used by dispatch, so advertised schemas, annotations, and
+handler routes cannot silently diverge.
+
+The server also advertises static resource and tool capabilities without
+`listChanged` or resource subscriptions. `resources/templates/list` exposes
+the canonical `anytype://spaces/{space_id}/objects/{object_id}` document
+template, `resources/list` is intentionally empty, and `resources/read`
+returns one complete bounded Markdown document.
 
 ### Status and schema discovery handlers
 
-The first read handlers are available as transport-neutral, typed operations;
-production catalog/router registration is kept separate. `server_status`
+The discovery handlers are exposed as typed production tools. `server_status`
 returns only a parsed, redacted HTTP endpoint, API revision, startup probe
 availability, and enabled toolsets. URL user information, passwords, query
 parameters, and fragments are removed before encoding.
@@ -147,6 +162,7 @@ Local TCP fixture tests exercise the real `anytype-api` fluent builders and
 verify exact paths and decoded queries for every paginated discovery handler,
 including page continuation, sparse pages, cursor mismatch without I/O,
 resolver errors, response ceilings, and secret-safe upstream failures.
+
 ### Object archive workflow
 
 The transport-neutral `object_archive` handler soft-archives exactly one
@@ -160,9 +176,8 @@ with `archived=true`.
 Its typed result contains the archived object id, the confirmed boolean state,
 and the canonical Anytype resource URI. The tool contract is destructive,
 non-idempotent, read-write, and closed-world. A reusable mutation-access gate
-also rejects stale direct calls before resolver or upstream I/O when a future
-production catalog selects read-only operation; environment parsing and
-catalog filtering are intentionally owned by the catalog integration phase.
+rejects stale direct calls before resolver or upstream I/O when the production
+catalog selects read-only operation.
 
 ### Shared mutation values
 
@@ -300,8 +315,8 @@ inspected.
 
 ### View discovery workflows
 
-The transport-neutral `view_list` and `view_object_list` handlers provide one
-bounded page at a time without registering the production tool catalog early.
+The `view_list` and `view_object_list` production tools provide one bounded
+page at a time.
 They resolve space and view names through `anytype-api`, so ambiguous view
 names return bounded candidate IDs instead of selecting an arbitrary match.
 `view_object_list` validates the resolver-returned view ID and sets it on the
@@ -315,9 +330,8 @@ and returned item count have been checked.
 
 ### Object discovery and reads
 
-The transport-neutral `object_search` and `object_get` handlers implement the
-bounded Phase 1 read path without adding the production tool router owned by a
-later catalog ticket.
+The `object_search` and `object_get` production tools implement the bounded
+Phase 1 read path.
 
 - `object_search` resolves an optional space and space-local type references,
   executes exactly one upstream page, and validates returned offset, limit,
