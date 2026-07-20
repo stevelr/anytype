@@ -138,8 +138,10 @@ Property summaries never contain tag options. Select and multi-select counts
 come from a separate `tags(...).limit(1).offset(0)` page's bounded `total`;
 the handler also verifies that zero, one, and larger totals agree with the
 first-page item count and continuation flag. Callers use `tag_list` to retrieve
-options explicitly. Template results reuse the summary-only object adapter and
-therefore contain no body or implicit property projection.
+options explicitly. Before that tag page, `tag_list` verifies the resolved
+property through one cache-independent scoped GET; a cold client cache never
+causes an implicit all-properties scan. Template results reuse the summary-only
+object adapter and therefore contain no body or implicit property projection.
 
 Local TCP fixture tests exercise the real `anytype-api` fluent builders and
 verify exact paths and decoded queries for every paginated discovery handler,

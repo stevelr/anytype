@@ -28,7 +28,9 @@ Applications authenticate with Anytype servers using access tokens. One token is
   bounded scans fail explicitly instead of guessing from partial results;
   candidate ordering is independent of upstream page order. Explicit type IDs
   that need metadata use one cache-independent scoped GET and reject a
-  mismatched returned identity instead of priming the all-types cache. Template
+  mismatched returned identity instead of priming the all-types cache. Direct
+  property reads provide the same exact-identity path, which explicit-ID tag
+  lookup uses without priming all space properties. Template
   resolution uses a direct-id GET or an exact 1,000-row scan and re-fetches the
   selected template to verify its space, canonical generic template type
   id/key, and non-archived state; the validated endpoint path establishes the

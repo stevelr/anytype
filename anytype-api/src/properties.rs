@@ -82,6 +82,7 @@ use crate::{
     Result,
     cache::AnytypeCache,
     client::AnytypeClient,
+    error::OtherSnafu,
     filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
@@ -885,6 +886,33 @@ impl PropertyRequest {
         }
 
         // cache disabled, fetch directly
+        self.fetch_direct().await
+    }
+
+    /// Retrieves the property with one cache-independent scoped HTTP GET.
+    ///
+    /// Unlike [`get`](Self::get), this method neither reads nor primes the
+    /// in-memory property cache. It validates the space and property IDs
+    /// before dispatch and rejects a successful response whose property ID
+    /// differs from the requested ID. If [`with_tags`](Self::with_tags) was
+    /// selected, tag options are fetched only after the property identity has
+    /// been verified.
+    ///
+    /// # Returns
+    /// The property returned for the exact scoped property endpoint.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::NotFound`] if the property doesn't exist
+    /// - [`AnytypeError::Validation`] if either ID is invalid
+    /// - [`AnytypeError::Other`] if the upstream response identity does not
+    ///   match the scoped request
+    pub async fn get_direct(self) -> Result<Property> {
+        self.limits.validate_id(&self.space_id, "space_id")?;
+        self.limits.validate_id(&self.property_id, "property_id")?;
+        self.fetch_direct().await
+    }
+
+    async fn fetch_direct(&self) -> Result<Property> {
         let response: PropertyResponse = self
             .client
             .get_request(
@@ -896,8 +924,15 @@ impl PropertyRequest {
             )
             .await?;
 
-        // if with_tags set, also get tags for the property
         let mut property = response.property;
+        if property.id != self.property_id {
+            return OtherSnafu {
+                message: "Anytype returned a mismatched property identity".to_string(),
+            }
+            .fail();
+        }
+
+        // Fetch tags only after the scoped response identity is trusted.
         if self.with_tags {
             set_property_tags(&self.client, &self.limits, &self.space_id, &mut property).await?;
         }
@@ -1660,7 +1695,10 @@ impl AnytypeClient {
     /// `property_key` can be a property key or id
     /// `tag_name` can be tag id, name, or key
     ///
-    /// This method requires cache to be enabled (the default).
+    /// An explicit property ID is fetched with one cache-independent scoped
+    /// GET before its tags are listed. A property key retains the cached key
+    /// lookup behavior and therefore requires cache to be enabled (the
+    /// default).
     ///
     /// # Example
     ///
@@ -1677,7 +1715,8 @@ impl AnytypeClient {
     ///
     /// Errors:
     /// - `AnytypeError::NotFound` if no property in the space matched, or tag doesn't match
-    /// - `AnytypeError::CacheDisabled` if cache is disabled
+    /// - `AnytypeError::CacheDisabled` if cache is disabled and a property key
+    ///   was supplied
     /// - `AnytypeError::*` any other error
     ///
     pub async fn lookup_property_tag(
@@ -1689,7 +1728,10 @@ impl AnytypeClient {
         let prop_key_or_id = property_key.as_ref();
         let tag_key_or_id = tag_name.as_ref();
         let property = if looks_like_object_id(prop_key_or_id) {
-            self.property(space_id, prop_key_or_id).get().await?
+            self.property(space_id, prop_key_or_id)
+                .with_tags()
+                .get_direct()
+                .await?
         } else {
             self.lookup_property_by_key(space_id, prop_key_or_id)
                 .await?
@@ -1705,6 +1747,281 @@ impl AnytypeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SPACE_ID: &str =
+        "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
+    const TEST_PROPERTY_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y";
+    const OTHER_PROPERTY_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4z";
+    const TEST_TAG_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4x";
+
+    #[derive(Debug, Default)]
+    struct PropertyRouteTraffic {
+        requests: Vec<String>,
+        property_list_pages: usize,
+        direct_property_gets: usize,
+        tag_list_pages: usize,
+    }
+
+    async fn route_aware_property_server(
+        returned_property_id: &'static str,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<PropertyRouteTraffic>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind route-aware property fixture");
+        let address = listener.local_addr().expect("property fixture address");
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut traffic = PropertyRouteTraffic::default();
+            loop {
+                let accepted = tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (mut stream, _) = accepted.expect("accept property fixture request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .expect("read property fixture request");
+                    assert!(
+                        read > 0,
+                        "property fixture connection closed before headers"
+                    );
+                    request.extend_from_slice(&buffer[..read]);
+                    assert!(
+                        request.len() <= 64 * 1024,
+                        "property fixture headers too large"
+                    );
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).expect("property request is utf-8");
+                let request_line = request.lines().next().expect("property request line");
+                let target = request_line
+                    .split_ascii_whitespace()
+                    .nth(1)
+                    .expect("property request target");
+                let collection_path = format!("/v1/spaces/{TEST_SPACE_ID}/properties");
+                let direct_path = format!("{collection_path}/{TEST_PROPERTY_ID}");
+                let tags_path = format!("{direct_path}/tags");
+                let body = if target == collection_path
+                    || target.starts_with(&format!("{collection_path}?"))
+                {
+                    let page = traffic.property_list_pages;
+                    traffic.property_list_pages += 1;
+                    if page == 0 {
+                        serde_json::json!({
+                            "data": [{
+                                "id": OTHER_PROPERTY_ID,
+                                "key": "other",
+                                "name": "Other",
+                                "format": "text",
+                                "tags": null
+                            }],
+                            "pagination": {
+                                "has_more": true,
+                                "limit": 100,
+                                "offset": 0,
+                                "total": 101
+                            }
+                        })
+                        .to_string()
+                    } else {
+                        serde_json::json!({
+                            "data": [{
+                                "id": TEST_PROPERTY_ID,
+                                "key": "status",
+                                "name": "Status",
+                                "format": "select",
+                                "tags": null
+                            }],
+                            "pagination": {
+                                "has_more": false,
+                                "limit": 100,
+                                "offset": 100,
+                                "total": 101
+                            }
+                        })
+                        .to_string()
+                    }
+                } else if target == direct_path {
+                    traffic.direct_property_gets += 1;
+                    serde_json::json!({
+                        "property": {
+                            "id": returned_property_id,
+                            "key": "status",
+                            "name": "private-property-body-marker",
+                            "format": "select",
+                            "tags": null
+                        }
+                    })
+                    .to_string()
+                } else if target == tags_path || target.starts_with(&format!("{tags_path}?")) {
+                    traffic.tag_list_pages += 1;
+                    serde_json::json!({
+                        "data": [{
+                            "id": TEST_TAG_ID,
+                            "key": "open",
+                            "name": "Open",
+                            "color": "blue"
+                        }],
+                        "pagination": {
+                            "has_more": false,
+                            "limit": 100,
+                            "offset": 0,
+                            "total": 1
+                        }
+                    })
+                    .to_string()
+                } else {
+                    panic!("unexpected property fixture route: {request_line}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                traffic.requests.push(request);
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write property fixture response");
+                stream
+                    .shutdown()
+                    .await
+                    .expect("shutdown property fixture response");
+            }
+            traffic
+        });
+        (format!("http://{address}"), shutdown_tx, task)
+    }
+
+    fn route_fixture_client(base_url: String) -> AnytypeClient {
+        let mut config = crate::client::ClientConfig::default().app_name("property-route-fixture");
+        config.base_url = Some(base_url);
+        config.keystore = Some("env".to_owned());
+        let client = AnytypeClient::with_config(config).expect("property fixture client");
+        client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
+        client
+    }
+
+    #[tokio::test]
+    async fn direct_property_get_is_cache_independent_and_exactly_scoped() {
+        let (base_url, shutdown, traffic) = route_aware_property_server(TEST_PROPERTY_ID).await;
+        let client = route_fixture_client(base_url);
+        assert!(
+            client.cache().is_enabled(),
+            "fixture must exercise cache-on behavior"
+        );
+
+        let property = client
+            .property(TEST_SPACE_ID, TEST_PROPERTY_ID)
+            .get_direct()
+            .await
+            .expect("direct property");
+        assert_eq!(property.id, TEST_PROPERTY_ID);
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(
+            traffic.property_list_pages, 0,
+            "must not prime property cache"
+        );
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(traffic.tag_list_pages, 0);
+        assert_eq!(traffic.requests.len(), 1);
+        assert_eq!(
+            traffic.requests[0].lines().next().unwrap(),
+            format!("GET /v1/spaces/{TEST_SPACE_ID}/properties/{TEST_PROPERTY_ID} HTTP/1.1")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_id_tag_lookup_uses_direct_property_get_with_cold_cache() {
+        let (base_url, shutdown, traffic) = route_aware_property_server(TEST_PROPERTY_ID).await;
+        let client = route_fixture_client(base_url);
+        assert!(
+            client.cache().is_enabled(),
+            "fixture must exercise cache-on behavior"
+        );
+
+        let tag = client
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "Open")
+            .await
+            .expect("explicit-id tag lookup");
+        assert_eq!(tag.id, TEST_TAG_ID);
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(
+            traffic.property_list_pages, 0,
+            "must not prime property cache"
+        );
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(traffic.tag_list_pages, 1);
+        assert_eq!(traffic.requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn direct_property_identity_mismatch_is_secret_safe_and_skips_tags() {
+        let (base_url, shutdown, traffic) = route_aware_property_server(OTHER_PROPERTY_ID).await;
+        let client = route_fixture_client(base_url);
+
+        let error = client
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "Open")
+            .await
+            .expect_err("mismatched direct property must fail closed");
+        let AnytypeError::Other { message } = &error else {
+            panic!("identity mismatch must be an upstream error: {error}");
+        };
+        assert_eq!(message, "Anytype returned a mismatched property identity");
+        let display = error.to_string();
+        for private in [
+            TEST_SPACE_ID,
+            TEST_PROPERTY_ID,
+            OTHER_PROPERTY_ID,
+            "private-property-body-marker",
+        ] {
+            assert!(
+                !display.contains(private),
+                "error display leaked fixture data"
+            );
+        }
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(traffic.property_list_pages, 0);
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(
+            traffic.tag_list_pages, 0,
+            "mismatch must stop before tag lookup"
+        );
+        assert_eq!(traffic.requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_property_get_validates_both_ids_before_io() {
+        let client = route_fixture_client("http://127.0.0.1:1".to_owned());
+        for (space_id, property_id) in [
+            ("unsafe/space", TEST_PROPERTY_ID),
+            (TEST_SPACE_ID, "unsafe/property"),
+        ] {
+            let error = client
+                .property(space_id, property_id)
+                .get_direct()
+                .await
+                .expect_err("unsafe scoped id must fail before transport");
+            assert!(matches!(error, AnytypeError::Validation { .. }));
+        }
+    }
 
     #[test]
     fn test_property_format_default() {
