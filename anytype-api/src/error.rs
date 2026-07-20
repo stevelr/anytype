@@ -2,7 +2,7 @@
 //!
 use std::{fmt, path::PathBuf};
 
-use anytype_rpc::error::AnytypeGrpcError;
+use anytype_rpc::error::{AnytypeGrpcError, BackupError, ViewError};
 use snafu::prelude::*;
 
 use crate::resolve::ResolveCandidate;
@@ -329,6 +329,44 @@ impl AnytypeError {
         }
     }
 
+    /// Returns whether this failure is structurally classified as authentication.
+    ///
+    /// This predicate covers the public HTTP/configuration authentication
+    /// variants and authentication failures nested below [`Self::Grpc`]. It
+    /// deliberately examines only typed variants and gRPC status categories;
+    /// it never formats or parses upstream messages, URLs, response bodies, or
+    /// credential-bearing values. Callers therefore do not need to depend on
+    /// `anytype-rpc` merely to choose secret-safe authentication guidance.
+    #[must_use]
+    pub fn is_authentication(&self) -> bool {
+        match self {
+            Self::ApiError {
+                code: 401 | 403, ..
+            }
+            | Self::Auth { .. }
+            | Self::Unauthorized
+            | Self::Forbidden
+            | Self::NoKeyStore
+            | Self::KeyStore { .. }
+            | Self::GrpcUnavailable { .. } => true,
+            Self::Grpc { source } => grpc_error_is_authentication(source),
+            Self::Http { .. }
+            | Self::ApiError { .. }
+            | Self::ResponseTooLarge { .. }
+            | Self::TooManyRetries { .. }
+            | Self::Deserialization { .. }
+            | Self::Serialization { .. }
+            | Self::NotFound { .. }
+            | Self::Ambiguous { .. }
+            | Self::ResolutionLimitExceeded { .. }
+            | Self::RateLimitExceeded { .. }
+            | Self::Validation { .. }
+            | Self::CacheDisabled
+            | Self::VerifyTimeout { .. }
+            | Self::Other { .. } => false,
+        }
+    }
+
     /// Returns bounded alternatives for an ambiguous resolver lookup.
     ///
     /// The slice contains at most
@@ -341,6 +379,41 @@ impl AnytypeError {
             _ => None,
         }
     }
+}
+
+fn grpc_error_is_authentication(error: &AnytypeGrpcError) -> bool {
+    match error {
+        AnytypeGrpcError::Auth { .. } => true,
+        AnytypeGrpcError::View { source } => match source {
+            ViewError::Rpc { source } => grpc_status_is_authentication(source),
+            // anytype-rpc uses this otherwise-success sentinel only when
+            // attaching the token failed before the view request was sent.
+            ViewError::ApiResponse { code: 0, .. } => true,
+            ViewError::ApiResponse { .. }
+            | ViewError::MissingObjectView
+            | ViewError::MissingDataviewBlock { .. }
+            | ViewError::MissingView { .. }
+            | ViewError::NotSupportedView { .. } => false,
+        },
+        AnytypeGrpcError::Backup { source } => match source {
+            BackupError::BackupRpc { source } => grpc_status_is_authentication(source),
+            BackupError::BackupAuth { .. } => true,
+            BackupError::BackupApiResponse { .. }
+            | BackupError::InvalidOptions { .. }
+            | BackupError::SpaceNameLookup { .. }
+            | BackupError::MissingExportPath
+            | BackupError::BackupIo { .. }
+            | BackupError::BackupMove { .. } => false,
+        },
+        AnytypeGrpcError::Config { .. } | AnytypeGrpcError::Transport { .. } => false,
+    }
+}
+
+fn grpc_status_is_authentication(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+    )
 }
 
 /// Errors arising from `KeyStore`
@@ -400,12 +473,16 @@ impl From<AnytypeGrpcError> for AnytypeError {
 mod tests {
     use std::time::Duration;
 
-    use anytype_rpc::error::{AnytypeGrpcError, AuthError};
+    use anytype_rpc::error::{AnytypeGrpcError, AuthError, BackupError, ConfigError, ViewError};
 
     use super::{AnytypeError, KeyStoreError};
     use crate::resolve::ResolveCandidate;
 
     const SECRET: &str = "STANDARD_DISPLAY_DOCUMENT_SECRET";
+
+    fn grpc(source: AnytypeGrpcError) -> AnytypeError {
+        AnytypeError::Grpc { source }
+    }
 
     #[test]
     fn all_raw_bearing_error_variants_keep_fields_but_redact_standard_diagnostics() {
@@ -478,5 +555,185 @@ mod tests {
                 "standard diagnostics exposed raw variant data: {diagnostics}"
             );
         }
+    }
+
+    #[test]
+    fn direct_authentication_categories_do_not_depend_on_error_text() {
+        let authentication = [
+            AnytypeError::ApiError {
+                code: 401,
+                method: "SECRET_METHOD".to_owned(),
+                url: "https://SECRET.invalid".to_owned(),
+                message: "SECRET_RESPONSE".to_owned(),
+            },
+            AnytypeError::ApiError {
+                code: 403,
+                method: "SECRET_METHOD".to_owned(),
+                url: "https://SECRET.invalid".to_owned(),
+                message: "SECRET_RESPONSE".to_owned(),
+            },
+            AnytypeError::Auth {
+                message: "SECRET_TOKEN".to_owned(),
+            },
+            AnytypeError::Unauthorized,
+            AnytypeError::Forbidden,
+            AnytypeError::NoKeyStore,
+            AnytypeError::KeyStore {
+                source: KeyStoreError::Config {
+                    message: "SECRET_KEYSTORE".to_owned(),
+                },
+            },
+            AnytypeError::GrpcUnavailable {
+                message: "SECRET_ACCOUNT_KEY".to_owned(),
+            },
+        ];
+        assert!(authentication.iter().all(AnytypeError::is_authentication));
+
+        let non_authentication = [
+            AnytypeError::ApiError {
+                code: 500,
+                method: "SECRET_METHOD".to_owned(),
+                url: "https://SECRET.invalid".to_owned(),
+                message: "SECRET_RESPONSE".to_owned(),
+            },
+            AnytypeError::Validation {
+                message: "SECRET_INPUT".to_owned(),
+            },
+            AnytypeError::Other {
+                message: "SECRET_OTHER".to_owned(),
+            },
+        ];
+        assert!(
+            non_authentication
+                .iter()
+                .all(|error| !error.is_authentication())
+        );
+    }
+
+    #[test]
+    fn nested_grpc_authentication_is_structural_and_exhaustive() {
+        let authentication = [
+            grpc(AnytypeGrpcError::Auth {
+                source: AuthError::Api {
+                    code: 5,
+                    description: "SECRET_BAD_TOKEN".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::Rpc {
+                    source: tonic::Status::unauthenticated("SECRET_VIEW_TOKEN"),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::Rpc {
+                    source: tonic::Status::permission_denied("SECRET_VIEW_SCOPE"),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::ApiResponse {
+                    code: 0,
+                    description: "SECRET_INVALID_TOKEN_METADATA".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::BackupAuth {
+                    source: AuthError::InvalidMetadata {
+                        source: "SECRET\nTOKEN"
+                            .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+                            .unwrap_err(),
+                    },
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::BackupRpc {
+                    source: tonic::Status::unauthenticated("SECRET_BACKUP_TOKEN"),
+                },
+            }),
+        ];
+        assert!(authentication.iter().all(AnytypeError::is_authentication));
+
+        let transport = tonic::transport::Endpoint::from_shared(
+            "not a valid SECRET_TRANSPORT_ENDPOINT".to_owned(),
+        )
+        .unwrap_err();
+        let non_authentication = [
+            grpc(AnytypeGrpcError::Config {
+                source: ConfigError::MissingHome,
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::Rpc {
+                    source: tonic::Status::internal("SECRET_VIEW_INTERNAL"),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::ApiResponse {
+                    code: 103,
+                    description: "SECRET_UNTYPED_CODE".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::MissingObjectView,
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::MissingDataviewBlock {
+                    view_id: "SECRET_VIEW".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::MissingView {
+                    view_id: "SECRET_VIEW".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::NotSupportedView {
+                    view_id: "SECRET_VIEW".to_owned(),
+                    actual: 99,
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::BackupRpc {
+                    source: tonic::Status::unavailable("SECRET_BACKUP_UNAVAILABLE"),
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::BackupApiResponse {
+                    code: 103,
+                    description: "SECRET_UNTYPED_CODE".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::InvalidOptions {
+                    message: "SECRET_OPTIONS".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::SpaceNameLookup {
+                    space_id: "SECRET_SPACE".to_owned(),
+                    message: "SECRET_LOOKUP".to_owned(),
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::MissingExportPath,
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::BackupIo {
+                    path: "SECRET_SOURCE".into(),
+                    source: std::io::Error::other("SECRET_IO"),
+                },
+            }),
+            grpc(AnytypeGrpcError::Backup {
+                source: BackupError::BackupMove {
+                    from: "SECRET_SOURCE".into(),
+                    to: "SECRET_TARGET".into(),
+                    source: std::io::Error::other("SECRET_MOVE"),
+                },
+            }),
+            grpc(AnytypeGrpcError::Transport { source: transport }),
+        ];
+        assert!(
+            non_authentication
+                .iter()
+                .all(|error| !error.is_authentication())
+        );
     }
 }

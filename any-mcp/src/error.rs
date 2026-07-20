@@ -131,10 +131,11 @@ pub enum AnytypeErrorMapping {
 /// `false` means that a write may have reached Anytype and the handler must
 /// return [`ToolError::mutation_indeterminate`] rather than ordinary retry
 /// guidance. The classifier is intentionally conservative and inspects only
-/// the error variant or numeric HTTP status. It never formats or copies URLs,
-/// credentials, response bodies, or diagnostic messages.
+/// the error variant, numeric HTTP status, or `anytype-api`'s typed
+/// authentication seam. It never formats or copies URLs, credentials,
+/// response bodies, or diagnostic messages.
 #[must_use]
-pub const fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) -> bool {
+pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) -> bool {
     use anytype::error::AnytypeError;
 
     match error {
@@ -175,11 +176,11 @@ pub const fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeErr
         // A transport failure, partial/oversized/malformed response, exhausted
         // retry sequence, verification timeout, or unclassified failure does
         // not prove whether a dispatched mutation took effect.
+        AnytypeError::Grpc { .. } => error.is_authentication(),
         AnytypeError::Http { .. }
         | AnytypeError::ResponseTooLarge { .. }
         | AnytypeError::TooManyRetries { .. }
         | AnytypeError::Deserialization { .. }
-        | AnytypeError::Grpc { .. }
         | AnytypeError::VerifyTimeout { .. }
         | AnytypeError::Other { .. } => false,
     }
@@ -286,6 +287,10 @@ impl ToolError {
     #[must_use]
     pub fn from_anytype(error: &anytype::error::AnytypeError) -> AnytypeErrorMapping {
         use anytype::error::AnytypeError;
+
+        if error.is_authentication() {
+            return AnytypeErrorMapping::Ready(Self::authentication());
+        }
 
         let code = match error {
             AnytypeError::Auth { .. }

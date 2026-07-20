@@ -14,6 +14,12 @@ An ergonomic Anytype API client in Rust.
 
 Applications authenticate with Anytype servers using access tokens. One token is required for http apis, and if gRPC apis are used (for files or chats), an additional gRPC token is required. The `anytype` library helps generate tokens and store them in a KeyStore.
 
+Call `AnytypeError::is_authentication()` when an embedding application needs
+stable authentication guidance. The predicate recognizes direct HTTP and
+configuration failures plus structurally typed nested gRPC authentication
+failures without exposing or parsing response messages, URLs, or credentials,
+and callers do not need a direct `anytype-rpc` dependency.
+
 ### Features
 
 - 100% coverage of Anytype API 2025-11-08

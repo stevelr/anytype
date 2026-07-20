@@ -49,6 +49,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- `AnytypeError::is_authentication()` now exposes a secret-safe,
+  `anytype-api`-level classification for direct and nested gRPC authentication
+  failures without requiring callers to depend on `anytype-rpc` or format
+  source diagnostics
 - test contexts now provide cleanup-owned custom types, source objects, and
   templates through `create_template_fixtures`: the helper takes finite,
   complete pre-create inventories of all types, space-wide active and archived
