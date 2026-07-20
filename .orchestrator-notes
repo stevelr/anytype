@@ -1,3 +1,5 @@
 # Orchestrator Notes
 
-Current loop scope: br issues labeled `mcp` only.
+- Current loop scope is limited to br issues labeled `mcp`.
+- `any-cut` remains tracker-ready but was session-deferred after workspace setup failed.
+- `/home/user/project/anytype/.work/it1` exists but is not registered as a jj workspace. Do not reuse, remove, or relocate it without operator approval or a recovery procedure that preserves unknown concurrent work.
