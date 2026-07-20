@@ -132,6 +132,10 @@ pub struct UpstreamPagination {
 
 impl UpstreamPagination {
     /// Validates metadata returned by Anytype.
+    ///
+    /// Offsets beyond the supported finite continuation range map to
+    /// `bounded_result`. A zero or over-100 upstream page limit is malformed
+    /// metadata and maps to the fixed `upstream` error instead.
     pub fn new(offset: u32, limit: u32, has_more: bool) -> Result<Self, HandlerError> {
         let limit = u16::try_from(limit)
             .ok()
@@ -139,7 +143,7 @@ impl UpstreamPagination {
             .ok_or_else(|| HandlerError::new(ToolError::upstream()))?;
         Ok(Self {
             offset: PageOffset::new(offset)
-                .map_err(|_| HandlerError::new(ToolError::upstream()))?,
+                .map_err(|_| HandlerError::new(ToolError::bounded_result()))?,
             limit,
             has_more,
         })
@@ -166,8 +170,8 @@ impl TryFrom<&anytype::paged::PaginationResponse> for UpstreamPagination {
     fn try_from(value: &anytype::paged::PaginationResponse) -> Result<Self, Self::Error> {
         let offset = u32::try_from(value.offset)
             .map_err(|_| HandlerError::new(ToolError::bounded_result()))?;
-        let limit = u32::try_from(value.limit)
-            .map_err(|_| HandlerError::new(ToolError::bounded_result()))?;
+        let limit =
+            u32::try_from(value.limit).map_err(|_| HandlerError::new(ToolError::upstream()))?;
         Self::new(offset, limit, value.has_more)
     }
 }
@@ -176,6 +180,7 @@ impl TryFrom<&anytype::paged::PaginationResponse> for UpstreamPagination {
 #[derive(Debug, Clone, Copy)]
 pub struct PageRequest {
     offset: PageOffset,
+    limit: PageLimit,
     binding: QueryFingerprint,
 }
 
@@ -220,15 +225,21 @@ pub fn begin_page<P: Serialize>(
         || PageOffset::new(0),
         |cursor| cursors.resolve(cursor, binding),
     )?;
-    Ok(PageRequest { offset, binding })
+    Ok(PageRequest {
+        offset,
+        limit,
+        binding,
+    })
 }
 
 /// Builds a bounded page and, only when upstream reports more data, issues a
 /// cursor advanced by checked upstream `offset + limit` metadata.
 ///
-/// The upstream offset must equal the offset that was requested. Advancement
-/// deliberately does not use returned item count: sparse pages must not repeat
-/// data when Anytype's page window is larger than the returned vector.
+/// The upstream offset and limit must equal the values that were requested,
+/// and the returned item count must not exceed that requested limit. All
+/// integrity checks happen before cursor issuance. Advancement deliberately
+/// does not use returned item count: sparse pages must not repeat data when
+/// Anytype's page window is larger than the returned vector.
 pub fn finish_page<T: JsonSchema>(
     cursors: &CursorStore,
     request: PageRequest,
@@ -238,7 +249,10 @@ pub fn finish_page<T: JsonSchema>(
     if upstream.offset != request.offset {
         return Err(HandlerError::new(ToolError::upstream()));
     }
-    if items.len() > MAX_PAGE_LIMIT as usize {
+    if upstream.limit != request.limit {
+        return Err(HandlerError::new(ToolError::upstream()));
+    }
+    if items.len() > usize::from(request.limit.get()) || items.len() > MAX_PAGE_LIMIT as usize {
         return Err(HandlerError::new(ToolError::bounded_result()));
     }
     let next_cursor = if upstream.has_more {
@@ -447,6 +461,54 @@ mod tests {
     }
 
     #[test]
+    fn page_integrity_failures_precede_cursor_issuance() {
+        let store = CursorStore::new().unwrap();
+        let request = begin_page(
+            &store,
+            None,
+            "space_list",
+            PageLimit::new(1).unwrap(),
+            &json!({}),
+        )
+        .unwrap();
+        let mismatched_limit = finish_page(
+            &store,
+            request,
+            UpstreamPagination::new(0, 100, true).unwrap(),
+            vec![true],
+        )
+        .unwrap_err();
+        assert_eq!(
+            mismatched_limit.tool_error().code(),
+            ToolErrorCode::Upstream
+        );
+        assert_eq!(store.entry_count(), 0);
+
+        let too_many_for_request = finish_page(
+            &store,
+            request,
+            UpstreamPagination::new(0, 1, true).unwrap(),
+            vec![true, false],
+        )
+        .unwrap_err();
+        assert_eq!(
+            too_many_for_request.tool_error().code(),
+            ToolErrorCode::BoundedResult
+        );
+        assert_eq!(store.entry_count(), 0);
+
+        let page = finish_page(
+            &store,
+            request,
+            UpstreamPagination::new(0, 1, true).unwrap(),
+            vec![true],
+        )
+        .unwrap();
+        assert!(page.next_cursor().is_some());
+        assert_eq!(store.entry_count(), 1);
+    }
+
+    #[test]
     fn terminal_mismatch_expiry_and_overflow_are_checked() {
         let store = CursorStore::new().unwrap();
         let request = begin_page(
@@ -487,6 +549,7 @@ mod tests {
         let binding = QueryFingerprint::from_normalized(&json!({"overflow":true})).unwrap();
         let overflow = PageRequest {
             offset: PageOffset::new(MAX_PAGE_OFFSET).unwrap(),
+            limit: PageLimit::new(1).unwrap(),
             binding,
         };
         let error = finish_page(
@@ -541,10 +604,28 @@ mod tests {
         if usize::BITS > u32::BITS {
             let oversized = anytype::paged::PaginationResponse {
                 offset: usize::MAX,
-                ..ordinary
+                ..ordinary.clone()
             };
             let error = UpstreamPagination::try_from(&oversized).unwrap_err();
             assert_eq!(error.tool_error().code(), ToolErrorCode::BoundedResult);
+
+            let malformed_limit = anytype::paged::PaginationResponse {
+                limit: usize::MAX,
+                ..ordinary
+            };
+            let error = UpstreamPagination::try_from(&malformed_limit).unwrap_err();
+            assert_eq!(error.tool_error().code(), ToolErrorCode::Upstream);
+        }
+    }
+
+    #[test]
+    fn upstream_metadata_error_categories_are_stable() {
+        let too_far = UpstreamPagination::new(MAX_PAGE_OFFSET + 1, 1, true).unwrap_err();
+        assert_eq!(too_far.tool_error().code(), ToolErrorCode::BoundedResult);
+
+        for invalid_limit in [0, u32::from(MAX_PAGE_LIMIT) + 1] {
+            let malformed = UpstreamPagination::new(0, invalid_limit, true).unwrap_err();
+            assert_eq!(malformed.tool_error().code(), ToolErrorCode::Upstream);
         }
     }
 
