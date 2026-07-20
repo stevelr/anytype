@@ -4,7 +4,7 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
-    directories: ["/", "/anytype-rpc/tools/gen-protos"]
+    directories: [ "/", "/anytype-rpc/tools/gen-protos" ]
     schedule:
       interval: "weekly"
       day: "sunday"

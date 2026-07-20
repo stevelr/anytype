@@ -1706,8 +1706,7 @@ async fn execute_object_import(
     space_id: &str,
     archive_path: &Path,
     explicit_object_selection: bool,
-    #[allow(unused_variables)]
-    selected_ids: &[String],
+    #[allow(unused_variables)] selected_ids: &[String],
     import_mode: ImportModeArg,
     replace_existing: bool,
     interactive_output: bool,

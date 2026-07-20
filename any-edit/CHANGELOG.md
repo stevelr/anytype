@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Normalized documentation emphasis, shell escaping guidance, and spellchecker configuration formatting.
+
 ## [0.1.5]
 
 ### Changed

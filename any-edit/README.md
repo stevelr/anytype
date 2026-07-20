@@ -120,7 +120,7 @@ The Raycast extension and hotkey to query the desktop app for the current page o
 
 ## Accessibility Permissions
 
-`any-edit` needs permission to send keystrokes to the Anytype desktop application. You may see a system prompt that _PROGRAM_ would like to control this computer using accessibility features". Depending on how it is invoked, "_PROGRAM_" may be any-edit, Raycast, or your terminal program (such as WezTerm or Terminal). Permissions can be enabled in System Settings -> Privacy and Security -> Accessibility.
+`any-edit` needs permission to send keystrokes to the Anytype desktop application. You may see a system prompt that *PROGRAM* would like to control this computer using accessibility features". Depending on how it is invoked, "*PROGRAM*" may be any-edit, Raycast, or your terminal program (such as WezTerm or Terminal). Permissions can be enabled in System Settings -> Privacy and Security -> Accessibility.
 
 ## License
 

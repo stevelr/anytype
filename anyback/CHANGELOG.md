@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Normalized Rust and spellchecker configuration formatting.
 - bumped dependencies: lru -> 0.16.4, nix -> 0.31.1, rand -> 0.10.0
 
 ## [0.4.0-alpha.2]

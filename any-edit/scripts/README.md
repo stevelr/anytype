@@ -23,7 +23,7 @@ EDITOR_COMMAND="/Applications/Alacritty.app/Contents/MacOS/alacritty -e $EDITOR"
 
 Notes:
 
-- `EDITOR_COMMAND` is split on spaces. Use `\ ` to escape spaces inside a path.
+- `EDITOR_COMMAND` is split on spaces. Use `\` to escape spaces inside a path.
 - If `EDITOR_COMMAND` is unset, `any-edit` falls back to `EDITOR` and passes the file path as the only arg.
 - Use absolute paths for all commands (EDITOR, etc.)
 

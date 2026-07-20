@@ -12,6 +12,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Normalized spellchecker configuration formatting.
 - name and id resolution (space, type, chat, view, property) moved into the
   anytype crate (`anytype::resolve`); anyr now calls the shared
   `AnytypeClient::resolve_*` methods. Behavior is unchanged, except: a type

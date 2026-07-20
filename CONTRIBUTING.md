@@ -89,7 +89,7 @@ We use GitHub issues to track bugs and errors. If you run into an issue with the
 
 - Open an [Issue](https://github.com/stevelr/anytype/issues/new).
 - Explain the behavior you would expect and the actual behavior.
-- Please provide as much context as possible and describe _steps to reproduce the issue_. This part is important. If we aren't able to reproduce the problem, it may be harder for us to understand and fix it.
+- Please provide as much context as possible and describe *steps to reproduce the issue*. This part is important. If we aren't able to reproduce the problem, it may be harder for us to understand and fix it.
 - Provide the information you collected in the previous section.
 
 Once it's filed:

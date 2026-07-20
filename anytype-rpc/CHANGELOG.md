@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - 0.4.0-pre.1
 
+**Changed:**
+
+- Normalized bootstrap example formatting.
+
 **Added:**
 
 | Name                                        | --                         |

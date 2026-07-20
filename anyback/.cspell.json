@@ -4,14 +4,5 @@
 	"dictionaries": ["rust"],
 	"ignorePaths": ["target/", "Cargo.lock", "./*.md"],
 	"ignoreRegExpList": ["/bafyrei[a-z0-9]*/gi"],
-	"words": [
-		"anyback",
-		"anyr",
-		"anytype",
-		"backlinks",
-		"creds",
-		"Schoettler",
-		"stevelr",
-		"uninlined"
-	]
+	"words": ["anyback", "anyr", "anytype", "backlinks", "creds", "Schoettler", "stevelr", "uninlined"]
 }

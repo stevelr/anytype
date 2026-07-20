@@ -34,10 +34,10 @@ To log http requests and responses, set `RUST_LOG=anytype::http_json=trace`
 To enable logging in examples, set RUST_LOG in the environment, and initialize tracing in main().
 
 ```rust
-    use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+use tracing_subscriber::EnvFilter;
+let _ = tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .try_init();
 ```
 
 ## OS Keyring may require signed executables
