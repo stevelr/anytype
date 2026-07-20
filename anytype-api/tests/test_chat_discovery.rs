@@ -1,25 +1,30 @@
+mod common;
+
 use anytype::{
     prelude::*,
     test_util::{TestResult, unique_suffix, with_test_context},
 };
+use common::retry_definitive_rate_limit;
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn test_chat_discovery_requests() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let name = format!("chat-discovery-{}", unique_suffix());
-        let chat = ctx
-            .client
-            .chats()
-            .in_space(&ctx.space_id)
-            .create(
-                &name,
-                Icon::Emoji {
-                    emoji: "🔎".to_string(),
-                },
-            )
-            .create()
-            .await?;
+        let chat = retry_definitive_rate_limit("chat discovery setup chat", || async {
+            ctx.client
+                .chats()
+                .in_space(&ctx.space_id)
+                .create(
+                    &name,
+                    Icon::Emoji {
+                        emoji: "🔎".to_string(),
+                    },
+                )
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&chat.id);
 
         let chats = ctx
@@ -69,18 +74,20 @@ async fn test_chat_discovery_requests() -> TestResult<()> {
 async fn test_rest_chat_messages_reactions_search_and_reads() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let name = format!("chat-rest-{}", unique_suffix());
-        let chat = ctx
-            .client
-            .chats()
-            .in_space(&ctx.space_id)
-            .create(
-                name,
-                Icon::Emoji {
-                    emoji: "💬".to_string(),
-                },
-            )
-            .create()
-            .await?;
+        let chat = retry_definitive_rate_limit("REST chat workflow setup chat", || async {
+            ctx.client
+                .chats()
+                .in_space(&ctx.space_id)
+                .create(
+                    &name,
+                    Icon::Emoji {
+                        emoji: "💬".to_string(),
+                    },
+                )
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&chat.id);
 
         // Publishing remains gRPC so structured blocks are not discarded.

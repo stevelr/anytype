@@ -30,7 +30,9 @@ use anytype::{
 };
 use tracing::debug;
 
-use crate::common::{create_object_with_retry, lookup_property_tag_with_retry};
+use crate::common::{
+    create_object_with_retry, lookup_property_tag_with_retry, retry_definitive_rate_limit,
+};
 
 // =============================================================================
 // Type Listing Tests
@@ -737,12 +739,14 @@ async fn test_types_update_custom() -> TestResult<()> {
         let unique_key = format!("test_update_{}", chrono::Utc::now().timestamp_millis());
 
         // Create a type
-        let created = ctx
-            .client
-            .new_type(&ctx.space_id, "Original Name")
-            .key(&unique_key)
-            .create()
-            .await?;
+        let created = retry_definitive_rate_limit("type update setup", || async {
+            ctx.client
+                .new_type(&ctx.space_id, "Original Name")
+                .key(&unique_key)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_type(&created.id);
 
         // Update it
@@ -775,14 +779,16 @@ async fn test_types_replace_and_clear_recommended_properties() -> TestResult<()>
         let first_key = format!("first_prop_{suffix}");
         let second_key = format!("second_prop_{suffix}");
 
-        let created = ctx
-            .client
-            .new_type(&ctx.space_id, "Property Replacement Type")
-            .key(type_key)
-            .property("First Property", &first_key, PropertyFormat::Text)
-            .property("Second Property", &second_key, PropertyFormat::Number)
-            .create()
-            .await?;
+        let created = retry_definitive_rate_limit("type property update setup", || async {
+            ctx.client
+                .new_type(&ctx.space_id, "Property Replacement Type")
+                .key(&type_key)
+                .property("First Property", &first_key, PropertyFormat::Text)
+                .property("Second Property", &second_key, PropertyFormat::Number)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_type(&created.id);
 
         let replaced = ctx
@@ -822,12 +828,15 @@ async fn test_types_delete_custom() -> TestResult<()> {
         let unique_key = format!("test_delete_{}", chrono::Utc::now().timestamp_millis());
 
         // Create a type
-        let created = ctx
-            .client
-            .new_type(&ctx.space_id, "To Be Deleted")
-            .key(&unique_key)
-            .create()
-            .await?;
+        let created = retry_definitive_rate_limit("type delete setup", || async {
+            ctx.client
+                .new_type(&ctx.space_id, "To Be Deleted")
+                .key(&unique_key)
+                .create()
+                .await
+        })
+        .await?;
+        ctx.register_type(&created.id);
 
         // Delete it
         let deleted = ctx
@@ -968,12 +977,14 @@ async fn test_types_duplicate_key() -> TestResult<()> {
         let unique_key = format!("test_dup_{}", chrono::Utc::now().timestamp_millis());
 
         // Create first type
-        let first = ctx
-            .client
-            .new_type(&ctx.space_id, "First Type")
-            .key(&unique_key)
-            .create()
-            .await?;
+        let first = retry_definitive_rate_limit("duplicate type setup", || async {
+            ctx.client
+                .new_type(&ctx.space_id, "First Type")
+                .key(&unique_key)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_type(&first.id);
 
         // Try to create second type with same key

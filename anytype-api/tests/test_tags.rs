@@ -20,7 +20,7 @@
 mod common;
 
 use anytype::{prelude::*, test_util::with_test_context_unit};
-use common::{create_object_with_retry, unique_test_name, update_object_with_retry};
+use common::{create_object_with_retry, retry_definitive_rate_limit, unique_test_name};
 
 // =============================================================================
 // Tag Listing Tests
@@ -31,25 +31,26 @@ use common::{create_object_with_retry, unique_test_name, update_object_with_retr
 #[test_log::test]
 async fn test_lookup_tag_by_explicit_property_id() {
     with_test_context_unit(|ctx| async move {
-        let property = ctx
-            .client
-            .new_property(
-                &ctx.space_id,
-                unique_test_name("Direct Tag Lookup"),
-                PropertyFormat::Select,
-            )
-            .create()
-            .await
-            .expect("create direct-lookup property");
+        let property_name = unique_test_name("Direct Tag Lookup");
+        let property = retry_definitive_rate_limit("direct tag lookup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &property_name, PropertyFormat::Select)
+                .create()
+                .await
+        })
+        .await
+        .expect("create direct-lookup property");
         ctx.register_property(&property.id);
-        let tag = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Bounded Option")
-            .color(Color::Teal)
-            .create()
-            .await
-            .expect("create direct-lookup tag");
+        let tag = retry_definitive_rate_limit("direct tag lookup option", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Bounded Option")
+                .color(Color::Teal)
+                .create()
+                .await
+        })
+        .await
+        .expect("create direct-lookup tag");
 
         let found = ctx
             .client
@@ -68,30 +69,36 @@ async fn test_list_tags_for_select_property() {
     with_test_context_unit(|ctx| async move {
         // Create a select property and tags
         let prop_name = unique_test_name("Select Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .create()
-            .await
-            .expect("Failed to create select property");
+        let property = retry_definitive_rate_limit("select tag-list property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create select property");
         ctx.register_property(&property.id);
 
-        let _tag1 = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Option 1")
-            .color(Color::Blue)
-            .create()
-            .await
-            .expect("Failed to create tag 1");
-        let _tag2 = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Option 2")
-            .color(Color::Red)
-            .create()
-            .await
-            .expect("Failed to create tag 2");
+        let _tag1 = retry_definitive_rate_limit("select tag-list option 1", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Option 1")
+                .color(Color::Blue)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create tag 1");
+        let _tag2 = retry_definitive_rate_limit("select tag-list option 2", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Option 2")
+                .color(Color::Red)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create tag 2");
 
         // List tags for this property
         let tags = ctx
@@ -116,38 +123,32 @@ async fn test_list_tags_for_multiselect_property() {
     with_test_context_unit(|ctx| async move {
         // Create a multi-select property and tags
         let prop_name = unique_test_name("MultiSelect Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect)
-            .create()
-            .await
-            .expect("Failed to create multi-select property");
+        let property = retry_definitive_rate_limit("multi-select tag-list property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create multi-select property");
         ctx.register_property(&property.id);
 
-        let _tag_a = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Tag A")
-            .color(Color::Yellow)
-            .create()
+        for (label, name, color) in [
+            ("multi-select tag-list option A", "Tag A", Color::Yellow),
+            ("multi-select tag-list option B", "Tag B", Color::Lime),
+            ("multi-select tag-list option C", "Tag C", Color::Purple),
+        ] {
+            retry_definitive_rate_limit(label, || async {
+                ctx.client
+                    .new_tag(&ctx.space_id, &property.id)
+                    .name(name)
+                    .color(color.clone())
+                    .create()
+                    .await
+            })
             .await
-            .expect("Failed to create tag A");
-        let _tag_b = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Tag B")
-            .color(Color::Lime)
-            .create()
-            .await
-            .expect("Failed to create tag B");
-        let _tag_c = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Tag C")
-            .color(Color::Purple)
-            .create()
-            .await
-            .expect("Failed to create tag C");
+            .expect("Failed to create multi-select tag");
+        }
 
         // List tags
         let tags = ctx
@@ -176,12 +177,14 @@ async fn test_list_tags_empty_property() {
     with_test_context_unit(|ctx| async move {
         // Create a select property without tags
         let prop_name = unique_test_name("Empty Select");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .create()
-            .await
-            .expect("Failed to create empty select property");
+        let property = retry_definitive_rate_limit("empty tag-list property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create empty select property");
         ctx.register_property(&property.id);
 
         // List tags should return empty list
@@ -204,12 +207,14 @@ async fn test_list_tags_invalid_property() {
     with_test_context_unit(|ctx| async move {
         // Create a text property (not select/multi-select)
         let prop_name = unique_test_name("Text Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Text)
-            .create()
-            .await
-            .expect("Failed to create text property");
+        let property = retry_definitive_rate_limit("invalid tag-list property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Text)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create text property");
         ctx.register_property(&property.id);
 
         // Try to list tags on a text property
@@ -240,13 +245,15 @@ async fn test_tag_has_required_fields() {
     with_test_context_unit(|ctx| async move {
         // Create property with a tag
         let prop_name = unique_test_name("Test Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .tag("Test Tag", Some("test_key".to_string()), Color::Orange)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("required tag fields setup", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .tag("Test Tag", Some("test_key".to_string()), Color::Orange)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Get the tags
@@ -289,17 +296,17 @@ async fn test_tag_color_values() {
         ];
 
         let prop_name = unique_test_name("Color Test");
-        let mut new_prop_req =
-            ctx.client
-                .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect);
-
-        for (i, color) in colors.iter().enumerate() {
-            new_prop_req = new_prop_req.tag(&format!("Color {}", i), None, color.clone());
-        }
-        let property = new_prop_req
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("tag color setup property", || async {
+            let mut request =
+                ctx.client
+                    .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect);
+            for (i, color) in colors.iter().enumerate() {
+                request = request.tag(&format!("Color {i}"), None, color.clone());
+            }
+            request.create().await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Get the tags
@@ -336,12 +343,14 @@ async fn test_create_tag() {
     with_test_context_unit(|ctx| async move {
         // Create a select property
         let prop_name = unique_test_name("Create Tag Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("create-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Create a new tag
@@ -381,12 +390,14 @@ async fn test_create_tag_with_color() {
     with_test_context_unit(|ctx| async move {
         // Create a select property
         let prop_name = unique_test_name("Color Tag Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("colored-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Create a tag with a specific color
@@ -413,13 +424,15 @@ async fn test_create_duplicate_tag_name() {
         // Create a property with a tag
         let prop_name = unique_test_name("Dup Tag Prop");
         let tag_name = "Duplicate";
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .tag(tag_name, None, Color::Red)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("duplicate-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .tag(tag_name, None, Color::Red)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Try to create another tag with the same name
@@ -465,33 +478,39 @@ async fn test_set_tag_on_object_select() {
         // convert key to snake_case
         let prop_key = prop_name.to_lowercase().replace(" ", "_");
 
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .key(&prop_key)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("select object-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
-        let active = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Active")
-            .key("active")
-            .color(Color::Lime)
-            .create()
-            .await
-            .expect("create active tag");
-        let _inactive = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Inactive")
-            .key("inactive")
-            .color(Color::Grey)
-            .create()
-            .await
-            .expect("create inactive tag");
+        let active = retry_definitive_rate_limit("active setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Active")
+                .key("active")
+                .color(Color::Lime)
+                .create()
+                .await
+        })
+        .await
+        .expect("create active tag");
+        let _inactive = retry_definitive_rate_limit("inactive setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Inactive")
+                .key("inactive")
+                .color(Color::Grey)
+                .create()
+                .await
+        })
+        .await
+        .expect("create inactive tag");
 
         // Create an object with the select property set
         let obj_name = unique_test_name("Test Object");
@@ -541,41 +560,50 @@ async fn test_set_tags_on_object_multiselect() {
         // convert key to snake_case
         let prop_key = prop_name.to_lowercase().replace(" ", "_");
 
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect)
-            .key(&prop_key)
-            .create()
+        let property =
+            retry_definitive_rate_limit("multi-select object-tag setup property", || async {
+                ctx.client
+                    .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect)
+                    .key(&prop_key)
+                    .create()
+                    .await
+            })
             .await
             .expect("Failed to create property");
         ctx.register_property(&property.id);
-        let work_tag = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Work")
-            .key("work")
-            .color(Color::Blue)
-            .create()
-            .await
-            .expect("create work tag");
-        let _personal_tag = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Personal")
-            .key("personal")
-            .color(Color::Lime)
-            .create()
-            .await
-            .expect("create personal tag");
-        let urgent_tag = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Urgent")
-            .key("urgent")
-            .color(Color::Red)
-            .create()
-            .await
-            .expect("create urgent tag");
+        let work_tag = retry_definitive_rate_limit("work setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Work")
+                .key("work")
+                .color(Color::Blue)
+                .create()
+                .await
+        })
+        .await
+        .expect("create work tag");
+        let _personal_tag = retry_definitive_rate_limit("personal setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Personal")
+                .key("personal")
+                .color(Color::Lime)
+                .create()
+                .await
+        })
+        .await
+        .expect("create personal tag");
+        let urgent_tag = retry_definitive_rate_limit("urgent setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Urgent")
+                .key("urgent")
+                .color(Color::Red)
+                .create()
+                .await
+        })
+        .await
+        .expect("create urgent tag");
 
         // Create an object with multiple tags
         let obj_name = unique_test_name("Multi Tag Object");
@@ -633,41 +661,49 @@ async fn test_read_tag_from_object() {
         let prop_name = unique_test_name("Priority");
         let prop_key = prop_name.to_lowercase().replace(" ", "_");
 
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .key(&prop_key)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("read object-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
-        let high_tag = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("High")
-            .key("high")
-            .color(Color::Red)
-            .create()
-            .await
-            .expect("create high tag");
-        let _medium_tag = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Medium")
-            .key("medium")
-            .color(Color::Yellow)
-            .create()
-            .await
-            .expect("create medium tag");
-        let low_tag = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Low")
-            .key("low")
-            .color(Color::Grey)
-            .create()
-            .await
-            .expect("create low tag");
+        let high_tag = retry_definitive_rate_limit("high setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("High")
+                .key("high")
+                .color(Color::Red)
+                .create()
+                .await
+        })
+        .await
+        .expect("create high tag");
+        let _medium_tag = retry_definitive_rate_limit("medium setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Medium")
+                .key("medium")
+                .color(Color::Yellow)
+                .create()
+                .await
+        })
+        .await
+        .expect("create medium tag");
+        let low_tag = retry_definitive_rate_limit("low setup tag", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Low")
+                .key("low")
+                .color(Color::Grey)
+                .create()
+                .await
+        })
+        .await
+        .expect("create low tag");
 
         // Create object with priority set
         let obj_name = unique_test_name("Priority Object");
@@ -718,15 +754,13 @@ async fn test_read_tag_from_object() {
         );
 
         // Update the priority
-        let updated = update_object_with_retry("Priority Object", || async {
-            ctx.client
-                .update_object(&ctx.space_id, &object.id)
-                .set_select(&prop_key, &low_tag.id)
-                .update()
-                .await
-        })
-        .await
-        .expect("Failed to update object");
+        let updated = ctx
+            .client
+            .update_object(&ctx.space_id, &object.id)
+            .set_select(&prop_key, &low_tag.id)
+            .update()
+            .await
+            .expect("Failed to update object");
 
         // verify change after update
         assert_eq!(
@@ -749,30 +783,36 @@ async fn test_delete_tag() {
     with_test_context_unit(|ctx| async move {
         // Create a select property and tags
         let prop_name = unique_test_name("Delete Tag Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("delete-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
-        let _keep = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Keep")
-            .color(Color::Lime)
-            .create()
-            .await
-            .expect("create keep tag");
-        let _delete = ctx
-            .client
-            .new_tag(&ctx.space_id, &property.id)
-            .name("Delete")
-            .color(Color::Red)
-            .create()
-            .await
-            .expect("create delete tag");
+        let _keep = retry_definitive_rate_limit("delete-tag keep option", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Keep")
+                .color(Color::Lime)
+                .create()
+                .await
+        })
+        .await
+        .expect("create keep tag");
+        let _delete = retry_definitive_rate_limit("delete-tag delete option", || async {
+            ctx.client
+                .new_tag(&ctx.space_id, &property.id)
+                .name("Delete")
+                .color(Color::Red)
+                .create()
+                .await
+        })
+        .await
+        .expect("create delete tag");
 
         // Get the tags
         let tags = ctx
@@ -837,13 +877,15 @@ async fn test_update_tag() {
     with_test_context_unit(|ctx| async move {
         // Create a select property with a tag
         let prop_name = unique_test_name("Update Tag Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .tag("Original Name", None, Color::Grey)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("update-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .tag("Original Name", None, Color::Grey)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Get the tag
@@ -909,13 +951,15 @@ async fn test_get_tag_by_id() {
     with_test_context_unit(|ctx| async move {
         // Create property with a tag
         let prop_name = unique_test_name("Get Tag Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .tag("Specific Tag", Some("specific".to_string()), Color::Teal)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("get-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .tag("Specific Tag", Some("specific".to_string()), Color::Teal)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // List tags to get the ID
@@ -951,15 +995,17 @@ async fn test_tag_pagination() {
     with_test_context_unit(|ctx| async move {
         // Create property with multiple tags
         let prop_name = unique_test_name("Pagination Prop");
-        let mut prop_req =
-            ctx.client
-                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select);
-
-        for i in 0..5 {
-            prop_req = prop_req.tag(&format!("Tag {}", i), None, Color::Blue);
-        }
-
-        let property = prop_req.create().await.expect("Failed to create property");
+        let property = retry_definitive_rate_limit("tag pagination setup property", || async {
+            let mut request =
+                ctx.client
+                    .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select);
+            for i in 0..5 {
+                request = request.tag(&format!("Tag {i}"), None, Color::Blue);
+            }
+            request.create().await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Test limit
@@ -994,12 +1040,14 @@ async fn test_create_tag_without_name() {
     with_test_context_unit(|ctx| async move {
         // Create a select property
         let prop_name = unique_test_name("Validation Prop");
-        let property = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .create()
-            .await
-            .expect("Failed to create property");
+        let property = retry_definitive_rate_limit("invalid-tag setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create property");
         ctx.register_property(&property.id);
 
         // Try to create a tag without setting a name

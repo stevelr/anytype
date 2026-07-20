@@ -63,6 +63,64 @@ const TEMPLATE_FIXTURE_GLOBAL_TEMPLATE_LIMIT: usize = 10_000;
 const TEMPLATE_FIXTURE_MAX_SOURCES: usize = 16;
 const TEMPLATE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 const TEMPLATE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
+/// Maximum attempts for test-only setup mutations rejected with HTTP 429.
+#[doc(hidden)]
+pub const DEFINITIVE_RATE_LIMIT_MAX_ATTEMPTS: usize = 5;
+const DEFINITIVE_RATE_LIMIT_DELAYS_MS: [u64; DEFINITIVE_RATE_LIMIT_MAX_ATTEMPTS - 1] =
+    [200, 400, 800, 1_500];
+
+/// Returns whether an error proves a setup mutation was rejected with HTTP 429.
+#[doc(hidden)]
+pub fn is_definitive_rate_limit_rejection(error: &AnytypeError) -> bool {
+    matches!(error, AnytypeError::ApiError { code: 429, .. })
+}
+
+/// Returns the bounded delay after a failed setup-mutation attempt.
+#[doc(hidden)]
+pub fn definitive_rate_limit_retry_delay(failed_attempt: usize) -> Option<Duration> {
+    failed_attempt
+        .checked_sub(1)
+        .and_then(|index| DEFINITIVE_RATE_LIMIT_DELAYS_MS.get(index))
+        .copied()
+        .map(Duration::from_millis)
+}
+
+/// Retries a test-only setup mutation only after a typed HTTP 429 rejection.
+///
+/// A 429 response proves that Anytype rejected the request before applying it.
+/// Transport failures, timeouts, validation errors, and all other HTTP statuses
+/// are returned immediately because replay could duplicate a mutation.
+#[doc(hidden)]
+pub async fn retry_definitive_rate_limit<T, F, Fut>(
+    label: &str,
+    mut operation: F,
+) -> Result<T, AnytypeError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, AnytypeError>>,
+{
+    for attempt in 1..=DEFINITIVE_RATE_LIMIT_MAX_ATTEMPTS {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let retry_delay = is_definitive_rate_limit_rejection(&error)
+                    .then(|| definitive_rate_limit_retry_delay(attempt))
+                    .flatten();
+                if let Some(delay) = retry_delay {
+                    eprintln!(
+                        "{label} received definitive HTTP 429 on attempt {attempt}; retrying after {}ms",
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    unreachable!("the final attempt always returns its result")
+}
 // =============================================================================
 // TestError
 // =============================================================================
@@ -287,14 +345,16 @@ impl TestContext {
             complete_type_object_id_snapshot(&self.client, &self.space_id, &exact_type.id)
                 .await
                 .map_err(|_| collection_fixture_ownership_error())?;
-        let created = self
-            .client
-            .new_object(&self.space_id, &exact_type.key)
-            .name(&name)
-            .no_verify()
-            .create()
-            .await
-            .map_err(|_| collection_fixture_ownership_error())?;
+        let created = retry_definitive_rate_limit("collection fixture", || async {
+            self.client
+                .new_object(&self.space_id, &exact_type.key)
+                .name(&name)
+                .no_verify()
+                .create()
+                .await
+        })
+        .await
+        .map_err(|_| collection_fixture_ownership_error())?;
         self.client
             .config
             .limits
@@ -480,7 +540,10 @@ impl TestContext {
             .limits
             .validate_name(name.clone(), "test space")?;
         let preexisting_ids = complete_space_id_snapshot(&self.client).await?;
-        let created = self.client.new_space(&name).no_verify().create().await?;
+        let created = retry_definitive_rate_limit("space fixture", || async {
+            self.client.new_space(&name).no_verify().create().await
+        })
+        .await?;
         validate_and_register_owned_space_fixture(
             &self.cleanup,
             &self.client.config.limits,
@@ -545,15 +608,17 @@ impl TestContext {
         let type_snapshot =
             complete_template_ownership_snapshot(&self.client, &self.space_id).await?;
         let type_key = format!("template_fixture_{}", unique_suffix());
-        let created_type = self
-            .client
-            .new_type(&self.space_id, &type_name)
-            .key(&type_key)
-            .plural_name(format!("{type_name}s"))
-            .layout(TypeLayout::Basic)
-            .no_verify()
-            .create()
-            .await?;
+        let created_type = retry_definitive_rate_limit("template fixture type", || async {
+            self.client
+                .new_type(&self.space_id, &type_name)
+                .key(&type_key)
+                .plural_name(format!("{type_name}s"))
+                .layout(TypeLayout::Basic)
+                .no_verify()
+                .create()
+                .await
+        })
+        .await?;
         limits.validate_id(&created_type.id, "template fixture type")?;
         authorize_template_resource(
             &self.cleanup,
@@ -592,13 +657,15 @@ impl TestContext {
         for source_name in source_names {
             let source_snapshot =
                 complete_template_ownership_snapshot(&self.client, &self.space_id).await?;
-            let source = self
-                .client
-                .new_object(&self.space_id, &verified_type.key)
-                .name(source_name)
-                .no_verify()
-                .create()
-                .await?;
+            let source = retry_definitive_rate_limit("template fixture source", || async {
+                self.client
+                    .new_object(&self.space_id, &verified_type.key)
+                    .name(&source_name)
+                    .no_verify()
+                    .create()
+                    .await
+            })
+            .await?;
             limits.validate_id(&source.id, "template fixture source")?;
             authorize_template_resource(
                 &self.cleanup,

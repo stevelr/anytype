@@ -311,6 +311,8 @@ mod search_and_filters {
 
     use anytype::{prelude::*, test_util::*};
 
+    use super::common::retry_definitive_rate_limit;
+
     /// Test global search functionality
     #[tokio::test]
     #[test_log::test]
@@ -363,13 +365,15 @@ mod search_and_filters {
         with_test_context_unit(|ctx| async move {
             // Create a uniquely named object to search for
             let unique_term = format!("SearchTest{}", chrono::Utc::now().timestamp_millis());
-            let obj = ctx
-                .client
-                .new_object(&ctx.space_id, "page")
-                .name(&unique_term)
-                .create()
-                .await
-                .expect("Failed to create searchable object");
+            let obj = retry_definitive_rate_limit("search text setup object", || async {
+                ctx.client
+                    .new_object(&ctx.space_id, "page")
+                    .name(&unique_term)
+                    .create()
+                    .await
+            })
+            .await
+            .expect("Failed to create searchable object");
             ctx.register_object(&obj.id);
 
             // Small delay to allow indexing
