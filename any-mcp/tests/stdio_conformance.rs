@@ -10,9 +10,9 @@
 //! channel APIs. It starts a bounded local Anytype HTTP fixture, drives the
 //! real `any-mcp` executable one JSON-RPC line at a time, and retains every
 //! stdout byte so protocol-channel purity is checked after clean EOF. Passing
-//! tests cover the server's current legacy-shaped lifecycle; ignored tests
-//! freeze requirements that the advertised MCP 2026-07-28 revision does not
-//! yet satisfy.
+//! Tests cover both the current stateless MCP 2026-07-28 wire contract and the
+//! exact legacy lifecycle used by current Codex, Claude Code, and Inspector
+//! releases.
 
 use std::{
     any::Any,
@@ -20,7 +20,7 @@ use std::{
     net::{TcpListener, TcpStream},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -49,6 +49,66 @@ const HANG_RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrl
 const RESOURCE_TEMPLATE: &str = "anytype://spaces/{space_id}/objects/{object_id}";
 const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-normal.json");
 const READ_ONLY_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-read-only.json");
+const MCP_DRAFT_SCHEMA: &str = include_str!("schema/mcp-2026-07-28.json");
+
+static MODERN_REQUEST_SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
+    official_validator(&[
+        "DiscoverRequest",
+        "ListToolsRequest",
+        "CallToolRequest",
+        "ListResourcesRequest",
+        "ListResourceTemplatesRequest",
+        "ReadResourceRequest",
+    ])
+});
+
+static MODERN_RESPONSE_SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
+    official_validator(&[
+        "DiscoverResultResponse",
+        "ListToolsResultResponse",
+        "CallToolResultResponse",
+        "ListResourcesResultResponse",
+        "ListResourceTemplatesResultResponse",
+        "ReadResourceResultResponse",
+    ])
+});
+
+static ERROR_RESPONSE_SCHEMA: LazyLock<jsonschema::Validator> =
+    LazyLock::new(|| official_validator(&["JSONRPCErrorResponse"]));
+
+fn official_validator(definitions: &[&str]) -> jsonschema::Validator {
+    let official: Value = serde_json::from_str(MCP_DRAFT_SCHEMA).expect("official draft schema");
+    let schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": official["$defs"].clone(),
+        "anyOf": definitions
+            .iter()
+            .map(|definition| json!({"$ref": format!("#/$defs/{definition}")}))
+            .collect::<Vec<_>>()
+    });
+    jsonschema::draft202012::options()
+        .build(&schema)
+        .expect("compile official draft schema subset")
+}
+
+fn assert_official_modern_request(request: &Value) {
+    assert!(
+        MODERN_REQUEST_SCHEMA.is_valid(request),
+        "modern request matches the official draft schema: {request}"
+    );
+}
+
+fn assert_official_modern_response(response: &Value) {
+    let validator = if response.get("result").is_some() {
+        &*MODERN_RESPONSE_SCHEMA
+    } else {
+        &*ERROR_RESPONSE_SCHEMA
+    };
+    assert!(
+        validator.is_valid(response),
+        "modern response matches the official draft schema: {response}"
+    );
+}
 
 struct HttpFixture {
     address: String,
@@ -337,6 +397,45 @@ impl ProtocolProcess {
         }));
         let response = self.read_frame();
         assert_eq!(response["id"], id, "response id for {method}");
+        response
+    }
+
+    fn modern_request(&mut self, id: u64, method: &str, params: Value) -> Value {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        if matches!(
+            method,
+            "server/discover"
+                | "tools/list"
+                | "tools/call"
+                | "resources/list"
+                | "resources/templates/list"
+                | "resources/read"
+        ) {
+            assert_official_modern_request(&request);
+        }
+        self.send_modern_request(id, method, request)
+    }
+
+    fn unchecked_modern_request(&mut self, id: u64, method: &str, params: Value) -> Value {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        self.send_modern_request(id, method, request)
+    }
+
+    fn send_modern_request(&mut self, id: u64, method: &str, request: Value) -> Value {
+        self.send(request);
+        let response = self.read_frame();
+        assert_eq!(response["id"], id, "response id for {method}");
+        assert_official_modern_response(&response);
         response
     }
 
@@ -835,12 +934,10 @@ fn production_stdio_read_only_mode_legacy_regression_is_bounded_and_pure() {
     run_legacy_stdio_regression(true);
 }
 
-#[test]
-#[ignore = "blocked by any-iur: rmcp 2.2.0 implements the legacy handshake, not MCP 2026-07-28"]
-fn advertised_2026_revision_supports_stateless_server_discovery() {
+fn run_modern_stdio_acceptance(read_only: bool) {
     let fixture = HttpFixture::start();
-    let mut process = ProtocolProcess::start(&fixture, true);
-    let discovered = process.request(1, "server/discover", json!({"_meta": modern_meta()}));
+    let mut process = ProtocolProcess::start(&fixture, read_only);
+    let discovered = process.modern_request(1, "server/discover", json!({"_meta": modern_meta()}));
     assert_eq!(discovered["result"]["resultType"], "complete");
     assert_eq!(
         discovered["result"]["supportedVersions"],
@@ -850,14 +947,148 @@ fn advertised_2026_revision_supports_stateless_server_discovery() {
         discovered["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
         "any-mcp"
     );
+    assert_eq!(discovered["result"]["cacheScope"], "public");
+    assert!(discovered["result"]["ttlMs"].as_u64().unwrap() > 0);
 
-    let listed = process.request(2, "tools/list", json!({"_meta": modern_meta()}));
+    let listed = process.modern_request(2, "tools/list", json!({"_meta": modern_meta()}));
     assert_eq!(listed["result"]["resultType"], "complete");
-    assert_exact_wire_catalog(&listed["result"], true);
+    assert_eq!(listed["result"]["cacheScope"], "public");
+    assert!(listed["result"]["ttlMs"].as_u64().unwrap() > 0);
+    let expected = assert_exact_wire_catalog(&listed["result"], read_only);
+
+    let resources = process.modern_request(3, "resources/list", json!({"_meta": modern_meta()}));
+    assert_eq!(resources["result"]["resources"], json!([]));
+    assert_eq!(resources["result"]["cacheScope"], "public");
+    let templates = process.modern_request(
+        4,
+        "resources/templates/list",
+        json!({"_meta": modern_meta()}),
+    );
+    assert_eq!(
+        templates["result"]["resourceTemplates"][0]["uriTemplate"],
+        RESOURCE_TEMPLATE
+    );
+    assert_eq!(templates["result"]["cacheScope"], "public");
+    let read = process.modern_request(
+        5,
+        "resources/read",
+        json!({"uri": RESOURCE_URI, "_meta": modern_meta()}),
+    );
+    assert_eq!(read["result"]["contents"][0]["text"], DOCUMENT_BODY);
+    assert_eq!(read["result"]["ttlMs"], 0);
+    assert_eq!(read["result"]["cacheScope"], "private");
+
+    let success = process.modern_request(
+        6,
+        "tools/call",
+        json!({"name": "server_status", "arguments": {}, "_meta": modern_meta()}),
+    );
+    assert_eq!(success["result"]["resultType"], "complete");
+    assert_structured_result(&success["result"], false);
+    let execution_error = process.modern_request(
+        7,
+        "tools/call",
+        json!({
+            "name": "object_search",
+            "arguments": {
+                "filters": {
+                    "operator": "and",
+                    "conditions": [{
+                        "format": "select",
+                        "property_key": "tag",
+                        "condition": "in",
+                        "values": []
+                    }],
+                    "filters": []
+                }
+            },
+            "_meta": modern_meta()
+        }),
+    );
+    assert_structured_result(&execution_error["result"], true);
+
+    let mut id = 20;
+    for name in &expected {
+        if matches!(name.as_str(), "server_status" | "object_search") {
+            continue;
+        }
+        let invalid = process.modern_request(
+            id,
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": {"unknown": INPUT_SECRET},
+                "_meta": modern_meta()
+            }),
+        );
+        assert_eq!(invalid["error"]["code"], -32602, "invalid {name} input");
+        id += 1;
+    }
+
+    let mut unsupported_meta = modern_meta();
+    unsupported_meta["io.modelcontextprotocol/protocolVersion"] = json!("1900-01-01");
+    let unsupported = process.modern_request(70, "tools/list", json!({"_meta": unsupported_meta}));
+    assert_eq!(unsupported["error"]["code"], -32022);
+    assert_eq!(unsupported["error"]["data"]["requested"], "1900-01-01");
+    assert_eq!(
+        unsupported["error"]["data"]["supported"],
+        json!(["2026-07-28"])
+    );
+
+    let mut incomplete_meta = modern_meta();
+    incomplete_meta
+        .as_object_mut()
+        .unwrap()
+        .remove("io.modelcontextprotocol/clientInfo");
+    let incomplete =
+        process.unchecked_modern_request(71, "tools/list", json!({"_meta": incomplete_meta}));
+    assert_eq!(incomplete["error"]["code"], -32602);
+
+    let initialize = process.modern_request(72, "initialize", json!({"_meta": modern_meta()}));
+    assert_eq!(initialize["error"]["code"], -32601);
+
+    fixture.arm_hanging_request();
+    process.send(json!({
+        "jsonrpc": "2.0",
+        "id": 80,
+        "method": "resources/read",
+        "params": {"uri": HANG_RESOURCE_URI, "_meta": modern_meta()}
+    }));
+    fixture.wait_for_hanging_request();
+    process.notification(
+        "notifications/cancelled",
+        json!({"requestId": 80, "reason": "bounded modern cancellation"}),
+    );
+    let after_cancel =
+        process.modern_request(81, "server/discover", json!({"_meta": modern_meta()}));
+    assert_eq!(after_cancel["result"]["resultType"], "complete");
+    fixture.release_hanging_requests();
+
     let output = process.finish();
     fixture.finish();
     assert_stdout_purity(&output.stdout);
-    assert_exchange_depth(&output.stdout, 2);
+    assert_exchange_depth(&output.stdout, if read_only { 19 } else { 23 });
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("\"id\":80"),
+        "modern cancellation suppresses the cancelled request response"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8 diagnostics");
+    for secret in [HTTP_TOKEN, INPUT_SECRET, DOCUMENT_BODY] {
+        assert!(
+            !stderr.contains(secret),
+            "stderr redacts modern request data"
+        );
+    }
+}
+
+#[test]
+fn production_stdio_normal_mode_supports_stateless_2026_revision() {
+    run_modern_stdio_acceptance(false);
+}
+
+#[test]
+fn production_stdio_read_only_mode_supports_stateless_2026_revision() {
+    run_modern_stdio_acceptance(true);
 }
 
 #[test]

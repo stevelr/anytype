@@ -31,6 +31,7 @@ pub mod result;
 pub mod runtime;
 pub mod schema;
 pub mod server;
+mod stdio;
 pub mod validation;
 pub mod view_handlers;
 

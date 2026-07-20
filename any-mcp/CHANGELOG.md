@@ -8,6 +8,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a bounded dual-era stdio adapter that preserves the rmcp legacy
+  initialization lifecycle for current clients and implements stateless MCP
+  `2026-07-28` discovery, per-request metadata/version validation, `-32022`
+  negotiation errors, complete-result discrimination, cache hints, concurrent
+  cancellation, clean EOF, and the full normal/read-only tool and resource
+  surface. Validate real modern process exchanges against the official draft
+  schema while retaining the legacy malformed-frame blocker separately.
 - Add ignored, cleanup-safe headless production-router coverage in
   `headless_default_discovery_routes_paginate_and_report_ambiguity`,
   `headless_view_body_and_resource_routes_are_complete_and_bound`, and

@@ -59,11 +59,11 @@ or tighter memory limits should lower `ANY_MCP_DOCUMENT_RESPONSE_BYTES` and/or
 `ANY_MCP_MAX_CONCURRENCY`; oversized documents then fail explicitly with
 `bounded_result`.
 
-Every future workflow handler uses the runtime execution seam, which includes
-permit wait in its timeout and observes rmcp request cancellation. The client
+Every workflow handler uses the runtime execution seam, which includes permit
+wait in its timeout and observes request cancellation. The client
 is shared without a mutex held across upstream awaits. Closing stdin cleanly
 closes the permit pool, signals the process shutdown token, cancels running and
-waiting operations, and then uses rmcp's bounded in-flight drain.
+waiting operations, and drains the selected protocol service.
 
 Each operation emits a structured completion diagnostic by default with a
 validated static operation name, a monotonic per-runtime server correlation
@@ -79,9 +79,18 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 - [`rmcp`](https://docs.rs/rmcp/) 2.2.0 with the `server`, `macros`, `schemars`,
   and `transport-io` features;
-- an explicit `2026-07-28` protocol declaration that is not yet a conformance
-  claim: the locked revision is stateless, while the current `rmcp` 2.2.0
-  transport still uses the legacy initialization lifecycle;
+- a dual-era stdio adapter: a first-frame `initialize` probe is replayed to
+  rmcp 2.2.0 for current clients, while `server/discover` and direct modern
+  requests use stateless MCP `2026-07-28` with required per-request version,
+  client identity, and capability metadata;
+- modern responses include `resultType: complete`; discovery and the static
+  tool/resource catalogs carry positive public cache hints, while authenticated
+  document reads are immediately stale and private. Unsupported versions use
+  error `-32022` with exact `supported` and `requested` data;
+- modern newline-delimited input/output frames are capped at 2 MiB with at most
+  64 active requests, one stdout writer, per-request cancellation, and prompt
+  EOF shutdown. The separate legacy malformed-frame defect remains tracked by
+  `any-m2u` because rmcp still drops syntactically invalid JSON;
 - an `anytype-api`-only application dependency through the `anytype` crate;
   `any-mcp` never depends directly on generated `anytype-rpc` support;
 - reusable strict JSON Schema 2020-12 input/output contracts with
@@ -453,12 +462,15 @@ runtime and advertises their static capability alongside the tool catalog.
   listing workflows.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
+- `src/stdio.rs` — bounded dual-era probe and stateless 2026-07-28 adapter.
 - `src/server/headless_integration.rs` — ignored cleanup-safe production-router
   tests against an authenticated headless Anytype server.
 - `tests/snapshots/` — reviewed deterministic normal/read-only tool catalogs,
   including every schema and annotation.
 - `tests/stdio_conformance.rs` — portable production-process protocol
-  regression harness and ignored modern acceptance tests.
+  regression and modern/legacy acceptance harness.
+- `tests/schema/mcp-2026-07-28.json` — official draft schema used only as a
+  test oracle for actual modern requests and results.
 - `STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client discovery
   evidence with current compatibility limits.
 
