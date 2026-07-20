@@ -702,7 +702,10 @@ impl DiscoveryHandlers {
                 let property_id = client
                     .resolve_property_id(&space_id, input.property.as_str())
                     .await?;
-                let property = client.property(&space_id, &property_id).get().await?;
+                let property = client
+                    .property(&space_id, &property_id)
+                    .get_direct()
+                    .await?;
                 if !matches!(
                     property.format(),
                     PropertyFormat::Select | PropertyFormat::MultiSelect
@@ -1141,8 +1144,156 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct PropertyRouteTraffic {
+        requests: usize,
+        property_list_pages: usize,
+        direct_property_gets: usize,
+        tag_list_pages: usize,
+    }
+
+    struct PropertyRouteFixture {
+        endpoint: String,
+        shutdown: tokio::sync::oneshot::Sender<()>,
+        task: JoinHandle<PropertyRouteTraffic>,
+    }
+
+    impl PropertyRouteFixture {
+        async fn start(returned_property_id: &'static str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut traffic = PropertyRouteTraffic::default();
+                loop {
+                    let accepted = tokio::select! {
+                        _ = &mut shutdown_rx => break,
+                        accepted = listener.accept() => accepted,
+                    };
+                    let (mut socket, _) = accepted.expect("accept property route fixture");
+                    let mut request = Vec::new();
+                    loop {
+                        let mut chunk = [0_u8; 1024];
+                        let read = socket
+                            .read(&mut chunk)
+                            .await
+                            .expect("read property route request");
+                        assert!(read > 0, "property route connection closed before headers");
+                        request.extend_from_slice(&chunk[..read]);
+                        assert!(
+                            request.len() <= 64 * 1024,
+                            "property route headers too large"
+                        );
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let request =
+                        std::str::from_utf8(&request).expect("ASCII property route request");
+                    let request_line = request.lines().next().expect("property route request line");
+                    let target = request_line
+                        .split_ascii_whitespace()
+                        .nth(1)
+                        .expect("property route target");
+                    let collection_path = format!("/v1/spaces/{SPACE_ID}/properties");
+                    let direct_path = format!("{collection_path}/{ID_B}");
+                    let tags_path = format!("{direct_path}/tags");
+                    let body = if target == collection_path
+                        || target.starts_with(&format!("{collection_path}?"))
+                    {
+                        let page = traffic.property_list_pages;
+                        traffic.property_list_pages += 1;
+                        if page == 0 {
+                            paged(
+                                vec![property_value(ID_A, "other", "Other", "text")],
+                                0,
+                                100,
+                                101,
+                            )
+                            .to_string()
+                        } else {
+                            paged(
+                                vec![property_value(ID_B, "status", "Status", "select")],
+                                100,
+                                100,
+                                101,
+                            )
+                            .to_string()
+                        }
+                    } else if target == direct_path {
+                        traffic.direct_property_gets += 1;
+                        json!({
+                            "property": property_value(
+                                returned_property_id,
+                                "status",
+                                "private-property-body-marker",
+                                "select"
+                            )
+                        })
+                        .to_string()
+                    } else if target == tags_path || target.starts_with(&format!("{tags_path}?")) {
+                        traffic.tag_list_pages += 1;
+                        paged(vec![tag_value(ID_A, "open", "Open")], 0, 2, 1).to_string()
+                    } else {
+                        panic!("unexpected property route: {request_line}");
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    traffic.requests += 1;
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write property route response");
+                    socket
+                        .shutdown()
+                        .await
+                        .expect("shutdown property route response");
+                }
+                traffic
+            });
+            Self {
+                endpoint,
+                shutdown,
+                task,
+            }
+        }
+
+        async fn finish(self) -> PropertyRouteTraffic {
+            self.shutdown.send(()).expect("stop property route fixture");
+            self.task.await.expect("property route fixture task")
+        }
+    }
+
     fn runtime(endpoint: &str) -> RuntimeContext {
         runtime_with_limits(endpoint, ResponseLimits::default())
+    }
+
+    fn runtime_with_cache(endpoint: &str) -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some(endpoint.to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("discovery-cache-test".to_owned()),
+            app_name: "discovery-cache-test".to_owned(),
+            disable_cache: false,
+            ..ClientConfig::default()
+        })
+        .unwrap();
+        client.set_api_key(HttpCredentials::new("fixture-token"));
+        assert!(
+            client.cache().is_enabled(),
+            "fixture must exercise cache-on behavior"
+        );
+        RuntimeContext::from_parts(
+            client,
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+        )
     }
 
     fn runtime_with_limits(endpoint: &str, response_limits: ResponseLimits) -> RuntimeContext {
@@ -1764,6 +1915,75 @@ mod tests {
                 .is_none()
         );
         fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn tag_list_uses_one_direct_property_get_with_cold_cache() {
+        let fixture = PropertyRouteFixture::start(ID_B).await;
+        let handlers =
+            DiscoveryHandlers::with_new_cursor_store(runtime_with_cache(&fixture.endpoint))
+                .unwrap();
+        let result = handlers
+            .tag_list(
+                TagListInput {
+                    space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                    property: DiscoveryReference::new(ID_B).unwrap(),
+                    limit: PageLimit::new(2).unwrap(),
+                    cursor: None,
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let traffic = fixture.finish().await;
+        assert_eq!(
+            traffic.property_list_pages, 0,
+            "must not prime property cache"
+        );
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(traffic.tag_list_pages, 1);
+        assert_eq!(traffic.requests, 2);
+    }
+
+    #[tokio::test]
+    async fn tag_list_rejects_property_identity_mismatch_before_tag_page() {
+        let fixture = PropertyRouteFixture::start(ID_C).await;
+        let handlers =
+            DiscoveryHandlers::with_new_cursor_store(runtime_with_cache(&fixture.endpoint))
+                .unwrap();
+        let result = handlers
+            .tag_list(
+                TagListInput {
+                    space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                    property: DiscoveryReference::new(ID_B).unwrap(),
+                    limit: PageLimit::new(2).unwrap(),
+                    cursor: None,
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_error(&result, "upstream");
+        let encoded = serde_json::to_string(&result).unwrap();
+        for private in [SPACE_ID, ID_B, ID_C, "private-property-body-marker"] {
+            assert!(!encoded.contains(private), "tool error leaked fixture data");
+        }
+
+        let traffic = fixture.finish().await;
+        assert_eq!(traffic.property_list_pages, 0);
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(
+            traffic.tag_list_pages, 0,
+            "mismatch must stop before tag list"
+        );
+        assert_eq!(traffic.requests, 1);
     }
 
     #[tokio::test]

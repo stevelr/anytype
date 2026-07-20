@@ -46,6 +46,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   resolver-backed references, redacted endpoint status, summary-only template
   output, and bounded tag counts that never expand property options and verify
   the first page's item/total/continuation consistency.
+- Make `tag_list` fetch resolved property metadata through one cache-independent
+  exact-identity scoped GET, preventing a cold production cache from expanding
+  the request into an all-properties scan.
 - Add typed, bounded `object_search` and `object_get` workflow handlers with
   resolver-backed references, constrained filters and sorting, exact one-page
   cursor integrity, explicit property projections, Unicode-safe body chunks,
