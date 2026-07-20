@@ -122,6 +122,35 @@ async fn assert_terminal_page(
     page
 }
 
+async fn assert_ambient_space_page(server: &AnyMcpServer, current_space_id: &str) -> Value {
+    let base = arguments(json!({"limit": 100}));
+    let page = success(server, SPACE_LIST, Value::Object(base.clone())).await;
+    let items = page["items"]
+        .as_array()
+        .expect("space_list items must be an array");
+    assert!(!items.is_empty(), "space_list must expose the test space");
+    assert!(
+        items
+            .iter()
+            .any(|item| item_id(item).and_then(Value::as_str) == Some(current_space_id)),
+        "space_list first page must contain the current test space"
+    );
+
+    if let Some(cursor) = page.get("next_cursor") {
+        let cursor = cursor
+            .as_str()
+            .filter(|cursor| !cursor.is_empty())
+            .expect("space_list next_cursor must be a nonempty string");
+        let mut mismatched = base;
+        mismatched.insert("limit".to_owned(), json!(99));
+        mismatched.insert("cursor".to_owned(), json!(cursor));
+        let mismatch = failure(server, SPACE_LIST, Value::Object(mismatched)).await;
+        assert_eq!(mismatch["code"], "validation", "space_list cursor binding");
+    }
+
+    page
+}
+
 async fn create_object(ctx: &TestContext, type_key: &str, name: &str, body: &str) -> Object {
     let object = ctx
         .client
@@ -278,8 +307,7 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
                 create_object(ctx.as_ref(), "page", &format!("{search_term} second"), "").await;
             sleep(Duration::from_millis(300)).await;
 
-            let spaces = assert_terminal_page(&server, SPACE_LIST, arguments(json!({})), 100).await;
-            assert!(!spaces["items"].as_array().unwrap().is_empty());
+            assert_ambient_space_page(&server, &ctx.space_id).await;
             assert_cursor_continuation(
                 &server,
                 TYPE_LIST,
