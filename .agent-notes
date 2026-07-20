@@ -14,3 +14,4 @@
 [invariant] MCP page completion must verify upstream offset and limit exactly match the request and returned count does not exceed the requested limit before issuing any continuation cursor.
 [pattern] Runtime operation diagnostics must enclose upstream calls, handler conversion, and typed result encoding; conversion/encoding failures use static categories and never log error values.
 [pattern] Object discovery uses explicit SummaryOnly/Selected/AllBounded projection modes; AllBounded fails rather than truncating, while cursor projection fingerprints sort/dedup keys even though selected output preserves first-request order.
+[gotcha] `anytype-api` pagination query serialization omits an explicit zero offset; HTTP path tests should assert the limit and path while treating absent offset as offset zero.

@@ -117,6 +117,19 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 Workflow tools and resources are added in subsequent Phase 1 work.
 
+### View discovery workflows
+
+The transport-neutral `view_list` and `view_object_list` handlers provide one
+bounded page at a time without registering the production tool catalog early.
+They resolve space and view names through `anytype-api`, so ambiguous view
+names return bounded candidate IDs instead of selecting an arbitrary match.
+`view_object_list` always sets the resolved view ID on the fluent request
+builder before listing and returns stable object summaries, canonical resource
+URIs, and only explicitly requested bounded property projections. Document
+bodies and snippets are never included. Continuation cursors bind the space,
+list, view, normalized projection, and limit, and are issued only after the
+upstream offset, limit, and returned item count have been checked.
+
 ## Source layout
 
 - `src/config.rs` — validated environment and operational limits.
@@ -135,6 +148,8 @@ Workflow tools and resources are added in subsequent Phase 1 work.
 - `src/validation.rs` — reusable collection, filter, and body chunk bounds.
 - `src/pagination.rs` — bounded pagination inputs and result pages.
 - `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.
+- `src/view_handlers.rs` — bounded view discovery and selected-view object
+  listing workflows.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
 

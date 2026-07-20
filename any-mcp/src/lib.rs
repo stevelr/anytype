@@ -24,6 +24,7 @@ pub mod runtime;
 pub mod schema;
 pub mod server;
 pub mod validation;
+pub mod view_handlers;
 
 pub use config::RuntimeConfig;
 pub use runtime::{
