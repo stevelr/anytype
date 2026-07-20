@@ -551,7 +551,8 @@ and traversal beyond a fixed bound.
 
 Collection coverage creates and immediately registers a custom
 collection-layout type through the same narrow helper, then uses a private
-create-provenance path to make the exact collection and clone its fully
+type-bound create-provenance path to atomically claim the exact collection and
+its sole cleanup dispatch, then clone its fully
 cross-checked default dataview into a cleanup-owned second view. Ordinary
 object cleanup registration cannot grant this mutation authority.
 `view_list(limit=1)` walks both exact ordinary-API IDs and names to a terminal

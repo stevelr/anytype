@@ -61,9 +61,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add privately proven collection-object and second-view test fixtures. The
   object helper accepts only a context-owned collection type, snapshots its
   exact existing object IDs, and binds the create result to active
-  space/type/layout identity; ordinary cleanup registration cannot authorize
-  view mutation. The view helper cross-checks every REST-visible field against
-  the exact `ObjectShow` root and dataview block, copies the complete proto,
+  space/type/layout identity. It atomically claims the authoritative ID, exact
+  object cleanup entry, and private `(space, object, type)` provenance; generic
+  or private collisions leave all three registries unchanged, and ordinary
+  cleanup registration cannot authorize view mutation. The view helper first
+  requires the REST object to retain the exact proven type ID, then
+  cross-checks every REST-visible field against the exact `ObjectShow` root and
+  dataview block, copies the complete proto,
   sends one authenticated create RPC, requires one exact full-view event and a
   distinct server-assigned ID, and finitely verifies the complete two-view REST
   result. Collection teardown owns the mutation.

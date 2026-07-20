@@ -40,8 +40,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   without item/cursor loops through terminality and require both fixture IDs.
   Collection/view coverage now creates and immediately registers its own
   collection-layout type through the narrow `anytype-api` test fixture instead
-  of ambient system schema. Add a privately create-proven collection and
-  cleanup-owned second view through that same test-only boundary, walk
+  of ambient system schema. Add a privately create-proven, exact-type-bound
+  collection with one atomically claimed cleanup dispatch and a cleanup-owned
+  second view through that same test-only boundary, walk
   `view_list(limit=1)` without item/cursor loops to an
   exact ordinary-API terminal result, reject limit and list-ID cursor rebinding,
   and retain explicit selected-view object listing with the added view ID.

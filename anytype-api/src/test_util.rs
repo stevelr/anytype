@@ -290,11 +290,10 @@ impl TestContext {
             || preexisting.contains(&created.id)
             || !self
                 .cleanup
-                .add_collection_fixture(&self.space_id, &created.id)
+                .claim_collection_fixture(&self.space_id, &created.id, &exact_type.id)
         {
             return Err(collection_fixture_ownership_error());
         }
-        self.register_object(&created.id);
         Ok(created)
     }
 
@@ -308,8 +307,9 @@ impl TestContext {
     /// response event and a finite REST read-after-write verification must both
     /// identify the same new ID and requested name before the helper succeeds.
     ///
-    /// The collection must already be registered for object cleanup on this
-    /// context and must still have exactly its one server-created default view.
+    /// The collection must carry this context's private, type-bound creation
+    /// provenance and must still have exactly its one server-created default
+    /// view. Generic object cleanup registration does not grant this authority.
     /// Deleting that collection owns cleanup of the added view; no independent
     /// view deletion is attempted.
     pub async fn create_collection_view_fixture(
@@ -321,12 +321,10 @@ impl TestContext {
         let limits = &self.client.get_config().limits;
         limits.validate_id(collection_id, "collection fixture")?;
         limits.validate_name(&name, "collection view fixture")?;
-        if !self
+        let expected_type_id = self
             .cleanup
-            .has_collection_fixture(&self.space_id, collection_id)
-        {
-            return Err(collection_view_fixture_code_error("ownership"));
-        }
+            .collection_fixture_type_id(&self.space_id, collection_id)
+            .ok_or_else(|| collection_view_fixture_code_error("ownership"))?;
 
         let collection = self
             .client
@@ -334,11 +332,12 @@ impl TestContext {
             .get()
             .await
             .map_err(|_| collection_view_fixture_code_error("collection-get"))?;
-        if collection.id != collection_id
-            || collection.space_id != self.space_id
-            || collection.archived
-            || collection.layout != ObjectLayout::Collection
-        {
+        if !collection_matches_fixture_provenance(
+            &collection,
+            &self.space_id,
+            collection_id,
+            &expected_type_id,
+        ) {
             return Err(collection_view_fixture_code_error("collection-identity"));
         }
 
@@ -721,6 +720,19 @@ struct ResolvedCollectionDataview {
     block_id: String,
     default_view: DataviewView,
     source: Vec<String>,
+}
+
+fn collection_matches_fixture_provenance(
+    collection: &Object,
+    space_id: &str,
+    collection_id: &str,
+    type_id: &str,
+) -> bool {
+    collection.id == collection_id
+        && collection.space_id == space_id
+        && !collection.archived
+        && collection.layout == ObjectLayout::Collection
+        && collection.r#type.as_ref().map(|typ| typ.id.as_str()) == Some(type_id)
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -1624,7 +1636,7 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
 #[derive(Default)]
 pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
-    collection_fixtures: Mutex<BTreeSet<(String, String)>>,
+    collection_fixtures: Mutex<BTreeSet<(String, String, String)>>,
     space_fixtures: Mutex<BTreeSet<String>>,
     template_resources: Mutex<Vec<TemplateFixtureResource>>,
     registered_ids: Mutex<BTreeSet<String>>,
@@ -1660,12 +1672,20 @@ impl TemplateFixtureResource {
 
 impl TestCleanup {
     pub fn is_empty(&self) -> bool {
-        self.objects.lock().is_empty()
-            && self.collection_fixtures.lock().is_empty()
-            && self.space_fixtures.lock().is_empty()
-            && self.template_resources.lock().is_empty()
-            && self.registered_ids.lock().is_empty()
-            && self.temp_paths.lock().is_empty()
+        // Inspect each registry under its own guard. The collection claim is
+        // the only operation that holds multiple registry locks at once.
+        let objects_empty = self.objects.lock().is_empty();
+        let collections_empty = self.collection_fixtures.lock().is_empty();
+        let spaces_empty = self.space_fixtures.lock().is_empty();
+        let templates_empty = self.template_resources.lock().is_empty();
+        let registered_empty = self.registered_ids.lock().is_empty();
+        let paths_empty = self.temp_paths.lock().is_empty();
+        objects_empty
+            && collections_empty
+            && spaces_empty
+            && templates_empty
+            && registered_empty
+            && paths_empty
     }
 
     /// Remembers this object for deletion after the test
@@ -1682,16 +1702,43 @@ impl TestCleanup {
             })
     }
 
-    fn add_collection_fixture(&self, space_id: &str, id: &str) -> bool {
-        self.collection_fixtures
-            .lock()
-            .insert((space_id.to_owned(), id.to_owned()))
+    fn claim_collection_fixture(&self, space_id: &str, id: &str, type_id: &str) -> bool {
+        // This is the sole multi-registry critical section. Keep its lock order
+        // authoritative IDs -> generic cleanup entries -> private provenance.
+        // Every other registry method releases one guard before taking another.
+        let mut registered_ids = self.registered_ids.lock();
+        let mut objects = self.objects.lock();
+        let mut fixtures = self.collection_fixtures.lock();
+        if registered_ids.contains(id)
+            || objects
+                .iter()
+                .any(|(_, registered_id, _)| registered_id == id)
+            || fixtures
+                .iter()
+                .any(|(_, registered_id, _)| registered_id == id)
+        {
+            return false;
+        }
+
+        let registered = registered_ids.insert(id.to_owned());
+        objects.push((space_id.to_owned(), id.to_owned(), DataModel::Object));
+        let proven = fixtures.insert((space_id.to_owned(), id.to_owned(), type_id.to_owned()));
+        debug_assert!(registered && proven);
+        true
     }
 
-    fn has_collection_fixture(&self, space_id: &str, id: &str) -> bool {
-        self.collection_fixtures
-            .lock()
-            .contains(&(space_id.to_owned(), id.to_owned()))
+    fn collection_fixture_type_id(&self, space_id: &str, id: &str) -> Option<String> {
+        let fixtures = self.collection_fixtures.lock();
+        let mut matches = fixtures
+            .iter()
+            .filter(|(registered_space, registered_id, _)| {
+                registered_space == space_id && registered_id == id
+            });
+        let (_, _, type_id) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(type_id.clone())
     }
 
     /// Remembers this property for deletion after the test
@@ -1705,7 +1752,8 @@ impl TestCleanup {
     }
 
     fn add_generic_resource(&self, space_id: &str, id: &str, model: DataModel) {
-        if self.registered_ids.lock().insert(id.to_owned()) {
+        let claimed = self.registered_ids.lock().insert(id.to_owned());
+        if claimed {
             self.objects
                 .lock()
                 .push((space_id.to_owned(), id.to_owned(), model));
@@ -1718,14 +1766,16 @@ impl TestCleanup {
 
     /// Remembers an exact space ID created by `TestContext::create_space_fixture`.
     fn add_space_fixture(&self, id: &str) -> bool {
-        if !self.registered_ids.lock().insert(id.to_owned()) {
+        let claimed = self.registered_ids.lock().insert(id.to_owned());
+        if !claimed {
             return false;
         }
         self.space_fixtures.lock().insert(id.into())
     }
 
     fn add_template_resource(&self, resource: TemplateFixtureResource) -> TestResult<()> {
-        if !self.registered_ids.lock().insert(resource.id().to_owned()) {
+        let claimed = self.registered_ids.lock().insert(resource.id().to_owned());
+        if !claimed {
             return Err(template_fixture_error());
         }
         self.template_resources.lock().push(resource);
@@ -2217,6 +2267,7 @@ mod tests {
 
     const COLLECTION_ID: &str = "bafyreig4ztsqf3f55gxm7wzh2z7njm4hzqvxwu7ha3frxfg5oimwnbzanu";
     const SPACE_ID: &str = "bafyreiafl45wf5eaxiby44pxrkhia3y5jsyix3ov2jzqiftsxjotujqlh4";
+    const COLLECTION_TYPE_ID: &str = "bafyreic73elywzqx2m7ihtqnmrx7aqmobey4upchx7y4e2d4sc5cchzjiu";
     const DEFAULT_VIEW_ID: &str = "77dbd55c-5f52-4a5b-9d73-e1a46845dd45";
     const CREATED_VIEW_ID: &str = "9c4d60de-66bb-41b9-984e-ce750e4301e1";
     const BLOCK_ID: &str = "dataview";
@@ -2236,6 +2287,31 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
             ..Default::default()
+        }
+    }
+
+    fn collection_object(type_id: &str) -> Object {
+        Object {
+            archived: false,
+            icon: None,
+            id: COLLECTION_ID.to_owned(),
+            layout: ObjectLayout::Collection,
+            markdown: None,
+            name: Some("Fixture".to_owned()),
+            object: DataModel::Object,
+            properties: Vec::new(),
+            snippet: None,
+            space_id: SPACE_ID.to_owned(),
+            r#type: Some(Type {
+                archived: false,
+                icon: None,
+                id: type_id.to_owned(),
+                key: "fixture-collection".to_owned(),
+                layout: ObjectLayout::Collection,
+                name: Some("Fixture collection".to_owned()),
+                plural_name: Some("Fixture collections".to_owned()),
+                properties: Vec::new(),
+            }),
         }
     }
 
@@ -2293,14 +2369,48 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_object_registration_does_not_grant_collection_fixture_ownership() {
+    fn generic_pre_registered_id_cannot_claim_collection_provenance() {
         let cleanup = TestCleanup::default();
-        assert!(!cleanup.has_collection_fixture(SPACE_ID, COLLECTION_ID));
         cleanup.add_object(SPACE_ID, COLLECTION_ID);
-        assert!(!cleanup.has_collection_fixture(SPACE_ID, COLLECTION_ID));
-        assert!(cleanup.add_collection_fixture(SPACE_ID, COLLECTION_ID));
-        assert!(cleanup.has_collection_fixture(SPACE_ID, COLLECTION_ID));
-        assert!(!cleanup.has_collection_fixture("different-space", COLLECTION_ID));
+        assert!(!cleanup.claim_collection_fixture(SPACE_ID, COLLECTION_ID, COLLECTION_TYPE_ID));
+        assert_eq!(
+            cleanup.collection_fixture_type_id(SPACE_ID, COLLECTION_ID),
+            None
+        );
+        assert_eq!(cleanup.registered_ids.lock().len(), 1);
+        assert_eq!(cleanup.objects.lock().len(), 1);
+        assert!(cleanup.collection_fixtures.lock().is_empty());
+    }
+
+    #[test]
+    fn duplicate_private_collection_claim_has_one_cleanup_dispatch() {
+        let cleanup = TestCleanup::default();
+        assert!(cleanup.claim_collection_fixture(SPACE_ID, COLLECTION_ID, COLLECTION_TYPE_ID));
+        assert!(!cleanup.claim_collection_fixture(SPACE_ID, COLLECTION_ID, "different-type"));
+        assert_eq!(
+            cleanup.collection_fixture_type_id(SPACE_ID, COLLECTION_ID),
+            Some(COLLECTION_TYPE_ID.to_owned())
+        );
+        assert_eq!(cleanup.registered_ids.lock().len(), 1);
+        assert_eq!(cleanup.objects.lock().len(), 1);
+        assert_eq!(cleanup.collection_fixtures.lock().len(), 1);
+    }
+
+    #[test]
+    fn wrong_collection_type_is_rejected_before_object_show_rpc() {
+        let collection = collection_object("wrong-type");
+        assert!(!collection_matches_fixture_provenance(
+            &collection,
+            SPACE_ID,
+            COLLECTION_ID,
+            COLLECTION_TYPE_ID
+        ));
+        assert!(collection_matches_fixture_provenance(
+            &collection_object(COLLECTION_TYPE_ID),
+            SPACE_ID,
+            COLLECTION_ID,
+            COLLECTION_TYPE_ID
+        ));
     }
 
     #[test]
