@@ -10,7 +10,6 @@ use tonic::transport::Channel;
 use crate::anytype::ClientCommandsClient;
 use crate::anytype::rpc::object::show::Request as ObjectShowRequest;
 use crate::auth::with_token;
-use crate::error::AuthError;
 pub use crate::error::ViewError;
 use crate::model;
 use crate::model::block::ContentValue;
@@ -51,12 +50,7 @@ pub async fn fetch_grid_view_columns(
         include_relations_as_dependent_objects: true,
         ..Default::default()
     };
-    let request = with_token(Request::new(request), token).map_err(|err: AuthError| {
-        ViewError::ApiResponse {
-            code: 0,
-            description: err.to_string(),
-        }
-    })?;
+    let request = authenticated_request(request, token)?;
 
     let response = client.object_show(request).await?.into_inner();
     if let Some(error) = response.error
@@ -121,6 +115,10 @@ pub async fn fetch_grid_view_columns(
     })
 }
 
+fn authenticated_request<T>(message: T, token: &str) -> Result<Request<T>, ViewError> {
+    with_token(Request::new(message), token).map_err(ViewError::from)
+}
+
 fn find_dataview_block(
     blocks: &[model::Block],
     view_id: &str,
@@ -169,4 +167,25 @@ fn string_field(details: &prost_types::Struct, key: &str) -> Option<String> {
         Some(Kind::StringValue(value)) => Some(value.clone()),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::AuthError;
+
+    use super::{ViewError, authenticated_request};
+
+    #[test]
+    fn invalid_view_token_is_preserved_as_typed_auth_error() {
+        let error = authenticated_request((), "SECRET_VIEW_TOKEN\n")
+            .expect_err("a newline is invalid in an ASCII metadata value");
+
+        assert!(matches!(
+            error,
+            ViewError::Auth {
+                source: AuthError::InvalidMetadata { .. }
+            }
+        ));
+        assert!(!error.to_string().contains("SECRET_VIEW_TOKEN"));
+    }
 }
