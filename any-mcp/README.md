@@ -531,16 +531,18 @@ The archive case independently proves the exact id absent from active results
 and present in the bounded type-scoped archive before teardown, and asserts
 that middleware issued no retry.
 
-Space and template list handlers
-cannot both receive fixture-backed continuation coverage because the public API
+Space and template list handlers cannot both receive fixture-backed
+continuation coverage because the public API
 has no cleanup-safe space deletion or template creation path. `space_list`
 therefore requests one bounded ambient page, requires the current test space,
 and validates an optional cursor's shape and query binding without assuming
 whether the page is terminal. `template_list` covers its cleanup-safe terminal
-route. Collection objects use a dynamically resolved and layout-validated
-system collection type because custom type creation cannot request collection
-layout. Separate tracker dependencies cover exact space continuation/terminal
-proof, the other fixture gaps, and multi-view `view_list` continuation.
+route. Collection coverage creates and immediately registers a custom
+collection-layout type through the narrow test helper owned by `anytype-api`;
+the helper contains the required heart RPC, so `any-mcp` retains its
+`anytype-api`-only dependency boundary. Separate tracker dependencies cover
+exact space continuation/terminal proof, the other fixture gaps, and multi-view
+`view_list` continuation.
 
 ## Build
 

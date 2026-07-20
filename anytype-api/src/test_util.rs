@@ -6,6 +6,7 @@
 #![doc(hidden)]
 
 use std::{
+    collections::BTreeMap,
     env::VarError,
     path::PathBuf,
     slice::Iter,
@@ -13,14 +14,23 @@ use std::{
     time::Instant,
 };
 
+use anytype_rpc::{anytype::rpc::object::create_object_type, model::object_type::Layout};
 use chrono::Utc;
 use futures::FutureExt;
 use parking_lot::Mutex;
+use prost_types::{Struct, Value, value::Kind};
 use snafu::prelude::*;
+use tonic::Request;
 
 #[allow(unused_imports)]
 use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
-use crate::{filters::Filter, objects::DataModel};
+use crate::{
+    filters::Filter,
+    grpc_util::{grpc_status, with_token_request},
+    objects::{DataModel, ObjectLayout},
+    types::Type,
+    verify::verify_semantic,
+};
 
 // =============================================================================
 // TestError
@@ -113,6 +123,63 @@ impl TestContext {
         self.cleanup.add_type(&self.space_id, type_id);
     }
 
+    /// Creates and immediately registers a cleanup-safe collection-layout type fixture.
+    ///
+    /// The public REST type API intentionally accepts only its four document
+    /// layouts. Tests that require a custom collection therefore use the
+    /// narrower heart RPC here, while all production type builders retain the
+    /// REST contract. The returned type is verified through the ordinary REST
+    /// getter before this helper succeeds.
+    pub async fn create_collection_type_fixture(
+        &self,
+        name: impl Into<String>,
+    ) -> TestResult<Type> {
+        let name = name.into();
+        let plural_name = format!("{name}s");
+        let limits = &self.client.get_config().limits;
+        limits.validate_id(&self.space_id, "space_id")?;
+        limits.validate_name(&name, "collection type name")?;
+        limits.validate_name(&plural_name, "collection type plural name")?;
+
+        let grpc = self.client.grpc_client().await?;
+        let mut commands = grpc.client_commands();
+        let request = create_object_type::Request {
+            details: Some(collection_type_details(&name, &plural_name)),
+            internal_flags: Vec::new(),
+            space_id: self.space_id.clone(),
+        };
+        let request = with_token_request(Request::new(request), grpc.token())?;
+        let response = commands
+            .object_create_object_type(request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+
+        let type_id = response.object_id;
+        limits.validate_id(&type_id, "created collection type id")?;
+        // Register before response classification or any follow-up read can fail.
+        self.register_type(&type_id);
+        if !response.error.as_ref().is_some_and(|error| {
+            error.code == create_object_type::response::error::Code::Null as i32
+        }) {
+            return Err(AnytypeError::Other {
+                message: "gRPC collection type fixture creation was rejected".to_owned(),
+            }
+            .into());
+        }
+
+        let verify_config = VerifyConfig::default();
+        let typ = verify_semantic(
+            &verify_config,
+            "collection type fixture",
+            &type_id,
+            || self.client.get_type(&self.space_id, &type_id).get_direct(),
+            |typ| typ.id == type_id && typ.layout == ObjectLayout::Collection,
+        )
+        .await?;
+        Ok(typ)
+    }
+
     pub fn temp_dir(&self, prefix: &str) -> TestResult<PathBuf> {
         let dir = std::env::temp_dir().join(format!("anytype_test_{prefix}_{}", unique_suffix()));
         std::fs::create_dir_all(&dir).map_err(|err| TestError::Config {
@@ -130,6 +197,27 @@ impl TestContext {
     pub async fn cleanup(&self) -> TestResult<()> {
         self.cleanup.cleanup(&self.client).await;
         Ok(())
+    }
+}
+
+fn collection_type_details(name: &str, plural_name: &str) -> Struct {
+    Struct {
+        fields: BTreeMap::from([
+            ("name".to_owned(), string_value(name)),
+            ("pluralName".to_owned(), string_value(plural_name)),
+            (
+                "recommendedLayout".to_owned(),
+                Value {
+                    kind: Some(Kind::NumberValue(Layout::Collection as i32 as f64)),
+                },
+            ),
+        ]),
+    }
+}
+
+fn string_value(value: &str) -> Value {
+    Value {
+        kind: Some(Kind::StringValue(value.to_owned())),
     }
 }
 
@@ -410,5 +498,28 @@ impl TestCleanup {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_type_fixture_details_use_the_canonical_heart_layout() {
+        let details = collection_type_details("MCP Collection", "MCP Collections");
+        assert_eq!(
+            details.fields["name"].kind,
+            Some(Kind::StringValue("MCP Collection".to_owned()))
+        );
+        assert_eq!(
+            details.fields["pluralName"].kind,
+            Some(Kind::StringValue("MCP Collections".to_owned()))
+        );
+        assert_eq!(
+            details.fields["recommendedLayout"].kind,
+            Some(Kind::NumberValue(Layout::Collection as i32 as f64))
+        );
+        assert_eq!(details.fields.len(), 3);
     }
 }

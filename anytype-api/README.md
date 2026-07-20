@@ -430,6 +430,12 @@ cargo test -- --nocapture
 
 Integration tests require a running Anytype server and environment variables. See `src/client.rs` for details.
 
+Tests that need a custom collection can use the hidden
+`TestContext::create_collection_type_fixture` helper. Anytype's REST type
+create/update contract rejects collection layout, so this test-only helper uses
+the narrow heart RPC, registers the returned type for cleanup before any
+follow-up read, and verifies it through the ordinary scoped REST getter.
+
 ## License
 
 Apache License, Version 2.0
