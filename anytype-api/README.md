@@ -440,9 +440,12 @@ Tests must create the object through
 `TestContext::create_collection_fixture`; ordinary cleanup registration does
 not grant view-mutation authority. This helper accepts only a collection type
 owned by the context, takes a complete type-scoped pre-create snapshot, and
-privately records the exact active collection returned in the context space.
+atomically records its cleanup dispatch and exact `(space, object, type)`
+provenance. Any collision with an authoritative cleanup ID or existing private
+claim is rejected without changing either registry.
 `TestContext::create_collection_view_fixture` then requires that provenance,
-cross-checks every REST-visible default-view field against the exact
+requires the REST object to retain the exact proven type ID, and cross-checks
+every REST-visible default-view field against the exact
 `ObjectShow` root and `dataview` block, clones the full proto, and issues one
 `BlockDataviewViewCreate` RPC. It requires exactly one matching view-set event,
 a distinct server-assigned ID, and complete nested-view equality before a
