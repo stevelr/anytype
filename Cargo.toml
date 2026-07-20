@@ -44,6 +44,7 @@ snafu = "0.9.1"
 strum = { version = "0.28.0", features = ["derive"] }
 test-log = { version = "0.2.21", features = ["log", "trace"] }
 tokio = { version = "1.53.0", features = ["full"] }
+tokio-util = "0.7.18"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tracing = "0.1.44"

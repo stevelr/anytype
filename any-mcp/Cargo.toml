@@ -22,3 +22,7 @@ name = "any-mcp"
 [dependencies]
 anytype.workspace = true
 rmcp.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

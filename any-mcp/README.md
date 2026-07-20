@@ -6,10 +6,34 @@ A bounded, workflow-oriented Model Context Protocol server for Anytype.
 reading, and safely editing documents. It is intentionally not a one-for-one
 mirror of the Anytype API.
 
-## Phase 1 scaffold
+## Authenticated stdio runtime
 
-The current crate establishes the workspace, dependency, and protocol
-boundaries for later runtime and handler work:
+The server keeps one authenticated `anytype-api` client alive for the process
+and serves MCP over stdin/stdout. At startup it loads credentials using the
+same environment and keystore configuration as `anyr`, requires a successful
+HTTP ping, and checks gRPC when gRPC credentials are configured. Startup
+failures exit non-zero with a concise diagnostic on stderr.
+
+Supported Anytype settings:
+
+- `ANYTYPE_URL` and `ANYTYPE_GRPC_ENDPOINT` select endpoints;
+- `ANYTYPE_KEYSTORE` selects the keystore (`env` supports no-persistence
+  deployments using `ANYTYPE_KEY_HTTP_TOKEN`); and
+- `ANYTYPE_KEYSTORE_SERVICE` selects the existing credential service and
+  defaults to `anyr` for compatibility.
+
+Operational settings are bounded defensively:
+
+- `ANY_MCP_MAX_CONCURRENCY` defaults to 8 and has a maximum of 64;
+- `ANY_MCP_REQUEST_TIMEOUT_SECS` defaults to 30 and has a maximum of 300; and
+- `ANY_MCP_STARTUP_TIMEOUT_SECS` defaults to 15 and has a maximum of 120.
+
+Every future workflow handler uses the runtime execution seam, which includes
+permit wait in its timeout and observes rmcp request cancellation. The client
+is shared without a mutex held across upstream awaits. Closing stdin cleanly
+stops the service.
+
+The crate also establishes these protocol boundaries:
 
 - [`rmcp`](https://docs.rs/rmcp/) 2.2.0 with the `server`, `macros`, `schemars`,
   and `transport-io` features;
@@ -17,16 +41,18 @@ boundaries for later runtime and handler work:
   the SDK's imminent release/API direction;
 - an `anytype-api`-only application dependency through the `anytype` crate;
   `any-mcp` never depends directly on generated `anytype-rpc` support; and
-- a minimal binary that constructs the server scaffold without writing to
-  stdout.
+- diagnostics use a tracing subscriber whose writer is always stderr; verbose
+  dependency targets that can expose protocol or upstream payloads remain
+  disabled even under a broad `RUST_LOG` filter.
 
-The authenticated stdio runtime, tools, resources, operational controls, and
-Anytype client lifecycle are added in subsequent Phase 1 work. Until then, the
-binary exits after constructing the scaffold.
+Workflow tools and resources are added in subsequent Phase 1 work.
 
 ## Source layout
 
-- `src/main.rs` — minimal binary entry point.
+- `src/config.rs` — validated environment and operational limits.
+- `src/logging.rs` — stderr-only tracing setup.
+- `src/runtime.rs` — authenticated client, controls, and stdio lifecycle.
+- `src/main.rs` — non-interactive startup and binary exit behavior.
 - `src/lib.rs` — shared crate surface for the binary and tests.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
@@ -39,9 +65,9 @@ cargo build -p any-mcp
 
 ## Protocol channel
 
-When stdio transport is enabled, stdout is reserved exclusively for MCP
-protocol frames. Redacted diagnostics are emitted to stderr, and credentials
-or full upstream response bodies must never be logged.
+Stdout is reserved exclusively for MCP protocol frames. Redacted diagnostics
+are emitted to stderr; credentials and full upstream response bodies are never
+included in runtime error formatting or startup diagnostics.
 
 ## License
 
