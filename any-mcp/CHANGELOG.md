@@ -14,10 +14,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `headless_mutations_are_visible_idempotent_and_conflict_safe`, including
   authenticated dual-protocol prerequisites, cursor binding, explicit view
   selection, complete resources, idempotent create, mutation visibility, and
-  zero-write stale exact-edit conflicts. Add the cleanup-safe create-body
-  canonicalization representative and the blocked-behavior diagnostic
-  `headless_diagnostic_archive_applies_before_fixed_error`, which proves applied
-  state and cleanup before accepting its fixed error code.
+  zero-write stale exact-edit conflicts. Add cleanup-safe create-body
+  canonicalization and verified archive representatives in
+  `headless_create_body_canonicalization_is_verified_once` and
+  `headless_archive_applies_and_returns_verified_success`, with exact
+  applied-state and cleanup evidence before teardown.
   Exercise one bounded ambient `space_list` page with current-space evidence
   and optional cursor validation without assuming terminality.
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
@@ -80,7 +81,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   transport, timeout, response, retry, and server outcomes after dispatch.
 - Add the typed `object_archive` soft-delete workflow with destructive
   annotations, pre-I/O read-only enforcement, safe resolver/response identity
-  validation, and a minimal verified archived-state result.
+  validation, one non-replayed DELETE, and a minimal verified archived-state
+  result. Exact immediate success is accepted directly; uncertain responses
+  use finite active-absence plus original-type-scoped archive confirmation,
+  while unproven outcomes return fixed mutation-indeterminate guidance.
 - Add the exact Anytype document resource template and transport-neutral
   resource handlers with strict canonical URI parsing, intentionally empty
   instance listing, complete 100,000-character markdown reads, document-byte

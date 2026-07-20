@@ -723,8 +723,8 @@ async fn headless_mutations_are_visible_idempotent_and_conflict_safe() {
 }
 
 #[tokio::test]
-#[ignore = "diagnostic for any-tme; requires source .test-env and headless Anytype"]
-async fn headless_diagnostic_archive_applies_before_fixed_error() {
+#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+async fn headless_archive_applies_and_returns_verified_success() {
     Box::pin(with_test_context(|ctx| {
         Box::pin(async move {
             let server = live_server(ctx.as_ref()).await;
@@ -742,7 +742,8 @@ async fn headless_diagnostic_archive_applies_before_fixed_error() {
                 .id
                 .clone();
 
-            let result = call(
+            let retries_before = ctx.client.http_metrics().retries;
+            let archived = success(
                 &server,
                 OBJECT_ARCHIVE,
                 json!({
@@ -751,18 +752,24 @@ async fn headless_diagnostic_archive_applies_before_fixed_error() {
                 }),
             )
             .await;
-            assert_eq!(result.is_error, Some(true));
-            let error = result
-                .structured_content
-                .expect("archive diagnostic error body");
-            assert_eq!(error["code"], "upstream");
+            assert_eq!(archived["id"], object.id);
+            assert_eq!(archived["archived"], true);
+            assert_eq!(
+                archived["resource_uri"],
+                format!("anytype://spaces/{}/objects/{}", ctx.space_id, object.id)
+            );
+            assert_eq!(
+                ctx.client.http_metrics().retries,
+                retries_before,
+                "object_archive must not replay DELETE in HTTP middleware"
+            );
 
             assert_archive_evidence(ctx.as_ref(), &object.id, &type_id).await;
             Ok(())
         })
     }))
     .await
-    .expect("cleanup-safe any-tme diagnostic");
+    .expect("cleanup-safe live archive workflow");
 }
 
 #[tokio::test]
