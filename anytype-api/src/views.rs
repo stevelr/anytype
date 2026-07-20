@@ -35,10 +35,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::{
     Result,
     client::AnytypeClient,
+    error::AnytypeError,
     filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
 };
+
+const MAX_VIEW_ID_CHARS: usize = 256;
 
 /// View layout for list types
 ///
@@ -138,6 +141,9 @@ impl ViewListObjectsRequest {
     }
 
     /// Filters by a specific view.
+    ///
+    /// The identifier is validated when [`list`](Self::list) executes, before
+    /// it can be interpolated into an HTTP path.
     #[must_use]
     pub fn view(mut self, view_id: impl Into<String>) -> Self {
         self.view_id = Some(view_id.into());
@@ -173,6 +179,7 @@ impl ViewListObjectsRequest {
         let view_id = self.view_id.ok_or_else(|| AnytypeError::Validation {
             message: "You must set the view with `.view(view_id)` before .list()".to_string(),
         })?;
+        validate_view_id(&view_id)?;
 
         let query = Query::default()
             .set_limit_opt(self.limit)
@@ -186,6 +193,21 @@ impl ViewListObjectsRequest {
 
         self.client.get_request_paged(&path, query).await
     }
+}
+
+fn validate_view_id(view_id: &str) -> Result<()> {
+    if view_id.is_empty()
+        || matches!(view_id, "." | "..")
+        || view_id.chars().count() > MAX_VIEW_ID_CHARS
+        || !view_id
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || b"._~-".contains(&character))
+    {
+        return Err(AnytypeError::Validation {
+            message: "view_id must be a nonempty safe path identifier".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Request builder for listing views of a list.
@@ -336,4 +358,51 @@ impl AnytypeClient {
 // ============================================================================
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    const SPACE_ID: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const LIST_ID: &str = "bafyreicccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn fixture_client() -> AnytypeClient {
+        let mut config = crate::client::ClientConfig::default().app_name("view-id-validation-test");
+        config.base_url = Some("http://127.0.0.1:1".to_owned());
+        config.keystore = Some("env".to_owned());
+        let client = AnytypeClient::with_config(config).expect("fixture client");
+        client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
+        client
+    }
+
+    #[test]
+    fn view_id_path_validation_accepts_only_bounded_safe_segments() {
+        for valid in ["view-1", "view_2", "view.3", "view~4"] {
+            assert!(validate_view_id(valid).is_ok());
+        }
+        for invalid in ["", ".", "..", "../secret", "view/name", "view?token=x"] {
+            assert!(matches!(
+                validate_view_id(invalid),
+                Err(AnytypeError::Validation { .. })
+            ));
+        }
+        assert!(matches!(
+            validate_view_id(&"x".repeat(MAX_VIEW_ID_CHARS + 1)),
+            Err(AnytypeError::Validation { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsafe_selected_view_is_rejected_before_an_http_request() {
+        let error = fixture_client()
+            .view_list_objects(SPACE_ID, LIST_ID)
+            .view("../private?token=secret")
+            .list()
+            .await
+            .expect_err("unsafe view ID must fail before connecting");
+
+        let AnytypeError::Validation { message } = error else {
+            panic!("unsafe view ID should be classified as validation");
+        };
+        assert_eq!(message, "view_id must be a nonempty safe path identifier");
+        assert!(!message.contains("secret"));
+    }
+}

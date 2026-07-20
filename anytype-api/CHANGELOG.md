@@ -13,7 +13,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - property updates now reject key-only requests before sending them because the
   REST API requires `name`; type updates now expose full property replacement
   and explicit clearing while preserving omission when properties are unchanged
-- view_list_objects() requires setting `.view(view_id)` before invoking `.list()`.
+- view_list_objects() requires setting `.view(view_id)` before invoking `.list()`
+  and rejects unsafe selected view path identifiers before building the URL.
 
 - integration-test clients now honor `ANYTYPE_KEYSTORE` instead of always using
   a separate default test database without the configured HTTP credentials

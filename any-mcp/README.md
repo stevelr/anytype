@@ -123,12 +123,14 @@ The transport-neutral `view_list` and `view_object_list` handlers provide one
 bounded page at a time without registering the production tool catalog early.
 They resolve space and view names through `anytype-api`, so ambiguous view
 names return bounded candidate IDs instead of selecting an arbitrary match.
-`view_object_list` always sets the resolved view ID on the fluent request
-builder before listing and returns stable object summaries, canonical resource
-URIs, and only explicitly requested bounded property projections. Document
-bodies and snippets are never included. Continuation cursors bind the space,
-list, view, normalized projection, and limit, and are issued only after the
-upstream offset, limit, and returned item count have been checked.
+`view_object_list` validates the resolver-returned view ID and sets it on the
+fluent request builder before listing. Unsafe upstream identifiers fail with a
+fixed secret-safe error before an object-list request. Successful calls return
+stable object summaries, canonical resource URIs, and only explicitly
+requested bounded property projections. Document bodies and snippets are never
+included. Continuation cursors bind the space, list, view, normalized
+projection, and limit, and are issued only after the upstream offset, limit,
+and returned item count have been checked.
 
 ## Source layout
 

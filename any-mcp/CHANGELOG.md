@@ -39,7 +39,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   operation boundary so diagnostics cannot report false success outcomes.
 - Add typed, transport-neutral `view_list` and `view_object_list` handlers with
   resolver-backed view selection, exact one-page reads, checked continuations,
-  stable resource-linked object summaries, and bounded property projections.
+  stable resource-linked object summaries, bounded property projections, and
+  fail-closed validation of resolver-returned view identifiers.
 
 ### Changed
 
