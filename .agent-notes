@@ -1,5 +1,3 @@
 # Agent Notes
 
-[state] `any-cut` has a scaffold implementation on a divergent jj head titled `loop: Scaffold the Phase 1 any-mcp workspace crate and minimal binary`; it is not integrated into the current root and must be reconciled before dependent work starts.
-[env] Root ancestry now contains the `any-cut` scaffold revision `4e6597c1dccb`; tracker lifecycle completion remains with the designated closer.
-[gotcha] Isolated jj workspaces may become stale after concurrent operations; run `jj workspace update-stale` before inspecting or editing them.
+[state] `any-cut` and `any-g8g` are resolved pre-close but remain tracker-in-progress for the designated closer; after closure, recheck the exact scoped ready query before dispatching dependents.
