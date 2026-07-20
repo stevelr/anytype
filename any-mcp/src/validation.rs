@@ -170,14 +170,22 @@ impl FilterBudget {
         if depth == 0 || depth > MAX_FILTER_DEPTH {
             return Err(error(ValidationCode::FilterDepth));
         }
-        if self.filters + 1 > MAX_FILTERS {
+        let next_filters = self
+            .filters
+            .checked_add(1)
+            .ok_or_else(|| error(ValidationCode::FilterCount))?;
+        if next_filters > MAX_FILTERS {
             return Err(error(ValidationCode::FilterCount));
         }
-        if self.values + values > MAX_FILTER_VALUES {
+        let next_values = self
+            .values
+            .checked_add(values)
+            .ok_or_else(|| error(ValidationCode::FilterValues))?;
+        if next_values > MAX_FILTER_VALUES {
             return Err(error(ValidationCode::FilterValues));
         }
-        self.filters += 1;
-        self.values += values;
+        self.filters = next_filters;
+        self.values = next_values;
         Ok(())
     }
 }
@@ -280,12 +288,17 @@ pub struct BodyChunk {
     /// Starting character offset.
     pub offset: BodyOffset,
     /// Next character offset, absent at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(default, schema_with = "non_null_body_offset_schema")]
     pub next_offset: Option<BodyOffset>,
     /// Complete body character count.
     pub total_chars: BodyOffset,
     /// SHA-256 of the complete current body.
     #[schemars(length(equal = 64))]
     pub sha256: String,
+}
+fn non_null_body_offset_schema(generator: &mut SchemaGenerator) -> Schema {
+    generator.subschema_for::<BodyOffset>()
 }
 
 /// Slices a body on Unicode character boundaries and hashes the full text.
@@ -363,6 +376,19 @@ mod tests {
             b.record(1, MAX_FILTER_VALUES + 1).unwrap_err().code(),
             ValidationCode::FilterValues
         );
+        b.record(1, 1).unwrap();
+        assert_eq!(
+            b.record(1, usize::MAX).unwrap_err().code(),
+            ValidationCode::FilterValues
+        );
+        let mut corrupt = FilterBudget {
+            filters: usize::MAX,
+            values: 0,
+        };
+        assert_eq!(
+            corrupt.record(1, 0).unwrap_err().code(),
+            ValidationCode::FilterCount
+        );
     }
     #[test]
     fn body_limits_and_utf8_boundaries() {
@@ -399,6 +425,31 @@ mod tests {
     #[test]
     fn body_chunk_wire_contract_is_strict() {
         assert!(input_schema::<BodyChunkInput>().is_ok());
-        assert!(output_schema::<BodyChunk>().is_ok());
+        let schema = output_schema::<BodyChunk>().unwrap();
+        let next_offset = &schema["properties"]["next_offset"];
+        assert_eq!(next_offset["$ref"], "#/$defs/BodyOffset");
+        assert_eq!(schema["$defs"]["BodyOffset"]["type"], "integer");
+        assert!(!next_offset.to_string().contains("null"));
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "next_offset")
+        );
+    }
+
+    #[test]
+    fn terminal_body_chunk_omits_next_offset_from_json() {
+        let chunk = chunk_body("aé", BodyOffset::default(), BodyCharLimit::default()).unwrap();
+        assert_eq!(
+            serde_json::to_value(chunk).unwrap(),
+            serde_json::json!({
+                "text":"aé",
+                "offset":0,
+                "total_chars":2,
+                "sha256":"561951c2b8c47984b8b4b8ae1f173a03d9c703f66cf36f145e27bc6145499f74"
+            })
+        );
     }
 }

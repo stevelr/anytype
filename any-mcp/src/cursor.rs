@@ -14,6 +14,8 @@ use std::{
 };
 /// Maximum encoded cursor length.
 pub const MAX_CURSOR_CHARS: usize = 64;
+/// Minimum encoded cursor length for the one-digit initial version.
+pub const MIN_CURSOR_CHARS: usize = 52;
 /// Maximum live cursor states retained by one process.
 pub const MAX_CURSOR_ENTRIES: usize = 4096;
 /// Maximum canonical query size accepted for hashing.
@@ -23,14 +25,11 @@ pub const MAX_NORMALIZED_QUERY_BYTES: usize = 65_536;
 /// Bounded opaque cursor token carried over MCP.
 pub struct CursorToken(String);
 impl CursorToken {
-    /// Constructs a bounded token; store resolution validates its syntax.
+    /// Constructs a bounded token matching the documented cursor grammar.
     pub fn new(v: impl Into<String>) -> Result<Self, ValidationError> {
         let v = v.into();
-        if v.is_empty() || v.len() > MAX_CURSOR_CHARS {
-            Err(error(ValidationCode::MalformedCursor))
-        } else {
-            Ok(Self(v))
-        }
+        cursor_parts(&v)?;
+        Ok(Self(v))
     }
     /// Borrows the encoded token.
     #[must_use]
@@ -48,7 +47,7 @@ impl JsonSchema for CursorToken {
         "CursorToken".into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"string","minLength":1,"maxLength":MAX_CURSOR_CHARS,"pattern":"^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$"})
+        json_schema!({"type":"string","minLength":MIN_CURSOR_CHARS,"maxLength":MAX_CURSOR_CHARS,"pattern":"^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$"})
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,32 +159,55 @@ impl CursorStore {
     }
 }
 fn parse(v: &str) -> Result<([u8; 8], [u8; 16]), ValidationError> {
-    let p: Vec<_> = v.split('.').collect();
-    if p.len() != 3 {
+    let (version, instance, id) = cursor_parts(v)?;
+    if version != "1" {
+        return Err(error(ValidationCode::CursorVersion));
+    }
+    Ok((unhex::<8>(instance)?, unhex::<16>(id)?))
+}
+fn cursor_parts(v: &str) -> Result<(&str, &str, &str), ValidationError> {
+    if !(MIN_CURSOR_CHARS..=MAX_CURSOR_CHARS).contains(&v.len()) || !v.is_ascii() {
         return Err(error(ValidationCode::MalformedCursor));
     }
-    if p[0] != "c1" {
-        return Err(error(if p[0].starts_with('c') {
-            ValidationCode::CursorVersion
-        } else {
-            ValidationCode::MalformedCursor
-        }));
+    let Some((version, remainder)) = v.strip_prefix('c').and_then(|v| v.split_once('.')) else {
+        return Err(error(ValidationCode::MalformedCursor));
+    };
+    let Some((instance, id)) = remainder.split_once('.') else {
+        return Err(error(ValidationCode::MalformedCursor));
+    };
+    let valid_version = !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit());
+    if !valid_version
+        || instance.len() != 16
+        || id.len() != 32
+        || !instance.bytes().all(is_lower_hex)
+        || !id.bytes().all(is_lower_hex)
+    {
+        return Err(error(ValidationCode::MalformedCursor));
     }
-    Ok((unhex::<8>(p[1])?, unhex::<16>(p[2])?))
+    Ok((version, instance, id))
 }
 fn hex(v: &[u8]) -> String {
     v.iter().map(|b| format!("{b:02x}")).collect()
 }
 fn unhex<const N: usize>(v: &str) -> Result<[u8; N], ValidationError> {
-    if v.len() != N * 2 {
+    if N.checked_mul(2) != Some(v.len()) {
         return Err(error(ValidationCode::MalformedCursor));
     }
     let mut out = [0; N];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&v[i * 2..i * 2 + 2], 16)
-            .map_err(|_| error(ValidationCode::MalformedCursor))?;
+    for (target, pair) in out.iter_mut().zip(v.as_bytes().chunks_exact(2)) {
+        *target = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(out)
+}
+fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+fn hex_nibble(byte: u8) -> Result<u8, ValidationError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(error(ValidationCode::MalformedCursor)),
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -223,9 +245,7 @@ mod tests {
         let q2 = QueryFingerprint::from_normalized(&json!({"b":2,"a":1})).unwrap();
         assert_eq!(q1, q2);
         assert_eq!(
-            s.resolve(&CursorToken::new("bad").unwrap(), q1)
-                .unwrap_err()
-                .code(),
+            CursorToken::new("bad").unwrap_err().code(),
             ValidationCode::MalformedCursor
         );
         let valid = s.issue(PageOffset::new(1).unwrap(), q1).unwrap();
@@ -253,6 +273,32 @@ mod tests {
         assert_eq!(
             s.resolve(&first, q).unwrap_err().code(),
             ValidationCode::UnknownCursor
+        );
+    }
+
+    #[test]
+    fn unicode_uppercase_and_invalid_boundaries_are_malformed_without_panics() {
+        let malformed = [
+            "c1.0000000é0000000.00000000000000000000000000000000",
+            "c1.0000000000000000.000000000000000é000000000000000",
+            "c1.0000000000000000.0000000000000000000000000000000é",
+            "c1.000000000000000A.00000000000000000000000000000000",
+            "c1.0000000000000000.0000000000000000000000000000000F",
+            "c١.0000000000000000.00000000000000000000000000000000",
+        ];
+        for value in malformed {
+            assert_eq!(
+                CursorToken::new(value).unwrap_err().code(),
+                ValidationCode::MalformedCursor
+            );
+            assert_eq!(
+                parse(value).unwrap_err().code(),
+                ValidationCode::MalformedCursor
+            );
+        }
+        assert_eq!(
+            unhex::<8>("0000000é0000000").unwrap_err().code(),
+            ValidationCode::MalformedCursor
         );
     }
 }
