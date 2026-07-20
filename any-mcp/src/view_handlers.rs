@@ -13,6 +13,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use anytype::{
+    error::AnytypeError,
     objects::Object,
     paged::PaginatedResponse,
     views::{View, ViewLayout as AnytypeViewLayout},
@@ -327,9 +328,12 @@ impl ViewReadHandlers {
                 let view_id = client
                     .resolve_view_id(&space_id, input.list_id.as_str(), input.view.as_str())
                     .await?;
+                let view_id = EntityId::new(view_id).map_err(|_| AnytypeError::Other {
+                    message: "resolved view identifier is unsafe".to_owned(),
+                })?;
                 client
                     .view_list_objects(&space_id, input.list_id.as_str())
-                    .view(view_id)
+                    .view(view_id.as_str())
                     .limit(u32::from(input.limit.get()))
                     .offset(request.offset().get())
                     .list()
@@ -415,7 +419,6 @@ mod tests {
     use super::*;
     use crate::{
         error::ToolErrorCode,
-        pagination::MAX_PAGE_LIMIT,
         runtime::StartupStatus,
         schema::{input_schema, output_schema},
     };
@@ -453,21 +456,7 @@ mod tests {
             let mut requests = Vec::with_capacity(bodies.len());
             for value in bodies {
                 let (mut stream, _) = listener.accept().await.expect("accept fixture request");
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 2048];
-                loop {
-                    let read = stream
-                        .read(&mut buffer)
-                        .await
-                        .expect("read fixture request");
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let request = read_request(&mut stream).await;
                 let body = serde_json::to_string(&value).expect("fixture JSON");
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -477,11 +466,41 @@ mod tests {
                     .write_all(response.as_bytes())
                     .await
                     .expect("write fixture response");
-                requests.push(String::from_utf8(request).expect("HTTP request is UTF-8"));
+                requests.push(request);
+            }
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_millis(100), listener.accept()).await
+            {
+                requests.push(read_request(&mut stream).await);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write unexpected-request response");
             }
             requests
         });
         (format!("http://{address}"), task)
+    }
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 2048];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .await
+                .expect("read fixture request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("HTTP request is UTF-8")
     }
 
     fn page(items: Value, limit: u32, offset: u32, has_more: bool) -> Value {
@@ -500,17 +519,18 @@ mod tests {
         json!({"filters": [], "id": id, "layout": "grid", "name": name, "sorts": []})
     }
 
-    fn object() -> Value {
+    fn object(id: &str) -> Value {
         json!({
             "archived": false,
-            "id": "object-1",
+            "id": id,
             "layout": "basic",
             "markdown": "# must not escape",
             "name": "Roadmap item",
             "object": "object",
             "properties": [
                 {"name": "Status", "key": "status", "id": "property-1", "format": "text", "text": "Ready"},
-                {"name": "Secret", "key": "secret", "id": "property-2", "format": "text", "text": "not requested"}
+                {"name": "Secret", "key": "secret", "id": "property-2", "format": "text", "text": "Secret projected"},
+                {"name": "Hidden", "key": "hidden", "id": "property-3", "format": "text", "text": "not requested"}
             ],
             "snippet": "must not escape",
             "space_id": SPACE_ID,
@@ -577,9 +597,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn view_list_executes_one_requested_page_and_returns_bounded_summaries() {
-        let (base_url, server) =
-            fixture_server(vec![page(json!([view("view-1", "Roadmap")]), 2, 0, true)]).await;
+    async fn view_list_continues_one_page_per_call_and_rejects_mismatched_cursor_without_io() {
+        let (base_url, server) = fixture_server(vec![
+            page(json!([view("view-1", "Roadmap")]), 2, 0, true),
+            page(json!([view("view-2", "Backlog")]), 2, 2, false),
+        ])
+        .await;
         let handlers = ViewReadHandlers::new(
             runtime(fixture_client(base_url)),
             Arc::new(CursorStore::new().unwrap()),
@@ -595,21 +618,47 @@ mod tests {
             encoded["items"],
             json!([{"id":"view-1","name":"Roadmap","layout":"grid"}])
         );
-        assert!(encoded["next_cursor"].as_str().is_some());
-        let requests = server.await.unwrap();
-        assert_eq!(requests.len(), 1);
-        let request_line = requests[0].lines().next().unwrap();
-        assert!(
-            request_line.starts_with(&format!("GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views?"))
+        let cursor = CursorToken::new(encoded["next_cursor"].as_str().unwrap()).unwrap();
+
+        let mut second_input = view_list_input(2);
+        second_input.cursor = Some(cursor.clone());
+        let second = handlers
+            .view_list(second_input, &CancellationToken::new())
+            .await;
+        assert_eq!(second.is_error, Some(false));
+        assert_eq!(
+            second.structured_content.as_ref().unwrap(),
+            &json!({"items":[{"id":"view-2","name":"Backlog","layout":"grid"}]})
         );
-        assert!(request_line.contains("limit=2"));
+
+        let mut mismatch = view_list_input(2);
+        mismatch.list_id = ObjectId::new("different-list").unwrap();
+        mismatch.cursor = Some(cursor);
+        let mismatch = handlers
+            .view_list(mismatch, &CancellationToken::new())
+            .await;
+        assert_eq!(mismatch.is_error, Some(true));
+        assert_eq!(mismatch.structured_content.unwrap()["code"], "validation");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let first = requests[0].lines().next().unwrap();
+        assert!(first.starts_with(&format!("GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views?")));
+        assert!(first.contains("limit=2"));
+        assert!(!first.contains("offset="));
+        let second = requests[1].lines().next().unwrap();
+        assert!(second.starts_with(&format!("GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views?")));
+        assert!(second.contains("limit=2"));
+        assert!(second.contains("offset=2"));
     }
 
     #[tokio::test]
-    async fn production_path_resolves_then_sets_view_before_listing_objects() {
+    async fn view_object_list_sets_resolved_view_and_continues_with_normalized_projection() {
         let (base_url, server) = fixture_server(vec![
             page(json!([view("view-1", "Roadmap")]), 99, 0, false),
-            page(json!([object()]), 2, 0, true),
+            page(json!([object("object-1")]), 2, 0, true),
+            page(json!([view("view-1", "Roadmap")]), 99, 0, false),
+            page(json!([object("object-2")]), 2, 2, false),
         ])
         .await;
         let handlers = ViewReadHandlers::new(
@@ -618,8 +667,16 @@ mod tests {
         )
         .unwrap();
 
+        let mut first_input = view_object_input("Roadmap", 2);
+        first_input.property_keys = Some(
+            ProjectionList::new(vec![
+                TypeKey::new("secret").unwrap(),
+                TypeKey::new("status").unwrap(),
+            ])
+            .unwrap(),
+        );
         let result = handlers
-            .view_object_list(view_object_input("Roadmap", 2), &CancellationToken::new())
+            .view_object_list(first_input, &CancellationToken::new())
             .await;
         assert_eq!(result.is_error, Some(false));
         let encoded = result.structured_content.unwrap();
@@ -628,22 +685,65 @@ mod tests {
             encoded["items"][0]["summary"]["resource_uri"],
             format!("anytype://spaces/{SPACE_ID}/objects/object-1")
         );
-        assert_eq!(encoded["items"][0]["properties"][0]["key"], "status");
-        assert!(encoded["next_cursor"].as_str().is_some());
+        assert_eq!(encoded["items"][0]["properties"][0]["key"], "secret");
+        assert_eq!(encoded["items"][0]["properties"][1]["key"], "status");
+        let cursor = CursorToken::new(encoded["next_cursor"].as_str().unwrap()).unwrap();
         let rendered = encoded.to_string();
         assert!(!rendered.contains("must not escape"));
         assert!(!rendered.contains("not requested"));
 
+        let mut second_input = view_object_input("Roadmap", 2);
+        second_input.property_keys = Some(
+            ProjectionList::new(vec![
+                TypeKey::new("status").unwrap(),
+                TypeKey::new("secret").unwrap(),
+            ])
+            .unwrap(),
+        );
+        second_input.cursor = Some(cursor.clone());
+        let second = handlers
+            .view_object_list(second_input, &CancellationToken::new())
+            .await;
+        assert_eq!(second.is_error, Some(false));
+        let second = second.structured_content.unwrap();
+        assert_eq!(second["items"][0]["summary"]["id"], "object-2");
+        assert!(second.get("next_cursor").is_none());
+
+        let mut mismatch = view_object_input("Other", 2);
+        mismatch.property_keys = Some(
+            ProjectionList::new(vec![
+                TypeKey::new("secret").unwrap(),
+                TypeKey::new("status").unwrap(),
+            ])
+            .unwrap(),
+        );
+        mismatch.cursor = Some(cursor);
+        let mismatch = handlers
+            .view_object_list(mismatch, &CancellationToken::new())
+            .await;
+        assert_eq!(mismatch.is_error, Some(true));
+        assert_eq!(mismatch.structured_content.unwrap()["code"], "validation");
+
         let requests = server.await.unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 4);
         assert!(requests[0].starts_with(&format!(
             "GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views?limit=99 HTTP/1.1"
         )));
-        let request_line = requests[1].lines().next().unwrap();
-        assert!(request_line.starts_with(&format!(
+        let first_page = requests[1].lines().next().unwrap();
+        assert!(first_page.starts_with(&format!(
             "GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views/view-1/objects?"
         )));
-        assert!(request_line.contains("limit=2"));
+        assert!(first_page.contains("limit=2"));
+        assert!(!first_page.contains("offset="));
+        assert!(requests[2].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views?limit=99 HTTP/1.1"
+        )));
+        let second_page = requests[3].lines().next().unwrap();
+        assert!(second_page.starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views/view-1/objects?"
+        )));
+        assert!(second_page.contains("limit=2"));
+        assert!(second_page.contains("offset=2"));
     }
 
     #[tokio::test]
@@ -671,6 +771,38 @@ mod tests {
         assert_eq!(error["candidates"][0]["id"], "view-a");
         assert_eq!(error["candidates"][1]["id"], "view-b");
         assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unsafe_unique_resolved_view_id_is_upstream_error_without_object_request() {
+        let (base_url, server) = fixture_server(vec![page(
+            json!([view("../private?token=secret", "Roadmap")]),
+            99,
+            0,
+            false,
+        )])
+        .await;
+        let handlers = ViewReadHandlers::new(
+            runtime(fixture_client(base_url)),
+            Arc::new(CursorStore::new().unwrap()),
+        )
+        .unwrap();
+
+        let result = handlers
+            .view_object_list(view_object_input("Roadmap", 2), &CancellationToken::new())
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        let error = result.structured_content.unwrap();
+        assert_eq!(error["code"], "upstream");
+        let rendered = error.to_string();
+        assert!(!rendered.contains("private"));
+        assert!(!rendered.contains("secret"));
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views?limit=99 HTTP/1.1"
+        )));
     }
 
     #[test]
@@ -742,48 +874,5 @@ mod tests {
             ToolErrorCode::BoundedResult
         );
         assert_eq!(cursors.entry_count(), 0);
-    }
-
-    #[test]
-    fn cursor_is_bound_to_view_projection_limit_and_parameters() {
-        let cursors = CursorStore::new().unwrap();
-        let projection = vec![TypeKey::new("status").unwrap()];
-        let request = begin_page(
-            &cursors,
-            None,
-            "view_object_list",
-            PageLimit::new(2).unwrap(),
-            &ViewObjectListBinding {
-                space: SPACE_ID,
-                list_id: LIST_ID,
-                view: "Roadmap",
-                property_keys: &projection,
-            },
-        )
-        .unwrap();
-        let page = finish_page::<bool>(
-            &cursors,
-            request,
-            UpstreamPagination::new(0, 2, true).unwrap(),
-            vec![true],
-        )
-        .unwrap();
-        let cursor = page.next_cursor().unwrap();
-        let mismatch = begin_page(
-            &cursors,
-            Some(cursor),
-            "view_object_list",
-            PageLimit::new(2).unwrap(),
-            &ViewObjectListBinding {
-                space: SPACE_ID,
-                list_id: LIST_ID,
-                view: "Other",
-                property_keys: &projection,
-            },
-        )
-        .unwrap_err();
-        assert_eq!(mismatch.tool_error().code(), ToolErrorCode::Validation);
-
-        assert_eq!(MAX_PAGE_LIMIT, 100);
     }
 }
