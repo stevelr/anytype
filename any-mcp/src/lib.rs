@@ -16,5 +16,8 @@ pub mod runtime;
 pub mod server;
 
 pub use config::RuntimeConfig;
-pub use runtime::{RuntimeContext, RuntimeError, StartupStatus, serve_stdio};
+pub use runtime::{
+    OperationContext, RuntimeContext, RuntimeError, ServeError, StartupError, StartupStatus,
+    serve_stdio,
+};
 pub use server::AnyMcpServer;
