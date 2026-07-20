@@ -45,13 +45,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Added
 
 - test contexts now provide cleanup-owned custom types, source objects, and
-  templates through `create_template_fixtures`: the helper takes finite
-  complete pre-create type, type-scoped object, and template snapshots, sends
-  one authenticated heart
+  templates through `create_template_fixtures`: the helper takes finite,
+  complete pre-create inventories of all types, space-wide active and archived
+  objects, and every active type's templates, sends one authenticated heart
   `TemplateCreateFromObject` request per source, registers every validated ID
   before response classification or follow-up reads, and verifies exact
   list/GET evidence. Teardown sends each mutation once in reverse dependency
-  order and proves every template absent and every source/type archived
+  order and proves every template absent and every source/type archived. One
+  shared ID registry prevents generic and private cleanup paths from dispatching
+  the same ID twice
 - Test contexts now provide a cleanup-registered collection-layout type fixture
   through the narrow heart RPC, with immediate safe-id registration and bounded
   exact-layout verification through the ordinary REST getter; production REST
