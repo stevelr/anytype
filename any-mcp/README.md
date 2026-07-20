@@ -89,10 +89,12 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   error `-32022` with exact `supported` and `requested` data;
 - newline-delimited input/output frames in both eras are capped at 2 MiB. The
   legacy transport preserves rmcp dispatch while a cancellation-safe decoder
-  returns one `-32700` response per syntactically malformed frame and one
-  `-32600` response per oversized or well-formed invalid frame. Decoder and
-  service responses share one stdout writer. The modern path allows at most 64
-  active requests; both paths preserve cancellation and prompt EOF shutdown;
+  returns one `-32700` response with explicit `id: null` per syntactically
+  malformed frame and one `-32600` response per oversized or well-formed
+  invalid frame. Valid JSON-RPC notification shapes never receive a response,
+  including when their parameters cannot be decoded. Decoder and service
+  responses share one stdout writer. The modern path allows at most 64 active
+  requests; both paths preserve cancellation and prompt EOF shutdown;
 - modern request IDs accept every bounded string, including the schema-valid
   empty string, plus exactly represented signed/unsigned JSON integers. Strings
   are capped at 256 bytes and integers at serde_json's exact i64/u64 range as
