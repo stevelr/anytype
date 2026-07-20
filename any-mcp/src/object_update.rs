@@ -15,7 +15,6 @@
 use std::{borrow::Cow, collections::HashMap, fmt};
 
 use anytype::{
-    error::AnytypeError,
     objects::Object,
     prelude::{VerifyConfig, verify_semantic},
     properties::PropertyFormat,
@@ -32,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     domain::{BoundedText, DomainValueError, EntityId, ObjectId, ObjectSummary, SpaceId, TypeKey},
-    error::ToolError,
+    error::{ToolError, mutation_rejection_is_definitive},
     handler_support::{
         HandlerError, HandlerOperationError, MutationAccess, MutationProgress,
         execute_mutation_handler, require_mutation_access,
@@ -472,7 +471,9 @@ pub async fn object_update(
                     &properties,
                 )
                 .unwrap_or(false),
-                Err(error) if patch_error_is_definitive(&error) => return Err(error.into()),
+                Err(error) if mutation_rejection_is_definitive(&error) => {
+                    return Err(error.into());
+                }
                 Err(_) => true,
             };
 
@@ -709,25 +710,6 @@ fn mutation_compare_error(error: MutationCompareError) -> HandlerError {
     }
 }
 
-fn patch_error_is_definitive(error: &AnytypeError) -> bool {
-    matches!(
-        error,
-        AnytypeError::Auth { .. }
-            | AnytypeError::Unauthorized
-            | AnytypeError::Forbidden
-            | AnytypeError::Validation { .. }
-            | AnytypeError::NotFound { .. }
-            | AnytypeError::RateLimitExceeded { .. }
-            | AnytypeError::Serialization { .. }
-            | AnytypeError::NoKeyStore
-            | AnytypeError::KeyStore { .. }
-            | AnytypeError::ApiError {
-                code: 400..=499,
-                ..
-            }
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -757,6 +739,7 @@ mod tests {
     struct FixtureReply {
         status: &'static str,
         body: String,
+        headers: String,
         delay: Duration,
     }
 
@@ -765,6 +748,7 @@ mod tests {
             Self {
                 status: "200 OK",
                 body: body.to_string(),
+                headers: String::new(),
                 delay: Duration::ZERO,
             }
         }
@@ -773,6 +757,16 @@ mod tests {
             Self {
                 status,
                 body: body.to_owned(),
+                headers: String::new(),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn redirect(status: &'static str, location: &str) -> Self {
+            Self {
+                status,
+                body: "{}".to_owned(),
+                headers: format!("Location: {location}\r\n"),
                 delay: Duration::ZERO,
             }
         }
@@ -814,8 +808,9 @@ mod tests {
                 }
                 tokio::time::sleep(reply.delay).await;
                 let response = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                     reply.status,
+                    reply.headers,
                     reply.body.len(),
                     reply.body,
                 );
@@ -871,6 +866,23 @@ mod tests {
                 .is_err()
         });
         (format!("http://{address}"), server)
+    }
+
+    async fn monitored_no_request_fixture() -> (String, oneshot::Sender<()>, JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind monitored no-request fixture");
+        let address = listener
+            .local_addr()
+            .expect("monitored no-request fixture address");
+        let (done_tx, done_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            tokio::select! {
+                _ = listener.accept() => false,
+                _ = done_rx => true,
+            }
+        });
+        (format!("http://{address}"), done_tx, server)
     }
 
     fn runtime(base_url: String, timeout: Duration) -> RuntimeContext {
@@ -1767,6 +1779,143 @@ mod tests {
                 .contains("private validation")
         );
         assert_eq!(server.await.expect("definitive patch fixture").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn patch_429_is_sent_once_and_maps_as_an_ordinary_definitive_rejection() {
+        let current = object(SPACE_ID, OBJECT_ID, "Before", "body", "page");
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(current),
+            FixtureReply::json(type_response("page", json!([]))),
+            FixtureReply::error("429 Too Many Requests", "private rate-limit detail"),
+        ])
+        .await;
+        let result = object_update(
+            &runtime(base_url, Duration::from_secs(1)),
+            &object_update_tool().unwrap(),
+            MutationAccess::Allowed,
+            &input(json!({"space":SPACE_ID,"object_id":OBJECT_ID,"name":"After"})),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result_code(&result), "upstream");
+        assert_eq!(result_message(&result), ToolError::upstream().message());
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("private rate-limit")
+        );
+        let requests = server.await.expect("429 patch fixture");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("PATCH "))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("GET "))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_408_is_sent_once_and_stays_indeterminate_after_matching_recovery() {
+        let current = object(SPACE_ID, OBJECT_ID, "Before", "body", "page");
+        let updated = object(SPACE_ID, OBJECT_ID, "After", "body", "page");
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(current),
+            FixtureReply::json(type_response("page", json!([]))),
+            FixtureReply::error("408 Request Timeout", "private timeout detail"),
+            FixtureReply::json(updated),
+        ])
+        .await;
+        let result = object_update(
+            &runtime_with_options(
+                base_url,
+                Duration::from_secs(1),
+                ResponseLimits::default(),
+                Some(fast_verify(1)),
+            ),
+            &object_update_tool().unwrap(),
+            MutationAccess::Allowed,
+            &input(json!({"space":SPACE_ID,"object_id":OBJECT_ID,"name":"After"})),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result_code(&result), "conflict");
+        assert_eq!(
+            result_message(&result),
+            ToolError::mutation_indeterminate().message()
+        );
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("private timeout")
+        );
+        let requests = server.await.expect("408 patch fixture");
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("PATCH "))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("GET "))
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_redirect_is_not_followed_and_remains_indeterminate_after_recovery() {
+        let current = object(SPACE_ID, OBJECT_ID, "Before", "body", "page");
+        let updated = object(SPACE_ID, OBJECT_ID, "After", "body", "page");
+        let (redirect_target, target_done, target_server) = monitored_no_request_fixture().await;
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(current),
+            FixtureReply::json(type_response("page", json!([]))),
+            FixtureReply::redirect("307 Temporary Redirect", &redirect_target),
+            FixtureReply::json(updated),
+        ])
+        .await;
+        let result = object_update(
+            &runtime_with_options(
+                base_url,
+                Duration::from_secs(1),
+                ResponseLimits::default(),
+                Some(fast_verify(1)),
+            ),
+            &object_update_tool().unwrap(),
+            MutationAccess::Allowed,
+            &input(json!({"space":SPACE_ID,"object_id":OBJECT_ID,"name":"After"})),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result_code(&result), "conflict");
+        assert_eq!(
+            result_message(&result),
+            ToolError::mutation_indeterminate().message()
+        );
+        let requests = server.await.expect("redirect patch fixture");
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("PATCH "))
+                .count(),
+            1
+        );
+        let _ = target_done.send(());
+        assert!(target_server.await.expect("redirect target fixture"));
     }
 
     #[tokio::test]
