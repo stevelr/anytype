@@ -229,7 +229,7 @@ impl AnyMcpServer {
         (self.state.access == MutationAccess::ReadOnly).then(|| tool_error(&ToolError::read_only()))
     }
 
-    async fn dispatch_tool(
+    pub(crate) async fn dispatch_tool(
         &self,
         request: CallToolRequestParams,
         cancellation: &tokio_util::sync::CancellationToken,
@@ -343,6 +343,39 @@ impl AnyMcpServer {
             _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
         }
     }
+
+    pub(crate) fn list_tools_wire(
+        &self,
+        request: Option<PaginatedRequestParams>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        reject_static_cursor(request)?;
+        Ok(ListToolsResult::with_all_items(self.state.tools.clone()))
+    }
+
+    pub(crate) fn list_resources_wire(
+        &self,
+        request: Option<PaginatedRequestParams>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        self.state.resources.list_resources(request)
+    }
+
+    pub(crate) fn list_resource_templates_wire(
+        &self,
+        request: Option<PaginatedRequestParams>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        self.state.resources.list_resource_templates(request)
+    }
+
+    pub(crate) async fn read_resource_wire(
+        &self,
+        request: ReadResourceRequestParams,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        self.state
+            .resources
+            .read_resource(request, cancellation)
+            .await
+    }
 }
 
 impl ServerHandler for AnyMcpServer {
@@ -365,8 +398,7 @@ impl ServerHandler for AnyMcpServer {
         request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        reject_static_cursor(request)?;
-        Ok(ListToolsResult::with_all_items(self.state.tools.clone()))
+        self.list_tools_wire(request)
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -390,7 +422,7 @@ impl ServerHandler for AnyMcpServer {
         request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        self.state.resources.list_resources(request)
+        self.list_resources_wire(request)
     }
 
     async fn list_resource_templates(
@@ -398,7 +430,7 @@ impl ServerHandler for AnyMcpServer {
         request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        self.state.resources.list_resource_templates(request)
+        self.list_resource_templates_wire(request)
     }
 
     async fn read_resource(
@@ -406,10 +438,7 @@ impl ServerHandler for AnyMcpServer {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
-        self.state
-            .resources
-            .read_resource(request, &context.ct)
-            .await
+        self.read_resource_wire(request, &context.ct).await
     }
 }
 

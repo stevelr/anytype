@@ -591,7 +591,7 @@ impl std::error::Error for StartupError {}
 /// task failures. EOF, including EOF before initialization, is a clean exit.
 pub async fn serve_stdio(runtime: RuntimeContext) -> Result<(), ServeError> {
     let server = AnyMcpServer::new(runtime).map_err(|_| ServeError::Catalog)?;
-    serve_transport(server, rmcp::transport::stdio()).await
+    crate::stdio::serve_dual_stdio(server).await
 }
 
 /// Runs an initialized handler over an arbitrary rmcp transport.
@@ -674,6 +674,8 @@ pub enum ServeError {
     Initialization,
     /// The rmcp service task failed.
     ServiceTask,
+    /// The bounded modern stdio adapter could not read or write a frame.
+    ModernTransport,
 }
 
 impl fmt::Display for ServeError {
@@ -682,6 +684,7 @@ impl fmt::Display for ServeError {
             Self::Catalog => formatter.write_str("MCP static catalog construction failed"),
             Self::Initialization => formatter.write_str("MCP stdio initialization failed"),
             Self::ServiceTask => formatter.write_str("MCP stdio service task failed"),
+            Self::ModernTransport => formatter.write_str("MCP modern stdio transport failed"),
         }
     }
 }
