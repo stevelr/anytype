@@ -47,7 +47,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Moved from the anyr cli so all clients share the same "name or id" conventions.
   `ChatTarget` and `DEFAULT_CHAT_NAME` are exported in the prelude.
 - new error variant `AnytypeError::Ambiguous`, returned by the `resolve_*` helpers
-  when a space, type, chat, or view name matches more than one item
+  when a space, type, chat, or view name matches more than one item; ambiguity
+  errors now include up to 10 deterministic, deduplicated candidate ids and
+  display names through the new `ResolveCandidate` type; resolver scans use a
+  hard 1,000-row limit and return `ResolutionLimitExceeded` rather than a
+  possibly false unique/not-found result, preserve direct view-id priority,
+  and select candidates independently of upstream row order; safe duplicate
+  representatives take precedence over malformed alternatives with the same id
 
 ### Changed
 

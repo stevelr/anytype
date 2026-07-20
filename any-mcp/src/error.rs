@@ -8,7 +8,7 @@
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{BoundedText, EntityId};
+use crate::domain::{BoundedText, DomainValueError, EntityId};
 
 /// Maximum number of ambiguity candidates returned to a caller.
 pub const MAX_ERROR_CANDIDATES: usize = 10;
@@ -83,6 +83,17 @@ pub struct ErrorCandidate {
     pub name: BoundedText<MAX_CANDIDATE_NAME_CHARS>,
 }
 
+impl TryFrom<&anytype::resolve::ResolveCandidate> for ErrorCandidate {
+    type Error = DomainValueError;
+
+    fn try_from(candidate: &anytype::resolve::ResolveCandidate) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: EntityId::new(candidate.id())?,
+            name: BoundedText::new(candidate.name())?,
+        })
+    }
+}
+
 /// Secret-safe error body returned in MCP `structuredContent`.
 ///
 /// Messages are selected only from fixed corrective text. Upstream response
@@ -104,13 +115,14 @@ pub struct ToolError {
 
 /// Classification produced when mapping an `anytype-api` failure.
 ///
-/// Ambiguity is deliberately not a completed [`ToolError`]: concrete handlers
-/// must obtain bounded candidate identifiers and names before returning it.
+/// Ambiguity without valid candidates is deliberately not a completed
+/// [`ToolError`]. Resolvers normally provide candidates directly; this state
+/// prevents malformed or manually constructed API errors from reaching MCP.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnytypeErrorMapping {
     /// A complete, secret-safe error that can be returned immediately.
     Ready(ToolError),
-    /// The handler must enrich the error with ambiguity candidates.
+    /// The handler cannot expose this ambiguity until it has valid candidates.
     AmbiguityRequiresCandidates,
 }
 
@@ -186,8 +198,8 @@ impl ToolError {
 
     /// Maps an `anytype-api` failure to a stable category without copying its
     /// URL, response body, credential text, or diagnostic message. Ambiguity
-    /// remains incomplete until the handler supplies candidates through
-    /// [`ToolError::ambiguous`].
+    /// becomes a ready error only when the resolver supplied candidates that
+    /// satisfy the MCP identifier and name bounds.
     #[must_use]
     pub fn from_anytype(error: &anytype::error::AnytypeError) -> AnytypeErrorMapping {
         use anytype::error::AnytypeError;
@@ -200,9 +212,18 @@ impl ToolError {
             | AnytypeError::KeyStore { .. }
             | AnytypeError::GrpcUnavailable { .. } => ToolErrorCode::Authentication,
             AnytypeError::Validation { .. } => ToolErrorCode::Validation,
-            AnytypeError::Ambiguous { .. } => {
-                return AnytypeErrorMapping::AmbiguityRequiresCandidates;
+            AnytypeError::Ambiguous { candidates, .. } => {
+                let candidates = candidates
+                    .iter()
+                    .map(ErrorCandidate::try_from)
+                    .filter_map(Result::ok)
+                    .take(MAX_ERROR_CANDIDATES);
+                return match Self::ambiguous(candidates) {
+                    Ok(error) => AnytypeErrorMapping::Ready(error),
+                    Err(_) => AnytypeErrorMapping::AmbiguityRequiresCandidates,
+                };
             }
+            AnytypeError::ResolutionLimitExceeded { .. } => ToolErrorCode::BoundedResult,
             AnytypeError::NotFound { .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
                 code: 400 | 422, ..
@@ -319,12 +340,109 @@ mod tests {
         let source = anytype::error::AnytypeError::Ambiguous {
             obj_type: "space".to_owned(),
             key: "Roadmap".to_owned(),
+            candidates: Vec::new(),
         };
 
         assert_eq!(
             ToolError::from_anytype(&source),
             AnytypeErrorMapping::AmbiguityRequiresCandidates
         );
+    }
+
+    #[test]
+    fn candidate_rich_anytype_ambiguity_maps_to_exact_tool_error() {
+        let source = anytype::error::AnytypeError::Ambiguous {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+            candidates: vec![
+                anytype::resolve::ResolveCandidate::new("space-a", "Roadmap"),
+                anytype::resolve::ResolveCandidate::new("space-b", "Roadmap"),
+            ],
+        };
+
+        let AnytypeErrorMapping::Ready(error) = ToolError::from_anytype(&source) else {
+            panic!("bounded resolver candidates must complete the tool error");
+        };
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "ambiguous",
+                "message": "The reference is ambiguous. Retry with one of the candidate identifiers.",
+                "candidates": [
+                    { "id": "space-a", "name": "Roadmap" },
+                    { "id": "space-b", "name": "Roadmap" }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_anytype_candidate_cannot_reach_tool_output() {
+        let source = anytype::error::AnytypeError::Ambiguous {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+            candidates: vec![anytype::resolve::ResolveCandidate::new(
+                "unsafe/id",
+                "Roadmap",
+            )],
+        };
+
+        assert_eq!(
+            ToolError::from_anytype(&source),
+            AnytypeErrorMapping::AmbiguityRequiresCandidates
+        );
+
+        let source = anytype::error::AnytypeError::Ambiguous {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+            candidates: vec![anytype::resolve::ResolveCandidate::new(
+                "space-a",
+                "x".repeat(MAX_CANDIDATE_NAME_CHARS + 1),
+            )],
+        };
+        assert_eq!(
+            ToolError::from_anytype(&source),
+            AnytypeErrorMapping::AmbiguityRequiresCandidates
+        );
+    }
+
+    #[test]
+    fn mixed_anytype_candidates_retain_valid_alternatives() {
+        let source = anytype::error::AnytypeError::Ambiguous {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+            candidates: vec![
+                anytype::resolve::ResolveCandidate::new("unsafe/id", "First"),
+                anytype::resolve::ResolveCandidate::new("space-a", "Roadmap A"),
+                anytype::resolve::ResolveCandidate::new(
+                    "space-b",
+                    "x".repeat(MAX_CANDIDATE_NAME_CHARS + 1),
+                ),
+                anytype::resolve::ResolveCandidate::new("space-c", "Roadmap C"),
+            ],
+        };
+
+        let AnytypeErrorMapping::Ready(error) = ToolError::from_anytype(&source) else {
+            panic!("valid alternatives must survive malformed neighbors");
+        };
+        assert_eq!(error.candidates().len(), 2);
+        assert_eq!(error.candidates()[0].id.as_str(), "space-a");
+        assert_eq!(error.candidates()[1].id.as_str(), "space-c");
+    }
+
+    #[test]
+    fn resolution_scan_limit_maps_to_bounded_result() {
+        let source = anytype::error::AnytypeError::ResolutionLimitExceeded {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+            limit: anytype::resolve::MAX_RESOLVE_SCAN_ITEMS,
+        };
+
+        let AnytypeErrorMapping::Ready(error) = ToolError::from_anytype(&source) else {
+            panic!("scan limits must map directly to a bounded-result error");
+        };
+        assert_eq!(error.code(), ToolErrorCode::BoundedResult);
+        assert!(error.candidates().is_empty());
     }
 
     #[test]
