@@ -1,0 +1,2064 @@
+// any-mcp - bounded, workflow-oriented MCP server for Anytype
+//
+// SPDX-FileCopyrightText: 2026 Steve Schoettler
+// SPDX-License-Identifier: Apache-2.0
+
+//! Verified, process-idempotent single-object creation.
+
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
+
+use anytype::{
+    error::AnytypeError,
+    objects::{Color, Icon, NewObjectRequest, Object},
+    properties::{PropertyFormat, PropertyValue, SetProperty},
+};
+use rmcp::{
+    model::CallToolResult,
+    schemars::{JsonSchema, Schema, SchemaGenerator, json_schema},
+};
+use serde::{Deserialize, Deserializer, Serialize, de};
+use serde_json::Number;
+use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex, Notify};
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    domain::{BoundedText, DomainValueError, EntityId, ObjectId, ObjectSummary, SpaceId, TypeKey},
+    error::{ErrorCandidate, MAX_CANDIDATE_NAME_CHARS, ToolError},
+    handler_support::{
+        HandlerError, HandlerOperationError, MutationAccess, execute_prepared_handler,
+        require_mutation_access,
+    },
+    object_output::{MAX_PROJECTED_NUMBER_ABS, MAX_PROPERTY_TEXT_CHARS, object_summary},
+    protocol::{ToolProfile, WorkflowTool, workflow_tool},
+    result::tool_error,
+    runtime::{OperationContext, RuntimeContext},
+    schema::SchemaContractError,
+    validation::{BoundedList, Omittable, optional_non_null_schema},
+};
+
+/// Maximum Unicode scalar values accepted in a resolvable reference.
+pub const MAX_CREATE_REFERENCE_CHARS: usize = 512;
+/// Maximum Unicode scalar values accepted in one document body.
+pub const MAX_CREATE_BODY_CHARS: usize = 100_000;
+/// Maximum Unicode scalar values accepted in an idempotency key.
+pub const MAX_IDEMPOTENCY_KEY_CHARS: usize = 256;
+/// Maximum properties accepted by one create call.
+pub const MAX_CREATE_PROPERTIES: usize = 50;
+/// Maximum identifiers accepted by a list-valued property.
+pub const MAX_CREATE_PROPERTY_ITEMS: usize = 100;
+/// Maximum retained idempotency entries in one handler instance.
+pub const DEFAULT_IDEMPOTENCY_CAPACITY: usize = 1_024;
+const RESOLVE_PAGE_SIZE: u32 = 100;
+const MAX_TEMPLATE_SCAN_ITEMS: u32 = 1_000;
+const MAX_ICON_CHARS: usize = 128;
+const MUTATION_PRE_DISPATCH: u8 = 0;
+const MUTATION_DISPATCHED: u8 = 1;
+const MUTATION_DEFINITIVELY_REJECTED: u8 = 2;
+
+type CreateBody = BoundedText<MAX_CREATE_BODY_CHARS>;
+type PropertyText = BoundedText<MAX_PROPERTY_TEXT_CHARS>;
+type PropertyItems<T> = BoundedList<T, MAX_CREATE_PROPERTY_ITEMS>;
+type CreateProperties = BoundedList<CreateProperty, MAX_CREATE_PROPERTIES>;
+
+/// A nonempty bounded space, type, or template reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CreateReference(String);
+
+impl CreateReference {
+    /// Validates a reference while retaining its exact matching spelling.
+    pub fn new(value: impl Into<String>) -> Result<Self, CreateInputError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(CreateInputError::Empty);
+        }
+        if value.chars().count() > MAX_CREATE_REFERENCE_CHARS {
+            return Err(CreateInputError::TooLong);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the reference exactly as supplied.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for CreateReference {
+    fn schema_name() -> Cow<'static, str> {
+        "CreateReference".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_CREATE_REFERENCE_CHARS,
+        })
+    }
+}
+
+/// A bounded, nonempty caller-generated idempotency key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct IdempotencyKey(String);
+
+impl IdempotencyKey {
+    /// Validates a process-local idempotency key.
+    pub fn new(value: impl Into<String>) -> Result<Self, CreateInputError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(CreateInputError::Empty);
+        }
+        if value.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS {
+            return Err(CreateInputError::TooLong);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for IdempotencyKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for IdempotencyKey {
+    fn schema_name() -> Cow<'static, str> {
+        "IdempotencyKey".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_IDEMPOTENCY_KEY_CHARS,
+        })
+    }
+}
+
+/// A wire-safe property key. Display names and arbitrary JSON keys are not accepted.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct CreatePropertyKey(String);
+
+impl CreatePropertyKey {
+    /// Validates an Anytype property key used in a request payload.
+    pub fn new(value: impl Into<String>) -> Result<Self, CreateInputError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(CreateInputError::Empty);
+        }
+        if value.chars().count() > crate::domain::MAX_TYPE_KEY_CHARS {
+            return Err(CreateInputError::TooLong);
+        }
+        if !value
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, b'_' | b'-'))
+        {
+            return Err(CreateInputError::UnsafeKey);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the validated key.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CreatePropertyKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for CreatePropertyKey {
+    fn schema_name() -> Cow<'static, str> {
+        "CreatePropertyKey".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": crate::domain::MAX_TYPE_KEY_CHARS,
+            "pattern": "^[A-Za-z0-9_-]+$",
+        })
+    }
+}
+
+/// A finite number accepted in a create-property request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CreateNumber(Number);
+
+impl CreateNumber {
+    fn new(value: Number) -> Result<Self, CreateInputError> {
+        let Some(number) = value.as_f64() else {
+            return Err(CreateInputError::InvalidNumber);
+        };
+        if !number.is_finite() || number.abs() > MAX_PROJECTED_NUMBER_ABS {
+            return Err(CreateInputError::InvalidNumber);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(Number::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for CreateNumber {
+    fn schema_name() -> Cow<'static, str> {
+        "CreateNumber".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "number",
+            "minimum": -MAX_PROJECTED_NUMBER_ABS,
+            "maximum": MAX_PROJECTED_NUMBER_ABS,
+        })
+    }
+}
+
+/// A bounded RFC 3339 date property value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CreateDate(BoundedText<{ crate::domain::MAX_TIMESTAMP_CHARS }>);
+
+impl CreateDate {
+    fn new(value: String) -> Result<Self, CreateInputError> {
+        chrono::DateTime::parse_from_rfc3339(&value).map_err(|_| CreateInputError::InvalidDate)?;
+        BoundedText::new(value)
+            .map(Self)
+            .map_err(|_| CreateInputError::TooLong)
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateDate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for CreateDate {
+    fn schema_name() -> Cow<'static, str> {
+        "CreateDate".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": crate::domain::MAX_TIMESTAMP_CHARS,
+            "format": "date-time",
+        })
+    }
+}
+
+/// Closed and bounded property assignment accepted by `object_create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "format", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CreateProperty {
+    /// Plain text value.
+    Text {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Bounded text value.
+        text: PropertyText,
+    },
+    /// Finite bounded numeric value.
+    Number {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Finite bounded numeric value.
+        number: CreateNumber,
+    },
+    /// One stable tag identifier.
+    Select {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Stable tag identifier.
+        select: EntityId,
+    },
+    /// Stable tag identifiers.
+    MultiSelect {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Bounded stable tag identifiers.
+        multi_select: PropertyItems<EntityId>,
+    },
+    /// RFC 3339 timestamp.
+    Date {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// RFC 3339 timestamp.
+        date: CreateDate,
+    },
+    /// Stable file identifiers.
+    Files {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Bounded stable file identifiers.
+        files: PropertyItems<EntityId>,
+    },
+    /// Checkbox value.
+    Checkbox {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Boolean checkbox value.
+        checkbox: bool,
+    },
+    /// Bounded URL value.
+    Url {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Bounded URL text.
+        url: PropertyText,
+    },
+    /// Bounded email value.
+    Email {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Bounded email text.
+        email: PropertyText,
+    },
+    /// Bounded phone value.
+    Phone {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Bounded phone text.
+        phone: PropertyText,
+    },
+    /// Stable object identifiers.
+    Objects {
+        /// Stable property key linked to the resolved type.
+        key: CreatePropertyKey,
+        /// Bounded stable object identifiers.
+        objects: PropertyItems<EntityId>,
+    },
+}
+
+impl CreateProperty {
+    fn key(&self) -> &CreatePropertyKey {
+        match self {
+            Self::Text { key, .. }
+            | Self::Number { key, .. }
+            | Self::Select { key, .. }
+            | Self::MultiSelect { key, .. }
+            | Self::Date { key, .. }
+            | Self::Files { key, .. }
+            | Self::Checkbox { key, .. }
+            | Self::Url { key, .. }
+            | Self::Email { key, .. }
+            | Self::Phone { key, .. }
+            | Self::Objects { key, .. } => key,
+        }
+    }
+
+    const fn format(&self) -> PropertyFormat {
+        match self {
+            Self::Text { .. } => PropertyFormat::Text,
+            Self::Number { .. } => PropertyFormat::Number,
+            Self::Select { .. } => PropertyFormat::Select,
+            Self::MultiSelect { .. } => PropertyFormat::MultiSelect,
+            Self::Date { .. } => PropertyFormat::Date,
+            Self::Files { .. } => PropertyFormat::Files,
+            Self::Checkbox { .. } => PropertyFormat::Checkbox,
+            Self::Url { .. } => PropertyFormat::Url,
+            Self::Email { .. } => PropertyFormat::Email,
+            Self::Phone { .. } => PropertyFormat::Phone,
+            Self::Objects { .. } => PropertyFormat::Objects,
+        }
+    }
+
+    fn apply(&self, request: NewObjectRequest) -> NewObjectRequest {
+        let key = self.key().as_str();
+        match self {
+            Self::Text { text, .. } => request.set_text(key, text.as_str()),
+            Self::Number { number, .. } => request.set_number(key, number.0.clone()),
+            Self::Select { select, .. } => request.set_select(key, select.as_str()),
+            Self::MultiSelect { multi_select, .. } => {
+                request.set_multi_select(key, multi_select.as_slice().iter().map(EntityId::as_str))
+            }
+            Self::Date { date, .. } => request.set_date(key, date.0.as_str()),
+            Self::Files { files, .. } => {
+                request.set_files(key, files.as_slice().iter().map(EntityId::as_str))
+            }
+            Self::Checkbox { checkbox, .. } => request.set_checkbox(key, *checkbox),
+            Self::Url { url, .. } => request.set_url(key, url.as_str()),
+            Self::Email { email, .. } => request.set_email(key, email.as_str()),
+            Self::Phone { phone, .. } => request.set_phone(key, phone.as_str()),
+            Self::Objects { objects, .. } => {
+                request.set_objects(key, objects.as_slice().iter().map(EntityId::as_str))
+            }
+        }
+    }
+
+    fn normalized(self) -> Self {
+        match self {
+            Self::MultiSelect { key, multi_select } => Self::MultiSelect {
+                key,
+                multi_select: normalized_ids(&multi_select),
+            },
+            Self::Files { key, files } => Self::Files {
+                key,
+                files: normalized_ids(&files),
+            },
+            Self::Objects { key, objects } => Self::Objects {
+                key,
+                objects: normalized_ids(&objects),
+            },
+            scalar => scalar,
+        }
+    }
+
+    fn matches(&self, value: &PropertyValue) -> bool {
+        match (self, value) {
+            (Self::Text { text, .. }, PropertyValue::Text { text: actual }) => {
+                text.as_str() == actual
+            }
+            (Self::Number { number, .. }, PropertyValue::Number { number: actual }) => {
+                &number.0 == actual
+            }
+            (Self::Select { select, .. }, PropertyValue::Select { select: actual }) => {
+                select.as_str() == actual.id
+            }
+            (
+                Self::MultiSelect { multi_select, .. },
+                PropertyValue::MultiSelect {
+                    multi_select: actual,
+                },
+            ) => same_ids(
+                multi_select.as_slice().iter().map(EntityId::as_str),
+                actual.iter().map(|tag| tag.id.as_str()),
+            ),
+            (Self::Date { date, .. }, PropertyValue::Date { date: actual }) => {
+                date.0.as_str() == actual
+            }
+            (Self::Files { files, .. }, PropertyValue::Files { files: actual }) => same_ids(
+                files.as_slice().iter().map(EntityId::as_str),
+                actual.iter().map(String::as_str),
+            ),
+            (Self::Checkbox { checkbox, .. }, PropertyValue::Checkbox { checkbox: actual }) => {
+                checkbox == actual
+            }
+            (Self::Url { url, .. }, PropertyValue::Url { url: actual }) => url.as_str() == actual,
+            (Self::Email { email, .. }, PropertyValue::Email { email: actual }) => {
+                email.as_str() == actual
+            }
+            (Self::Phone { phone, .. }, PropertyValue::Phone { phone: actual }) => {
+                phone.as_str() == actual
+            }
+            (Self::Objects { objects, .. }, PropertyValue::Objects { objects: actual }) => {
+                same_ids(
+                    objects.as_slice().iter().map(EntityId::as_str),
+                    actual.iter().map(String::as_str),
+                )
+            }
+            _ => false,
+        }
+    }
+}
+
+fn normalized_ids(values: &PropertyItems<EntityId>) -> PropertyItems<EntityId> {
+    let mut values = values.as_slice().to_vec();
+    values.sort();
+    values.dedup();
+    BoundedList::new(values).expect("normalizing cannot increase a bounded list")
+}
+
+fn same_ids<'a>(
+    expected: impl Iterator<Item = &'a str>,
+    actual: impl Iterator<Item = &'a str>,
+) -> bool {
+    let mut expected: Vec<_> = expected.collect();
+    let mut actual: Vec<_> = actual.collect();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    expected == actual
+}
+
+/// Closed object-icon input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "format", rename_all = "lowercase", deny_unknown_fields)]
+pub enum CreateIcon {
+    /// One bounded emoji sequence.
+    Emoji {
+        /// Nonempty bounded emoji sequence.
+        emoji: NonemptyIconText,
+    },
+    /// Stable Anytype file identifier.
+    File {
+        /// Stable file identifier, never a path or URL.
+        file: EntityId,
+    },
+    /// One bounded built-in icon name and color.
+    Icon {
+        /// Closed Anytype icon color.
+        color: CreateColor,
+        /// Nonempty bounded built-in icon name.
+        name: NonemptyIconText,
+    },
+}
+
+impl From<&CreateIcon> for Icon {
+    fn from(value: &CreateIcon) -> Self {
+        match value {
+            CreateIcon::Emoji { emoji } => Self::Emoji {
+                emoji: emoji.0.as_str().to_owned(),
+            },
+            CreateIcon::File { file } => Self::File {
+                file: file.as_str().to_owned(),
+            },
+            CreateIcon::Icon { color, name } => Self::Icon {
+                color: (*color).into(),
+                name: name.0.as_str().to_owned(),
+            },
+        }
+    }
+}
+
+/// Bounded nonempty icon text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct NonemptyIconText(BoundedText<MAX_ICON_CHARS>);
+
+impl<'de> Deserialize<'de> for NonemptyIconText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() {
+            return Err(de::Error::custom("icon text must not be empty"));
+        }
+        BoundedText::new(value).map(Self).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for NonemptyIconText {
+    fn schema_name() -> Cow<'static, str> {
+        "NonemptyIconText".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"string", "minLength":1, "maxLength":MAX_ICON_CHARS})
+    }
+}
+
+/// Closed set of Anytype icon colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateColor {
+    Grey,
+    Yellow,
+    Orange,
+    Red,
+    Pink,
+    Purple,
+    Blue,
+    Ice,
+    Teal,
+    Lime,
+}
+
+impl From<CreateColor> for Color {
+    fn from(value: CreateColor) -> Self {
+        match value {
+            CreateColor::Grey => Self::Grey,
+            CreateColor::Yellow => Self::Yellow,
+            CreateColor::Orange => Self::Orange,
+            CreateColor::Red => Self::Red,
+            CreateColor::Pink => Self::Pink,
+            CreateColor::Purple => Self::Purple,
+            CreateColor::Blue => Self::Blue,
+            CreateColor::Ice => Self::Ice,
+            CreateColor::Teal => Self::Teal,
+            CreateColor::Lime => Self::Lime,
+        }
+    }
+}
+
+/// Strict input for creating one object.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectCreateInput {
+    /// Unique space name or stable identifier.
+    space: CreateReference,
+    /// Type key, display name, or stable identifier.
+    #[serde(rename = "type")]
+    type_reference: CreateReference,
+    /// Optional object name. Explicit null is rejected; an empty string is explicit.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_name_schema")]
+    name: Omittable<crate::domain::DisplayName>,
+    /// Optional complete Markdown body. Explicit null is rejected.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_body_schema")]
+    body_markdown: Omittable<CreateBody>,
+    /// Optional closed property assignments. Explicit null is rejected.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_properties_schema")]
+    properties: Omittable<CreateProperties>,
+    /// Optional template id or unique name. Explicit null is rejected.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_template_schema")]
+    template: Omittable<CreateReference>,
+    /// Optional closed icon. Explicit null is rejected.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_icon_schema")]
+    icon: Omittable<CreateIcon>,
+    /// Optional process-lifetime retry key. Explicit null is rejected.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_idempotency_schema")]
+    idempotency_key: Omittable<IdempotencyKey>,
+}
+
+fn optional_name_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<crate::domain::DisplayName>(generator)
+}
+
+fn optional_body_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<CreateBody>(generator)
+}
+
+fn optional_properties_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<CreateProperties>(generator)
+}
+
+fn optional_template_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<CreateReference>(generator)
+}
+
+fn optional_icon_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<CreateIcon>(generator)
+}
+
+fn optional_idempotency_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<IdempotencyKey>(generator)
+}
+
+/// Verified bounded result of `object_create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectCreateOutput {
+    /// Verified metadata and canonical body resource link.
+    object: ObjectSummary,
+}
+
+/// Failure to construct one strict create input component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateInputError {
+    Empty,
+    TooLong,
+    UnsafeKey,
+    InvalidNumber,
+    InvalidDate,
+}
+
+impl fmt::Display for CreateInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Empty => "value must not be empty",
+            Self::TooLong => "value exceeds its maximum length",
+            Self::UnsafeKey => "property key contains unsafe characters",
+            Self::InvalidNumber => "number is outside the supported finite range",
+            Self::InvalidDate => "date must be RFC 3339",
+        })
+    }
+}
+
+impl std::error::Error for CreateInputError {}
+
+/// Builds the strict create contract; registration is performed by the catalog ticket.
+pub fn object_create_tool() -> Result<WorkflowTool<ObjectCreateOutput>, SchemaContractError> {
+    workflow_tool::<ObjectCreateInput, ObjectCreateOutput>(
+        "object_create",
+        "Create one object, verify it by reading it back, and return only bounded metadata. Optional fields must be omitted rather than null. A retry key deduplicates identical verified creates for this server process; timeout or cancellation can leave mutation outcome uncertain.",
+        ToolProfile::Create,
+    )
+}
+
+/// Stateful transport-neutral object-create handler.
+#[derive(Clone)]
+pub struct ObjectCreateHandlers {
+    runtime: RuntimeContext,
+    idempotency: Arc<IdempotencyStore>,
+    contract: WorkflowTool<ObjectCreateOutput>,
+}
+
+impl ObjectCreateHandlers {
+    /// Creates a handler with the documented finite idempotency capacity.
+    pub fn new(runtime: RuntimeContext) -> Result<Self, SchemaContractError> {
+        Self::build(runtime, DEFAULT_IDEMPOTENCY_CAPACITY)
+    }
+
+    fn build(runtime: RuntimeContext, capacity: usize) -> Result<Self, SchemaContractError> {
+        Ok(Self {
+            runtime,
+            idempotency: Arc::new(IdempotencyStore::new(capacity)),
+            contract: object_create_tool()?,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_idempotency_capacity(
+        runtime: RuntimeContext,
+        capacity: usize,
+    ) -> Result<Self, SchemaContractError> {
+        Self::build(runtime, capacity)
+    }
+
+    /// Creates and verifies one object, applying the mutation gate before cache lookup or I/O.
+    pub async fn object_create(
+        &self,
+        access: MutationAccess,
+        input: ObjectCreateInput,
+        cancellation: &CancellationToken,
+    ) -> CallToolResult {
+        if let Err(error) = require_mutation_access(access) {
+            return tool_error(error.tool_error());
+        }
+        let normalized = match NormalizedCreate::new(input) {
+            Ok(input) => input,
+            Err(error) => return tool_error(error.tool_error()),
+        };
+        let Some(key) = normalized.idempotency_key.clone() else {
+            return execute_create(&self.runtime, &self.contract, normalized, cancellation)
+                .await
+                .result;
+        };
+
+        let fingerprint = normalized.fingerprint();
+        match self.idempotency.begin(key.clone(), fingerprint).await {
+            BeginAttempt::Cached(result) => result,
+            BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
+            BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
+            BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
+            BeginAttempt::Lead(attempt) => {
+                let runtime = self.runtime.clone();
+                let contract = self.contract.clone();
+                let store = self.idempotency.clone();
+                let task_cancellation = cancellation.clone();
+                let task_attempt = attempt.clone();
+                tokio::spawn(async move {
+                    let result =
+                        execute_create(&runtime, &contract, normalized, &task_cancellation).await;
+                    store.finish(&key, &task_attempt, result).await;
+                });
+                wait_for_attempt(attempt, cancellation).await
+            }
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct NormalizedCreate {
+    space: CreateReference,
+    type_reference: CreateReference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<crate::domain::DisplayName>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_markdown: Option<CreateBody>,
+    properties: Vec<CreateProperty>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<CreateReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<CreateIcon>,
+    #[serde(skip)]
+    idempotency_key: Option<IdempotencyKey>,
+}
+
+impl NormalizedCreate {
+    fn new(input: ObjectCreateInput) -> Result<Self, HandlerError> {
+        let mut properties = input.properties.as_ref().map_or_else(Vec::new, |values| {
+            values
+                .as_slice()
+                .iter()
+                .cloned()
+                .map(CreateProperty::normalized)
+                .collect()
+        });
+        properties.sort_by(|left, right| left.key().cmp(right.key()));
+        if properties
+            .windows(2)
+            .any(|pair| pair[0].key() == pair[1].key())
+        {
+            return Err(HandlerError::new(ToolError::validation()));
+        }
+        Ok(Self {
+            space: input.space,
+            type_reference: input.type_reference,
+            name: input.name.as_ref().cloned(),
+            body_markdown: input.body_markdown.as_ref().cloned(),
+            properties,
+            template: input.template.as_ref().cloned(),
+            icon: input.icon.as_ref().cloned(),
+            idempotency_key: input.idempotency_key.as_ref().cloned(),
+        })
+    }
+
+    fn fingerprint(&self) -> [u8; 32] {
+        let encoded = serde_json::to_vec(self).expect("normalized create is serializable");
+        Sha256::digest(encoded).into()
+    }
+}
+
+struct IdempotencyStore {
+    entries: Mutex<HashMap<IdempotencyKey, StoredAttempt>>,
+    capacity: usize,
+}
+
+enum StoredAttempt {
+    Running {
+        fingerprint: [u8; 32],
+        attempt: Arc<Attempt>,
+    },
+    Complete {
+        fingerprint: [u8; 32],
+        result: CallToolResult,
+    },
+    Indeterminate {
+        fingerprint: [u8; 32],
+    },
+}
+
+struct Attempt {
+    result: Mutex<Option<CallToolResult>>,
+    notify: Notify,
+}
+
+enum BeginAttempt {
+    Lead(Arc<Attempt>),
+    Wait(Arc<Attempt>),
+    Cached(CallToolResult),
+    Conflict,
+    Full,
+}
+
+impl IdempotencyStore {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            capacity,
+        }
+    }
+
+    async fn begin(&self, key: IdempotencyKey, fingerprint: [u8; 32]) -> BeginAttempt {
+        let mut entries = self.entries.lock().await;
+        if let Some(entry) = entries.get(&key) {
+            return match entry {
+                StoredAttempt::Running {
+                    fingerprint: saved,
+                    attempt,
+                } if saved == &fingerprint => BeginAttempt::Wait(attempt.clone()),
+                StoredAttempt::Complete {
+                    fingerprint: saved,
+                    result,
+                } if saved == &fingerprint => BeginAttempt::Cached(result.clone()),
+                StoredAttempt::Indeterminate { fingerprint: saved } if saved == &fingerprint => {
+                    BeginAttempt::Conflict
+                }
+                _ => BeginAttempt::Conflict,
+            };
+        }
+        if self.capacity == 0 || entries.len() >= self.capacity {
+            return BeginAttempt::Full;
+        }
+        let attempt = Arc::new(Attempt {
+            result: Mutex::new(None),
+            notify: Notify::new(),
+        });
+        entries.insert(
+            key,
+            StoredAttempt::Running {
+                fingerprint,
+                attempt: attempt.clone(),
+            },
+        );
+        BeginAttempt::Lead(attempt)
+    }
+
+    async fn finish(&self, key: &IdempotencyKey, attempt: &Arc<Attempt>, result: CreateExecution) {
+        let mut entries = self.entries.lock().await;
+        if let Some(StoredAttempt::Running {
+            fingerprint,
+            attempt: stored,
+        }) = entries.get(key)
+            && Arc::ptr_eq(stored, attempt)
+        {
+            let fingerprint = *fingerprint;
+            match result.disposition {
+                CreateDisposition::Verified => {
+                    entries.insert(
+                        key.clone(),
+                        StoredAttempt::Complete {
+                            fingerprint,
+                            result: result.result.clone(),
+                        },
+                    );
+                }
+                CreateDisposition::Indeterminate => {
+                    entries.insert(key.clone(), StoredAttempt::Indeterminate { fingerprint });
+                }
+                CreateDisposition::PreDispatchFailure => {
+                    entries.remove(key);
+                }
+            }
+        }
+        drop(entries);
+        *attempt.result.lock().await = Some(result.result);
+        attempt.notify.notify_waiters();
+    }
+}
+
+async fn wait_for_attempt(
+    attempt: Arc<Attempt>,
+    cancellation: &CancellationToken,
+) -> CallToolResult {
+    loop {
+        let notified = attempt.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(result) = attempt.result.lock().await.clone() {
+            return result;
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return tool_error(&ToolError::upstream()),
+            () = &mut notified => {}
+        }
+    }
+}
+
+async fn execute_create(
+    runtime: &RuntimeContext,
+    contract: &WorkflowTool<ObjectCreateOutput>,
+    input: NormalizedCreate,
+    cancellation: &CancellationToken,
+) -> CreateExecution {
+    let client = runtime.client().clone();
+    let mutation_phase = Arc::new(AtomicU8::new(MUTATION_PRE_DISPATCH));
+    let operation_phase = mutation_phase.clone();
+    let result = execute_prepared_handler(
+        runtime,
+        contract,
+        OperationContext::new("object_create"),
+        cancellation,
+        async move {
+            let resolved_space = client.resolve_space_id(input.space.as_str()).await?;
+            let space_id = SpaceId::new(resolved_space).map_err(unsafe_upstream)?;
+            let typ = client
+                .resolve_type(space_id.as_str(), input.type_reference.as_str())
+                .await?;
+            let type_id = EntityId::new(typ.id.clone()).map_err(unsafe_upstream)?;
+            let type_key = TypeKey::new(typ.key.clone()).map_err(unsafe_upstream)?;
+            validate_properties(&typ, &input.properties)?;
+
+            let template_id = if let Some(reference) = &input.template {
+                Some(resolve_template(&client, &space_id, &type_id, &type_key, reference).await?)
+            } else {
+                None
+            };
+
+            let mut request = client
+                .new_object(space_id.as_str(), type_key.as_str())
+                .no_verify();
+            if let Some(name) = &input.name {
+                request = request.name(name.as_str());
+            }
+            if let Some(body) = &input.body_markdown {
+                request = request.body(body.as_str());
+            }
+            if let Some(icon) = &input.icon {
+                request = request.icon(Icon::from(icon));
+            }
+            if let Some(template_id) = &template_id {
+                request = request.template(template_id.as_str());
+            }
+            for property in &input.properties {
+                request = property.apply(request);
+            }
+
+            // Mark uncertainty before the non-idempotent POST future is first
+            // polled. Cancellation, timeout, or failed verification after
+            // this point must never enable another create for the same key.
+            operation_phase.store(MUTATION_DISPATCHED, Ordering::Release);
+            let created = match request.create().await {
+                Ok(created) => created,
+                Err(error) => {
+                    if definitely_rejected_create(&error) {
+                        operation_phase.store(MUTATION_DEFINITIVELY_REJECTED, Ordering::Release);
+                    }
+                    return Err(error.into());
+                }
+            };
+            validate_created_response(&created, &space_id, &type_key)?;
+            let object_id = ObjectId::new(created.id).map_err(unsafe_upstream)?;
+            let verified = client
+                .object(space_id.as_str(), object_id.as_str())
+                .get()
+                .await?;
+            verify_object(&verified, &object_id, &space_id, &type_key, &input)?;
+            Ok::<_, HandlerOperationError>(verified)
+        },
+        |verified| async move {
+            Ok(ObjectCreateOutput {
+                object: object_summary(&verified)?,
+            })
+        },
+    )
+    .await;
+    let disposition = if result.is_error == Some(false) {
+        CreateDisposition::Verified
+    } else if mutation_phase.load(Ordering::Acquire) == MUTATION_DISPATCHED {
+        CreateDisposition::Indeterminate
+    } else {
+        CreateDisposition::PreDispatchFailure
+    };
+    CreateExecution {
+        result,
+        disposition,
+    }
+}
+
+fn definitely_rejected_create(error: &AnytypeError) -> bool {
+    matches!(
+        error,
+        AnytypeError::ApiError {
+            code: 400 | 401 | 403 | 404 | 409 | 412 | 422,
+            ..
+        } | AnytypeError::Auth { .. }
+            | AnytypeError::Unauthorized
+            | AnytypeError::Forbidden
+            | AnytypeError::Validation { .. }
+            | AnytypeError::Serialization { .. }
+            | AnytypeError::NotFound { .. }
+            | AnytypeError::NoKeyStore
+            | AnytypeError::KeyStore { .. }
+            | AnytypeError::CacheDisabled
+    )
+}
+
+struct CreateExecution {
+    result: CallToolResult,
+    disposition: CreateDisposition,
+}
+
+#[derive(Clone, Copy)]
+enum CreateDisposition {
+    Verified,
+    Indeterminate,
+    PreDispatchFailure,
+}
+
+fn validate_properties(
+    typ: &anytype::types::Type,
+    requested: &[CreateProperty],
+) -> Result<(), HandlerOperationError> {
+    let mut seen = HashSet::new();
+    for property in requested {
+        if !seen.insert(property.key().as_str()) {
+            return Err(HandlerError::new(ToolError::validation()).into());
+        }
+        let matches: Vec<_> = typ
+            .properties
+            .iter()
+            .filter(|schema| schema.key == property.key().as_str())
+            .collect();
+        if matches.len() != 1 || matches[0].format() != property.format() {
+            return Err(HandlerError::new(ToolError::validation()).into());
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_template(
+    client: &anytype::prelude::AnytypeClient,
+    space_id: &SpaceId,
+    type_id: &EntityId,
+    type_key: &TypeKey,
+    reference: &CreateReference,
+) -> Result<ObjectId, HandlerOperationError> {
+    let mut offset = 0_u32;
+    let mut exact_id = None;
+    let mut exact_name = Vec::new();
+    let mut insensitive_name = Vec::new();
+    while offset < MAX_TEMPLATE_SCAN_ITEMS {
+        let page = client
+            .templates(space_id.as_str(), type_id.as_str())
+            .limit(RESOLVE_PAGE_SIZE)
+            .offset(offset)
+            .list()
+            .await?;
+        let returned = u32::try_from(page.items.len()).unwrap_or(u32::MAX);
+        let upstream_limit = page.pagination.limit;
+        if page.pagination.offset != offset
+            || upstream_limit == 0
+            || upstream_limit > RESOLVE_PAGE_SIZE
+            || returned > upstream_limit
+        {
+            return Err(HandlerError::new(ToolError::upstream()).into());
+        }
+        for template in &page.items {
+            let id = ObjectId::new(template.id.clone()).map_err(unsafe_upstream)?;
+            if template.id == reference.as_str() {
+                exact_id = Some(id);
+                break;
+            }
+            if let Some(name) = &template.name {
+                let candidate = || {
+                    Ok::<_, HandlerOperationError>((
+                        id.clone(),
+                        ErrorCandidate {
+                            id: EntityId::new(id.as_str()).map_err(unsafe_upstream)?,
+                            name: BoundedText::<MAX_CANDIDATE_NAME_CHARS>::new(name.clone())
+                                .map_err(unsafe_upstream)?,
+                        },
+                    ))
+                };
+                if name == reference.as_str() {
+                    exact_name.push(candidate()?);
+                } else if name.eq_ignore_ascii_case(reference.as_str()) {
+                    insensitive_name.push(candidate()?);
+                }
+            }
+        }
+        if exact_id.is_some() {
+            break;
+        }
+        offset = offset
+            .checked_add(upstream_limit)
+            .ok_or_else(|| HandlerOperationError::from(HandlerError::new(ToolError::upstream())))?;
+        if !page.pagination.has_more {
+            break;
+        }
+        if returned == 0 || offset >= MAX_TEMPLATE_SCAN_ITEMS {
+            return Err(HandlerError::new(ToolError::bounded_result()).into());
+        }
+    }
+    let candidates = if exact_name.is_empty() {
+        insensitive_name
+    } else {
+        exact_name
+    };
+    let selected = match exact_id {
+        Some(id) => id,
+        None if candidates.len() == 1 => candidates.into_iter().next().expect("one candidate").0,
+        None if candidates.is_empty() => {
+            return Err(HandlerError::new(ToolError::not_found()).into());
+        }
+        None => {
+            let error =
+                ToolError::ambiguous(candidates.into_iter().map(|(_, candidate)| candidate))
+                    .map_err(|_| {
+                        HandlerOperationError::from(HandlerError::new(ToolError::upstream()))
+                    })?;
+            return Err(HandlerError::new(error).into());
+        }
+    };
+    let template = client
+        .template(space_id.as_str(), type_id.as_str(), selected.as_str())
+        .get()
+        .await?;
+    let verified_id = ObjectId::new(template.id.clone()).map_err(unsafe_upstream)?;
+    let verified_space = SpaceId::new(template.space_id.clone()).map_err(unsafe_upstream)?;
+    let verified_type = template
+        .r#type
+        .as_ref()
+        .ok_or_else(|| HandlerOperationError::from(HandlerError::new(ToolError::upstream())))
+        .and_then(|typ| TypeKey::new(typ.key.clone()).map_err(unsafe_upstream))?;
+    if verified_id != selected || verified_space != *space_id || verified_type != *type_key {
+        return Err(HandlerError::new(ToolError::upstream()).into());
+    }
+    Ok(selected)
+}
+
+fn validate_created_response(
+    created: &Object,
+    space_id: &SpaceId,
+    type_key: &TypeKey,
+) -> Result<(), HandlerOperationError> {
+    let id = ObjectId::new(created.id.clone()).map_err(unsafe_upstream)?;
+    let returned_space = SpaceId::new(created.space_id.clone()).map_err(unsafe_upstream)?;
+    let returned_type = created
+        .r#type
+        .as_ref()
+        .ok_or_else(|| HandlerOperationError::from(HandlerError::new(ToolError::upstream())))
+        .and_then(|typ| TypeKey::new(typ.key.clone()).map_err(unsafe_upstream))?;
+    if id.as_str().is_empty()
+        || returned_space != *space_id
+        || returned_type != *type_key
+        || created.archived
+    {
+        return Err(HandlerError::new(ToolError::upstream()).into());
+    }
+    Ok(())
+}
+
+fn verify_object(
+    object: &Object,
+    expected_id: &ObjectId,
+    expected_space: &SpaceId,
+    expected_type: &TypeKey,
+    input: &NormalizedCreate,
+) -> Result<(), HandlerOperationError> {
+    let id = ObjectId::new(object.id.clone()).map_err(unsafe_upstream)?;
+    let space = SpaceId::new(object.space_id.clone()).map_err(unsafe_upstream)?;
+    let typ = object
+        .r#type
+        .as_ref()
+        .ok_or_else(|| HandlerOperationError::from(HandlerError::new(ToolError::upstream())))
+        .and_then(|typ| TypeKey::new(typ.key.clone()).map_err(unsafe_upstream))?;
+    if &id != expected_id
+        || &space != expected_space
+        || &typ != expected_type
+        || object.archived
+        || input
+            .name
+            .as_ref()
+            .is_some_and(|expected| object.name.as_deref() != Some(expected.as_str()))
+        || input
+            .body_markdown
+            .as_ref()
+            .is_some_and(|expected| object.markdown.as_deref() != Some(expected.as_str()))
+        || input
+            .icon
+            .as_ref()
+            .is_some_and(|expected| object.icon.as_ref() != Some(&Icon::from(expected)))
+    {
+        return Err(HandlerError::new(ToolError::upstream()).into());
+    }
+    for expected in &input.properties {
+        let mut matches = object
+            .properties
+            .iter()
+            .filter(|actual| actual.key == expected.key().as_str());
+        let Some(actual) = matches.next() else {
+            return Err(HandlerError::new(ToolError::upstream()).into());
+        };
+        if matches.next().is_some() || !expected.matches(&actual.value) {
+            return Err(HandlerError::new(ToolError::upstream()).into());
+        }
+    }
+    Ok(())
+}
+
+fn unsafe_upstream(_: DomainValueError) -> HandlerOperationError {
+    HandlerError::new(ToolError::upstream()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials, ResponseLimits};
+    use serde_json::{Value, json};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+
+    use super::*;
+    use crate::runtime::StartupStatus;
+
+    const SPACE_ID: &str =
+        "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
+    const TYPE_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y";
+    const OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+    const OTHER_OBJECT_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4z";
+
+    struct FixtureReply {
+        status: &'static str,
+        body: String,
+        delay: Duration,
+    }
+
+    impl FixtureReply {
+        fn json(value: Value) -> Self {
+            Self {
+                status: "200 OK",
+                body: value.to_string(),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn error(status: &'static str, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_owned(),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn delayed(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
+        }
+    }
+
+    async fn fixture(replies: Vec<FixtureReply>) -> (String, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind create fixture");
+        let address = listener.local_addr().expect("create fixture address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(replies.len());
+            for reply in replies {
+                let Ok(Ok((mut socket, _))) =
+                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
+                else {
+                    break;
+                };
+                let request = read_request(&mut socket).await;
+                requests.push(request);
+                tokio::time::sleep(reply.delay).await;
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    reply.status,
+                    reply.body.len(),
+                    reply.body,
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+            if let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_millis(100), listener.accept()).await
+            {
+                requests.push(read_request(&mut socket).await);
+            }
+            requests
+        });
+        (format!("http://{address}"), server)
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut expected = None;
+        loop {
+            let mut buffer = [0_u8; 2048];
+            let read = socket.read(&mut buffer).await.expect("read create request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected.is_none()
+                && let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let body_start = header_end + 4;
+                let headers = std::str::from_utf8(&request[..header_end]).expect("ASCII headers");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                    })
+                    .unwrap_or(0);
+                expected = Some(body_start + content_length);
+            }
+            if expected.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+            assert!(
+                request.len() <= 2 * 1024 * 1024,
+                "fixture request exceeded bound"
+            );
+        }
+        String::from_utf8(request).expect("request is utf-8")
+    }
+
+    async fn no_request_fixture() -> (String, JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind no-request fixture");
+        let address = listener.local_addr().expect("no-request fixture address");
+        let task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err()
+        });
+        (format!("http://{address}"), task)
+    }
+
+    fn runtime(base_url: String, timeout: Duration) -> RuntimeContext {
+        runtime_with_limits(base_url, timeout, ResponseLimits::default())
+    }
+
+    fn runtime_with_limits(
+        base_url: String,
+        timeout: Duration,
+        response_limits: ResponseLimits,
+    ) -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some(base_url),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("object-create-test".to_owned()),
+            app_name: "object-create-test".to_owned(),
+            disable_cache: true,
+            response_limits,
+            ..ClientConfig::default()
+        })
+        .expect("create fixture client");
+        client.set_api_key(HttpCredentials::new("fixture-token"));
+        RuntimeContext::from_parts(
+            client,
+            4,
+            timeout,
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+        )
+    }
+
+    fn type_value() -> Value {
+        json!({
+            "type": {
+                "archived": false,
+                "id": TYPE_ID,
+                "key": "page",
+                "layout": "basic",
+                "name": "Page",
+                "plural_name": "Pages",
+                "properties": [
+                    {"id":"prop-description", "key":"description", "name":"Description", "format":"text"},
+                    {"id":"prop-done", "key":"done", "name":"Done", "format":"checkbox"}
+                ]
+            }
+        })
+    }
+
+    fn object_value(object_id: &str, body: &str, description: &str) -> Value {
+        json!({
+            "object": {
+                "archived": false,
+                "icon": {"format":"emoji", "emoji":"📄"},
+                "id": object_id,
+                "layout": "basic",
+                "markdown": body,
+                "name": "Roadmap",
+                "object": "object",
+                "properties": [
+                    {"id":"prop-description", "key":"description", "name":"Description", "format":"text", "text":description},
+                    {"id":"prop-done", "key":"done", "name":"Done", "format":"checkbox", "checkbox":true}
+                ],
+                "space_id": SPACE_ID,
+                "type": {
+                    "archived": false,
+                    "id": TYPE_ID,
+                    "key":"page",
+                    "layout":"basic",
+                    "name":"Page",
+                    "plural_name":"Pages",
+                    "properties":[]
+                }
+            }
+        })
+    }
+
+    fn input(key: Option<&str>) -> ObjectCreateInput {
+        let mut value = json!({
+            "space": SPACE_ID,
+            "type": TYPE_ID,
+            "name": "Roadmap",
+            "body_markdown": "# Plan",
+            "icon": {"format":"emoji", "emoji":"📄"},
+            "properties": [
+                {"format":"checkbox", "key":"done", "checkbox":true},
+                {"format":"text", "key":"description", "text":"Q3"}
+            ]
+        });
+        if let Some(key) = key {
+            value["idempotency_key"] = json!(key);
+        }
+        serde_json::from_value(value).expect("valid create input")
+    }
+
+    fn success_replies() -> Vec<FixtureReply> {
+        vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3")),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3")),
+        ]
+    }
+
+    fn page(items: Vec<Value>, limit: u32, offset: u32) -> Value {
+        let total = items.len();
+        json!({
+            "items":items,
+            "pagination":{
+                "has_more":false,
+                "limit":limit,
+                "offset":offset,
+                "total":total
+            }
+        })
+    }
+
+    fn object_inner(object_id: &str, body: &str, description: &str) -> Value {
+        object_value(object_id, body, description)["object"].clone()
+    }
+
+    fn result_code(result: &CallToolResult) -> &str {
+        result
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("code"))
+            .and_then(Value::as_str)
+            .expect("error code")
+    }
+
+    fn request_body(request: &str) -> Value {
+        let (_, body) = request.split_once("\r\n\r\n").expect("request body");
+        serde_json::from_str(body).expect("JSON request body")
+    }
+
+    #[test]
+    fn contract_is_strict_bounded_non_null_and_uses_create_annotations() {
+        let contract = object_create_tool().expect("valid create tool");
+        assert_eq!(
+            serde_json::to_value(contract.as_tool().annotations.as_ref().unwrap()).unwrap(),
+            json!({
+                "readOnlyHint":false,
+                "destructiveHint":false,
+                "idempotentHint":false,
+                "openWorldHint":false
+            })
+        );
+        assert_eq!(contract.as_tool().name, "object_create");
+
+        for field in [
+            "name",
+            "body_markdown",
+            "properties",
+            "template",
+            "icon",
+            "idempotency_key",
+        ] {
+            let mut value = json!({"space":SPACE_ID, "type":TYPE_ID});
+            value[field] = Value::Null;
+            assert!(
+                serde_json::from_value::<ObjectCreateInput>(value).is_err(),
+                "accepted explicit null {field}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ObjectCreateInput>(json!({
+                "space":SPACE_ID, "type":TYPE_ID, "extra":true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObjectCreateInput>(json!({
+                "space":SPACE_ID,
+                "type":TYPE_ID,
+                "properties":[{"format":"text", "key":"../unsafe", "text":"x"}]
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObjectCreateInput>(json!({
+                "space":SPACE_ID,
+                "type":TYPE_ID,
+                "icon":{"format":"file", "file":"../unsafe"}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObjectCreateInput>(json!({
+                "space":SPACE_ID,
+                "type":TYPE_ID,
+                "properties":[{"format":"number", "key":"score", "number":1e30}]
+            }))
+            .is_err()
+        );
+
+        let schema = serde_json::to_value(contract.as_tool().input_schema.as_ref()).unwrap();
+        let encoded = schema.to_string();
+        assert!(!encoded.contains("additionalProperties\":true"));
+        assert!(!encoded.contains("body_markdown\":[\"null"));
+    }
+
+    #[tokio::test]
+    async fn sends_exact_create_payload_then_verifies_by_get_and_returns_only_summary() {
+        let (base_url, server) = fixture(success_replies()).await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(2))).unwrap();
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(None),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        let requests = server.await.expect("fixture task");
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.structured_content,
+            Some(json!({
+                "object": {
+                    "id":OBJECT_ID,
+                    "name":"Roadmap",
+                    "type_key":"page",
+                    "space_id":SPACE_ID,
+                    "resource_uri":format!("anytype://spaces/{SPACE_ID}/objects/{OBJECT_ID}")
+                }
+            }))
+        );
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/types/{TYPE_ID} HTTP/1.1\r\n"
+        )));
+        assert!(
+            requests[1].starts_with(&format!("POST /v1/spaces/{SPACE_ID}/objects HTTP/1.1\r\n"))
+        );
+        assert_eq!(
+            request_body(&requests[1]),
+            json!({
+                "type_key":"page",
+                "name":"Roadmap",
+                "body":"# Plan",
+                "icon":{"format":"emoji", "emoji":"📄"},
+                "properties":[
+                    {"key":"description", "text":"Q3"},
+                    {"key":"done", "checkbox":true}
+                ]
+            })
+        );
+        assert!(requests[2].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/objects/{OBJECT_ID} HTTP/1.1\r\n"
+        )));
+        let encoded = serde_json::to_string(&result).unwrap();
+        assert!(!encoded.contains("# Plan"));
+        assert!(!encoded.contains("description"));
+    }
+
+    #[tokio::test]
+    async fn named_space_type_and_template_are_bounded_and_revalidated_before_create() {
+        let space = json!({
+            "id":SPACE_ID,
+            "name":"Workspace",
+            "object":"space",
+            "description":null,
+            "icon":null,
+            "gateway_url":null,
+            "network_id":null
+        });
+        let type_item = type_value()["type"].clone();
+        let mut template = object_inner(OTHER_OBJECT_ID, "Template", "Template property");
+        template["name"] = json!("Starter");
+        let replies = vec![
+            FixtureReply::json(page(vec![space], 100, 0)),
+            FixtureReply::json(page(vec![type_item], 99, 0)),
+            FixtureReply::json(page(vec![template.clone()], 100, 0)),
+            FixtureReply::json(json!({"template":template})),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3")),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3")),
+        ];
+        let (base_url, server) = fixture(replies).await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(2))).unwrap();
+        let mut request = input(None);
+        request.space = CreateReference::new("Workspace").unwrap();
+        request.type_reference = CreateReference::new("Page").unwrap();
+        request.template = Omittable::Present(CreateReference::new("Starter").unwrap());
+        let result = handlers
+            .object_create(MutationAccess::Allowed, request, &CancellationToken::new())
+            .await;
+        let requests = server.await.expect("named resolver fixture");
+
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(requests.len(), 6);
+        assert!(requests[0].starts_with("GET /v1/spaces?"));
+        assert!(requests[0].contains("limit=99"));
+        assert!(requests[1].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/types?limit=99 HTTP/1.1\r\n"
+        )));
+        assert!(requests[2].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/types/{TYPE_ID}/templates"
+        )));
+        assert!(requests[3].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/types/{TYPE_ID}/templates/{OTHER_OBJECT_ID} HTTP/1.1\r\n"
+        )));
+        assert_eq!(
+            request_body(&requests[4])["template_id"],
+            json!(OTHER_OBJECT_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_sequential_and_concurrent_keyed_calls_create_once() {
+        for concurrent in [false, true] {
+            let mut replies = success_replies();
+            if concurrent {
+                replies[1] = std::mem::replace(
+                    &mut replies[1],
+                    FixtureReply::error("500 Internal Server Error", "unused"),
+                )
+                .delayed(Duration::from_millis(50));
+            }
+            let (base_url, server) = fixture(replies).await;
+            let handlers =
+                ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(2))).unwrap();
+            let cancellation_a = CancellationToken::new();
+            let cancellation_b = CancellationToken::new();
+            let (first, second) = if concurrent {
+                tokio::join!(
+                    handlers.object_create(
+                        MutationAccess::Allowed,
+                        input(Some("same")),
+                        &cancellation_a
+                    ),
+                    handlers.object_create(
+                        MutationAccess::Allowed,
+                        input(Some("same")),
+                        &cancellation_b
+                    )
+                )
+            } else {
+                let first = handlers
+                    .object_create(
+                        MutationAccess::Allowed,
+                        input(Some("same")),
+                        &cancellation_a,
+                    )
+                    .await;
+                let second = handlers
+                    .object_create(
+                        MutationAccess::Allowed,
+                        input(Some("same")),
+                        &cancellation_b,
+                    )
+                    .await;
+                (first, second)
+            };
+            assert_eq!(first.is_error, Some(false));
+            assert_eq!(first, second);
+            assert_eq!(server.await.expect("dedupe fixture").len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_key_reuse_and_read_only_cached_call_do_no_io() {
+        let (base_url, server) = fixture(success_replies()).await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(2))).unwrap();
+        let first = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("stable-key")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(first.is_error, Some(false));
+
+        let mut changed = input(Some("stable-key"));
+        changed.name = Omittable::Present(crate::domain::DisplayName::new("Changed").unwrap());
+        let mismatch = handlers
+            .object_create(MutationAccess::Allowed, changed, &CancellationToken::new())
+            .await;
+        assert_eq!(result_code(&mismatch), "conflict");
+        let read_only = handlers
+            .object_create(
+                MutationAccess::ReadOnly,
+                input(Some("stable-key")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&read_only), "validation");
+        assert_eq!(server.await.expect("no extra request fixture").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn predispatch_failure_is_retryable_but_verification_failure_is_terminal() {
+        let mut replies = vec![FixtureReply::error(
+            "500 Internal Server Error",
+            "Bearer secret-key private failed body",
+        )];
+        replies.extend(success_replies());
+        let (base_url, server) = fixture(replies).await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(2))).unwrap();
+        let failed = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("retryable")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&failed), "upstream");
+        let encoded = serde_json::to_string(&failed).unwrap();
+        assert!(!encoded.contains("secret-key"));
+        assert!(!encoded.contains("private failed"));
+        let retried = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("retryable")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(retried.is_error, Some(false));
+        assert_eq!(server.await.expect("failed retry fixture").len(), 4);
+
+        let mut replies = vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::error("403 Forbidden", "definitive rejection"),
+        ];
+        replies.extend(success_replies());
+        let (base_url, server) = fixture(replies).await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(2))).unwrap();
+        let rejected = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("rejected")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&rejected), "authentication");
+        let retried = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("rejected")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(retried.is_error, Some(false));
+        assert_eq!(server.await.expect("rejected retry fixture").len(), 5);
+
+        let replies = vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3")),
+            FixtureReply::json(object_value(OTHER_OBJECT_ID, "# Plan", "Q3")),
+        ];
+        let (base_url, server) = fixture(replies).await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(2))).unwrap();
+        let mismatch = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("verify-retry")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&mismatch), "upstream");
+        let retried = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("verify-retry")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&retried), "conflict");
+        assert_eq!(server.await.expect("verification retry fixture").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn retained_key_capacity_fails_closed_without_growing_or_writing() {
+        let (base_url, server) = fixture(success_replies()).await;
+        let handlers = ObjectCreateHandlers::with_idempotency_capacity(
+            runtime(base_url, Duration::from_secs(2)),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            handlers
+                .object_create(
+                    MutationAccess::Allowed,
+                    input(Some("first")),
+                    &CancellationToken::new()
+                )
+                .await
+                .is_error,
+            Some(false)
+        );
+        let full = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("second")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&full), "bounded_result");
+        assert_eq!(server.await.expect("capacity fixture").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn pre_cancel_timeout_permissions_and_document_cap_are_fixed_and_bounded() {
+        let (base_url, no_request) = no_request_fixture().await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(1))).unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let result = handlers
+            .object_create(MutationAccess::Allowed, input(None), &cancelled)
+            .await;
+        assert_eq!(result_code(&result), "upstream");
+        assert!(no_request.await.expect("cancel no-request fixture"));
+
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(type_value()).delayed(Duration::from_millis(100)),
+        ])
+        .await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_millis(20))).unwrap();
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("timeout")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&result), "upstream");
+        assert_eq!(server.await.expect("timeout fixture").len(), 1);
+
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3"))
+                .delayed(Duration::from_millis(100)),
+        ])
+        .await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_millis(20))).unwrap();
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("post-timeout")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&result), "upstream");
+        let retry = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("post-timeout")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&retry), "conflict");
+        assert_eq!(server.await.expect("post timeout fixture").len(), 2);
+
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3"))
+                .delayed(Duration::from_millis(100)),
+        ])
+        .await;
+        let handlers =
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(1))).unwrap();
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let cancellation_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel.cancel();
+        });
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("post-cancel")),
+                &cancellation,
+            )
+            .await;
+        cancellation_task.await.expect("cancellation task");
+        assert_eq!(result_code(&result), "upstream");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let retry = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("post-cancel")),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&retry), "conflict");
+        assert_eq!(server.await.expect("post cancel fixture").len(), 2);
+
+        for (status, code) in [
+            ("401 Unauthorized", "authentication"),
+            ("403 Forbidden", "authentication"),
+            ("404 Not Found", "not_found"),
+        ] {
+            let (base_url, server) = fixture(vec![FixtureReply::error(
+                status,
+                "Bearer credential private response body",
+            )])
+            .await;
+            let handlers =
+                ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(1))).unwrap();
+            let result = handlers
+                .object_create(
+                    MutationAccess::Allowed,
+                    input(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(result_code(&result), code);
+            let encoded = serde_json::to_string(&result).unwrap();
+            assert!(!encoded.contains("Bearer"));
+            assert!(!encoded.contains("private response"));
+            assert_eq!(server.await.expect("permission fixture").len(), 1);
+        }
+
+        let (base_url, server) = fixture(vec![FixtureReply::json(type_value())]).await;
+        let handlers = ObjectCreateHandlers::new(runtime_with_limits(
+            base_url,
+            Duration::from_secs(1),
+            ResponseLimits {
+                json_bytes: 64,
+                document_bytes: 64,
+                error_bytes: 64,
+                file_bytes: 64,
+            },
+        ))
+        .unwrap();
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(None),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&result), "bounded_result");
+        assert_eq!(server.await.expect("response cap fixture").len(), 1);
+    }
+}
