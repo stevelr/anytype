@@ -5,11 +5,16 @@
 
 //! Shared foundations for the `any-mcp` binary.
 //!
-//! The crate exposes the MCP server identity and protocol declaration while the
-//! authenticated stdio runtime and workflow handlers are added in later phases.
-//! It depends on `anytype-api` through the `anytype` crate and never directly on
-//! generated `anytype-rpc` support.
+//! The crate exposes authenticated Anytype client startup, bounded upstream
+//! execution controls, and the stdio MCP service lifecycle. It depends on
+//! `anytype-api` through the `anytype` crate and never directly on generated
+//! `anytype-rpc` support.
 
+pub mod config;
+pub mod logging;
+pub mod runtime;
 pub mod server;
 
+pub use config::RuntimeConfig;
+pub use runtime::{RuntimeContext, RuntimeError, StartupStatus, serve_stdio};
 pub use server::AnyMcpServer;

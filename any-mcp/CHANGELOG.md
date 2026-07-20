@@ -10,3 +10,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
   2.2.0 and protocol revision `2026-07-28`.
+- Add authenticated long-lived Anytype client startup, bounded and cancellable
+  upstream execution, request/startup timeouts, stderr-only diagnostics, and
+  clean stdio EOF shutdown.

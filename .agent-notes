@@ -1,1 +1,2 @@
 # Agent Notes
+[pattern] rmcp 2.2.0 exposes per-request cancellation through `RequestContext.ct`; `RunningService::waiting` returns `QuitReason::Closed` on stdio EOF.

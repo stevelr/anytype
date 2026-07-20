@@ -16,18 +16,25 @@ use rmcp::{
 /// server selects it explicitly to follow the SDK's upcoming API direction.
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2026_07_28;
 
-/// Minimal server implementation used to establish the MCP protocol boundary.
-///
-/// Workflow tools, resources, authentication, and stdio transport are layered
-/// onto this type in later Phase 1 work.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AnyMcpServer;
+use crate::runtime::RuntimeContext;
+
+/// MCP handler backed by one authenticated, process-long runtime.
+#[derive(Debug, Clone)]
+pub struct AnyMcpServer {
+    runtime: RuntimeContext,
+}
 
 impl AnyMcpServer {
-    /// Creates an MCP server scaffold with no registered tools or resources.
+    /// Creates an MCP handler using the authenticated runtime.
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub const fn new(runtime: RuntimeContext) -> Self {
+        Self { runtime }
+    }
+
+    /// Returns the shared authenticated runtime used by workflow handlers.
+    #[must_use]
+    pub const fn runtime(&self) -> &RuntimeContext {
+        &self.runtime
     }
 
     /// Returns the initialization metadata advertised to MCP clients.
@@ -51,11 +58,36 @@ impl ServerHandler for AnyMcpServer {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use anytype::prelude::{AnytypeClient, ClientConfig};
+
     use super::*;
+
+    fn server() -> AnyMcpServer {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            keystore: Some("env".to_string()),
+            keystore_service: Some("any-mcp-server-test".to_string()),
+            app_name: "any-mcp-server-test".to_string(),
+            ..ClientConfig::default()
+        })
+        .expect("in-memory test client");
+        let runtime = RuntimeContext::from_parts(
+            client,
+            1,
+            Duration::from_secs(1),
+            crate::runtime::StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+        );
+        AnyMcpServer::new(runtime)
+    }
 
     #[test]
     fn advertises_upcoming_protocol_revision_and_server_identity() {
-        let info = AnyMcpServer::new().info();
+        let info = server().info();
 
         assert_eq!(info.protocol_version, ProtocolVersion::V_2026_07_28);
         assert_eq!(info.protocol_version.as_str(), "2026-07-28");
