@@ -31,6 +31,45 @@ use crate::{
     prelude::*,
 };
 
+/// Byte ceilings for HTTP response bodies buffered by the client.
+///
+/// JSON and error bodies are read incrementally and rejected as soon as they
+/// exceed the selected ceiling. File downloads use a separate limit because
+/// their binary payloads are commonly much larger than API JSON responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseLimits {
+    /// Default ceiling for buffered JSON API responses (8 MiB).
+    pub json_bytes: u64,
+    /// Default ceiling for a single object/document JSON response (64 MiB).
+    pub document_bytes: u64,
+    /// Ceiling for a buffered upstream error body (64 KiB).
+    pub error_bytes: u64,
+    /// Ceiling for a buffered raw file-download response (256 MiB).
+    pub file_bytes: u64,
+}
+
+/// Hard maximum accepted for a configured generic JSON response ceiling.
+pub const MAX_JSON_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard maximum accepted for a configured document response ceiling.
+pub const MAX_DOCUMENT_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard maximum accepted for a configured error response ceiling.
+pub const MAX_ERROR_RESPONSE_BYTES: u64 = 1024 * 1024;
+/// Hard maximum accepted for a configured raw file response ceiling.
+pub const MAX_FILE_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
+
+impl Default for ResponseLimits {
+    fn default() -> Self {
+        Self {
+            json_bytes: 8 * 1024 * 1024,
+            // A valid 10 MiB outgoing markdown body may expand substantially
+            // when represented as an escaped JSON string in the response.
+            document_bytes: MAX_DOCUMENT_RESPONSE_BYTES,
+            error_bytes: 64 * 1024,
+            file_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
 /// Configuration for the Anytype client. Defines endpoint url, validation limits, and other settings.
 ///
 /// ```rust,no_run
@@ -71,6 +110,13 @@ pub struct ClientConfig {
     /// To support pages greater than 10MB, increase `limits.markdown_max_len`.
     pub limits: ValidationLimits,
 
+    /// Finite byte ceilings for buffered HTTP response bodies.
+    ///
+    /// Use [`ResponseLimits::default`] unless the server is known to return
+    /// larger documents or files. Streaming chat events are not buffered and
+    /// therefore do not use these success-response limits.
+    pub response_limits: ResponseLimits,
+
     /// Maximum consecutive 429 retries before failing (0 disables the cap).
     ///
     /// When the anytype server rate limit is exceeded and responds with http 429 status,
@@ -100,6 +146,7 @@ impl Default for ClientConfig {
             base_url: None,
             app_name: DEFAULT_SERVICE_NAME.to_string(),
             limits: ValidationLimits::default(),
+            response_limits: ResponseLimits::default(),
             rate_limit_max_retries: std::env::var(RATE_LIMIT_MAX_RETRIES_ENV)
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
@@ -253,6 +300,7 @@ impl AnytypeClient {
             builder,
             base_url.clone(),
             config.limits.clone(),
+            config.response_limits,
             config.rate_limit_max_retries,
             http_creds,
         )?;

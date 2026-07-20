@@ -74,12 +74,13 @@ impl TemplateRequest {
 
         let response: TemplateResponse = self
             .client
-            .get_request(
+            .get_request_with_limit(
                 &format!(
                     "/v1/spaces/{}/types/{}/templates/{}",
                     self.space_id, self.type_id, self.template_id
                 ),
                 QueryWithFilters::default(),
+                self.client.document_response_limit(),
             )
             .await?;
         Ok(response.template)

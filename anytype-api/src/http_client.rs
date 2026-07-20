@@ -17,13 +17,17 @@ use std::{
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use reqwest::{ClientBuilder, Method, StatusCode, header::HeaderMap};
+use reqwest::{ClientBuilder, Method, Response, StatusCode, header::HeaderMap};
 use serde::{Serialize, de::DeserializeOwned};
 use snafu::prelude::*;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     Result,
+    client::{
+        MAX_DOCUMENT_RESPONSE_BYTES, MAX_ERROR_RESPONSE_BYTES, MAX_FILE_RESPONSE_BYTES,
+        MAX_JSON_RESPONSE_BYTES, ResponseLimits,
+    },
     config::{
         ANYTYPE_API_HEADER, MAX_RETRIES, RATE_LIMIT_WAIT_MAX_SECS, RATE_LIMIT_WAIT_WARN_SECS,
     },
@@ -186,7 +190,7 @@ impl fmt::Debug for HttpRequest {
         f.debug_struct("HttpRequest")
             .field("method", &self.method)
             .field("path", &self.path)
-            .field("query", &self.query)
+            .field("query_fields", &self.query.len())
             .field("body", &self.body.as_ref().map_or(0, Bytes::len))
             .finish()
     }
@@ -226,6 +230,8 @@ pub struct HttpClient {
 
     limits: ValidationLimits,
 
+    response_limits: ResponseLimits,
+
     // Max consecutive 429 retries before failing; 0 disables cap.
     rate_limit_max_retries: u32,
 
@@ -263,7 +269,7 @@ fn parse_retry_after(headers: &HeaderMap) -> Result<ParsedRetry> {
                     header: header.to_string(),
                 });
             }
-            error!("Could not parse 429 response header '{header_name}: {header}'");
+            error!(header_name, "Could not parse HTTP 429 response header");
         }
     }
 
@@ -279,6 +285,7 @@ impl HttpClient {
         builder: ClientBuilder,
         base_url: String,
         limits: ValidationLimits,
+        response_limits: ResponseLimits,
         rate_limit_max_retries: u32,
         http_creds: HttpCredentials,
     ) -> Result<Self> {
@@ -286,11 +293,42 @@ impl HttpClient {
             method: "client-init",
             url: "",
         })?;
+        for (name, limit, maximum) in [
+            (
+                "json_bytes",
+                response_limits.json_bytes,
+                MAX_JSON_RESPONSE_BYTES,
+            ),
+            (
+                "document_bytes",
+                response_limits.document_bytes,
+                MAX_DOCUMENT_RESPONSE_BYTES,
+            ),
+            (
+                "error_bytes",
+                response_limits.error_bytes,
+                MAX_ERROR_RESPONSE_BYTES,
+            ),
+            (
+                "file_bytes",
+                response_limits.file_bytes,
+                MAX_FILE_RESPONSE_BYTES,
+            ),
+        ] {
+            if limit == 0 || limit > maximum || usize::try_from(limit).is_err() {
+                return Err(AnytypeError::Validation {
+                    message: format!(
+                        "response_limits.{name} must be between 1 and {maximum} bytes"
+                    ),
+                });
+            }
+        }
         Ok(Self {
             client,
             base_url,
             api_key: Arc::new(Mutex::new(http_creds)),
             limits,
+            response_limits,
             rate_limit_max_retries,
             metrics: Arc::new(HttpMetrics::new()),
         })
@@ -299,6 +337,60 @@ impl HttpClient {
     /// Returns a snapshot of current HTTP metrics
     pub fn metrics_snapshot(&self) -> HttpMetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    pub(crate) const fn document_response_limit(&self) -> u64 {
+        self.response_limits.document_bytes
+    }
+
+    /// Incrementally buffers one response up to `limit` bytes.
+    ///
+    /// A truthful oversized `Content-Length` is rejected before reading. The
+    /// streamed total is still checked with overflow-safe arithmetic because
+    /// the header may be absent or misleading. Capacity starts small rather
+    /// than trusting an attacker-controlled advertised length.
+    async fn read_bounded(
+        &self,
+        mut response: Response,
+        limit: u64,
+        method: &str,
+        path: &str,
+    ) -> Result<Bytes> {
+        let declared = response.content_length();
+        if declared.is_some_and(|length| length > limit) {
+            return Err(AnytypeError::ResponseTooLarge { limit, declared });
+        }
+
+        const INITIAL_CAPACITY: u64 = 8 * 1024;
+        let initial_capacity = declared.unwrap_or(INITIAL_CAPACITY).min(INITIAL_CAPACITY);
+        let mut body = Vec::with_capacity(initial_capacity as usize);
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context(HttpSnafu { method, url: path })?
+        {
+            self.metrics.add_bytes_received(chunk.len() as u64);
+            let next_len = (body.len() as u64)
+                .checked_add(chunk.len() as u64)
+                .ok_or(AnytypeError::ResponseTooLarge { limit, declared })?;
+            if next_len > limit {
+                return Err(AnytypeError::ResponseTooLarge { limit, declared });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(body))
+    }
+
+    async fn read_error_body(
+        &self,
+        response: Response,
+        method: &str,
+        path: &str,
+    ) -> Result<String> {
+        let body = self
+            .read_bounded(response, self.response_limits.error_bytes, method, path)
+            .await?;
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 
     /// Returns true if `api_key` has been initialized.
@@ -334,6 +426,22 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// Makes an authenticated DELETE whose successful JSON may contain a
+    /// complete document body.
+    pub(crate) async fn delete_document_request<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<T> {
+        let req = HttpRequest {
+            method: Method::DELETE,
+            path: path.into(),
+            query: Vec::default(),
+            body: None,
+        };
+        self.send_with_limit(req, self.response_limits.document_bytes)
+            .await
+    }
+
     pub(crate) async fn get_request<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -349,6 +457,33 @@ impl HttpClient {
             body: None,
         };
         self.send(req).await
+    }
+
+    /// Makes an authenticated GET with an explicit finite response ceiling.
+    pub(crate) async fn get_request_with_limit<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: QueryWithFilters,
+        response_limit: u64,
+    ) -> Result<T> {
+        query.validate().map_err(|err| AnytypeError::Validation {
+            message: format!("get_request_with_limit {path} {err}"),
+        })?;
+        if response_limit == 0 || response_limit > self.response_limits.document_bytes {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "response limit must be between 1 and {} bytes",
+                    self.response_limits.document_bytes
+                ),
+            });
+        }
+        let req = HttpRequest {
+            method: Method::GET,
+            path: path.into(),
+            query: query.params,
+            body: None,
+        };
+        self.send_with_limit(req, response_limit).await
     }
 
     /// Opens an authenticated streaming GET request.
@@ -377,7 +512,7 @@ impl HttpClient {
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!("get_streaming_request {full_url}");
+        debug!(path, "get_streaming_request");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -396,11 +531,11 @@ impl HttpClient {
         if !response.status().is_success() {
             self.metrics.increment_errors();
             let code = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
+            let message = self.read_error_body(response, "get", path).await?;
             return Err(AnytypeError::ApiError {
                 code,
                 method: "get".to_string(),
-                url: full_url,
+                url: path.to_string(),
                 message,
             });
         }
@@ -426,6 +561,25 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// Makes an authenticated PATCH whose successful JSON may contain a
+    /// complete document body.
+    pub(crate) async fn patch_document_request<T: DeserializeOwned, B: Serialize + Sync>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, AnytypeError> {
+        let req = HttpRequest {
+            method: Method::PATCH,
+            path: path.into(),
+            query: Vec::default(),
+            body: Some(Bytes::from(
+                serde_json::to_vec(body).context(SerializationSnafu)?,
+            )),
+        };
+        self.send_with_limit(req, self.response_limits.document_bytes)
+            .await
+    }
+
     pub(crate) async fn post_request<T: DeserializeOwned, B: Serialize + Sync>(
         &self,
         path: &str,
@@ -443,6 +597,26 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// Makes an authenticated POST whose successful JSON may contain a
+    /// complete document body.
+    pub(crate) async fn post_document_request<T: DeserializeOwned, B: Serialize + Sync>(
+        &self,
+        path: &str,
+        body: &B,
+        query: QueryWithFilters,
+    ) -> Result<T> {
+        let req = HttpRequest {
+            method: Method::POST,
+            path: path.into(),
+            query: query.params,
+            body: Some(Bytes::from(
+                serde_json::to_vec(body).context(SerializationSnafu)?,
+            )),
+        };
+        self.send_with_limit(req, self.response_limits.document_bytes)
+            .await
+    }
+
     /// Makes an unauthenticated POST request (for auth endpoints).
     pub(crate) async fn post_unauthenticated<Resp: DeserializeOwned, Req: Serialize + Sync>(
         &self,
@@ -450,7 +624,8 @@ impl HttpClient {
         body: &Req,
     ) -> Result<Resp> {
         let full_url = format!("{}{}", self.base_url, path);
-        debug!("post_unauthenticated {full_url}");
+        debug!(path, "post_unauthenticated");
+        self.metrics.increment_requests();
         let response = self
             .client
             .post(&full_url)
@@ -463,17 +638,27 @@ impl HttpClient {
                 url: &full_url,
             })?;
         if !response.status().is_success() {
+            self.metrics.increment_errors();
+            let code = response.status().as_u16();
+            let message = self.read_error_body(response, "post", path).await?;
             return Err(AnytypeError::ApiError {
-                code: response.status().as_u16(),
+                code,
                 method: "post".to_string(),
-                url: full_url,
-                message: response.text().await.unwrap_or_default(),
+                url: path.to_string(),
+                message,
             });
         }
-        let data = response.bytes().await.context(HttpSnafu {
-            method: "post",
-            url: &full_url,
-        })?;
+        let data = match self
+            .read_bounded(response, self.response_limits.json_bytes, "post", path)
+            .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                self.metrics.increment_errors();
+                return Err(error);
+            }
+        };
+        self.metrics.increment_success();
         deserialize_json(&data)
     }
 
@@ -494,7 +679,7 @@ impl HttpClient {
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!("delete_no_content {full_url}");
+        debug!(path, "delete_no_content");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -509,11 +694,13 @@ impl HttpClient {
             })?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
+            let code = response.status().as_u16();
+            let message = self.read_error_body(response, "delete", path).await?;
             return Err(AnytypeError::ApiError {
-                code: response.status().as_u16(),
+                code,
                 method: "delete".to_string(),
-                url: full_url,
-                message: response.text().await.unwrap_or_default(),
+                url: path.to_string(),
+                message,
             });
         }
         self.metrics.increment_success();
@@ -543,7 +730,7 @@ impl HttpClient {
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!(method = %method, "file_request {full_url}");
+        debug!(method = %method, path, "file_request");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -560,30 +747,45 @@ impl HttpClient {
             })?;
         let status = response.status();
         let response_headers = response.headers().clone();
-        let body = response.bytes().await.context(HttpSnafu {
-            method: method.as_str(),
-            url: &full_url,
-        })?;
+        let allowed_control_status = matches!(
+            status,
+            StatusCode::NOT_MODIFIED
+                | StatusCode::PRECONDITION_FAILED
+                | StatusCode::RANGE_NOT_SATISFIABLE
+        );
+        let body = if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+            // HEAD and 304 legitimately carry representation metadata such as
+            // a Content-Length while having no response body to buffer.
+            Bytes::new()
+        } else {
+            let body_limit = if status.is_success() {
+                self.response_limits.file_bytes
+            } else {
+                self.response_limits.error_bytes
+            };
+            match self
+                .read_bounded(response, body_limit, method.as_str(), path)
+                .await
+            {
+                Ok(body) => body,
+                Err(error) => {
+                    self.metrics.increment_errors();
+                    return Err(error);
+                }
+            }
+        };
 
         if status.is_success() {
             self.metrics.increment_success();
         } else {
             self.metrics.increment_errors();
         }
-        self.metrics.add_bytes_received(body.len() as u64);
 
-        if !(status.is_success()
-            || matches!(
-                status,
-                StatusCode::NOT_MODIFIED
-                    | StatusCode::PRECONDITION_FAILED
-                    | StatusCode::RANGE_NOT_SATISFIABLE
-            ))
-        {
+        if !(status.is_success() || allowed_control_status) {
             return Err(AnytypeError::ApiError {
                 code: status.as_u16(),
                 method: method.as_str().to_ascii_lowercase(),
-                url: full_url,
+                url: path.to_string(),
                 message: String::from_utf8_lossy(&body).into_owned(),
             });
         }
@@ -614,7 +816,7 @@ impl HttpClient {
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!("post_multipart {full_url}");
+        debug!(path, "post_multipart");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -630,19 +832,26 @@ impl HttpClient {
             })?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
+            let code = response.status().as_u16();
+            let message = self.read_error_body(response, "post", path).await?;
             return Err(AnytypeError::ApiError {
-                code: response.status().as_u16(),
+                code,
                 method: "post".to_string(),
-                url: full_url,
-                message: response.text().await.unwrap_or_default(),
+                url: path.to_string(),
+                message,
             });
         }
-        let data = response.bytes().await.context(HttpSnafu {
-            method: "post",
-            url: &full_url,
-        })?;
+        let data = match self
+            .read_bounded(response, self.response_limits.json_bytes, "post", path)
+            .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                self.metrics.increment_errors();
+                return Err(error);
+            }
+        };
         self.metrics.increment_success();
-        self.metrics.add_bytes_received(data.len() as u64);
         deserialize_json(&data)
     }
 
@@ -651,8 +860,17 @@ impl HttpClient {
     /// - retries up to N(=3) times for connection failures or server timeout
     /// - maps http error codes into `AnytypeErrors`
     /// - deserializes json response body into return type T
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn send<T: DeserializeOwned>(&self, req: HttpRequest) -> Result<T> {
+        self.send_with_limit(req, self.response_limits.json_bytes)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn send_with_limit<T: DeserializeOwned>(
+        &self,
+        req: HttpRequest,
+        response_limit: u64,
+    ) -> Result<T> {
         // attempt counter is for server busy and connection drop errors
         // counter is reset to 0 whenever we wait based on 429 rate limit response
         let mut attempt = 0u32;
@@ -686,7 +904,7 @@ impl HttpClient {
             .bearer_auth(api_key.token().unwrap());
 
         // debug log (if tracing enabled)
-        log_request(&req_builder, req.body.as_ref());
+        log_request(&req);
 
         // Track bytes to be sent (body size)
         let body_size = req.body.as_ref().map_or(0, |bytes| bytes.len() as u64);
@@ -727,14 +945,22 @@ impl HttpClient {
                             // believe the request succeeded, and the request may not be idempotent.
                             // Most transient failures where we could have reasonably retried
                             // would have already occurred.
-                            let body = response.bytes().await
-                            .context(HttpSnafu{
-                                method: req.method.to_string(),
-                                url: req.path.clone(),
-                            })?;
-                            // Track success and bytes received
+                            let body = match self
+                                .read_bounded(
+                                    response,
+                                    response_limit,
+                                    req.method.as_str(),
+                                    &req.path,
+                                )
+                                .await
+                            {
+                                Ok(body) => body,
+                                Err(error) => {
+                                    self.metrics.increment_errors();
+                                    return Err(error);
+                                }
+                            };
                             self.metrics.increment_success();
-                            self.metrics.add_bytes_received(body.len() as u64);
 
                             log_response(&req.path, &body);
 
@@ -795,16 +1021,16 @@ impl HttpClient {
                         }
                         StatusCode::BAD_REQUEST /* 400 */ => {
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or_else(|_| "BadRequest".into());
-                            error!(?code, ?message, ?req, "http");
+                            let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
+                            error!(?code, ?req, "http");
                             return Err(AnytypeError::Validation { message })
                         }
                         StatusCode::NOT_FOUND /* 404 */ |
                         StatusCode::GONE /* 410 */
                          => {
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or_else(|_| "NotFound".into());
-                            error!(?code, ?message, ?req, "http");
+                            self.read_error_body(response, req.method.as_str(), &req.path).await?;
+                            error!(?code, ?req, "http");
                             return Err(AnytypeError::NotFound{
                                 // too generic here - we don't know whether the query
                                 // needs to be reported at higher level
@@ -815,24 +1041,24 @@ impl HttpClient {
                         StatusCode::UNAUTHORIZED /* 401 */ => {
                             // client is not authenticated
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or_else(|_| "Unauthorized".into());
-                            error!(?code, ?message, ?req, "http");
+                            self.read_error_body(response, req.method.as_str(), &req.path).await?;
+                            error!(?code, ?req, "http");
                             return Err(AnytypeError::Unauthorized)
                         }
                         StatusCode::FORBIDDEN /* 403 */ => {
                             // client is authenticated, but does not have permission to access the object
                             self.metrics.increment_errors();
-                            let message = response.text().await.unwrap_or_else(|_| "Forbidden".into());
-                            error!(?code, ?message, ?req, "http");
+                            self.read_error_body(response, req.method.as_str(), &req.path).await?;
+                            error!(?code, ?req, "http");
                             return Err(AnytypeError::Forbidden)
                         }
                         _ => {
-                            let message  = response.text().await.unwrap_or_default();
-                            error!(?code, ?req, message, attempt, "http");
                             self.metrics.increment_errors();
+                            let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
+                            error!(?code, ?req, attempt, "http");
                             if attempt < MAX_RETRIES && retry_for_status(code) && is_idempotent_method(&req.method)
                             {
-                              log_and_backoff(attempt, code.to_string()).await;
+                              log_and_backoff(attempt, "retryable HTTP status").await;
                               self.metrics.increment_retries();
                               attempt += 1;
                               continue;
@@ -847,12 +1073,12 @@ impl HttpClient {
                     }
                 }
                 Err(err) => {
-                    error!(source=?err, ?req, "http");
+                    error!(?req, "HTTP transport failure");
                     // Check for connection or timeout errors
                     if (err.is_connect() || err.is_timeout()) && is_idempotent_method(&req.method) {
                         rate_limit_retries = 0;
                         if attempt < MAX_RETRIES {
-                            log_and_backoff(attempt, err.to_string()).await;
+                            log_and_backoff(attempt, "transport failure").await;
                             self.metrics.increment_retries();
                             attempt += 1;
                             continue;
@@ -938,28 +1164,23 @@ impl GetPaged for Arc<HttpClient> {
 
 // dump request
 // requires RUST_LOG=anytype::http_json=trace
-fn log_request(builder: &reqwest::RequestBuilder, body: Option<&Bytes>) {
-    if tracing::enabled!(target: "anytype::http_json", tracing::Level::TRACE)
-        && let Some(req) = builder.try_clone().and_then(|builder| builder.build().ok())
-    {
-        let method = req.method().as_str();
-        let url = req.url();
-        let body = body
-            .as_ref()
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-            .unwrap_or_default();
-        // Log method, url (including all query parameters), and body
-        // don't log headers so we don't leak api token
-        trace!(target: "anytype::http_json", "{method} url={url} body={body}");
+fn log_request(request: &HttpRequest) {
+    if tracing::enabled!(target: "anytype::http_json", tracing::Level::TRACE) {
+        trace!(
+            target: "anytype::http_json",
+            method = %request.method,
+            path = request.path,
+            query_fields = request.query.len(),
+            body_bytes = request.body.as_ref().map_or(0, Bytes::len),
+            "HTTP request"
+        );
     }
 }
 
-// dump json response, for debugging
+// Log response metadata only. Anytype JSON may contain private document data.
 fn log_response(path: &str, body: &Bytes) {
     if tracing::enabled!(target: "anytype::http_json", tracing::Level::TRACE) {
-        trace!(target: "anytype::http_json", "Response path={path} body={}",
-            String::from_utf8_lossy(body)
-        );
+        trace!(target: "anytype::http_json", path, body_bytes = body.len(), "HTTP response");
     }
 }
 
@@ -983,7 +1204,7 @@ fn deserialize_json<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
 }
 
 // log attempt and sleep for exponential backoff
-async fn log_and_backoff(attempt: u32, err: String) {
+async fn log_and_backoff(attempt: u32, reason: &str) {
     // exponential backoff: 1s, 2s, 4s, with jitter
     #[allow(clippy::cast_precision_loss)]
     let base_delay = 2u64.pow(attempt) as f64;
@@ -1000,7 +1221,7 @@ async fn log_and_backoff(attempt: u32, err: String) {
     } else {
         jittered_delay
     };
-    warn!("Recoverable error {err}. Attempt {attempt}. Waiting {delay}s before retry");
+    warn!("Recoverable {reason}. Attempt {attempt}. Waiting {delay}s before retry");
     tokio::time::sleep(Duration::from_secs(delay)).await;
 }
 
@@ -1013,12 +1234,363 @@ fn is_idempotent_method(method: &Method) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use reqwest::{
-        StatusCode,
+        ClientBuilder, StatusCode,
         header::{HeaderMap, HeaderValue},
     };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
 
-    use super::{deserialize_json, parse_retry_after};
+    use super::{HttpClient, HttpRequest, deserialize_json, parse_retry_after};
+    use crate::prelude::{
+        HttpCredentials, MAX_JSON_RESPONSE_BYTES, ResponseLimits, ValidationLimits,
+    };
+
+    fn test_limits(json_bytes: u64, document_bytes: u64, error_bytes: u64) -> ResponseLimits {
+        ResponseLimits {
+            json_bytes,
+            document_bytes,
+            error_bytes,
+            file_bytes: 1024,
+        }
+    }
+
+    async fn serve_once(response: Vec<u8>) -> (Arc<HttpClient>, JoinHandle<()>) {
+        serve_once_with_limits(response, test_limits(4, 8, 4)).await
+    }
+
+    async fn serve_once_with_limits(
+        response: Vec<u8>,
+        response_limits: ResponseLimits,
+    ) -> (Arc<HttpClient>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            socket.write_all(&response).await.expect("write response");
+        });
+        let client = HttpClient::new(
+            ClientBuilder::new().no_proxy(),
+            format!("http://{address}"),
+            ValidationLimits::default(),
+            response_limits,
+            1,
+            HttpCredentials::new("test-token"),
+        )
+        .expect("test client");
+        (Arc::new(client), server)
+    }
+
+    fn get_request() -> HttpRequest {
+        HttpRequest {
+            method: reqwest::Method::GET,
+            path: "/test".to_string(),
+            query: Vec::new(),
+            body: None,
+        }
+    }
+
+    #[test]
+    fn response_limit_configuration_rejects_zero_and_hard_maximum_bypass() {
+        for json_bytes in [0, MAX_JSON_RESPONSE_BYTES + 1] {
+            let error = HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                "http://127.0.0.1:1".to_string(),
+                ValidationLimits::default(),
+                ResponseLimits {
+                    json_bytes,
+                    ..ResponseLimits::default()
+                },
+                1,
+                HttpCredentials::new("test-token"),
+            )
+            .expect_err("invalid response limit");
+            assert!(matches!(
+                error,
+                crate::error::AnytypeError::Validation { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn content_length_exact_limit_succeeds() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnull".to_vec();
+        let (client, server) = serve_once(response).await;
+
+        client.send::<()>(get_request()).await.expect("exact limit");
+        server.await.expect("server task");
+        assert_eq!(client.metrics_snapshot().bytes_received, 4);
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_fails_before_body_is_buffered() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nnull ".to_vec();
+        let (client, server) = serve_once(response).await;
+
+        let error = client
+            .send::<()>(get_request())
+            .await
+            .expect_err("declared over limit");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge {
+                limit: 4,
+                declared: Some(5)
+            }
+        ));
+        server.await.expect("server task");
+        assert_eq!(client.metrics_snapshot().bytes_received, 0);
+        assert_eq!(client.metrics_snapshot().errors, 1);
+    }
+
+    #[tokio::test]
+    async fn chunked_exact_limit_succeeds_without_content_length() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nnu\r\n2\r\nll\r\n0\r\n\r\n"
+            .to_vec();
+        let (client, server) = serve_once(response).await;
+
+        client
+            .send::<()>(get_request())
+            .await
+            .expect("exact chunks");
+        server.await.expect("server task");
+        assert_eq!(client.metrics_snapshot().bytes_received, 4);
+    }
+
+    #[tokio::test]
+    async fn first_streamed_byte_over_limit_fails() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nnull\r\n1\r\n \r\n0\r\n\r\n"
+            .to_vec();
+        let (client, server) = serve_once(response).await;
+
+        let error = client
+            .send::<()>(get_request())
+            .await
+            .expect_err("streamed byte over limit");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge {
+                limit: 4,
+                declared: None
+            }
+        ));
+        server.await.expect("server task");
+        assert_eq!(client.metrics_snapshot().bytes_received, 5);
+        assert_eq!(client.metrics_snapshot().errors, 1);
+    }
+
+    #[tokio::test]
+    async fn chunked_framing_cannot_bypass_limit_with_a_low_length_header() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nnull \r\n0\r\n\r\n"
+            .to_vec();
+        let (client, server) = serve_once(response).await;
+
+        let error = client
+            .send::<()>(get_request())
+            .await
+            .expect_err("transfer framing must not bypass streamed total");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge { limit: 4, .. }
+        ));
+        server.await.expect("server task");
+        assert_eq!(client.metrics_snapshot().bytes_received, 5);
+    }
+
+    #[tokio::test]
+    async fn per_request_override_is_bounded_by_document_policy() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nnull ".to_vec();
+        let (client, server) = serve_once(response).await;
+        client
+            .get_request_with_limit::<()>("/test", crate::filters::QueryWithFilters::default(), 8)
+            .await
+            .expect("document override");
+        server.await.expect("server task");
+
+        let error = client
+            .get_request_with_limit::<()>("/test", crate::filters::QueryWithFilters::default(), 9)
+            .await
+            .expect_err("override above configured document ceiling");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::Validation { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn object_get_routes_complete_document_to_document_limit() {
+        const OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+        const SPACE_ID: &str =
+            "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
+        let body = format!(
+            r#"{{"object":{{"archived":false,"id":"{OBJECT_ID}","space_id":"{SPACE_ID}","type":null}}}}"#
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_bytes();
+        let limits = test_limits(4, body.len() as u64, 4);
+        let (client, server) = serve_once_with_limits(response, limits).await;
+
+        let object = crate::objects::ObjectRequest::new(
+            client,
+            ValidationLimits::default(),
+            SPACE_ID,
+            OBJECT_ID,
+        )
+        .get()
+        .await
+        .expect("single-object reads use the document limit");
+        server.await.expect("server task");
+        assert_eq!(object.id, OBJECT_ID);
+    }
+
+    #[tokio::test]
+    async fn oversized_error_body_uses_typed_limit_error() {
+        let response = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror"
+            .to_vec();
+        let (client, server) = serve_once(response).await;
+        let error = client
+            .send::<()>(get_request())
+            .await
+            .expect_err("error body over limit");
+
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge {
+                limit: 4,
+                declared: Some(5)
+            }
+        ));
+        server.await.expect("server task");
+        assert_eq!(client.metrics_snapshot().errors, 1);
+        assert_eq!(client.metrics_snapshot().bytes_received, 0);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_json_success_uses_generic_limit() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nnull ".to_vec();
+        let (client, server) = serve_once(response).await;
+        let error = client
+            .post_unauthenticated::<(), _>("/test", &serde_json::json!({}))
+            .await
+            .expect_err("unauthenticated JSON must be bounded");
+
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge { limit: 4, .. }
+        ));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn multipart_json_success_uses_generic_limit() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nnull ".to_vec();
+        let (client, server) = serve_once(response).await;
+        let form = reqwest::multipart::Form::new().text("file", "content");
+        let error = client
+            .post_multipart::<()>("/test", form)
+            .await
+            .expect_err("multipart JSON response must be bounded");
+
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge { limit: 4, .. }
+        ));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn raw_file_success_uses_separate_file_limit() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nbytes".to_vec();
+        let limits = ResponseLimits {
+            file_bytes: 4,
+            ..test_limits(2, 8, 2)
+        };
+        let (client, server) = serve_once_with_limits(response, limits).await;
+        let error = match client
+            .file_request(reqwest::Method::GET, "/test", &[], HeaderMap::new())
+            .await
+        {
+            Ok(_) => panic!("raw file response must use its own limit"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge { limit: 4, .. }
+        ));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn streamed_over_limit_stops_before_full_response_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind streaming server");
+        let address = listener.local_addr().expect("streaming server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .expect("write headers");
+            let chunk = vec![b'x'; 1024];
+            let mut sent = 0;
+            for _ in 0..100 {
+                if socket.write_all(b"400\r\n").await.is_err()
+                    || socket.write_all(&chunk).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                    || socket.flush().await.is_err()
+                {
+                    break;
+                }
+                sent += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            sent
+        });
+        let client = HttpClient::new(
+            ClientBuilder::new().no_proxy(),
+            format!("http://{address}"),
+            ValidationLimits::default(),
+            test_limits(1024, 2048, 1024),
+            1,
+            HttpCredentials::new("test-token"),
+        )
+        .expect("streaming test client");
+
+        let error = client
+            .send::<()>(get_request())
+            .await
+            .expect_err("second chunk exceeds limit");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge { limit: 1024, .. }
+        ));
+        let sent = server.await.expect("streaming server task");
+        assert!(sent < 100, "client should close before all chunks are sent");
+        assert!(client.metrics_snapshot().bytes_received < 100 * 1024);
+    }
 
     #[test]
     fn empty_success_body_deserializes_as_unit() {

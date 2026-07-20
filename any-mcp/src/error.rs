@@ -223,7 +223,8 @@ impl ToolError {
                     Err(_) => AnytypeErrorMapping::AmbiguityRequiresCandidates,
                 };
             }
-            AnytypeError::ResolutionLimitExceeded { .. } => ToolErrorCode::BoundedResult,
+            AnytypeError::ResolutionLimitExceeded { .. }
+            | AnytypeError::ResponseTooLarge { .. } => ToolErrorCode::BoundedResult,
             AnytypeError::NotFound { .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
                 code: 400 | 422, ..
@@ -443,6 +444,22 @@ mod tests {
         };
         assert_eq!(error.code(), ToolErrorCode::BoundedResult);
         assert!(error.candidates().is_empty());
+    }
+
+    #[test]
+    fn oversized_response_maps_without_exposing_limit_metadata() {
+        let source = anytype::error::AnytypeError::ResponseTooLarge {
+            limit: 8 * 1024 * 1024,
+            declared: Some(123_456_789),
+        };
+
+        let AnytypeErrorMapping::Ready(error) = ToolError::from_anytype(&source) else {
+            panic!("response ceilings must map directly to bounded_result");
+        };
+        assert_eq!(error.code(), ToolErrorCode::BoundedResult);
+        let encoded = serde_json::to_string(&error).unwrap();
+        assert!(!encoded.contains("123456789"));
+        assert!(!encoded.contains("8388608"));
     }
 
     #[test]

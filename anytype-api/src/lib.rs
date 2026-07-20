@@ -196,7 +196,10 @@ pub mod prelude {
     pub use crate::{
         // HTTP metrics
         cache::AnytypeCache,
-        client::{AnytypeClient, ClientConfig},
+        client::{
+            AnytypeClient, ClientConfig, MAX_DOCUMENT_RESPONSE_BYTES, MAX_ERROR_RESPONSE_BYTES,
+            MAX_FILE_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseLimits,
+        },
         // Filters, Query parameters, and sorting
         filters::{Condition, Filter, FilterExpression, FilterOperator, Sort, SortDirection},
         // HTTP server metrics
