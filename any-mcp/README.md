@@ -538,8 +538,10 @@ that middleware issued no retry.
 `space_list` continuation uses two disposable spaces created and immediately
 registered through the test-only `anytype-api` fixture lifecycle. Their complete
 REST visibility proves that `limit=1` must continue before the production MCP
-router exercises cursor/query binding; teardown irreversibly deletes only those
-self-created IDs and requires bounded absence evidence. `template_list` covers
+router walks the hard-bounded cursor chain to terminality, rejects a cursor
+rebound to a different limit, detects repeated items/cursors, and observes both
+exact fixture IDs; teardown irreversibly deletes only those self-created IDs
+and requires bounded absence evidence. `template_list` covers
 its cleanup-safe terminal route. Collection coverage creates and immediately
 registers a custom collection-layout type through the narrow test helper owned
 by `anytype-api`; the helper contains the required heart RPC, so `any-mcp`

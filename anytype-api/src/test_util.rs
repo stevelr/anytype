@@ -6,7 +6,7 @@
 #![doc(hidden)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env::VarError,
     path::PathBuf,
     slice::Iter,
@@ -191,25 +191,33 @@ impl TestContext {
     /// Creates a disposable space owned by this test context.
     ///
     /// The normal authenticated REST create path is used without its built-in
-    /// follow-up verification. The returned ID is validated and registered for
-    /// teardown immediately, before a complete bounded REST listing verifies
-    /// the exact fixture ID and name. Teardown removes only IDs registered by
-    /// this helper through Anytype's irreversible `SpaceDelete` RPC and then
-    /// proves each ID is absent from a complete bounded REST space listing.
+    /// follow-up verification. A complete bounded pre-create space snapshot
+    /// establishes ownership: the returned ID must be valid, different from
+    /// the context space, and absent from that snapshot before it is registered
+    /// exactly once for teardown. Registration precedes every follow-up check.
+    /// Teardown removes only IDs registered by this helper through Anytype's
+    /// irreversible `SpaceDelete` RPC and then proves each ID is absent from a
+    /// complete bounded REST space listing.
     ///
     /// This test-only lifecycle must not be used for pre-existing spaces.
+    /// If an untrusted create response reuses a pre-existing ID, the helper
+    /// refuses cleanup ownership even though that can leave an unknown newly
+    /// created server-side resource behind.
     pub async fn create_space_fixture(&self, name: impl Into<String>) -> TestResult<Space> {
         let name = name.into();
         self.client
             .config
             .limits
             .validate_name(name.clone(), "test space")?;
+        let preexisting_ids = complete_space_id_snapshot(&self.client).await?;
         let created = self.client.new_space(&name).no_verify().create().await?;
-        self.client
-            .config
-            .limits
-            .validate_id(&created.id, "test space")?;
-        self.cleanup.add_space_fixture(&created.id);
+        validate_and_register_owned_space_fixture(
+            &self.cleanup,
+            &self.client.config.limits,
+            &self.space_id,
+            &preexisting_ids,
+            &created.id,
+        )?;
 
         let config = space_fixture_verify_config(&self.client);
         let expected_id = created.id.clone();
@@ -462,7 +470,7 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
 #[derive(Default)]
 pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
-    space_fixtures: Mutex<Vec<String>>,
+    space_fixtures: Mutex<BTreeSet<String>>,
     temp_paths: Mutex<Vec<PathBuf>>,
 }
 
@@ -495,8 +503,8 @@ impl TestCleanup {
     }
 
     /// Remembers an exact space ID created by `TestContext::create_space_fixture`.
-    fn add_space_fixture(&self, id: &str) {
-        self.space_fixtures.lock().push(id.into());
+    fn add_space_fixture(&self, id: &str) -> bool {
+        self.space_fixtures.lock().insert(id.into())
     }
 
     /// Deletes this file or folder after the test
@@ -504,10 +512,10 @@ impl TestCleanup {
         self.temp_paths.lock().push(path);
     }
 
-    /// Cleans up all remembered item
-    /// Delete in reverse order from creation order, so dependencies should be handled correctly.
-    /// Also deletes objects before properties before types, and all child
-    /// resources before registered disposable spaces.
+    /// Cleans up all remembered items.
+    /// Child resources are deleted in reverse creation order and grouped as
+    /// objects, properties, then types. The deduplicated disposable-space set
+    /// is processed only after all child resources.
     pub async fn cleanup(&self, client: &AnytypeClient) -> TestResult<()> {
         let mut objects = {
             let mut guard = self.objects.lock();
@@ -549,13 +557,12 @@ impl TestCleanup {
         // Delete disposable spaces only after their possible child resources.
         // SpaceDelete is irreversible, so this registry is private and can be
         // populated only by the create-and-register helper above.
-        let mut space_fixtures = {
+        let space_fixtures = {
             let mut guard = self.space_fixtures.lock();
             std::mem::take(&mut *guard)
         };
-        space_fixtures.reverse();
         let mut space_cleanup_failed = false;
-        for space_id in space_fixtures {
+        for space_id in space_fixtures.into_iter().rev() {
             if delete_space_fixture(client, &space_id).await.is_err() {
                 space_cleanup_failed = true;
             }
@@ -579,6 +586,39 @@ impl TestCleanup {
         }
         Ok(())
     }
+}
+
+async fn complete_space_id_snapshot(client: &AnytypeClient) -> TestResult<BTreeSet<String>> {
+    let response = client
+        .spaces()
+        .limit(SPACE_FIXTURE_SCAN_LIMIT)
+        .offset(0)
+        .list()
+        .await?
+        .into_response();
+    if !space_page_is_complete(&response) {
+        return Err(space_fixture_ownership_error());
+    }
+    Ok(response.items.into_iter().map(|space| space.id).collect())
+}
+
+fn validate_and_register_owned_space_fixture(
+    cleanup: &TestCleanup,
+    limits: &crate::validation::ValidationLimits,
+    current_space_id: &str,
+    preexisting_ids: &BTreeSet<String>,
+    returned_id: &str,
+) -> TestResult<()> {
+    limits.validate_id(returned_id, "test space")?;
+    if returned_id == current_space_id || preexisting_ids.contains(returned_id) {
+        // An untrusted duplicate response may leak a newly created server-side
+        // space, but must never authorize deletion of pre-existing state.
+        return Err(space_fixture_ownership_error());
+    }
+    if !cleanup.add_space_fixture(returned_id) {
+        return Err(space_fixture_ownership_error());
+    }
+    Ok(())
 }
 
 async fn delete_space_fixture(client: &AnytypeClient, space_id: &str) -> TestResult<()> {
@@ -640,9 +680,7 @@ async fn space_listing_evidence(
         .list()
         .await?
         .into_response();
-    let complete = response.pagination.offset == 0
-        && !response.pagination.has_more
-        && response.pagination.total == response.items.len();
+    let complete = space_page_is_complete(&response);
     let matching_space = response.items.iter().find(|space| space.id == space_id);
     let present = matching_space.is_some();
     let name_matches = expected_name
@@ -652,6 +690,13 @@ async fn space_listing_evidence(
         present,
         name_matches,
     })
+}
+
+fn space_page_is_complete(response: &crate::paged::PaginatedResponse<Space>) -> bool {
+    response.pagination.offset == 0
+        && !response.pagination.has_more
+        && response.items.len() <= SPACE_FIXTURE_SCAN_LIMIT as usize
+        && response.pagination.total == response.items.len()
 }
 
 fn space_delete_succeeded(error_code: Option<i32>) -> bool {
@@ -671,6 +716,12 @@ fn space_cleanup_error() -> TestError {
     }
 }
 
+fn space_fixture_ownership_error() -> TestError {
+    TestError::Assertion {
+        message: "created test space ownership could not be established".to_owned(),
+    }
+}
+
 fn space_cleanup_transport_error(_: tonic::Status) -> TestError {
     space_cleanup_error()
 }
@@ -678,6 +729,87 @@ fn space_cleanup_transport_error(_: tonic::Status) -> TestError {
 #[cfg(test)]
 mod space_tests {
     use super::*;
+
+    const CURRENT_SPACE_ID: &str = "bafyreiafl45wf5eaxiby44pxrkhia3y5jsyix3ov2jzqiftsxjotujqlh4";
+    const STALE_SPACE_ID: &str = "bafyreifmrdlvfk5uolhph6xmh6geta47auzqjilcsxarpyxlkrbqxks64a";
+    const OWNED_SPACE_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+
+    fn registered_spaces(cleanup: &TestCleanup) -> BTreeSet<String> {
+        cleanup.space_fixtures.lock().clone()
+    }
+
+    #[test]
+    fn malformed_create_response_never_enters_deletion_registry() {
+        let cleanup = TestCleanup::default();
+        let result = validate_and_register_owned_space_fixture(
+            &cleanup,
+            &crate::validation::ValidationLimits::default(),
+            CURRENT_SPACE_ID,
+            &BTreeSet::new(),
+            "malformed-space-id",
+        );
+        assert!(result.is_err());
+        assert!(registered_spaces(&cleanup).is_empty());
+    }
+
+    #[test]
+    fn current_space_create_response_never_enters_deletion_registry() {
+        let cleanup = TestCleanup::default();
+        let result = validate_and_register_owned_space_fixture(
+            &cleanup,
+            &crate::validation::ValidationLimits::default(),
+            CURRENT_SPACE_ID,
+            &BTreeSet::new(),
+            CURRENT_SPACE_ID,
+        );
+        assert!(result.is_err());
+        assert!(registered_spaces(&cleanup).is_empty());
+    }
+
+    #[test]
+    fn stale_create_response_never_enters_deletion_registry() {
+        let cleanup = TestCleanup::default();
+        let preexisting = BTreeSet::from([STALE_SPACE_ID.to_owned()]);
+        let result = validate_and_register_owned_space_fixture(
+            &cleanup,
+            &crate::validation::ValidationLimits::default(),
+            CURRENT_SPACE_ID,
+            &preexisting,
+            STALE_SPACE_ID,
+        );
+        assert!(result.is_err());
+        assert!(registered_spaces(&cleanup).is_empty());
+    }
+
+    #[test]
+    fn duplicate_create_response_is_registered_for_at_most_one_delete() {
+        let cleanup = TestCleanup::default();
+        let limits = crate::validation::ValidationLimits::default();
+        assert!(
+            validate_and_register_owned_space_fixture(
+                &cleanup,
+                &limits,
+                CURRENT_SPACE_ID,
+                &BTreeSet::new(),
+                OWNED_SPACE_ID,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_and_register_owned_space_fixture(
+                &cleanup,
+                &limits,
+                CURRENT_SPACE_ID,
+                &BTreeSet::new(),
+                OWNED_SPACE_ID,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            registered_spaces(&cleanup),
+            BTreeSet::from([OWNED_SPACE_ID.to_owned()])
+        );
+    }
 
     #[test]
     fn space_delete_requires_an_explicit_null_error_code() {

@@ -36,9 +36,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   applied-state and cleanup evidence before teardown.
   Exercise `space_list` limit-one continuation and cursor/query binding with
   two immediately registered disposable spaces whose exact IDs are removed and
-  verified absent during test-context teardown. Collection/view coverage now
-  creates and immediately registers its own collection-layout type through the
-  narrow `anytype-api` test fixture instead of ambient system schema.
+  verified absent during test-context teardown; walk the bounded cursor chain
+  without item/cursor loops through terminality and require both fixture IDs.
+  Collection/view coverage now creates and immediately registers its own
+  collection-layout type through the narrow `anytype-api` test fixture instead
+  of ambient system schema.
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
   2.2.0 and protocol revision `2026-07-28`.
 - Add authenticated long-lived Anytype client startup, bounded and cancellable

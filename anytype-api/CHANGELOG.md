@@ -49,10 +49,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   exact-layout verification through the ordinary REST getter; production REST
   `TypeLayout` remains restricted to the four layouts the server accepts.
 - Add a test-only disposable-space lifecycle that registers validated REST
-  create IDs before verification, deletes only its private registry through
-  the irreversible exact-ID `SpaceDelete` RPC after child-resource cleanup,
-  and requires bounded complete REST absence evidence during teardown. No
-  production space-delete API is exposed.
+  create IDs before verification only after a complete pre-create snapshot
+  proves they are neither current nor pre-existing, structurally deduplicates
+  its private deletion registry, deletes it through the irreversible exact-ID
+  `SpaceDelete` RPC after child-resource cleanup, and requires bounded complete
+  REST absence evidence during teardown. No production space-delete API is
+  exposed; ambiguous responses favor a leak over deleting existing state.
 - object requests now offer `delete_once()` for soft-delete workflows that
   must reconcile an uncertain response without middleware replaying `DELETE`
 - bounded predicate-based semantic read-after-write verification with finite
