@@ -574,83 +574,562 @@ mod tests {
         )
     }
 
-    fn assert_schema_node_is_bounded(value: &Value, path: &str) {
-        if value == &Value::Bool(false) {
-            return;
-        }
-        let schema = value
-            .as_object()
-            .unwrap_or_else(|| panic!("{path} must be an object or false schema"));
+    const MAX_AUDITED_STRING_CHARS: u64 = 100_000;
+    const MAX_AUDITED_ARRAY_ITEMS: u64 = 10_000;
+    const MAX_AUDITED_ENUM_VALUES: usize = 128;
+    const MAX_AUDITED_NUMBER_ABS: f64 = 1_000_000_000_000_000.0;
+    const MAX_AUDITED_ANNOTATION_CHARS: usize = 4_096;
 
-        if let Some(definitions) = schema.get("$defs").and_then(Value::as_object) {
-            for (name, definition) in definitions {
-                assert_schema_node_is_bounded(definition, &format!("{path}/$defs/{name}"));
+    struct SchemaAudit<'root> {
+        root: &'root Value,
+        visited_refs: std::collections::HashSet<String>,
+        active_refs: std::collections::HashSet<String>,
+        active_ref_depths: std::collections::HashMap<String, usize>,
+        guard_depth: usize,
+    }
+
+    impl<'root> SchemaAudit<'root> {
+        fn new(root: &'root Value) -> Self {
+            Self {
+                root,
+                visited_refs: std::collections::HashSet::new(),
+                active_refs: std::collections::HashSet::new(),
+                active_ref_depths: std::collections::HashMap::new(),
+                guard_depth: 0,
             }
         }
-        if schema.contains_key("$ref") {
-            return;
+
+        fn validate(mut self) -> Result<(), String> {
+            self.validate_node(self.root, "#")
         }
-        for keyword in ["allOf", "anyOf", "oneOf"] {
-            if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+
+        fn validate_node(&mut self, value: &Value, path: &str) -> Result<(), String> {
+            match value {
+                Value::Bool(false) => Ok(()),
+                Value::Bool(true) => Err(format!("{path}: true schema is unconstrained")),
+                Value::Object(schema) => self.validate_schema_object(schema, path),
+                _ => Err(format!("{path}: schema must be an object or false")),
+            }
+        }
+
+        fn validate_schema_object(
+            &mut self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+        ) -> Result<(), String> {
+            if schema.is_empty() {
+                return Err(format!("{path}: empty schema is unconstrained"));
+            }
+            self.validate_annotations(schema, path)?;
+            self.validate_root_definitions(schema, path)?;
+
+            if let Some(reference) = schema.get("$ref") {
+                self.require_allowed_keys(schema, path, &["$ref"])?;
+                let reference = reference
+                    .as_str()
+                    .ok_or_else(|| format!("{path}/$ref: reference must be a string"))?;
+                return self.validate_reference(reference, path);
+            }
+
+            let compositions = ["allOf", "anyOf", "oneOf"]
+                .into_iter()
+                .filter(|keyword| schema.contains_key(*keyword))
+                .collect::<Vec<_>>();
+            if !compositions.is_empty() {
+                if compositions.len() != 1 {
+                    return Err(format!(
+                        "{path}: exactly one composition keyword is permitted"
+                    ));
+                }
+                let keyword = compositions[0];
+                self.require_allowed_keys(schema, path, &[keyword])?;
+                let branches = schema[keyword]
+                    .as_array()
+                    .ok_or_else(|| format!("{path}/{keyword}: composition must be an array"))?;
+                let minimum = if keyword == "allOf" { 1 } else { 2 };
+                if branches.len() < minimum {
+                    return Err(format!(
+                        "{path}/{keyword}: composition requires at least {minimum} branches"
+                    ));
+                }
                 for (index, branch) in branches.iter().enumerate() {
-                    assert_schema_node_is_bounded(branch, &format!("{path}/{keyword}/{index}"));
+                    self.validate_node(branch, &format!("{path}/{keyword}/{index}"))?;
                 }
+                return Ok(());
+            }
+
+            let Some(raw_type) = schema.get("type") else {
+                self.require_allowed_keys(schema, path, &["const", "enum"])?;
+                if schema.contains_key("const") == schema.contains_key("enum") {
+                    return Err(format!(
+                        "{path}: untyped schema requires exactly one finite const or enum"
+                    ));
+                }
+                self.validate_finite_values(schema, path, None)?;
+                return Ok(());
+            };
+            let kind = self.normalized_type(raw_type, path)?;
+            match kind {
+                "object" => self.validate_object(schema, path),
+                "array" => self.validate_array(schema, path),
+                "string" => self.validate_string(schema, path),
+                "number" | "integer" => self.validate_number(schema, path, kind),
+                "boolean" | "null" => self.validate_scalar_type(schema, path, kind),
+                _ => Err(format!("{path}/type: unknown schema type {kind:?}")),
             }
         }
 
-        let has_type = |expected: &str| match schema.get("type") {
-            Some(Value::String(kind)) => kind == expected,
-            Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == expected),
-            _ => false,
-        };
-        if has_type("object") {
-            assert_eq!(
-                schema.get("additionalProperties"),
-                Some(&Value::Bool(false)),
-                "{path} must reject unconstrained map keys"
-            );
-            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        fn validate_root_definitions(
+            &mut self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+        ) -> Result<(), String> {
+            let Some(definitions) = schema.get("$defs") else {
+                return Ok(());
+            };
+            if path != "#" {
+                return Err(format!("{path}/$defs: definitions are root-only"));
+            }
+            let definitions = definitions
+                .as_object()
+                .filter(|definitions| !definitions.is_empty())
+                .ok_or_else(|| format!("{path}/$defs: definitions must be a nonempty object"))?;
+            for name in definitions.keys() {
+                let pointer = format!("#/$defs/{}", json_pointer_token(name));
+                self.validate_reference(&pointer, path)?;
+            }
+            Ok(())
+        }
+
+        fn validate_reference(&mut self, reference: &str, path: &str) -> Result<(), String> {
+            if !reference
+                .strip_prefix("#/$defs/")
+                .is_some_and(|suffix| !suffix.is_empty())
+            {
+                return Err(format!(
+                    "{path}/$ref: reference must be local under #/$defs"
+                ));
+            }
+            let target = self
+                .root
+                .pointer(reference.strip_prefix('#').expect("local reference"))
+                .ok_or_else(|| format!("{path}/$ref: dangling reference {reference}"))?;
+            if self.visited_refs.contains(reference) {
+                return Ok(());
+            }
+            if self.active_refs.contains(reference) {
+                let opening_depth = self
+                    .active_ref_depths
+                    .get(reference)
+                    .copied()
+                    .expect("active references retain their opening depth");
+                return if self.guard_depth > opening_depth {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{path}/$ref: unguarded cyclic reference {reference}"
+                    ))
+                };
+            }
+
+            self.active_refs.insert(reference.to_owned());
+            self.active_ref_depths
+                .insert(reference.to_owned(), self.guard_depth);
+            let result = self.validate_node(target, reference);
+            self.active_refs.remove(reference);
+            self.active_ref_depths.remove(reference);
+            if result.is_ok() {
+                self.visited_refs.insert(reference.to_owned());
+            }
+            result
+        }
+
+        fn validate_object(
+            &mut self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+        ) -> Result<(), String> {
+            self.require_allowed_keys(
+                schema,
+                path,
+                &["type", "properties", "required", "additionalProperties"],
+            )?;
+            if schema.get("additionalProperties") != Some(&Value::Bool(false)) {
+                return Err(format!(
+                    "{path}/additionalProperties: object schema must reject open maps"
+                ));
+            }
+            let properties = match schema.get("properties") {
+                None => None,
+                Some(Value::Object(properties)) => Some(properties),
+                Some(_) => return Err(format!("{path}/properties: must be an object")),
+            };
+            if let Some(properties) = properties {
                 for (name, property) in properties {
-                    assert_schema_node_is_bounded(property, &format!("{path}/properties/{name}"));
+                    self.validate_guarded_node(
+                        property,
+                        &format!("{path}/properties/{}", json_pointer_token(name)),
+                    )?;
                 }
             }
+            if let Some(required) = schema.get("required") {
+                let required = required
+                    .as_array()
+                    .ok_or_else(|| format!("{path}/required: must be an array"))?;
+                let mut names = std::collections::HashSet::new();
+                for name in required {
+                    let name = name
+                        .as_str()
+                        .ok_or_else(|| format!("{path}/required: names must be strings"))?;
+                    if !names.insert(name) {
+                        return Err(format!("{path}/required: duplicate property {name:?}"));
+                    }
+                    if properties.is_none_or(|properties| !properties.contains_key(name)) {
+                        return Err(format!(
+                            "{path}/required: unknown required property {name:?}"
+                        ));
+                    }
+                }
+            }
+            Ok(())
         }
-        if has_type("array") {
+
+        fn validate_array(
+            &mut self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+        ) -> Result<(), String> {
+            self.require_allowed_keys(
+                schema,
+                path,
+                &["type", "items", "minItems", "maxItems", "uniqueItems"],
+            )?;
             let maximum = schema
                 .get("maxItems")
                 .and_then(Value::as_u64)
-                .unwrap_or_else(|| panic!("{path} array must have maxItems"));
-            assert!(maximum <= 10_000, "{path} array bound is impractical");
+                .filter(|maximum| *maximum <= MAX_AUDITED_ARRAY_ITEMS)
+                .ok_or_else(|| format!("{path}/maxItems: missing or impractical array bound"))?;
+            if schema
+                .get("minItems")
+                .and_then(Value::as_u64)
+                .is_some_and(|minimum| minimum > maximum)
+            {
+                return Err(format!("{path}/minItems: exceeds maxItems"));
+            }
+            if schema.get("minItems").is_some_and(|value| !value.is_u64()) {
+                return Err(format!("{path}/minItems: must be a nonnegative integer"));
+            }
+            if schema
+                .get("uniqueItems")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Err(format!("{path}/uniqueItems: must be boolean"));
+            }
             let items = schema
                 .get("items")
-                .unwrap_or_else(|| panic!("{path} array must constrain its items"));
-            assert_schema_node_is_bounded(items, &format!("{path}/items"));
+                .ok_or_else(|| format!("{path}/items: array items must be constrained"))?;
+            self.validate_guarded_node(items, &format!("{path}/items"))
         }
-        if has_type("string") && !schema.contains_key("const") && !schema.contains_key("enum") {
+
+        fn validate_string(
+            &mut self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+        ) -> Result<(), String> {
+            let finite = self.validate_finite_values(schema, path, Some("string"))?;
+            if finite {
+                self.require_allowed_keys(schema, path, &["type", "const", "enum"])?;
+                return Ok(());
+            }
+            self.require_allowed_keys(
+                schema,
+                path,
+                &["type", "minLength", "maxLength", "pattern", "format"],
+            )?;
             let maximum = schema
                 .get("maxLength")
                 .and_then(Value::as_u64)
-                .unwrap_or_else(|| panic!("{path} string must have maxLength"));
-            assert!(maximum <= 100_000, "{path} string bound is impractical");
+                .filter(|maximum| *maximum <= MAX_AUDITED_STRING_CHARS)
+                .ok_or_else(|| format!("{path}/maxLength: missing or impractical string bound"))?;
+            if schema
+                .get("minLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|minimum| minimum > maximum)
+            {
+                return Err(format!("{path}/minLength: exceeds maxLength"));
+            }
+            if schema.get("minLength").is_some_and(|value| !value.is_u64()) {
+                return Err(format!("{path}/minLength: must be a nonnegative integer"));
+            }
+            if schema
+                .get("pattern")
+                .is_some_and(|value| !value.as_str().is_some_and(|pattern| pattern.len() <= 1_024))
+            {
+                return Err(format!("{path}/pattern: must be a bounded string"));
+            }
+            if schema.get("format").is_some_and(|value| !value.is_string()) {
+                return Err(format!("{path}/format: must be a string"));
+            }
+            Ok(())
+        }
+
+        fn validate_number(
+            &mut self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+            kind: &str,
+        ) -> Result<(), String> {
+            if self.validate_finite_values(schema, path, Some(kind))? {
+                self.require_allowed_keys(schema, path, &["type", "const", "enum"])?;
+                return Ok(());
+            }
+            self.require_allowed_keys(
+                schema,
+                path,
+                &[
+                    "type",
+                    "minimum",
+                    "maximum",
+                    "exclusiveMinimum",
+                    "exclusiveMaximum",
+                    "multipleOf",
+                ],
+            )?;
+            let minimum = numeric_boundary(schema, "minimum", "exclusiveMinimum", path)?;
+            let maximum = numeric_boundary(schema, "maximum", "exclusiveMaximum", path)?;
+            if minimum > maximum {
+                return Err(format!("{path}: numeric minimum exceeds maximum"));
+            }
+            if schema.get("multipleOf").is_some_and(|value| {
+                !value
+                    .as_f64()
+                    .is_some_and(|number| number.is_finite() && number > 0.0)
+            }) {
+                return Err(format!("{path}/multipleOf: must be finite and positive"));
+            }
+            Ok(())
+        }
+
+        fn validate_scalar_type(
+            &self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+            kind: &str,
+        ) -> Result<(), String> {
+            self.require_allowed_keys(schema, path, &["type", "const", "enum"])?;
+            self.validate_finite_values(schema, path, Some(kind))?;
+            Ok(())
+        }
+
+        fn validate_finite_values(
+            &self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+            kind: Option<&str>,
+        ) -> Result<bool, String> {
+            if schema.contains_key("const") && schema.contains_key("enum") {
+                return Err(format!("{path}: const and enum cannot be combined"));
+            }
+            if let Some(value) = schema.get("const") {
+                validate_finite_scalar(value, kind, &format!("{path}/const"))?;
+                return Ok(true);
+            }
+            if let Some(values) = schema.get("enum") {
+                let values = values
+                    .as_array()
+                    .filter(|values| !values.is_empty() && values.len() <= MAX_AUDITED_ENUM_VALUES)
+                    .ok_or_else(|| format!("{path}/enum: must be a nonempty bounded array"))?;
+                let mut seen = std::collections::HashSet::new();
+                for (index, value) in values.iter().enumerate() {
+                    validate_finite_scalar(value, kind, &format!("{path}/enum/{index}"))?;
+                    if !seen.insert(value.to_string()) {
+                        return Err(format!("{path}/enum: duplicate value"));
+                    }
+                }
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        fn normalized_type<'schema>(
+            &self,
+            value: &'schema Value,
+            path: &str,
+        ) -> Result<&'schema str, String> {
+            match value {
+                Value::String(kind) => Ok(kind),
+                Value::Array(kinds) if kinds.len() == 2 => {
+                    let kinds = kinds
+                        .iter()
+                        .map(|kind| {
+                            kind.as_str()
+                                .ok_or_else(|| format!("{path}/type: types must be strings"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if kinds.iter().filter(|kind| **kind == "null").count() != 1 {
+                        return Err(format!(
+                            "{path}/type: nullable type requires exactly one null branch"
+                        ));
+                    }
+                    kinds
+                        .into_iter()
+                        .find(|kind| *kind != "null")
+                        .ok_or_else(|| format!("{path}/type: missing non-null type"))
+                }
+                _ => Err(format!(
+                    "{path}/type: must be one type or one nullable type pair"
+                )),
+            }
+        }
+
+        fn validate_annotations(
+            &self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+        ) -> Result<(), String> {
+            if schema.get("$schema").is_some_and(|dialect| {
+                path != "#"
+                    || dialect.as_str() != Some("https://json-schema.org/draft/2020-12/schema")
+            }) {
+                return Err(format!("{path}/$schema: invalid or non-root dialect"));
+            }
+            for keyword in ["title", "description", "$comment"] {
+                if schema.get(keyword).is_some_and(|value| {
+                    !value
+                        .as_str()
+                        .is_some_and(|value| value.chars().count() <= MAX_AUDITED_ANNOTATION_CHARS)
+                }) {
+                    return Err(format!("{path}/{keyword}: invalid annotation"));
+                }
+            }
+            for keyword in ["deprecated", "readOnly", "writeOnly"] {
+                if schema.get(keyword).is_some_and(|value| !value.is_boolean()) {
+                    return Err(format!("{path}/{keyword}: must be boolean"));
+                }
+            }
+            if schema.get("examples").is_some_and(|value| {
+                !value
+                    .as_array()
+                    .is_some_and(|examples| examples.len() <= 10)
+            }) {
+                return Err(format!("{path}/examples: invalid annotation"));
+            }
+            Ok(())
+        }
+
+        fn require_allowed_keys(
+            &self,
+            schema: &serde_json::Map<String, Value>,
+            path: &str,
+            structural: &[&str],
+        ) -> Result<(), String> {
+            const ANNOTATIONS: &[&str] = &[
+                "$schema",
+                "$defs",
+                "title",
+                "description",
+                "$comment",
+                "default",
+                "examples",
+                "deprecated",
+                "readOnly",
+                "writeOnly",
+            ];
+            for key in schema.keys() {
+                if structural.contains(&key.as_str()) || ANNOTATIONS.contains(&key.as_str()) {
+                    continue;
+                }
+                return Err(format!(
+                    "{path}/{key}: keyword is not allowed for this form"
+                ));
+            }
+            if path != "#" && (schema.contains_key("$schema") || schema.contains_key("$defs")) {
+                return Err(format!(
+                    "{path}: $schema and $defs are permitted only at the root"
+                ));
+            }
+            Ok(())
+        }
+
+        fn validate_guarded_node(&mut self, value: &Value, path: &str) -> Result<(), String> {
+            self.guard_depth += 1;
+            let result = self.validate_node(value, path);
+            self.guard_depth -= 1;
+            result
+        }
+    }
+
+    fn audit_schema(root: &Value) -> Result<(), String> {
+        SchemaAudit::new(root).validate()
+    }
+
+    fn json_pointer_token(value: &str) -> String {
+        value.replace('~', "~0").replace('/', "~1")
+    }
+
+    fn numeric_boundary(
+        schema: &serde_json::Map<String, Value>,
+        inclusive: &str,
+        exclusive: &str,
+        path: &str,
+    ) -> Result<f64, String> {
+        if schema.contains_key(inclusive) == schema.contains_key(exclusive) {
+            return Err(format!(
+                "{path}: exactly one of {inclusive} or {exclusive} is required"
+            ));
+        }
+        schema
+            .get(inclusive)
+            .or_else(|| schema.get(exclusive))
+            .and_then(Value::as_f64)
+            .filter(|number| number.is_finite() && number.abs() <= MAX_AUDITED_NUMBER_ABS)
+            .ok_or_else(|| format!("{path}: missing or impractical numeric boundary"))
+    }
+
+    fn validate_finite_scalar(value: &Value, kind: Option<&str>, path: &str) -> Result<(), String> {
+        let matches_kind = match (kind, value) {
+            (None, Value::Null | Value::Bool(_)) => true,
+            (None, Value::String(value)) => {
+                value.chars().count() <= MAX_AUDITED_STRING_CHARS as usize
+            }
+            (None, Value::Number(value)) => value
+                .as_f64()
+                .is_some_and(|number| number.is_finite() && number.abs() <= MAX_AUDITED_NUMBER_ABS),
+            (Some("null"), Value::Null) | (Some("boolean"), Value::Bool(_)) => true,
+            (Some("string"), Value::String(value)) => {
+                value.chars().count() <= MAX_AUDITED_STRING_CHARS as usize
+            }
+            (Some("number"), Value::Number(value)) => value
+                .as_f64()
+                .is_some_and(|number| number.is_finite() && number.abs() <= MAX_AUDITED_NUMBER_ABS),
+            (Some("integer"), Value::Number(value)) => value.as_f64().is_some_and(|number| {
+                number.is_finite()
+                    && number.fract() == 0.0
+                    && number.abs() <= MAX_AUDITED_NUMBER_ABS
+            }),
+            _ => false,
+        };
+        if matches_kind {
+            Ok(())
+        } else {
+            Err(format!("{path}: value is not a finite {kind:?} scalar"))
         }
     }
 
     fn assert_catalog_contracts(server: &AnyMcpServer) {
         for tool in server.tools() {
-            assert_schema_node_is_bounded(
-                &Value::Object(tool.input_schema.as_ref().clone()),
-                &format!("{}/inputSchema", tool.name),
+            let input = Value::Object(tool.input_schema.as_ref().clone());
+            audit_schema(&input)
+                .unwrap_or_else(|error| panic!("{}/inputSchema: {error}", tool.name));
+            let output = Value::Object(
+                tool.output_schema
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{} must declare outputSchema", tool.name))
+                    .as_ref()
+                    .clone(),
             );
-            assert_schema_node_is_bounded(
-                &Value::Object(
-                    tool.output_schema
-                        .as_ref()
-                        .unwrap_or_else(|| panic!("{} must declare outputSchema", tool.name))
-                        .as_ref()
-                        .clone(),
-                ),
-                &format!("{}/outputSchema", tool.name),
-            );
+            audit_schema(&output)
+                .unwrap_or_else(|error| panic!("{}/outputSchema: {error}", tool.name));
 
             let expected = if READ_TOOL_NAMES.contains(&tool.name.as_ref()) {
                 json!({
@@ -840,6 +1319,271 @@ mod tests {
         assert_catalog_contracts(&normal);
         let read_only = AnyMcpServer::new(runtime(true)).expect("read-only static catalog");
         assert_catalog_contracts(&read_only);
+    }
+
+    #[test]
+    fn independent_schema_audit_accepts_local_cycles_refs_and_compositions() {
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "next": {
+                            "anyOf": [
+                                {"$ref": "#/$defs/Node"},
+                                {"type": "null"}
+                            ]
+                        }
+                    }
+                },
+                "Label": {"type": "string", "maxLength": 12},
+                "a/b~c": {"type": "boolean"}
+            },
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "node": {
+                    "$ref": "#/$defs/Node",
+                    "description": "A guarded recursive node."
+                },
+                "choice": {
+                    "oneOf": [
+                        {"$ref": "#/$defs/Label"},
+                        {"type": "integer", "minimum": 0, "maximum": 4}
+                    ]
+                },
+                "both": {
+                    "allOf": [
+                        {"type": "string", "maxLength": 12},
+                        {"type": "string", "minLength": 1, "maxLength": 8}
+                    ]
+                },
+                "maybe": {
+                    "type": ["array", "null"],
+                    "maxItems": 2,
+                    "items": {"$ref": "#/$defs/Label"}
+                },
+                "escaped": {"$ref": "#/$defs/a~1b~0c"},
+                "finite": {"enum": [null, true, "bounded", 3]}
+            }
+        });
+
+        audit_schema(&schema).expect("finite recursive synthetic schema");
+    }
+
+    #[test]
+    fn independent_schema_audit_rejects_every_open_or_malformed_form() {
+        let cases = vec![
+            ("boolean true", json!(true), "true schema"),
+            ("non-schema scalar", json!(null), "object or false"),
+            ("empty", json!({}), "empty schema"),
+            (
+                "annotation only",
+                json!({"description": "not a constraint"}),
+                "exactly one finite const or enum",
+            ),
+            (
+                "unknown type",
+                json!({"type": "mystery"}),
+                "unknown schema type",
+            ),
+            (
+                "non-string ref",
+                json!({"$ref": 7}),
+                "reference must be a string",
+            ),
+            (
+                "external ref",
+                json!({"$ref": "https://example.invalid/schema"}),
+                "local under #/$defs",
+            ),
+            (
+                "dangling ref",
+                json!({
+                    "$defs": {"Present": {"type": "boolean"}},
+                    "$ref": "#/$defs/Missing"
+                }),
+                "dangling reference",
+            ),
+            (
+                "illegal ref sibling",
+                json!({
+                    "$defs": {"Text": {"type": "string", "maxLength": 4}},
+                    "$ref": "#/$defs/Text",
+                    "type": "string"
+                }),
+                "keyword is not allowed",
+            ),
+            (
+                "unguarded alias cycle",
+                json!({
+                    "$defs": {"Loop": {"$ref": "#/$defs/Loop"}},
+                    "$ref": "#/$defs/Loop"
+                }),
+                "unguarded cyclic reference",
+            ),
+            (
+                "unguarded composition cycle",
+                json!({
+                    "$defs": {
+                        "Loop": {"allOf": [{"$ref": "#/$defs/Loop"}]}
+                    },
+                    "$ref": "#/$defs/Loop"
+                }),
+                "unguarded cyclic reference",
+            ),
+            (
+                "invalid node after guarded cycle",
+                json!({
+                    "$defs": {
+                        "Node": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "next": {"$ref": "#/$defs/Node"},
+                                "bad": {}
+                            }
+                        }
+                    },
+                    "$ref": "#/$defs/Node"
+                }),
+                "empty schema",
+            ),
+            (
+                "empty composition",
+                json!({"oneOf": []}),
+                "at least 2 branches",
+            ),
+            (
+                "malformed composition",
+                json!({"allOf": {}}),
+                "composition must be an array",
+            ),
+            (
+                "multiple compositions",
+                json!({
+                    "oneOf": [{"type": "null"}, {"type": "boolean"}],
+                    "anyOf": [{"type": "null"}, {"type": "boolean"}]
+                }),
+                "exactly one composition keyword",
+            ),
+            (
+                "composition sibling",
+                json!({
+                    "oneOf": [{"type": "null"}, {"type": "boolean"}],
+                    "type": "boolean"
+                }),
+                "keyword is not allowed",
+            ),
+            (
+                "unbounded string",
+                json!({"type": "string"}),
+                "missing or impractical string bound",
+            ),
+            (
+                "impractical string",
+                json!({"type": "string", "maxLength": 100_001}),
+                "missing or impractical string bound",
+            ),
+            (
+                "array missing max",
+                json!({"type": "array", "items": {"type": "boolean"}}),
+                "missing or impractical array bound",
+            ),
+            (
+                "array missing items",
+                json!({"type": "array", "maxItems": 1}),
+                "array items must be constrained",
+            ),
+            (
+                "impractical array",
+                json!({
+                    "type": "array",
+                    "maxItems": 10_001,
+                    "items": {"type": "boolean"}
+                }),
+                "missing or impractical array bound",
+            ),
+            (
+                "open object",
+                json!({"type": "object", "additionalProperties": true}),
+                "reject open maps",
+            ),
+            (
+                "object missing closure",
+                json!({"type": "object"}),
+                "reject open maps",
+            ),
+            (
+                "number missing bounds",
+                json!({"type": "number"}),
+                "exactly one of minimum or exclusiveMinimum",
+            ),
+            (
+                "impractical number",
+                json!({
+                    "type": "number",
+                    "minimum": -1_000_000_000_000_001_f64,
+                    "maximum": 1
+                }),
+                "missing or impractical numeric boundary",
+            ),
+            (
+                "non-scalar const",
+                json!({"const": {"open": "value"}}),
+                "not a finite",
+            ),
+            (
+                "finite const with structural sibling",
+                json!({"type": "string", "const": "x", "maxLength": 1}),
+                "keyword is not allowed",
+            ),
+            ("empty enum", json!({"enum": []}), "nonempty bounded array"),
+            (
+                "unknown keyword",
+                json!({"type": "boolean", "additionalProperties": false}),
+                "keyword is not allowed",
+            ),
+            (
+                "malformed nullable type",
+                json!({"type": ["string", "null", "boolean"], "maxLength": 4}),
+                "one nullable type pair",
+            ),
+            (
+                "nested definitions",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "nested": {
+                            "$defs": {"Inner": {"type": "boolean"}},
+                            "type": "boolean"
+                        }
+                    }
+                }),
+                "definitions are root-only",
+            ),
+            (
+                "empty definitions",
+                json!({
+                    "$defs": {},
+                    "type": "object",
+                    "additionalProperties": false
+                }),
+                "nonempty object",
+            ),
+        ];
+
+        for (name, schema, expected) in cases {
+            let error = audit_schema(&schema)
+                .expect_err("synthetic open or malformed schema must fail closed");
+            assert!(
+                error.contains(expected),
+                "{name}: expected {expected:?}, got {error:?}"
+            );
+        }
     }
 
     #[test]
