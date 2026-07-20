@@ -122,33 +122,35 @@ async fn assert_terminal_page(
     page
 }
 
-async fn assert_ambient_space_page(server: &AnyMcpServer, current_space_id: &str) -> Value {
-    let base = arguments(json!({"limit": 100}));
-    let page = success(server, SPACE_LIST, Value::Object(base.clone())).await;
-    let items = page["items"]
-        .as_array()
-        .expect("space_list items must be an array");
-    assert!(!items.is_empty(), "space_list must expose the test space");
+async fn assert_fixture_space_continuation(
+    ctx: &TestContext,
+    server: &AnyMcpServer,
+    fixture_ids: &[&str],
+) {
+    let response = ctx
+        .client
+        .spaces()
+        .limit(1_000)
+        .offset(0)
+        .list()
+        .await
+        .expect("list registered space fixtures")
+        .into_response();
+    assert_eq!(response.pagination.offset, 0);
+    assert!(!response.pagination.has_more);
+    assert_eq!(response.pagination.total, response.items.len());
+    for fixture_id in fixture_ids {
+        assert!(
+            response.items.iter().any(|space| space.id == *fixture_id),
+            "registered fixture must be present in complete space listing"
+        );
+    }
     assert!(
-        items
-            .iter()
-            .any(|item| item_id(item).and_then(Value::as_str) == Some(current_space_id)),
-        "space_list first page must contain the current test space"
+        response.items.len() >= 2,
+        "two registered fixtures must force limit=1 continuation"
     );
 
-    if let Some(cursor) = page.get("next_cursor") {
-        let cursor = cursor
-            .as_str()
-            .filter(|cursor| !cursor.is_empty())
-            .expect("space_list next_cursor must be a nonempty string");
-        let mut mismatched = base;
-        mismatched.insert("limit".to_owned(), json!(99));
-        mismatched.insert("cursor".to_owned(), json!(cursor));
-        let mismatch = failure(server, SPACE_LIST, Value::Object(mismatched)).await;
-        assert_eq!(mismatch["code"], "validation", "space_list cursor binding");
-    }
-
-    page
+    assert_cursor_continuation(server, SPACE_LIST, arguments(json!({}))).await;
 }
 
 async fn create_object(ctx: &TestContext, type_key: &str, name: &str, body: &str) -> Object {
@@ -248,6 +250,15 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
             assert_eq!(status["http_available"], true);
             assert_eq!(status["grpc_available"], true);
 
+            let first_space = ctx
+                .create_space_fixture(format!("MCP pagination space {}", unique_suffix()))
+                .await
+                .expect("create first disposable space");
+            let second_space = ctx
+                .create_space_fixture(format!("MCP pagination space {}", unique_suffix()))
+                .await
+                .expect("create second disposable space");
+
             let duplicate_name = format!("MCP ambiguous {}", unique_suffix());
             let first_type = ctx
                 .client
@@ -307,7 +318,12 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
                 create_object(ctx.as_ref(), "page", &format!("{search_term} second"), "").await;
             sleep(Duration::from_millis(300)).await;
 
-            assert_ambient_space_page(&server, &ctx.space_id).await;
+            assert_fixture_space_continuation(
+                ctx.as_ref(),
+                &server,
+                &[first_space.id.as_str(), second_space.id.as_str()],
+            )
+            .await;
             assert_cursor_continuation(
                 &server,
                 TYPE_LIST,

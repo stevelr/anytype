@@ -44,10 +44,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
-- test contexts now provide a cleanup-registered collection-layout type fixture
+- Test contexts now provide a cleanup-registered collection-layout type fixture
   through the narrow heart RPC, with immediate safe-id registration and bounded
   exact-layout verification through the ordinary REST getter; production REST
-  `TypeLayout` remains restricted to the four layouts the server accepts
+  `TypeLayout` remains restricted to the four layouts the server accepts.
+- Add a test-only disposable-space lifecycle that registers validated REST
+  create IDs before verification, deletes only its private registry through
+  the irreversible exact-ID `SpaceDelete` RPC after child-resource cleanup,
+  and requires bounded complete REST absence evidence during teardown. No
+  production space-delete API is exposed.
 - object requests now offer `delete_once()` for soft-delete workflows that
   must reconcile an uncertain response without middleware replaying `DELETE`
 - bounded predicate-based semantic read-after-write verification with finite

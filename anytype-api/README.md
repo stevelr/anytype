@@ -436,6 +436,14 @@ create/update contract rejects collection layout, so this test-only helper uses
 the narrow heart RPC, registers the returned type for cleanup before any
 follow-up read, and verifies it through the ordinary scoped REST getter.
 
+Tests that need disposable spaces should use
+`TestContext::create_space_fixture`. It creates through the authenticated REST
+API, validates and registers the returned ID before complete bounded-list
+verification, and removes only those registered IDs during teardown through
+Anytype's irreversible `SpaceDelete` RPC. Teardown then requires complete
+bounded REST evidence that each created ID is gone; there is intentionally no
+general test registration or production space-delete API.
+
 ## License
 
 Apache License, Version 2.0
