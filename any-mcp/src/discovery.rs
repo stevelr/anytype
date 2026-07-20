@@ -1191,19 +1191,31 @@ mod tests {
                     let request =
                         std::str::from_utf8(&request).expect("ASCII property route request");
                     let request_line = request.lines().next().expect("property route request line");
-                    let target = request_line
-                        .split_ascii_whitespace()
-                        .nth(1)
-                        .expect("property route target");
+                    let mut parts = request_line.split_ascii_whitespace();
+                    assert_eq!(parts.next(), Some("GET"));
+                    let target = parts.next().expect("property route target");
+                    assert_eq!(parts.next(), Some("HTTP/1.1"));
+                    assert_eq!(
+                        parts.next(),
+                        None,
+                        "extra property route request-line field"
+                    );
+                    let (path, raw_query) = target
+                        .split_once('?')
+                        .map_or((target, ""), |(path, query)| (path, query));
+                    let mut query = BTreeMap::new();
+                    for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+                        let previous = query.insert(key.into_owned(), value.into_owned());
+                        assert!(previous.is_none(), "duplicate property route query key");
+                    }
                     let collection_path = format!("/v1/spaces/{SPACE_ID}/properties");
                     let direct_path = format!("{collection_path}/{ID_B}");
                     let tags_path = format!("{direct_path}/tags");
-                    let body = if target == collection_path
-                        || target.starts_with(&format!("{collection_path}?"))
-                    {
+                    let body = if path == collection_path {
                         let page = traffic.property_list_pages;
                         traffic.property_list_pages += 1;
                         if page == 0 {
+                            assert_eq!(query, BTreeMap::new(), "first property-list query");
                             paged(
                                 vec![property_value(ID_A, "other", "Other", "text")],
                                 0,
@@ -1212,6 +1224,14 @@ mod tests {
                             )
                             .to_string()
                         } else {
+                            assert_eq!(
+                                query,
+                                BTreeMap::from([
+                                    ("limit".to_owned(), "100".to_owned()),
+                                    ("offset".to_owned(), "100".to_owned()),
+                                ]),
+                                "continued property-list query"
+                            );
                             paged(
                                 vec![property_value(ID_B, "status", "Status", "select")],
                                 100,
@@ -1220,7 +1240,8 @@ mod tests {
                             )
                             .to_string()
                         }
-                    } else if target == direct_path {
+                    } else if path == direct_path {
+                        assert_eq!(query, BTreeMap::new(), "direct property query");
                         traffic.direct_property_gets += 1;
                         json!({
                             "property": property_value(
@@ -1231,7 +1252,12 @@ mod tests {
                             )
                         })
                         .to_string()
-                    } else if target == tags_path || target.starts_with(&format!("{tags_path}?")) {
+                    } else if path == tags_path {
+                        assert_eq!(
+                            query,
+                            BTreeMap::from([("limit".to_owned(), "2".to_owned())]),
+                            "bounded MCP tag-list query"
+                        );
                         traffic.tag_list_pages += 1;
                         paged(vec![tag_value(ID_A, "open", "Open")], 0, 2, 1).to_string()
                     } else {

@@ -26,6 +26,41 @@ use common::{create_object_with_retry, unique_test_name, update_object_with_retr
 // Tag Listing Tests
 // =============================================================================
 
+/// Test bounded tag lookup through an explicit property ID.
+#[tokio::test]
+#[test_log::test]
+async fn test_lookup_tag_by_explicit_property_id() {
+    with_test_context_unit(|ctx| async move {
+        let property = ctx
+            .client
+            .new_property(
+                &ctx.space_id,
+                unique_test_name("Direct Tag Lookup"),
+                PropertyFormat::Select,
+            )
+            .create()
+            .await
+            .expect("create direct-lookup property");
+        ctx.register_property(&property.id);
+        let tag = ctx
+            .client
+            .new_tag(&ctx.space_id, &property.id)
+            .name("Bounded Option")
+            .color(Color::Teal)
+            .create()
+            .await
+            .expect("create direct-lookup tag");
+
+        let found = ctx
+            .client
+            .lookup_property_tag(&ctx.space_id, &property.id, "Bounded Option")
+            .await
+            .expect("lookup tag through explicit property id");
+        assert_eq!(found.id, tag.id);
+    })
+    .await
+}
+
 /// Test listing tags for a select property
 #[tokio::test]
 #[test_log::test]

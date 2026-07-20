@@ -8,9 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
-- direct property-ID reads now offer a cache-independent, exact-identity
-  scoped GET; explicit-ID tag lookup uses it before fetching tag options, so a
-  cold cache no longer primes every property in the space
+- direct property-ID reads now offer a metadata-only, cache-independent,
+  exact-identity scoped GET that never expands tags; explicit-ID tag lookup
+  follows it with a separately paginated 1,000-row scan and fails explicitly
+  when completeness exceeds that bound, so a cold cache no longer primes
+  every property or collects unbounded tag options
 - explicit type-ID metadata resolution now performs one cache-independent
   scoped GET and rejects mismatched returned type identities, avoiding an
   unbounded all-types cache prime in bounded protocol consumers
