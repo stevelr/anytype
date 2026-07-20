@@ -620,6 +620,32 @@ impl ObjectRequest {
             .await?;
         Ok(response.object)
     }
+
+    /// Deletes (archives) the object with exactly one HTTP request attempt.
+    ///
+    /// This has the same soft-delete semantics and response bounds as
+    /// [`delete`](Self::delete), but disables middleware retries for callers
+    /// that must reconcile an uncertain response through read-after-write
+    /// confirmation instead of replaying the mutation.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::NotFound`] if the object doesn't exist
+    /// - [`AnytypeError::Forbidden`] if you don't have permission
+    /// - transport, status, response-bound, or response-decoding errors from
+    ///   the sole request attempt
+    pub async fn delete_once(self) -> Result<Object> {
+        self.limits.validate_id(&self.space_id, "space_id")?;
+        self.limits.validate_id(&self.object_id, "object_id")?;
+
+        let response: ObjectResponse = self
+            .client
+            .delete_document_request_once(&format!(
+                "/v1/spaces/{}/objects/{}",
+                self.space_id, self.object_id
+            ))
+            .await?;
+        Ok(response.object)
+    }
 }
 
 /// Request builder for creating a new object.
