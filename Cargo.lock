@@ -304,6 +304,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tracing",
+ "url",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
  "zeroize",

@@ -68,7 +68,7 @@ const MAX_RESOLVE_CANDIDATE_ID_CHARS: usize = 256;
 // An explicit limit bypasses cache-prime shortcuts. Choosing 99 also makes
 // short-page completion unambiguous around the 1,000-row scan ceiling and for
 // chat searches, whose gRPC response has no total/has-more metadata.
-const RESOLVE_PAGE_SIZE: u32 = 99;
+pub(crate) const RESOLVE_PAGE_SIZE: u32 = 99;
 
 /// Name of the default chat created in every space.
 ///
@@ -1157,7 +1157,7 @@ fn property_candidate(property: &crate::properties::Property) -> ResolveCandidat
     ResolveCandidate::new(&property.id, &property.name)
 }
 
-fn resolution_limit(obj_type: &str, key: &str) -> AnytypeError {
+pub(crate) fn resolution_limit(obj_type: &str, key: &str) -> AnytypeError {
     AnytypeError::ResolutionLimitExceeded {
         obj_type: obj_type.to_string(),
         key: key.to_string(),

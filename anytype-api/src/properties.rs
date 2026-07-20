@@ -78,6 +78,7 @@ use serde_json::{Number, Value, json};
 use snafu::prelude::*;
 use tracing::error;
 
+use crate::resolve::{MAX_RESOLVE_SCAN_ITEMS, RESOLVE_PAGE_SIZE, resolution_limit};
 use crate::{
     Result,
     cache::AnytypeCache,
@@ -842,7 +843,10 @@ impl PropertyRequest {
         }
     }
 
-    /// Also fetches tags for this property.
+    /// Also fetches tags when this request is executed with [`get`](Self::get).
+    ///
+    /// [`get_direct`](Self::get_direct) is intentionally metadata-only and
+    /// never expands tags, even when this option was selected.
     #[must_use]
     pub fn with_tags(mut self) -> Self {
         self.with_tags = true;
@@ -886,7 +890,11 @@ impl PropertyRequest {
         }
 
         // cache disabled, fetch directly
-        self.fetch_direct().await
+        let mut property = self.fetch_direct_metadata().await?;
+        if self.with_tags {
+            set_property_tags(&self.client, &self.limits, &self.space_id, &mut property).await?;
+        }
+        Ok(property)
     }
 
     /// Retrieves the property with one cache-independent scoped HTTP GET.
@@ -894,9 +902,11 @@ impl PropertyRequest {
     /// Unlike [`get`](Self::get), this method neither reads nor primes the
     /// in-memory property cache. It validates the space and property IDs
     /// before dispatch and rejects a successful response whose property ID
-    /// differs from the requested ID. If [`with_tags`](Self::with_tags) was
-    /// selected, tag options are fetched only after the property identity has
-    /// been verified.
+    /// differs from the requested ID. This method is always metadata-only:
+    /// [`with_tags`](Self::with_tags) affects [`get`](Self::get), but is
+    /// intentionally ignored here so a direct read is exactly one request and
+    /// can never expand into an unbounded tag scan. Any tags included
+    /// unexpectedly in the direct response are discarded.
     ///
     /// # Returns
     /// The property returned for the exact scoped property endpoint.
@@ -909,10 +919,12 @@ impl PropertyRequest {
     pub async fn get_direct(self) -> Result<Property> {
         self.limits.validate_id(&self.space_id, "space_id")?;
         self.limits.validate_id(&self.property_id, "property_id")?;
-        self.fetch_direct().await
+        let mut property = self.fetch_direct_metadata().await?;
+        property.tags = None;
+        Ok(property)
     }
 
-    async fn fetch_direct(&self) -> Result<Property> {
+    async fn fetch_direct_metadata(&self) -> Result<Property> {
         let response: PropertyResponse = self
             .client
             .get_request(
@@ -924,17 +936,12 @@ impl PropertyRequest {
             )
             .await?;
 
-        let mut property = response.property;
+        let property = response.property;
         if property.id != self.property_id {
             return OtherSnafu {
                 message: "Anytype returned a mismatched property identity".to_string(),
             }
             .fail();
-        }
-
-        // Fetch tags only after the scoped response identity is trusted.
-        if self.with_tags {
-            set_property_tags(&self.client, &self.limits, &self.space_id, &mut property).await?;
         }
 
         Ok(property)
@@ -1695,8 +1702,12 @@ impl AnytypeClient {
     /// `property_key` can be a property key or id
     /// `tag_name` can be tag id, name, or key
     ///
-    /// An explicit property ID is fetched with one cache-independent scoped
-    /// GET before its tags are listed. A property key retains the cached key
+    /// An explicit property ID is fetched with one metadata-only,
+    /// cache-independent scoped GET before tag options are scanned in explicit
+    /// 99-row pages. The scan examines at most
+    /// [`MAX_RESOLVE_SCAN_ITEMS`] options and returns
+    /// [`AnytypeError::ResolutionLimitExceeded`] rather than guessing when
+    /// completeness exceeds that bound. A property key retains the cached key
     /// lookup behavior and therefore requires cache to be enabled (the
     /// default).
     ///
@@ -1727,16 +1738,87 @@ impl AnytypeClient {
     ) -> Result<Tag> {
         let prop_key_or_id = property_key.as_ref();
         let tag_key_or_id = tag_name.as_ref();
-        let property = if looks_like_object_id(prop_key_or_id) {
-            self.property(space_id, prop_key_or_id)
-                .with_tags()
-                .get_direct()
+        if looks_like_object_id(prop_key_or_id) {
+            let property = self.property(space_id, prop_key_or_id).get_direct().await?;
+            if !matches!(
+                property.format(),
+                PropertyFormat::Select | PropertyFormat::MultiSelect
+            ) {
+                return NotFoundSnafu {
+                    obj_type: "Tag".to_owned(),
+                    key: tag_key_or_id.to_owned(),
+                }
+                .fail();
+            }
+            return self
+                .lookup_property_tag_bounded(space_id, prop_key_or_id, tag_key_or_id)
+                .await;
+        }
+
+        self.lookup_property_by_key(space_id, prop_key_or_id)
+            .await?
+            .lookup_tag(tag_key_or_id)
+    }
+
+    async fn lookup_property_tag_bounded(
+        &self,
+        space_id: &str,
+        property_id: &str,
+        tag_key_or_id: &str,
+    ) -> Result<Tag> {
+        const MAX_PAGES: usize = MAX_RESOLVE_SCAN_ITEMS.div_ceil(RESOLVE_PAGE_SIZE as usize);
+
+        let needle = tag_key_or_id.to_lowercase();
+        let mut offset = 0_u32;
+        let mut scanned = 0_usize;
+        for _ in 0..MAX_PAGES {
+            let remaining = MAX_RESOLVE_SCAN_ITEMS.saturating_sub(scanned);
+            if remaining == 0 {
+                return Err(resolution_limit("tag", tag_key_or_id));
+            }
+            let requested_limit = RESOLVE_PAGE_SIZE.min(remaining as u32);
+            let page = self
+                .tags(space_id, property_id)
+                .limit(requested_limit)
+                .offset(offset)
+                .list()
                 .await?
-        } else {
-            self.lookup_property_by_key(space_id, prop_key_or_id)
-                .await?
-        };
-        property.lookup_tag(tag_key_or_id)
+                .into_response();
+            if page.pagination.offset != offset
+                || page.pagination.limit != requested_limit
+                || page.items.len() > remaining
+                || page.items.len() > requested_limit as usize
+            {
+                return OtherSnafu {
+                    message: "Anytype returned malformed tag pagination".to_owned(),
+                }
+                .fail();
+            }
+
+            for tag in &page.items {
+                if tag.id == needle || tag.key == needle || tag.name.to_lowercase() == needle {
+                    return Ok(tag.clone());
+                }
+            }
+            scanned += page.items.len();
+
+            if page.pagination.total > MAX_RESOLVE_SCAN_ITEMS
+                || (scanned == MAX_RESOLVE_SCAN_ITEMS && page.pagination.has_more)
+            {
+                return Err(resolution_limit("tag", tag_key_or_id));
+            }
+            if !page.pagination.has_more {
+                return NotFoundSnafu {
+                    obj_type: "Tag".to_owned(),
+                    key: tag_key_or_id.to_owned(),
+                }
+                .fail();
+            }
+            offset = offset
+                .checked_add(requested_limit)
+                .ok_or_else(|| resolution_limit("tag", tag_key_or_id))?;
+        }
+        Err(resolution_limit("tag", tag_key_or_id))
     }
 }
 
@@ -1746,6 +1828,8 @@ impl AnytypeClient {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     const TEST_SPACE_ID: &str =
@@ -1762,8 +1846,16 @@ mod tests {
         tag_list_pages: usize,
     }
 
+    #[derive(Clone, Copy)]
+    enum TagRoute {
+        Single,
+        TargetSecondPage,
+        BeyondLimit,
+    }
+
     async fn route_aware_property_server(
         returned_property_id: &'static str,
+        tag_route: TagRoute,
     ) -> (
         String,
         tokio::sync::oneshot::Sender<()>,
@@ -1806,19 +1898,27 @@ mod tests {
                 }
                 let request = String::from_utf8(request).expect("property request is utf-8");
                 let request_line = request.lines().next().expect("property request line");
-                let target = request_line
-                    .split_ascii_whitespace()
-                    .nth(1)
-                    .expect("property request target");
+                let mut parts = request_line.split_ascii_whitespace();
+                assert_eq!(parts.next(), Some("GET"));
+                let target = parts.next().expect("property request target");
+                assert_eq!(parts.next(), Some("HTTP/1.1"));
+                assert_eq!(parts.next(), None, "extra property request-line field");
+                let (path, raw_query) = target
+                    .split_once('?')
+                    .map_or((target, ""), |(path, query)| (path, query));
+                let mut query = BTreeMap::new();
+                for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+                    let previous = query.insert(key.into_owned(), value.into_owned());
+                    assert!(previous.is_none(), "duplicate property query key");
+                }
                 let collection_path = format!("/v1/spaces/{TEST_SPACE_ID}/properties");
                 let direct_path = format!("{collection_path}/{TEST_PROPERTY_ID}");
                 let tags_path = format!("{direct_path}/tags");
-                let body = if target == collection_path
-                    || target.starts_with(&format!("{collection_path}?"))
-                {
+                let body = if path == collection_path {
                     let page = traffic.property_list_pages;
                     traffic.property_list_pages += 1;
                     if page == 0 {
+                        assert_eq!(query, BTreeMap::new(), "first property-list query");
                         serde_json::json!({
                             "data": [{
                                 "id": OTHER_PROPERTY_ID,
@@ -1836,6 +1936,14 @@ mod tests {
                         })
                         .to_string()
                     } else {
+                        assert_eq!(
+                            query,
+                            BTreeMap::from([
+                                ("limit".to_owned(), "100".to_owned()),
+                                ("offset".to_owned(), "100".to_owned()),
+                            ]),
+                            "continued property-list query"
+                        );
                         serde_json::json!({
                             "data": [{
                                 "id": TEST_PROPERTY_ID,
@@ -1853,7 +1961,8 @@ mod tests {
                         })
                         .to_string()
                     }
-                } else if target == direct_path {
+                } else if path == direct_path {
+                    assert_eq!(query, BTreeMap::new(), "direct property query");
                     traffic.direct_property_gets += 1;
                     serde_json::json!({
                         "property": {
@@ -1861,27 +1970,97 @@ mod tests {
                             "key": "status",
                             "name": "private-property-body-marker",
                             "format": "select",
-                            "tags": null
+                            "tags": [{
+                                "id": OTHER_PROPERTY_ID,
+                                "key": "embedded-private-tag",
+                                "name": "embedded private tag",
+                                "color": "red"
+                            }]
                         }
                     })
                     .to_string()
-                } else if target == tags_path || target.starts_with(&format!("{tags_path}?")) {
+                } else if path == tags_path {
+                    let page = traffic.tag_list_pages;
                     traffic.tag_list_pages += 1;
-                    serde_json::json!({
-                        "data": [{
-                            "id": TEST_TAG_ID,
-                            "key": "open",
-                            "name": "Open",
-                            "color": "blue"
-                        }],
-                        "pagination": {
-                            "has_more": false,
-                            "limit": 100,
-                            "offset": 0,
-                            "total": 1
+                    let expected_query = if page == 0 {
+                        BTreeMap::from([("limit".to_owned(), "99".to_owned())])
+                    } else {
+                        BTreeMap::from([
+                            ("limit".to_owned(), "99".to_owned()),
+                            ("offset".to_owned(), "99".to_owned()),
+                        ])
+                    };
+                    assert_eq!(query, expected_query, "tag-list query for page {page}");
+                    match (tag_route, page) {
+                        (TagRoute::Single, 0) => serde_json::json!({
+                            "data": [{
+                                "id": TEST_TAG_ID,
+                                "key": "open",
+                                "name": "Open",
+                                "color": "blue"
+                            }],
+                            "pagination": {
+                                "has_more": false,
+                                "limit": 99,
+                                "offset": 0,
+                                "total": 1
+                            }
+                        })
+                        .to_string(),
+                        (TagRoute::TargetSecondPage, 0) => {
+                            let tags = (0..99)
+                                .map(|index| {
+                                    serde_json::json!({
+                                        "id": format!("other-tag-{index}"),
+                                        "key": format!("other_{index}"),
+                                        "name": format!("Other {index}"),
+                                        "color": "grey"
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            serde_json::json!({
+                                "data": tags,
+                                "pagination": {
+                                    "has_more": true,
+                                    "limit": 99,
+                                    "offset": 0,
+                                    "total": 100
+                                }
+                            })
+                            .to_string()
                         }
-                    })
-                    .to_string()
+                        (TagRoute::TargetSecondPage, 1) => serde_json::json!({
+                            "data": [{
+                                "id": TEST_TAG_ID,
+                                "key": "open",
+                                "name": "Open",
+                                "color": "blue"
+                            }],
+                            "pagination": {
+                                "has_more": false,
+                                "limit": 99,
+                                "offset": 99,
+                                "total": 100
+                            }
+                        })
+                        .to_string(),
+                        (TagRoute::BeyondLimit, 0) => serde_json::json!({
+                            "data": [{
+                                "id": "other-tag",
+                                "key": "other",
+                                "name": "Other",
+                                "color": "grey"
+                            }],
+                            "pagination": {
+                                "has_more": true,
+                                "limit": 99,
+                                "offset": 0,
+                                "total": 1001
+                            }
+                        })
+                        .to_string(),
+                        _ => panic!("unexpected tag fixture page {page}"),
+                    }
                 } else {
                     panic!("unexpected property fixture route: {request_line}");
                 };
@@ -1915,7 +2094,8 @@ mod tests {
 
     #[tokio::test]
     async fn direct_property_get_is_cache_independent_and_exactly_scoped() {
-        let (base_url, shutdown, traffic) = route_aware_property_server(TEST_PROPERTY_ID).await;
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::Single).await;
         let client = route_fixture_client(base_url);
         assert!(
             client.cache().is_enabled(),
@@ -1924,10 +2104,15 @@ mod tests {
 
         let property = client
             .property(TEST_SPACE_ID, TEST_PROPERTY_ID)
+            .with_tags()
             .get_direct()
             .await
             .expect("direct property");
         assert_eq!(property.id, TEST_PROPERTY_ID);
+        assert!(
+            property.tags().is_none(),
+            "direct metadata must discard embedded tags"
+        );
 
         shutdown.send(()).expect("stop property fixture");
         let traffic = traffic.await.expect("property fixture task");
@@ -1946,7 +2131,8 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_id_tag_lookup_uses_direct_property_get_with_cold_cache() {
-        let (base_url, shutdown, traffic) = route_aware_property_server(TEST_PROPERTY_ID).await;
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::Single).await;
         let client = route_fixture_client(base_url);
         assert!(
             client.cache().is_enabled(),
@@ -1971,8 +2157,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_id_tag_lookup_finds_second_page_target_within_budget() {
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::TargetSecondPage).await;
+        let client = route_fixture_client(base_url);
+
+        let tag = client
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "open")
+            .await
+            .expect("bounded second-page tag lookup");
+        assert_eq!(tag.id, TEST_TAG_ID);
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(traffic.property_list_pages, 0);
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(traffic.tag_list_pages, 2);
+        assert_eq!(traffic.requests.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn explicit_id_tag_lookup_reports_incomplete_scan_beyond_budget() {
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::BeyondLimit).await;
+        let client = route_fixture_client(base_url);
+
+        let error = client
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "absent")
+            .await
+            .expect_err("incomplete tag scan must not report not-found");
+        assert!(matches!(
+            error,
+            AnytypeError::ResolutionLimitExceeded {
+                obj_type,
+                limit: MAX_RESOLVE_SCAN_ITEMS,
+                ..
+            } if obj_type == "tag"
+        ));
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(traffic.property_list_pages, 0);
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(
+            traffic.tag_list_pages, 1,
+            "known over-budget total stops immediately"
+        );
+        assert_eq!(traffic.requests.len(), 2);
+    }
+
+    #[tokio::test]
     async fn direct_property_identity_mismatch_is_secret_safe_and_skips_tags() {
-        let (base_url, shutdown, traffic) = route_aware_property_server(OTHER_PROPERTY_ID).await;
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(OTHER_PROPERTY_ID, TagRoute::Single).await;
         let client = route_fixture_client(base_url);
 
         let error = client
@@ -2021,6 +2258,23 @@ mod tests {
                 .expect_err("unsafe scoped id must fail before transport");
             assert!(matches!(error, AnytypeError::Validation { .. }));
         }
+    }
+
+    #[tokio::test]
+    async fn property_key_tag_lookup_retains_documented_cache_requirement() {
+        let mut config =
+            crate::client::ClientConfig::default().app_name("property-key-cache-fixture");
+        config.base_url = Some("http://127.0.0.1:1".to_owned());
+        config.keystore = Some("env".to_owned());
+        config.disable_cache = true;
+        let client = AnytypeClient::with_config(config).expect("cache-disabled fixture client");
+        client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
+
+        let error = client
+            .lookup_property_tag(TEST_SPACE_ID, "status", "Open")
+            .await
+            .expect_err("property-key lookup requires enabled cache");
+        assert!(matches!(error, AnytypeError::CacheDisabled));
     }
 
     #[test]
