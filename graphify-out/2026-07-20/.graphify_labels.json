@@ -374,5 +374,16 @@
   "372": "go-testvec",
   "373": "mod.rs",
   "374": "lib.rs",
-  "375": "lib.rs"
+  "375": "lib.rs",
+  "376": "ParticipantStatus",
+  "377": "PaymentProvider",
+  "378": "RelationFormat",
+  "379": ".from_str_name",
+  "380": ".fmt",
+  "381": "AuthArgs",
+  "382": "AuthCommand",
+  "383": "Cli",
+  "384": "InviteArgs",
+  "385": "ObjectArgs",
+  "386": "SpaceArgs"
 }

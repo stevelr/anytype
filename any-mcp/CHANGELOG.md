@@ -8,5 +8,5 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
-- initial bounded, workflow-oriented MCP server scaffold using `rmcp` 2.2.0 and
-  the upcoming MCP protocol revision `2026-07-28`
+- Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
+  2.2.0 and protocol revision `2026-07-28`.

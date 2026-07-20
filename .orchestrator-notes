@@ -1,6 +1,5 @@
 # Orchestrator Notes
 
-- Audited `any-g8g`: the canonical filtered ready query and tracker-ready/session-deferred/blocked classifications are present in `AGENTS.md`; the final query returned `[]`.
-- `any-g8g` is verified but remains in progress for the designated closer; no crate files changed, so no crate CHANGELOG entry applies.
-- Blocked state: 18 scoped MCP issues remain dependency-blocked. `any-cut` is still in progress, and its scaffold change is on a divergent head rather than in the current ancestry.
-- Next: integrate and verify `any-cut`, let the designated closer close verified tickets, then rerun the exact scoped ready query.
+- Audited `any-cut`: Definition of Done verified; scaffold, dependency boundary, protocol identity, rustdoc, README, CHANGELOG, build, unit test, clippy, rustfmt, gate checks, and zero-output startup all pass.
+- Blocked: `any-cut` remains in progress for the designated closer; its 18 scoped dependents remain dependency-blocked, and no scoped review issue is unblocked yet.
+- Next: closer closes `any-cut`, then rechecks unblocked reviews and the exact scoped ready query before scheduling dependents.
