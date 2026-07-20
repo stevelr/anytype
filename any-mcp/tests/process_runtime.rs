@@ -89,3 +89,22 @@ fn invalid_protocol_mode_fails_before_auth_without_echoing_its_value() {
     assert!(!stderr.contains(secret_like_value));
     assert!(!stderr.contains("HTTP credentials are missing"));
 }
+
+#[test]
+fn invalid_catalog_profile_fails_before_auth_without_echoing_its_value() {
+    let secret_like_value = "secret-catalog-profile";
+    let output = unauthenticated_command()
+        .env("ANY_MCP_PROFILE", secret_like_value)
+        .output()
+        .expect("run any-mcp test binary");
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "stdout is reserved for MCP frames"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("ANY_MCP_PROFILE"));
+    assert!(!stderr.contains(secret_like_value));
+    assert!(!stderr.contains("HTTP credentials are missing"));
+}

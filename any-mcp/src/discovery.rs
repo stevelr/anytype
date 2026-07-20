@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
+    config::ApplicationProfile,
     cursor::{CursorStore, CursorStoreError, CursorToken},
     domain::{
         BoundedText, DisplayName, DomainValueError, EntityId, ObjectSummary, SpaceId, TypeKey,
@@ -39,7 +40,7 @@ use crate::{
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
     schema::SchemaContractError,
-    validation::BoundedList,
+    validation::{BoundedList, ValidationError},
 };
 
 const MAX_REFERENCE_CHARS: usize = 512;
@@ -205,6 +206,10 @@ pub struct TemplateListInput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerStatusOutput {
+    /// Startup-selected application catalog profile.
+    profile: ApplicationProfile,
+    /// Whether mutating workflows are omitted and rejected.
+    read_only: bool,
     /// HTTP endpoint with user information, query, and fragment removed.
     endpoint: Endpoint,
     /// Anytype HTTP API revision used by the client.
@@ -213,7 +218,7 @@ pub struct ServerStatusOutput {
     http_available: bool,
     /// Whether configured gRPC credentials and its startup probe succeeded.
     grpc_available: bool,
-    /// Startup-selected MCP toolsets; Phase 1 enables only the default set.
+    /// Startup-selected MCP toolsets available in this application profile.
     enabled_toolsets: EnabledToolsets,
 }
 
@@ -221,20 +226,39 @@ pub struct ServerStatusOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EnabledToolset {
-    /// The bounded Phase 1 document workflow catalog.
-    Default,
-    /// Optional schema-management workflows.
-    Schema,
-    /// Optional member discovery workflows.
-    Members,
-    /// Optional collection and view mutation workflows.
-    ViewsWrite,
-    /// Optional file workflows.
-    Files,
-    /// Optional chat workflows.
-    Chats,
-    /// Optional narrowly scoped administrative workflows.
-    Admin,
+    /// Server status and capability discovery.
+    Core,
+    /// Search, read, and exact-edit document workflows.
+    Documents,
+    /// Space and type discovery workflows.
+    Discovery,
+    /// Object creation workflow.
+    Create,
+    /// Broad object update and archive workflows.
+    AdvancedMutations,
+    /// Property and tag discovery workflows.
+    Properties,
+    /// Template discovery workflows.
+    Templates,
+    /// View and view-object discovery workflows.
+    Views,
+}
+
+fn enabled_toolsets(profile: ApplicationProfile) -> Result<EnabledToolsets, ValidationError> {
+    let values = match profile {
+        ApplicationProfile::Compact => vec![EnabledToolset::Core, EnabledToolset::Documents],
+        ApplicationProfile::Standard => vec![
+            EnabledToolset::Core,
+            EnabledToolset::Documents,
+            EnabledToolset::Discovery,
+            EnabledToolset::Create,
+            EnabledToolset::AdvancedMutations,
+            EnabledToolset::Properties,
+            EnabledToolset::Templates,
+            EnabledToolset::Views,
+        ],
+    };
+    EnabledToolsets::new(values)
 }
 
 /// Concise Anytype space summary.
@@ -462,6 +486,8 @@ impl DiscoveryHandlers {
         };
         let runtime = self.runtime.clone();
         let status = runtime.startup_status();
+        let profile = runtime.profile();
+        let read_only = runtime.is_read_only();
         let endpoint = runtime.client().get_http_endpoint().to_owned();
         let api_version = runtime.client().api_version();
         execute_handler(
@@ -472,11 +498,13 @@ impl DiscoveryHandlers {
             async move { Ok::<_, AnytypeError>((endpoint, api_version, status)) },
             |(endpoint, api_version, status)| async move {
                 Ok(ServerStatusOutput {
+                    profile,
+                    read_only,
                     endpoint: redact_endpoint(&endpoint)?,
                     api_version: ApiVersion::new(api_version).map_err(domain_handler_error)?,
                     http_available: status.http_available,
                     grpc_available: status.grpc_available,
-                    enabled_toolsets: EnabledToolsets::new(vec![EnabledToolset::Default])?,
+                    enabled_toolsets: enabled_toolsets(profile)?,
                 })
             },
         )
@@ -1530,7 +1558,21 @@ mod tests {
         assert_eq!(value["api_version"], anytype::ANYTYPE_API_VERSION);
         assert_eq!(value["http_available"], true);
         assert_eq!(value["grpc_available"], false);
-        assert_eq!(value["enabled_toolsets"], json!(["default"]));
+        assert_eq!(value["profile"], "standard");
+        assert_eq!(value["read_only"], false);
+        assert_eq!(
+            value["enabled_toolsets"],
+            json!([
+                "core",
+                "documents",
+                "discovery",
+                "create",
+                "advanced_mutations",
+                "properties",
+                "templates",
+                "views"
+            ])
+        );
         let wire = result.content[0].as_text().unwrap().text.as_str();
         for secret in ["alice", "secret", "token", "fragment"] {
             assert!(!wire.contains(secret));

@@ -10,6 +10,8 @@ use std::{fmt, time::Duration};
 use anytype::prelude::{
     ClientConfig, MAX_DOCUMENT_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseLimits,
 };
+use schemars::JsonSchema;
+use serde::Serialize;
 
 const DEFAULT_KEYSTORE_SERVICE: &str = "anyr";
 const DEFAULT_MAX_CONCURRENCY: usize = 8;
@@ -36,11 +38,38 @@ pub enum ProtocolMode {
     Experimental20260728,
 }
 
+/// Startup-selected application catalog profile.
+///
+/// Profiles select stable sets of complete workflow contracts. They never
+/// change the schema of a tool name and are independent of read-only mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationProfile {
+    /// Common existing-document search, read, and exact-edit workflows.
+    #[default]
+    Compact,
+    /// Complete fourteen-tool Phase 1 compatibility catalog.
+    Standard,
+}
+
+impl ApplicationProfile {
+    /// Returns the stable configuration/wire name of this profile.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Standard => "standard",
+        }
+    }
+}
+
 /// Validated configuration for one `any-mcp` process.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     /// Stdio protocol mode selected at process startup.
     pub protocol_mode: ProtocolMode,
+    /// Startup-selected stable application catalog profile.
+    pub profile: ApplicationProfile,
     /// Whether the production catalog omits and rejects mutating workflows.
     pub read_only: bool,
     /// Maximum number of concurrent Anytype operations.
@@ -64,7 +93,8 @@ impl RuntimeConfig {
     ///
     /// Anytype settings use `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
     /// `ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE`. Operational limits
-    /// use `ANY_MCP_PROTOCOL`, `ANY_MCP_READ_ONLY`, `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
+    /// use `ANY_MCP_PROTOCOL`, `ANY_MCP_PROFILE`, `ANY_MCP_READ_ONLY`,
+    /// `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
     /// `ANY_MCP_STARTUP_TIMEOUT_SECS`, `ANY_MCP_JSON_RESPONSE_BYTES`, and
     /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`.
     ///
@@ -105,6 +135,7 @@ impl RuntimeConfig {
         F: Fn(&'static str) -> Result<Option<String>, ConfigError>,
     {
         let protocol_mode = parse_protocol_mode(lookup("ANY_MCP_PROTOCOL")?)?;
+        let profile = parse_profile(lookup("ANY_MCP_PROFILE")?)?;
         let read_only = parse_read_only(lookup("ANY_MCP_READ_ONLY")?)?;
         let max_concurrency = parse_bounded(
             "ANY_MCP_MAX_CONCURRENCY",
@@ -145,6 +176,7 @@ impl RuntimeConfig {
 
         Ok(Self {
             protocol_mode,
+            profile,
             read_only,
             max_concurrency,
             request_timeout: Duration::from_secs(request_timeout_secs),
@@ -167,6 +199,17 @@ fn parse_protocol_mode(value: Option<String>) -> Result<ProtocolMode, ConfigErro
         Some(_) => Err(ConfigError::invalid(
             "ANY_MCP_PROTOCOL",
             "must be exactly stable or experimental-2026-07-28",
+        )),
+    }
+}
+
+fn parse_profile(value: Option<String>) -> Result<ApplicationProfile, ConfigError> {
+    match value.as_deref() {
+        None | Some("compact") => Ok(ApplicationProfile::Compact),
+        Some("standard") => Ok(ApplicationProfile::Standard),
+        Some(_) => Err(ConfigError::invalid(
+            "ANY_MCP_PROFILE",
+            "must be exactly compact or standard",
         )),
     }
 }
@@ -256,6 +299,7 @@ mod tests {
 
         assert_eq!(config.max_concurrency, 8);
         assert_eq!(config.protocol_mode, ProtocolMode::Stable);
+        assert_eq!(config.profile, ApplicationProfile::Compact);
         assert!(!config.read_only);
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.startup_timeout, Duration::from_secs(15));
@@ -286,6 +330,7 @@ mod tests {
             ("ANYTYPE_GRPC_ENDPOINT", "127.0.0.1:31013"),
             ("ANYTYPE_KEYSTORE", "env"),
             ("ANYTYPE_KEYSTORE_SERVICE", "custom-service"),
+            ("ANY_MCP_PROFILE", "compact"),
             ("ANY_MCP_READ_ONLY", "1"),
             ("ANY_MCP_PROTOCOL", "experimental-2026-07-28"),
             ("ANY_MCP_MAX_CONCURRENCY", "16"),
@@ -302,6 +347,7 @@ mod tests {
         assert_eq!(client.keystore.as_deref(), Some("env"));
         assert_eq!(client.keystore_service.as_deref(), Some("custom-service"));
         assert_eq!(config.max_concurrency, 16);
+        assert_eq!(config.profile, ApplicationProfile::Compact);
         assert!(config.read_only);
         assert_eq!(config.protocol_mode, ProtocolMode::Experimental20260728);
         assert_eq!(config.request_timeout, Duration::from_secs(45));
@@ -348,7 +394,6 @@ mod tests {
             assert!(message.contains("ANY_MCP_READ_ONLY"));
         }
     }
-
     #[test]
     fn protocol_mode_is_stable_by_default_and_preview_is_exact() {
         assert_eq!(config(&[]).unwrap().protocol_mode, ProtocolMode::Stable);
@@ -376,5 +421,44 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("ANY_MCP_PROTOCOL"));
         }
+    }
+
+    #[test]
+    fn application_profile_parser_is_exact_and_secret_safe() {
+        assert_eq!(config(&[]).unwrap().profile, ApplicationProfile::Compact);
+        assert_eq!(
+            config(&[("ANY_MCP_PROFILE", "compact")]).unwrap().profile,
+            ApplicationProfile::Compact
+        );
+        assert_eq!(
+            config(&[("ANY_MCP_PROFILE", "standard")]).unwrap().profile,
+            ApplicationProfile::Standard
+        );
+        for invalid in ["", "default", "Compact", " compact", "standard "] {
+            let error = config(&[("ANY_MCP_PROFILE", invalid)]).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("ANY_MCP_PROFILE"));
+        }
+        let secret_like = "token-do-not-echo-as-profile";
+        let message = config(&[("ANY_MCP_PROFILE", secret_like)])
+            .unwrap_err()
+            .to_string();
+        assert!(!message.contains(secret_like));
+    }
+
+    #[test]
+    fn non_unicode_profile_failure_names_only_the_variable() {
+        let error = RuntimeConfig::from_lookup(|name| {
+            if name == "ANY_MCP_PROFILE" {
+                Err(ConfigError::non_unicode(name))
+            } else {
+                Ok(None)
+            }
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid configuration: ANY_MCP_PROFILE must contain valid Unicode"
+        );
     }
 }

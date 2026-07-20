@@ -1,0 +1,57 @@
+# Cross-platform regression gates for the bounded Anytype MCP server.
+
+name: any-mcp
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/any-mcp.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "any-mcp/**"
+      - "anytype-api/**"
+      - "anytype-rpc/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/any-mcp.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "any-mcp/**"
+      - "anytype-api/**"
+      - "anytype-rpc/**"
+
+permissions:
+  contents: read
+
+jobs:
+  portable-contracts:
+    name: contracts and stdio (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: any-mcp-${{ matrix.os }}
+
+      - name: Run schema, catalog, token-budget, and unit tests
+        run: cargo test --locked -p any-mcp --lib
+
+      - name: Run portable production-process and stdio conformance tests
+        run: cargo test --locked -p any-mcp --test process_runtime --test stdio_conformance

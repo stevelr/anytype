@@ -21,6 +21,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::{
+    config::ApplicationProfile,
     cursor::{CursorStore, CursorStoreError},
     discovery::{
         DiscoveryHandlers, PropertyListInput, ServerStatusInput, SpaceListInput, TagListInput,
@@ -96,6 +97,9 @@ const ALL_TOOL_NAMES: [&str; 14] = [
     VIEW_OBJECT_LIST,
 ];
 
+const COMPACT_TOOL_NAMES: [&str; 4] = [OBJECT_EDIT, OBJECT_GET, OBJECT_SEARCH, SERVER_STATUS];
+const COMPACT_READ_TOOL_NAMES: [&str; 3] = [OBJECT_GET, OBJECT_SEARCH, SERVER_STATUS];
+
 struct ServerState {
     tools: Vec<Tool>,
     access: MutationAccess,
@@ -133,6 +137,9 @@ impl AnyMcpServer {
     /// Read-only runtime configuration omits every mutating tool while retaining
     /// all read tools and resources. Catalog construction validates the exact
     /// canonical inventory and refuses duplicate or disconnected contracts.
+    /// The serialized normal and read-only inventories are also locked by a
+    /// deterministic, reviewed `o200k_base` token-budget regression so schema
+    /// growth cannot silently consume model context.
     ///
     /// # Errors
     ///
@@ -175,21 +182,29 @@ impl AnyMcpServer {
             view_read.view_list_contract().as_tool().clone(),
             view_read.view_object_list_contract().as_tool().clone(),
         ];
+        tools.extend([
+            object_create_tool()
+                .map_err(ServerBuildError::schema)?
+                .into_tool(),
+            object_update_contract.as_tool().clone(),
+            object_edit_contract.as_tool().clone(),
+            object_archive_contract.as_tool().clone(),
+        ]);
         let access = if runtime.is_read_only() {
             MutationAccess::ReadOnly
         } else {
-            tools.extend([
-                object_create_tool()
-                    .map_err(ServerBuildError::schema)?
-                    .into_tool(),
-                object_update_contract.as_tool().clone(),
-                object_edit_contract.as_tool().clone(),
-                object_archive_contract.as_tool().clone(),
-            ]);
             MutationAccess::Allowed
         };
+        tools.retain(|tool| {
+            let name = tool.name.as_ref();
+            let selected = match runtime.profile() {
+                ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
+                ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
+            };
+            selected && !(runtime.is_read_only() && !READ_TOOL_NAMES.contains(&name))
+        });
         tools.sort_by(|left, right| left.name.cmp(&right.name));
-        validate_catalog(&tools, runtime.is_read_only())?;
+        validate_catalog(&tools, runtime.profile(), runtime.is_read_only())?;
 
         Ok(Self {
             runtime: runtime.clone(),
@@ -237,6 +252,14 @@ impl AnyMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         if request.task.is_some() {
             return Err(invalid_arguments());
+        }
+        let name = request.name.as_ref();
+        let selected_by_profile = match self.runtime.profile() {
+            ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
+            ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
+        };
+        if !selected_by_profile {
+            return Err(ErrorData::method_not_found::<CallToolRequestMethod>());
         }
         let arguments = request.arguments;
         match request.name.as_ref() {
@@ -473,11 +496,16 @@ fn reject_static_cursor(request: Option<PaginatedRequestParams>) -> Result<(), E
     Ok(())
 }
 
-fn validate_catalog(tools: &[Tool], read_only: bool) -> Result<(), ServerBuildError> {
-    let expected: &[&str] = if read_only {
-        &READ_TOOL_NAMES
-    } else {
-        &ALL_TOOL_NAMES
+fn validate_catalog(
+    tools: &[Tool],
+    profile: ApplicationProfile,
+    read_only: bool,
+) -> Result<(), ServerBuildError> {
+    let expected: &[&str] = match (profile, read_only) {
+        (ApplicationProfile::Compact, true) => &COMPACT_READ_TOOL_NAMES,
+        (ApplicationProfile::Compact, false) => &COMPACT_TOOL_NAMES,
+        (ApplicationProfile::Standard, true) => &READ_TOOL_NAMES,
+        (ApplicationProfile::Standard, false) => &ALL_TOOL_NAMES,
     };
     if tools.len() != expected.len()
         || tools
@@ -522,7 +550,10 @@ mod tests {
 
     use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
     use rmcp::ServiceExt;
+    use serde::Deserialize;
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+    use tiktoken_rs::{CoreBPE, o200k_base};
     use tokio::{
         io::{
             AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf,
@@ -545,12 +576,45 @@ mod tests {
     const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("../tests/snapshots/catalog-normal.json");
     const READ_ONLY_CATALOG_SNAPSHOT: &str =
         include_str!("../tests/snapshots/catalog-read-only.json");
+    const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("../tests/snapshots/catalog-compact.json");
+    const COMPACT_READ_ONLY_CATALOG_SNAPSHOT: &str =
+        include_str!("../tests/snapshots/catalog-compact-read-only.json");
+    const REPRESENTATIVE_RESULTS_SNAPSHOT: &str =
+        include_str!("../tests/snapshots/result-representatives.json");
+    const TOKEN_BUDGET_SNAPSHOT: &str = include_str!("../tests/snapshots/token-budget.json");
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReviewedTokenBudget {
+        tokenizer: String,
+        smallest_supported_context_tokens: usize,
+        catalog_context_limit_percent: usize,
+        material_growth_review_percent: usize,
+        compact_catalog_tokens: usize,
+        compact_read_only_catalog_tokens: usize,
+        standard_catalog_tokens: usize,
+        standard_read_only_catalog_tokens: usize,
+        object_search_result_tokens: usize,
+        object_get_result_tokens: usize,
+    }
 
     fn runtime(read_only: bool) -> RuntimeContext {
-        runtime_at("http://127.0.0.1:1".to_owned(), read_only)
+        runtime_with_profile(ApplicationProfile::Standard, read_only)
+    }
+
+    fn runtime_with_profile(profile: ApplicationProfile, read_only: bool) -> RuntimeContext {
+        runtime_at_with_profile("http://127.0.0.1:1".to_owned(), profile, read_only)
     }
 
     fn runtime_at(base_url: String, read_only: bool) -> RuntimeContext {
+        runtime_at_with_profile(base_url, ApplicationProfile::Standard, read_only)
+    }
+
+    fn runtime_at_with_profile(
+        base_url: String,
+        profile: ApplicationProfile,
+        read_only: bool,
+    ) -> RuntimeContext {
         let client = AnytypeClient::with_config(ClientConfig {
             base_url: Some(base_url),
             keystore: Some("env".to_string()),
@@ -560,7 +624,7 @@ mod tests {
         })
         .expect("in-memory test client");
         client.set_api_key(HttpCredentials::new("fixture-token"));
-        RuntimeContext::from_parts_with_read_only(
+        RuntimeContext::from_parts_with_profile(
             client,
             1,
             Duration::from_secs(1),
@@ -568,6 +632,7 @@ mod tests {
                 http_available: true,
                 grpc_available: false,
             },
+            profile,
             read_only,
         )
     }
@@ -597,8 +662,9 @@ mod tests {
         }
     }
 
-    fn catalog_snapshot(read_only: bool) -> String {
-        let server = AnyMcpServer::new(runtime(read_only)).expect("static catalog");
+    fn catalog_snapshot(profile: ApplicationProfile, read_only: bool) -> String {
+        let server =
+            AnyMcpServer::new(runtime_with_profile(profile, read_only)).expect("static catalog");
         let value = canonical_json(json!({
             "read_only": read_only,
             "tools": server.tools(),
@@ -607,6 +673,40 @@ mod tests {
             "{}\n",
             serde_json::to_string_pretty(&value).expect("serialize static catalog")
         )
+    }
+
+    fn compact_canonical_json(value: Value) -> String {
+        serde_json::to_string(&canonical_json(value)).expect("serialize compact canonical JSON")
+    }
+
+    fn token_count(tokenizer: &CoreBPE, value: Value) -> usize {
+        tokenizer
+            .encode_with_special_tokens(&compact_canonical_json(value))
+            .len()
+    }
+
+    fn tools_list_value(profile: ApplicationProfile, read_only: bool) -> Value {
+        let server =
+            AnyMcpServer::new(runtime_with_profile(profile, read_only)).expect("static catalog");
+        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
+            .expect("serialize complete tools/list result")
+    }
+
+    fn assert_valid_representative(server: &AnyMcpServer, name: &str, result: &Value) {
+        let schema = server
+            .tools()
+            .iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.output_schema.as_ref())
+            .map(|schema| Value::Object(schema.as_ref().clone()))
+            .unwrap_or_else(|| panic!("production {name} output schema"));
+        let validator = jsonschema::draft202012::options()
+            .build(&schema)
+            .unwrap_or_else(|error| panic!("compile production {name} output schema: {error}"));
+        assert!(
+            validator.is_valid(result),
+            "representative {name} result must satisfy the production output schema"
+        );
     }
 
     const MAX_AUDITED_STRING_CHARS: u64 = 100_000;
@@ -1335,11 +1435,32 @@ mod tests {
     }
 
     #[test]
-    fn normal_and_read_only_catalogs_have_exact_canonical_inventories() {
-        let normal = AnyMcpServer::new(runtime(false)).unwrap();
-        assert_eq!(tool_names(&normal), ALL_TOOL_NAMES);
-        let read_only = AnyMcpServer::new(runtime(true)).unwrap();
-        assert_eq!(tool_names(&read_only), READ_TOOL_NAMES);
+    fn profiles_and_read_only_mode_have_exact_canonical_inventories() {
+        for (profile, read_only, expected) in [
+            (
+                ApplicationProfile::Compact,
+                false,
+                COMPACT_TOOL_NAMES.as_slice(),
+            ),
+            (
+                ApplicationProfile::Compact,
+                true,
+                COMPACT_READ_TOOL_NAMES.as_slice(),
+            ),
+            (
+                ApplicationProfile::Standard,
+                false,
+                ALL_TOOL_NAMES.as_slice(),
+            ),
+            (
+                ApplicationProfile::Standard,
+                true,
+                READ_TOOL_NAMES.as_slice(),
+            ),
+        ] {
+            let server = AnyMcpServer::new(runtime_with_profile(profile, read_only)).unwrap();
+            assert_eq!(tool_names(&server), expected);
+        }
     }
 
     #[test]
@@ -1381,16 +1502,224 @@ mod tests {
     }
 
     #[test]
+    fn shared_tool_names_have_identical_contracts_across_profiles() {
+        for read_only in [false, true] {
+            let compact =
+                AnyMcpServer::new(runtime_with_profile(ApplicationProfile::Compact, read_only))
+                    .unwrap();
+            let standard = AnyMcpServer::new(runtime_with_profile(
+                ApplicationProfile::Standard,
+                read_only,
+            ))
+            .unwrap();
+            for compact_tool in compact.tools() {
+                let standard_tool = standard
+                    .tools()
+                    .iter()
+                    .find(|tool| tool.name == compact_tool.name)
+                    .expect("compact tool must exist in standard profile");
+                assert_eq!(
+                    compact_tool, standard_tool,
+                    "{} contract",
+                    compact_tool.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn serialized_catalog_snapshots_are_exact_and_deterministic() {
-        let normal = catalog_snapshot(false);
+        let normal = catalog_snapshot(ApplicationProfile::Standard, false);
         assert!(
             normal == NORMAL_CATALOG_SNAPSHOT,
             "normal catalog snapshot drifted; review and run the documented explicit updater"
         );
-        let read_only = catalog_snapshot(true);
+        let read_only = catalog_snapshot(ApplicationProfile::Standard, true);
         assert!(
             read_only == READ_ONLY_CATALOG_SNAPSHOT,
             "read-only catalog snapshot drifted; review and run the documented explicit updater"
+        );
+        let compact = catalog_snapshot(ApplicationProfile::Compact, false);
+        assert!(
+            compact == COMPACT_CATALOG_SNAPSHOT,
+            "compact catalog snapshot drifted; review and run the documented explicit updater"
+        );
+        let compact_read_only = catalog_snapshot(ApplicationProfile::Compact, true);
+        assert!(
+            compact_read_only == COMPACT_READ_ONLY_CATALOG_SNAPSHOT,
+            "compact read-only catalog snapshot drifted; review and run the documented explicit updater"
+        );
+    }
+
+    #[test]
+    fn profile_catalogs_and_representative_results_match_reviewed_token_budget() {
+        let tokenizer = o200k_base().expect("construct pinned o200k_base tokenizer");
+        let representatives: Value = serde_json::from_str(REPRESENTATIVE_RESULTS_SNAPSHOT)
+            .expect("reviewed representative results");
+        let reviewed: ReviewedTokenBudget =
+            serde_json::from_str(TOKEN_BUDGET_SNAPSHOT).expect("reviewed token budget");
+        let normal_server = AnyMcpServer::new(runtime(false)).expect("normal static catalog");
+
+        assert_valid_representative(
+            &normal_server,
+            "object_search",
+            &representatives["object_search"],
+        );
+        assert_valid_representative(&normal_server, "object_get", &representatives["object_get"]);
+        let body = &representatives["object_get"]["body"];
+        let text = body["text"].as_str().expect("representative body text");
+        assert_eq!(
+            body["total_chars"].as_u64(),
+            Some(text.chars().count() as u64),
+            "representative body character count"
+        );
+        let body_hash = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            body["sha256"].as_str(),
+            Some(body_hash.as_str()),
+            "representative complete-body hash"
+        );
+
+        let actual = json!({
+            "compact_catalog_tokens": token_count(
+                &tokenizer,
+                tools_list_value(ApplicationProfile::Compact, false),
+            ),
+            "compact_read_only_catalog_tokens": token_count(
+                &tokenizer,
+                tools_list_value(ApplicationProfile::Compact, true),
+            ),
+            "standard_catalog_tokens": token_count(
+                &tokenizer,
+                tools_list_value(ApplicationProfile::Standard, false),
+            ),
+            "standard_read_only_catalog_tokens": token_count(
+                &tokenizer,
+                tools_list_value(ApplicationProfile::Standard, true),
+            ),
+            "object_search_result_tokens": token_count(
+                &tokenizer,
+                representatives["object_search"].clone(),
+            ),
+            "object_get_result_tokens": token_count(
+                &tokenizer,
+                representatives["object_get"].clone(),
+            ),
+        });
+        let expected = json!({
+            "compact_catalog_tokens": reviewed.compact_catalog_tokens,
+            "compact_read_only_catalog_tokens": reviewed.compact_read_only_catalog_tokens,
+            "standard_catalog_tokens": reviewed.standard_catalog_tokens,
+            "standard_read_only_catalog_tokens": reviewed.standard_read_only_catalog_tokens,
+            "object_search_result_tokens": reviewed.object_search_result_tokens,
+            "object_get_result_tokens": reviewed.object_get_result_tokens,
+        });
+        assert_eq!(
+            actual, expected,
+            "token counts changed; review the complete catalog/result diff and update the audited baseline explicitly"
+        );
+
+        assert_eq!(
+            reviewed.tokenizer,
+            "tiktoken o200k_base (tiktoken-rs 0.12.0)"
+        );
+        assert_eq!(reviewed.catalog_context_limit_percent, 5);
+        assert_eq!(reviewed.material_growth_review_percent, 2);
+        let catalog_limit = reviewed
+            .smallest_supported_context_tokens
+            .checked_mul(reviewed.catalog_context_limit_percent)
+            .expect("context percentage multiplication is bounded")
+            / 100;
+        let material_growth_tokens = reviewed
+            .compact_catalog_tokens
+            .checked_mul(reviewed.material_growth_review_percent)
+            .expect("material growth multiplication is bounded")
+            .div_ceil(100);
+        assert!(
+            reviewed.compact_catalog_tokens < catalog_limit,
+            "default catalog must remain below 5% of the smallest supported context: {} >= {}",
+            reviewed.compact_catalog_tokens,
+            catalog_limit,
+        );
+        assert!(
+            reviewed
+                .compact_catalog_tokens
+                .checked_add(material_growth_tokens)
+                .is_some_and(|review_boundary| review_boundary < catalog_limit),
+            "the reviewed material-growth boundary must retain context-limit headroom"
+        );
+    }
+
+    #[test]
+    #[ignore = "diagnostic report for explicit catalog-growth review"]
+    fn report_compact_catalog_token_breakdown() {
+        let tokenizer = o200k_base().expect("construct pinned o200k_base tokenizer");
+        let server = AnyMcpServer::new(runtime_with_profile(ApplicationProfile::Compact, false))
+            .expect("compact static catalog");
+        let response =
+            serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
+                .expect("serialize complete tools/list result");
+        eprintln!(
+            "complete_tools_list_result={}",
+            token_count(&tokenizer, response)
+        );
+        for (profile, read_only) in [
+            (ApplicationProfile::Compact, false),
+            (ApplicationProfile::Compact, true),
+            (ApplicationProfile::Standard, false),
+            (ApplicationProfile::Standard, true),
+        ] {
+            eprintln!(
+                "profile={} read_only={read_only} complete_tools_list_result={}",
+                profile.as_str(),
+                token_count(&tokenizer, tools_list_value(profile, read_only)),
+            );
+        }
+        let mut description_total = 0;
+        let mut input_total = 0;
+        let mut output_total = 0;
+        let mut output_removal_total = 0;
+        for tool in server.tools() {
+            let full_value = serde_json::to_value(tool).expect("serialize production tool");
+            let full_tokens = token_count(&tokenizer, full_value.clone());
+            let description_tokens = tool.description.as_ref().map_or(0, |description| {
+                tokenizer.encode_ordinary(description.as_ref()).len()
+            });
+            let input_tokens = token_count(
+                &tokenizer,
+                Value::Object(tool.input_schema.as_ref().clone()),
+            );
+            let output_tokens = tool.output_schema.as_ref().map_or(0, |schema| {
+                token_count(&tokenizer, Value::Object(schema.as_ref().clone()))
+            });
+            let mut without_description = full_value.clone();
+            without_description
+                .as_object_mut()
+                .expect("serialized tool object")
+                .remove("description");
+            let description_removal =
+                full_tokens.saturating_sub(token_count(&tokenizer, without_description));
+            let mut without_output = full_value;
+            without_output
+                .as_object_mut()
+                .expect("serialized tool object")
+                .remove("outputSchema");
+            let output_removal =
+                full_tokens.saturating_sub(token_count(&tokenizer, without_output));
+            description_total += description_removal;
+            input_total += input_tokens;
+            output_total += output_tokens;
+            output_removal_total += output_removal;
+            eprintln!(
+                "{}: full={full_tokens} description_text={description_tokens} description_field_delta={description_removal} input={input_tokens} output={output_tokens} output_field_delta={output_removal}",
+                tool.name,
+            );
+        }
+        eprintln!(
+            "totals: description_field_delta={description_total} input={input_total} output={output_total} output_field_delta={output_removal_total}"
         );
     }
 
@@ -1670,8 +1999,22 @@ mod tests {
     #[test]
     #[ignore = "manual updater; review every schema and annotation diff before committing"]
     fn write_catalog_snapshots() {
-        write_snapshot("catalog-normal.json", &catalog_snapshot(false));
-        write_snapshot("catalog-read-only.json", &catalog_snapshot(true));
+        write_snapshot(
+            "catalog-normal.json",
+            &catalog_snapshot(ApplicationProfile::Standard, false),
+        );
+        write_snapshot(
+            "catalog-read-only.json",
+            &catalog_snapshot(ApplicationProfile::Standard, true),
+        );
+        write_snapshot(
+            "catalog-compact.json",
+            &catalog_snapshot(ApplicationProfile::Compact, false),
+        );
+        write_snapshot(
+            "catalog-compact-read-only.json",
+            &catalog_snapshot(ApplicationProfile::Compact, true),
+        );
     }
 
     #[tokio::test]
@@ -1701,6 +2044,49 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn compact_omissions_are_unknown_while_read_only_edit_fails_closed() {
+        let writable =
+            AnyMcpServer::new(runtime_with_profile(ApplicationProfile::Compact, false)).unwrap();
+        let error = writable
+            .dispatch_tool(
+                CallToolRequestParams::new(SPACE_LIST),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("standard-only tool is absent from compact");
+        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+
+        let read_only =
+            AnyMcpServer::new(runtime_with_profile(ApplicationProfile::Compact, true)).unwrap();
+        let result = read_only
+            .dispatch_tool(
+                CallToolRequestParams::new(OBJECT_EDIT),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("selected mutation retains read-only defense in depth");
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.structured_content.unwrap()["code"], "validation");
+    }
+
+    #[tokio::test]
+    async fn compact_status_reports_profile_read_only_and_stable_toolsets() {
+        let server =
+            AnyMcpServer::new(runtime_with_profile(ApplicationProfile::Compact, true)).unwrap();
+        let result = server
+            .dispatch_tool(
+                CallToolRequestParams::new(SERVER_STATUS),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let status = result.structured_content.unwrap();
+        assert_eq!(status["profile"], "compact");
+        assert_eq!(status["read_only"], true);
+        assert_eq!(status["enabled_toolsets"], json!(["core", "documents"]));
     }
 
     #[tokio::test]
@@ -1800,7 +2186,7 @@ mod tests {
             status["result"]["structuredContent"]["enabled_toolsets"]
                 .as_array()
                 .map(Vec::len),
-            Some(1)
+            Some(8)
         );
 
         drop(writer);

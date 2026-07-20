@@ -22,6 +22,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   the fixed secret-safe MCP `authentication` error, including definitive
   post-dispatch rejection handling, without depending directly on
   `anytype-rpc` or formatting source diagnostics.
+- Add startup-selected `compact` (default) and `standard` application catalog
+  profiles, with read-only mode remaining orthogonal and `server_status`
+  reporting the selected profile and stable toolsets. Shared names retain
+  identical complete contracts. Enforce deterministic complete-`tools/list`
+  and representative-result budgets with compact canonical JSON and pinned
+  `o200k_base` tokenization. The reviewed 9,423-token compact catalog remains
+  below 5% of the documented 200,000-token support floor with 577 tokens of
+  headroom; exact baselines cover all four profile/read-only envelopes, reject
+  drift, and require an
+  explicit rationale for material growth of at least 2%. Validate the current
+  production output schemas against reviewed search/get results, and run the
+  schema/unit and portable real-process stdio suites on Linux, macOS, and
+  Windows in a dedicated CI matrix.
 - Add a bounded dual-era stdio adapter that preserves the rmcp legacy
   initialization lifecycle for current clients and implements stateless MCP
   `2026-07-28` discovery, per-request metadata/version validation, `-32022`

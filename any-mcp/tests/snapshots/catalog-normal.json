@@ -3559,6 +3559,21 @@
       "name": "server_status",
       "outputSchema": {
         "$defs": {
+          "ApplicationProfile": {
+            "description": "Startup-selected application catalog profile.\n\nProfiles select stable sets of complete workflow contracts. They never\nchange the schema of a tool name and are independent of read-only mode.",
+            "oneOf": [
+              {
+                "const": "compact",
+                "description": "Common existing-document search, read, and exact-edit workflows.",
+                "type": "string"
+              },
+              {
+                "const": "standard",
+                "description": "Complete fourteen-tool Phase 1 compatibility catalog.",
+                "type": "string"
+              }
+            ]
+          },
           "BoundedList8OfEnabledToolset": {
             "items": {
               "$ref": "#/$defs/EnabledToolset"
@@ -3578,38 +3593,43 @@
             "description": "Startup-selected toolset names returned by `server_status`.",
             "oneOf": [
               {
-                "const": "default",
-                "description": "The bounded Phase 1 document workflow catalog.",
+                "const": "core",
+                "description": "Server status and capability discovery.",
                 "type": "string"
               },
               {
-                "const": "schema",
-                "description": "Optional schema-management workflows.",
+                "const": "documents",
+                "description": "Search, read, and exact-edit document workflows.",
                 "type": "string"
               },
               {
-                "const": "members",
-                "description": "Optional member discovery workflows.",
+                "const": "discovery",
+                "description": "Space and type discovery workflows.",
                 "type": "string"
               },
               {
-                "const": "views_write",
-                "description": "Optional collection and view mutation workflows.",
+                "const": "create",
+                "description": "Object creation workflow.",
                 "type": "string"
               },
               {
-                "const": "files",
-                "description": "Optional file workflows.",
+                "const": "advanced_mutations",
+                "description": "Broad object update and archive workflows.",
                 "type": "string"
               },
               {
-                "const": "chats",
-                "description": "Optional chat workflows.",
+                "const": "properties",
+                "description": "Property and tag discovery workflows.",
                 "type": "string"
               },
               {
-                "const": "admin",
-                "description": "Optional narrowly scoped administrative workflows.",
+                "const": "templates",
+                "description": "Template discovery workflows.",
+                "type": "string"
+              },
+              {
+                "const": "views",
+                "description": "View and view-object discovery workflows.",
                 "type": "string"
               }
             ]
@@ -3624,7 +3644,7 @@
           },
           "enabled_toolsets": {
             "$ref": "#/$defs/BoundedList8OfEnabledToolset",
-            "description": "Startup-selected MCP toolsets; Phase 1 enables only the default set."
+            "description": "Startup-selected MCP toolsets available in this application profile."
           },
           "endpoint": {
             "$ref": "#/$defs/BoundedText2048",
@@ -3637,9 +3657,19 @@
           "http_available": {
             "description": "Whether the authenticated HTTP startup probe succeeded.",
             "type": "boolean"
+          },
+          "profile": {
+            "$ref": "#/$defs/ApplicationProfile",
+            "description": "Startup-selected application catalog profile."
+          },
+          "read_only": {
+            "description": "Whether mutating workflows are omitted and rejected.",
+            "type": "boolean"
           }
         },
         "required": [
+          "profile",
+          "read_only",
           "endpoint",
           "api_version",
           "http_available",

@@ -35,7 +35,7 @@ mod stdio;
 pub mod validation;
 pub mod view_handlers;
 
-pub use config::{ProtocolMode, RuntimeConfig};
+pub use config::{ApplicationProfile, ProtocolMode, RuntimeConfig};
 pub use runtime::{
     OperationContext, RuntimeContext, RuntimeError, ServeError, StartupError, StartupStatus,
     serve_stdio,
