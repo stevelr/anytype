@@ -198,6 +198,31 @@ async fn test_types_get_by_id() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
+async fn test_resolve_type_by_id_bypasses_primed_cache() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let types = ctx.client.types(&ctx.space_id).list().await?.items.clone();
+        let first_type = types.first().ok_or_else(|| TestError::Assertion {
+            message: "Need at least one type for this test".to_string(),
+        })?;
+
+        // The list above primes the production cache. Explicit ID resolution
+        // must still issue the bounded, identity-checked direct request.
+        let resolved = ctx
+            .client
+            .resolve_type(&ctx.space_id, &first_type.id)
+            .await?;
+        ctx.increment_calls(2);
+
+        assert_eq!(resolved.id, first_type.id);
+        assert_eq!(resolved.key, first_type.key);
+        assert_eq!(resolved.name, first_type.name);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[test_log::test]
 async fn test_types_get_consistency() -> TestResult<()> {
     with_test_context(|ctx| async move {
         // Get types via list

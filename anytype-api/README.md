@@ -26,7 +26,9 @@ Applications authenticate with Anytype servers using access tokens. One token is
   chat, view, or property by name, key, or id; ambiguous names return up to 10
   deterministic candidate ids and display names for an actionable retry, and
   bounded scans fail explicitly instead of guessing from partial results;
-  candidate ordering is independent of upstream page order
+  candidate ordering is independent of upstream page order. Explicit type IDs
+  that need metadata use one cache-independent scoped GET and reject a
+  mismatched returned identity instead of priming the all-types cache
 - Nested filter expression builder
 - Parameter validation
 - Metrics
