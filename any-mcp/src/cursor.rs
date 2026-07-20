@@ -157,6 +157,15 @@ impl CursorStore {
         }
         Ok(state.offset)
     }
+
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.registry
+            .lock()
+            .expect("cursor registry poisoned")
+            .entries
+            .len()
+    }
 }
 fn parse(v: &str) -> Result<([u8; 8], [u8; 16]), ValidationError> {
     let (version, instance, id) = cursor_parts(v)?;

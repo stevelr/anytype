@@ -66,7 +66,8 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   issuing server process;
 - transport-neutral handler helpers that execute upstream calls and bounded
   conversion under the runtime controls, encode only through the declared
-  typed contract, and advance cursors from checked upstream page metadata;
+  typed contract, verify upstream offset/limit and result count before cursor
+  issuance, and advance continuations from the checked upstream page window;
 - deterministic object adapters with explicit summary-only, selected-property,
   and fail-closed bounded-all projection modes; projected values cover every
   Anytype property format with closed finite wire schemas and never include a
