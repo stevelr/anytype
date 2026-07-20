@@ -23,12 +23,16 @@ Applications authenticate with Anytype servers using access tokens. One token is
 - Http middleware with debug logging, retries, and rate limit handling
 - Client-side caching (spaces, properties, types)
 - Name and id resolution helpers (`resolve` module): accept a space, type,
-  chat, view, or property by name, key, or id; ambiguous names return up to 10
+  template, chat, view, or property by name, key, or id; ambiguous names return up to 10
   deterministic candidate ids and display names for an actionable retry, and
   bounded scans fail explicitly instead of guessing from partial results;
   candidate ordering is independent of upstream page order. Explicit type IDs
   that need metadata use one cache-independent scoped GET and reject a
-  mismatched returned identity instead of priming the all-types cache
+  mismatched returned identity instead of priming the all-types cache. Template
+  resolution uses a direct-id GET or an exact 1,000-row scan and re-fetches the
+  selected template to verify its space, canonical generic template type
+  id/key, and non-archived state; the validated endpoint path establishes the
+  owning object type.
 - Nested filter expression builder
 - Parameter validation
 - Metrics

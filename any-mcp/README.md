@@ -227,35 +227,46 @@ hash precondition was supplied; they never echo the document body.
 
 ### Object create workflow
 
-The transport-neutral `object_create` handler creates exactly one object and
-then performs an explicit object GET before reporting success. Space and type
-references use the bounded `anytype-api` resolvers; an optional template is
-located by a capped 1,000-item paged scan and then fetched by id. Every
-resolver result and both create/read responses are revalidated. A success
-requires safe matching object, space, and type identities plus exact agreement
+The transport-neutral `object_create` handler sends exactly one POST and uses
+bounded semantic verification to retry stale or transient GETs before reporting
+success. Space and full non-archived type references use the bounded
+`anytype-api` resolvers. Optional templates use the public direct-id or exact
+1,000-row resolver and are fetched by id to revalidate archive, space, and type
+id/key for the generic template object; the endpoint path scopes the owning
+object type. Create and verification responses are also revalidated. A success
+requires safe matching object, space, and type id/key plus semantic agreement
 for each caller-supplied name, Markdown body, icon, and typed property. The MCP
 result contains only a bounded object summary and canonical resource link—not
 the body or an implicit property projection.
 
 All optional fields reject explicit JSON `null`; omission means that the field
-is absent from the create payload. Explicitly supplied empty name/body values
-are sent, and empty property or relation lists mean no assignments or
-references. Properties use a closed tagged union for the current Anytype
-property formats. Property keys, tag/file/object references, icon fields,
-scalar lengths, numeric values, collection sizes, body length, and the complete
-request schema are bounded.
+is absent from the create payload. Names are nonempty, while an explicitly
+empty Markdown body is sent. Empty property lists mean no assignments and
+empty relation lists explicitly clear those assignments. Create consumes the
+shared closed mutation values: property keys are strict ASCII, numbers and RFC
+3339 timestamps are canonical, set-valued identifiers are capped before being
+sorted and deduplicated, and all eleven current property formats and three icon
+forms are bounded. Markdown accepts exactly 100,000 Unicode scalar values.
 
-An optional caller-generated `idempotency_key` deduplicates normalized creates
-for the process lifetime. Identical concurrent calls share one in-flight
-attempt without holding the registry mutex across network waits, and verified
-successes are returned from the finite cache without I/O. Key reuse with
-different parameters conflicts before a write. Safe pre-POST failures and
-definitive validation/authentication rejections are removed so they can be
-retried; after possible acceptance, a timeout, cancellation, transport/server
-error, malformed response, or failed verification is retained as an
-indeterminate terminal conflict so the same key can never create a duplicate.
-The registry has a fixed capacity and fails closed when full. Read-only access
-is rejected before even a cached success is inspected.
+An optional caller-generated `idempotency_key` deduplicates the explicit,
+domain-separated version-1 canonical create fingerprint for the process
+lifetime. Identical sequential or concurrent calls share one supervised
+in-flight attempt without holding the registry mutex across network waits, and
+verified successes are returned from the finite cache without I/O. Key reuse
+with different parameters conflicts before a write. Safe pre-POST failures and
+definitive 4xx/validation/authentication rejections free the entry for retry.
+After possible acceptance, timeout, cancellation, transport/server failure,
+oversized or malformed response, identity mismatch, verifier exhaustion, task
+panic, or abort becomes the same fixed indeterminate conflict directing the
+caller to reread/search before retry. This applies on the first keyed or
+unkeyed call; keyed indeterminate entries remain terminal so retry cannot issue
+a second POST, and an identical keyed retry receives the same fixed reread
+guidance without I/O. Only reuse with a different fingerprint receives the
+generic key-conflict guidance. Cancelled leaders and waiters cannot abandon or
+duplicate the supervised cohort. The registry has a fixed capacity and fails
+closed when full. Read-only access is rejected before even a cached success is
+inspected.
+
 ### View discovery workflows
 
 The transport-neutral `view_list` and `view_object_list` handlers provide one
