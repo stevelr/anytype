@@ -1071,6 +1071,13 @@ async fn headless_create_body_canonicalization_is_verified_once() {
             )
             .await;
             assert_eq!(result.is_error, Some(false), "create failed: {result:?}");
+            let object_id = result
+                .structured_content
+                .as_ref()
+                .and_then(|output| output["object"]["id"].as_str())
+                .expect("created object id")
+                .to_owned();
+            ctx.register_object(&object_id);
             let after_first = ctx.client.http_metrics();
             assert_eq!(after_first.total_requests - before.total_requests, 3);
             assert_eq!(after_first.retries - before.retries, 0);
@@ -1091,11 +1098,7 @@ async fn headless_create_body_canonicalization_is_verified_once() {
             assert_eq!(ctx.client.http_metrics(), after_first);
 
             let output = result.structured_content.expect("create-body success body");
-            let object_id = output["object"]["id"]
-                .as_str()
-                .expect("created object id")
-                .to_owned();
-            ctx.register_object(&object_id);
+            assert_eq!(output["object"]["id"].as_str(), Some(object_id.as_str()));
             let created = ctx
                 .client
                 .object(&ctx.space_id, &object_id)
