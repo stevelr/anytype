@@ -159,6 +159,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   the reviewed canonical catalog snapshots, including exact descriptions,
   nested input/output schemas, annotations, ordering, and omissions without
   duplicating fixture contents.
+- Document reproducible isolated MCP Inspector 0.22.0, Codex CLI 0.144.6, and
+  Claude Code 2.1.214 compatibility checks. Record exact 14/10 Inspector tool
+  counts, live `server_status` calls from both released clients, and the
+  official conformance runner's current HTTP-only server interface without
+  claiming an inapplicable stdio conformance pass.
 - Add reviewed deterministic normal/read-only catalog snapshots, an independent
   fail-closed local-reference graph audit for recursive schema bounds and exact
   annotation audits, exact character/byte boundary coverage, exhaustive Anytype
