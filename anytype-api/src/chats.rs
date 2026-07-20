@@ -1353,10 +1353,9 @@ impl ChatHttpMessageStreamRequest<'_> {
                         ));
                     }
                     None => {
-                        state.finished = true;
-                        if !state.buffer.is_empty() {
-                            let parsed = parse_chat_http_event(&state.buffer);
-                            state.buffer.clear();
+                        if let Some(final_buffer) = state.finish_at_eof() {
+                            let parsed = parse_chat_http_event(&final_buffer);
+                            drop(final_buffer);
                             match parsed {
                                 Ok(Some(event)) => return Some((Ok(event), state)),
                                 Ok(None) => continue,
@@ -1383,6 +1382,15 @@ struct ChatHttpSseState {
 }
 
 impl ChatHttpSseState {
+    fn finish_at_eof(&mut self) -> Option<Vec<u8>> {
+        self.finished = true;
+        if self.buffer.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.buffer))
+        }
+    }
+
     fn terminate(&mut self) {
         self.finished = true;
         self.buffer = Vec::new();
@@ -4077,6 +4085,29 @@ mod tests {
 
         state.terminate();
 
+        assert_eq!(state.buffer.capacity(), 0);
+        assert!(state.finished);
+    }
+
+    #[test]
+    fn eof_finalization_moves_event_buffer_out_of_terminal_state() {
+        let mut state = ChatHttpSseState {
+            chunks: futures::stream::empty().boxed(),
+            buffer: Vec::with_capacity(1024 * 1024),
+            pending: None,
+            pending_offset: 0,
+            finished: false,
+            path: "/v1/spaces/s/chats/c/messages/stream".to_string(),
+            event_limit: 1024 * 1024,
+        };
+        state
+            .buffer
+            .extend_from_slice(b"delimiter-free final event");
+        assert!(state.buffer.capacity() >= 1024 * 1024);
+
+        let final_buffer = state.finish_at_eof().expect("nonempty final event");
+
+        assert_eq!(final_buffer, b"delimiter-free final event");
         assert_eq!(state.buffer.capacity(), 0);
         assert!(state.finished);
     }
