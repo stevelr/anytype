@@ -215,6 +215,32 @@ never broaden a scoped search to global search or a selected projection to all
 properties. Space-scoped type resolver results are revalidated as bounded,
 nonempty type keys before they enter a cursor binding or upstream search.
 
+### Document resources
+
+The transport-neutral resource handler advertises exactly one RFC 6570
+template:
+
+```text
+anytype://spaces/{space_id}/objects/{object_id}
+```
+
+`resources/list` deliberately returns no object instances; use the paginated
+`object_search` workflow for discovery. `resources/read` accepts only the
+canonical scheme, authority, and path shape, performs no percent-decoding or
+URI normalization, verifies the returned object and space identity, and
+returns one complete `text/markdown` content item. Complete bodies of at most
+100,000 Unicode characters are returned without truncation. Larger bodies
+produce a stable `bounded_result` error directing the caller to `object_get`
+body chunking.
+
+Each read uses the configured document-response byte ceiling under the shared
+concurrency, timeout, cancellation, and shutdown controls. Its typed resource
+descriptor carries byte size, user/assistant audience, priority, and a strict
+RFC 3339 `lastModified` annotation when Anytype supplies one. Properties,
+snippets, and document content are never duplicated into descriptor metadata.
+Production server capability and catalog delegation are intentionally kept in
+the final catalog integration phase.
+
 ## Source layout
 
 - `src/config.rs` — validated environment and operational limits.
@@ -227,6 +253,8 @@ nonempty type keys before they enter a cursor binding or upstream search.
   transport-neutral handlers.
 - `src/schema.rs` — strict input/output schema generation.
 - `src/protocol.rs` — tool contracts and annotation profiles.
+- `src/resources.rs` — exact document template, empty instance listing, and
+  bounded resource reads.
 - `src/result.rs` — structured results with compact JSON text fallbacks.
 - `src/error.rs` — stable, redacted tool execution errors.
 - `src/handler_support.rs` — controlled handler execution and checked page

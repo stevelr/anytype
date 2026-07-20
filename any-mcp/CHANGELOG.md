@@ -56,6 +56,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add the typed `object_archive` soft-delete workflow with destructive
   annotations, pre-I/O read-only enforcement, safe resolver/response identity
   validation, and a minimal verified archived-state result.
+- Add the exact Anytype document resource template and transport-neutral
+  resource handlers with strict canonical URI parsing, intentionally empty
+  instance listing, complete 100,000-character markdown reads, document-byte
+  ceilings, resource annotations and size, identity verification, shared
+  cancellation/timeout controls, and secret-safe bounded errors directing
+  larger reads to `object_get` chunking.
 
 ### Changed
 
