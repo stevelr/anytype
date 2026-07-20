@@ -337,6 +337,8 @@ async fn assert_collection_view_continuation(
         "view_list must terminate within its hard bound"
     );
     assert_eq!(observed, expected, "MCP and ordinary API view lists differ");
+}
+
 async fn assert_fixture_template_continuation(
     server: &AnyMcpServer,
     space_id: &str,
@@ -686,13 +688,13 @@ async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
                 .await
                 .expect("create and register collection-layout type fixture");
             assert_eq!(collection_type.layout, ObjectLayout::Collection);
-            let collection = create_object(
-                ctx.as_ref(),
-                &collection_type.key,
-                &format!("MCP collection {}", unique_suffix()),
-                "",
-            )
-            .await;
+            let collection = ctx
+                .create_collection_fixture(
+                    &collection_type,
+                    format!("MCP collection {}", unique_suffix()),
+                )
+                .await
+                .expect("create privately owned collection fixture");
             let second_view_name = format!("MCP second view {}", unique_suffix());
             let second_view = ctx
                 .create_collection_view_fixture(&collection.id, &second_view_name)

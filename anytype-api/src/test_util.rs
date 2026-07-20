@@ -21,17 +21,13 @@ use anytype_rpc::{
             block_dataview::view::create as create_dataview_view,
             object::{create_object_type, show as object_show},
             space::delete as space_delete,
+            template::create_from_object as template_create_from_object,
         },
     },
     model::{
         block::{ContentValue, content::dataview::View as DataviewView},
         object_type::Layout,
     },
-    anytype::rpc::{
-        object::create_object_type, space::delete as space_delete,
-        template::create_from_object as template_create_from_object,
-    },
-    model::object_type::Layout,
 };
 use chrono::Utc;
 use futures::FutureExt;
@@ -44,15 +40,17 @@ use tonic::Request;
 #[allow(unused_imports)]
 use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
 use crate::{
-    filters::Filter,
+    filters::{Filter, Query, QueryWithFilters},
     grpc_util::with_token_request,
+    http_client::GetPaged,
     objects::{DataModel, Object, ObjectLayout},
     spaces::Space,
     types::{Type, TypeLayout},
     verify::verify_semantic,
-    views::View,
+    views::ViewLayout,
 };
 
+const COLLECTION_DATAVIEW_BLOCK_ID: &str = "dataview";
 const COLLECTION_VIEW_FIXTURE_SCAN_LIMIT: u32 = 1_000;
 const SPACE_FIXTURE_SCAN_LIMIT: u32 = 1_000;
 const SPACE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -105,6 +103,16 @@ pub struct TestContext {
     start_time: Instant,
     api_call_count: AtomicUsize,
     cleanup: TestCleanup,
+}
+
+/// Identity returned for a cleanup-owned collection view fixture.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionViewFixture {
+    /// Server-assigned view identifier.
+    pub id: String,
+    /// Exact requested view name.
+    pub name: String,
 }
 
 /// Cleanup-owned custom type, source objects, and templates created for tests.
@@ -224,6 +232,72 @@ impl TestContext {
         Ok(typ)
     }
 
+    /// Creates and privately registers a cleanup-owned collection object.
+    ///
+    /// Only a collection-layout type already owned by this context is accepted.
+    /// A complete bounded pre-create snapshot for that exact type prevents a
+    /// stale create response from granting cleanup or mutation authority over a
+    /// pre-existing object. The returned object is bound to the context space,
+    /// type, active state, and collection layout before entering the private
+    /// collection-fixture registry used by the second-view helper.
+    pub async fn create_collection_fixture(
+        &self,
+        collection_type: &Type,
+        name: impl Into<String>,
+    ) -> TestResult<crate::objects::Object> {
+        let name = name.into();
+        self.client
+            .config
+            .limits
+            .validate_name(&name, "collection fixture")?;
+        if !self.cleanup.has_type(&self.space_id, &collection_type.id) {
+            return Err(collection_fixture_ownership_error());
+        }
+        let exact_type = self
+            .client
+            .get_type(&self.space_id, &collection_type.id)
+            .get_direct()
+            .await
+            .map_err(|_| collection_fixture_ownership_error())?;
+        if exact_type.id != collection_type.id
+            || exact_type.key != collection_type.key
+            || exact_type.archived
+            || exact_type.layout != ObjectLayout::Collection
+        {
+            return Err(collection_fixture_ownership_error());
+        }
+        let preexisting =
+            complete_type_object_id_snapshot(&self.client, &self.space_id, &exact_type.id)
+                .await
+                .map_err(|_| collection_fixture_ownership_error())?;
+        let created = self
+            .client
+            .new_object(&self.space_id, &exact_type.key)
+            .name(&name)
+            .no_verify()
+            .create()
+            .await
+            .map_err(|_| collection_fixture_ownership_error())?;
+        self.client
+            .config
+            .limits
+            .validate_id(&created.id, "created collection fixture")
+            .map_err(|_| collection_fixture_ownership_error())?;
+        if created.space_id != self.space_id
+            || created.archived
+            || created.layout != ObjectLayout::Collection
+            || created.r#type.as_ref().map(|typ| typ.id.as_str()) != Some(exact_type.id.as_str())
+            || preexisting.contains(&created.id)
+            || !self
+                .cleanup
+                .add_collection_fixture(&self.space_id, &created.id)
+        {
+            return Err(collection_fixture_ownership_error());
+        }
+        self.register_object(&created.id);
+        Ok(created)
+    }
+
     /// Adds a second view to a cleanup-registered collection fixture.
     ///
     /// The public REST API does not expose view creation. This test-only helper
@@ -242,13 +316,16 @@ impl TestContext {
         &self,
         collection_id: &str,
         name: impl Into<String>,
-    ) -> TestResult<View> {
+    ) -> TestResult<CollectionViewFixture> {
         let name = name.into();
         let limits = &self.client.get_config().limits;
         limits.validate_id(collection_id, "collection fixture")?;
         limits.validate_name(&name, "collection view fixture")?;
-        if !self.cleanup.has_object(&self.space_id, collection_id) {
-            return Err(collection_view_fixture_error());
+        if !self
+            .cleanup
+            .has_collection_fixture(&self.space_id, collection_id)
+        {
+            return Err(collection_view_fixture_code_error("ownership"));
         }
 
         let collection = self
@@ -256,26 +333,29 @@ impl TestContext {
             .object(&self.space_id, collection_id)
             .get()
             .await
-            .map_err(|_| collection_view_fixture_error())?;
-        if collection.id != collection_id || collection.layout != ObjectLayout::Collection {
-            return Err(collection_view_fixture_error());
+            .map_err(|_| collection_view_fixture_code_error("collection-get"))?;
+        if collection.id != collection_id
+            || collection.space_id != self.space_id
+            || collection.archived
+            || collection.layout != ObjectLayout::Collection
+        {
+            return Err(collection_view_fixture_code_error("collection-identity"));
         }
 
         let existing =
             complete_collection_view_snapshot(&self.client, &self.space_id, collection_id)
                 .await
-                .map_err(|_| collection_view_fixture_error())?;
+                .map_err(|_| collection_view_fixture_code_error("rest-view-list"))?;
         if existing.len() != 1 || !collection_view_ids_are_unique(&existing) {
-            return Err(collection_view_fixture_error());
+            return Err(collection_view_fixture_code_error("rest-view-snapshot"));
         }
         let default_id = existing[0].id.clone();
-        let default_name = existing[0].name.clone();
 
         let grpc = self
             .client
             .grpc_client()
             .await
-            .map_err(|_| collection_view_fixture_error())?;
+            .map_err(|_| collection_view_fixture_code_error("grpc-client"))?;
         let mut commands = grpc.client_commands();
         let show_request = object_show::Request {
             object_id: collection_id.to_owned(),
@@ -290,29 +370,30 @@ impl TestContext {
             .map_err(collection_view_fixture_transport_error)?
             .into_inner();
         if !object_show_succeeded(show_response.error.as_ref().map(|error| error.code)) {
-            return Err(collection_view_fixture_error());
+            return Err(collection_view_fixture_code_error("object-show-response"));
         }
         let object_view = show_response
             .object_view
-            .ok_or_else(collection_view_fixture_error)?;
+            .ok_or_else(|| collection_view_fixture_code_error("object-show-view"))?;
         let resolved = resolve_collection_dataview(
+            &object_view.root_id,
+            collection_id,
             &object_view.blocks,
             &existing,
             &default_id,
-            default_name.as_deref(),
         )?;
 
         let request_id = format!("test-view-request-{}", unique_suffix());
         if !valid_collection_view_id(&request_id)
             || existing.iter().any(|view| view.id == request_id)
         {
-            return Err(collection_view_fixture_error());
+            return Err(collection_view_fixture_code_error("request-id"));
         }
         let requested_view = clone_collection_view(&resolved.default_view, &request_id, &name);
         let create_request = create_dataview_view::Request {
             context_id: collection_id.to_owned(),
             block_id: resolved.block_id.clone(),
-            view: Some(requested_view),
+            view: Some(requested_view.clone()),
             source: resolved.source,
         };
         let create_request = with_token_request(Request::new(create_request), grpc.token())
@@ -327,22 +408,26 @@ impl TestContext {
             &self.space_id,
             collection_id,
             &resolved.block_id,
-            &name,
+            &request_id,
+            &requested_view,
             &existing,
         )?;
 
         let mut expected = existing
             .iter()
-            .map(|view| (view.id.clone(), view.name.clone()))
+            .cloned()
+            .map(|view| (view.id.clone(), view))
             .collect::<BTreeMap<_, _>>();
+        let mut created_rest_view = dataview_view_as_rest(&requested_view)?;
+        created_rest_view.id.clone_from(&created_id);
         if expected
-            .insert(created_id.clone(), Some(name.clone()))
+            .insert(created_id.clone(), created_rest_view)
             .is_some()
         {
             return Err(collection_view_fixture_error());
         }
         let verify_config = self.client.config.verify.clone().unwrap_or_default();
-        let verified = verify_semantic(
+        verify_semantic(
             &verify_config,
             "collection view fixture",
             collection_id,
@@ -351,10 +436,10 @@ impl TestContext {
         )
         .await
         .map_err(|_| collection_view_fixture_error())?;
-        verified
-            .into_iter()
-            .find(|view| view.id == created_id && view.name.as_deref() == Some(name.as_str()))
-            .ok_or_else(collection_view_fixture_error)
+        Ok(CollectionViewFixture {
+            id: created_id,
+            name,
+        })
     }
 
     /// Creates a disposable space owned by this test context.
@@ -638,14 +723,355 @@ struct ResolvedCollectionDataview {
     source: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RestCollectionView {
+    id: String,
+    name: String,
+    layout: ViewLayout,
+    #[serde(default, deserialize_with = "deserialize_vec_or_null")]
+    filters: Vec<RestCollectionViewFilter>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_null")]
+    sorts: Vec<RestCollectionViewSort>,
+}
+
+fn deserialize_vec_or_null<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RestCollectionViewFilter {
+    id: String,
+    property_key: String,
+    format: crate::properties::PropertyFormat,
+    condition: crate::filters::Condition,
+    value: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RestCollectionViewSort {
+    id: String,
+    property_key: String,
+    format: crate::properties::PropertyFormat,
+    sort_type: RestCollectionViewSortType,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RestCollectionViewSortType {
+    Asc,
+    Desc,
+    Custom,
+}
+
 async fn complete_collection_view_snapshot(
     client: &AnytypeClient,
     space_id: &str,
     collection_id: &str,
-) -> Result<Vec<View>, AnytypeError> {
-    let response = client
-        .list_views(space_id, collection_id)
+) -> Result<Vec<RestCollectionView>, AnytypeError> {
+    let query = Query::default()
         .limit(COLLECTION_VIEW_FIXTURE_SCAN_LIMIT)
+        .offset(0);
+    let response = client
+        .client
+        .get_request_paged(
+            &format!("/v1/spaces/{space_id}/lists/{collection_id}/views"),
+            QueryWithFilters::from(query),
+        )
+        .await?
+        .into_response();
+    if response.pagination.offset != 0
+        || response.pagination.has_more
+        || response.pagination.total != response.items.len()
+        || response.items.len() > COLLECTION_VIEW_FIXTURE_SCAN_LIMIT as usize
+    {
+        return Err(collection_view_fixture_api_error());
+    }
+    Ok(response.items)
+}
+
+fn collection_view_ids_are_unique(views: &[RestCollectionView]) -> bool {
+    let ids = views
+        .iter()
+        .map(|view| view.id.as_str())
+        .collect::<BTreeSet<_>>();
+    ids.len() == views.len() && ids.iter().all(|id| valid_collection_view_id(id))
+}
+
+fn resolve_collection_dataview(
+    root_id: &str,
+    collection_id: &str,
+    blocks: &[anytype_rpc::model::Block],
+    rest_views: &[RestCollectionView],
+    default_id: &str,
+) -> TestResult<ResolvedCollectionDataview> {
+    if root_id != collection_id {
+        return Err(collection_view_fixture_code_error("object-show-root"));
+    }
+    let dataview_blocks = blocks
+        .iter()
+        .filter(|block| matches!(block.content_value, Some(ContentValue::Dataview(_))))
+        .collect::<Vec<_>>();
+    if dataview_blocks.len() != 1 || dataview_blocks[0].id != COLLECTION_DATAVIEW_BLOCK_ID {
+        return Err(collection_view_fixture_code_error("dataview-block"));
+    }
+    let mut matches = dataview_blocks.into_iter().filter_map(|block| {
+        let Some(ContentValue::Dataview(dataview)) = block.content_value.as_ref() else {
+            return None;
+        };
+        let default_views = dataview
+            .views
+            .iter()
+            .filter(|view| view.id == default_id)
+            .collect::<Vec<_>>();
+        (default_views.len() == 1).then(|| (block, dataview, default_views[0]))
+    });
+    let Some((block, dataview, default_view)) = matches.next() else {
+        return Err(collection_view_fixture_code_error("default-view"));
+    };
+    if matches.next().is_some()
+        || !dataview.is_collection
+        || !dataview_view_snapshot_matches(&dataview.views, rest_views)
+    {
+        return Err(collection_view_fixture_code_error("rest-proto-view"));
+    }
+    Ok(ResolvedCollectionDataview {
+        block_id: block.id.clone(),
+        default_view: default_view.clone(),
+        source: dataview.source.clone(),
+    })
+}
+
+fn dataview_view_snapshot_matches(
+    proto_views: &[DataviewView],
+    rest_views: &[RestCollectionView],
+) -> bool {
+    if proto_views.len() != rest_views.len() {
+        return false;
+    }
+    let Ok(proto) = proto_views
+        .iter()
+        .map(dataview_view_as_rest)
+        .collect::<TestResult<Vec<_>>>()
+    else {
+        return false;
+    };
+    let proto = proto
+        .into_iter()
+        .map(|view| (view.id.clone(), view))
+        .collect::<BTreeMap<_, _>>();
+    let rest = rest_views
+        .iter()
+        .cloned()
+        .map(|view| (view.id.clone(), view))
+        .collect::<BTreeMap<_, _>>();
+    proto.len() == proto_views.len() && rest.len() == rest_views.len() && proto == rest
+}
+
+fn dataview_view_as_rest(view: &DataviewView) -> TestResult<RestCollectionView> {
+    use anytype_rpc::model::block::content::dataview::{filter, sort, view};
+
+    let layout = match view::Type::try_from(view.r#type).ok() {
+        Some(view::Type::Table) => ViewLayout::Grid,
+        Some(view::Type::List) => ViewLayout::List,
+        Some(view::Type::Gallery) => ViewLayout::Gallery,
+        Some(view::Type::Kanban) => ViewLayout::Kanban,
+        Some(view::Type::Calendar) => ViewLayout::Calendar,
+        Some(view::Type::Graph) => ViewLayout::Graph,
+        None => return Err(collection_view_fixture_error()),
+    };
+    let mut filters = Vec::new();
+    for item in &view.filters {
+        let condition = match filter::Condition::try_from(item.condition).ok() {
+            Some(filter::Condition::None) => continue,
+            Some(filter::Condition::Equal) => crate::filters::Condition::Equal,
+            Some(filter::Condition::NotEqual) => crate::filters::Condition::NotEqual,
+            Some(filter::Condition::Greater) => crate::filters::Condition::Greater,
+            Some(filter::Condition::Less) => crate::filters::Condition::Less,
+            Some(filter::Condition::GreaterOrEqual) => crate::filters::Condition::GreaterOrEqual,
+            Some(filter::Condition::LessOrEqual) => crate::filters::Condition::LessOrEqual,
+            Some(filter::Condition::Like) => crate::filters::Condition::Contains,
+            Some(filter::Condition::NotLike) => crate::filters::Condition::NotContains,
+            Some(filter::Condition::In) => crate::filters::Condition::In,
+            Some(filter::Condition::NotIn) => crate::filters::Condition::NotIn,
+            Some(filter::Condition::Empty) => crate::filters::Condition::Empty,
+            Some(filter::Condition::NotEmpty) => crate::filters::Condition::NotEmpty,
+            Some(filter::Condition::AllIn) => crate::filters::Condition::All,
+            _ => return Err(collection_view_fixture_error()),
+        };
+        let value = match item.value.as_ref().and_then(|value| value.kind.as_ref()) {
+            Some(Kind::StringValue(value)) => value.clone(),
+            _ => return Err(collection_view_fixture_error()),
+        };
+        filters.push(RestCollectionViewFilter {
+            id: item.id.clone(),
+            property_key: item.relation_key.clone(),
+            format: rest_property_format(item.format)?,
+            condition,
+            value,
+        });
+    }
+    let sorts = view
+        .sorts
+        .iter()
+        .map(|item| {
+            let sort_type = match sort::Type::try_from(item.r#type).ok() {
+                Some(sort::Type::Asc) => RestCollectionViewSortType::Asc,
+                Some(sort::Type::Desc) => RestCollectionViewSortType::Desc,
+                Some(sort::Type::Custom) => RestCollectionViewSortType::Custom,
+                None => return Err(collection_view_fixture_error()),
+            };
+            Ok(RestCollectionViewSort {
+                id: item.id.clone(),
+                property_key: item.relation_key.clone(),
+                format: rest_property_format(item.format)?,
+                sort_type,
+            })
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    Ok(RestCollectionView {
+        id: view.id.clone(),
+        name: view.name.clone(),
+        layout,
+        filters,
+        sorts,
+    })
+}
+
+fn rest_property_format(format: i32) -> TestResult<crate::properties::PropertyFormat> {
+    use anytype_rpc::model::RelationFormat;
+
+    match RelationFormat::try_from(format).ok() {
+        Some(RelationFormat::Longtext | RelationFormat::Shorttext) => {
+            Ok(crate::properties::PropertyFormat::Text)
+        }
+        Some(RelationFormat::Number) => Ok(crate::properties::PropertyFormat::Number),
+        Some(RelationFormat::Status) => Ok(crate::properties::PropertyFormat::Select),
+        Some(RelationFormat::Tag) => Ok(crate::properties::PropertyFormat::MultiSelect),
+        Some(RelationFormat::Date) => Ok(crate::properties::PropertyFormat::Date),
+        Some(RelationFormat::File) => Ok(crate::properties::PropertyFormat::Files),
+        Some(RelationFormat::Checkbox) => Ok(crate::properties::PropertyFormat::Checkbox),
+        Some(RelationFormat::Url) => Ok(crate::properties::PropertyFormat::Url),
+        Some(RelationFormat::Email) => Ok(crate::properties::PropertyFormat::Email),
+        Some(RelationFormat::Phone) => Ok(crate::properties::PropertyFormat::Phone),
+        Some(RelationFormat::Object) => Ok(crate::properties::PropertyFormat::Objects),
+        _ => Err(collection_view_fixture_error()),
+    }
+}
+
+fn clone_collection_view(default_view: &DataviewView, id: &str, name: &str) -> DataviewView {
+    let mut view = default_view.clone();
+    view.id = id.to_owned();
+    view.name = name.to_owned();
+    view
+}
+
+fn validate_created_collection_view(
+    response: &create_dataview_view::Response,
+    space_id: &str,
+    collection_id: &str,
+    block_id: &str,
+    request_id: &str,
+    requested_view: &DataviewView,
+    existing: &[RestCollectionView],
+) -> TestResult<String> {
+    if !create_collection_view_succeeded(response.error.as_ref().map(|error| error.code))
+        || !valid_collection_view_id(&response.view_id)
+        || response.view_id == request_id
+        || existing.iter().any(|view| view.id == response.view_id)
+    {
+        return Err(collection_view_fixture_error());
+    }
+    let Some(event) = response.event.as_ref() else {
+        return Err(collection_view_fixture_error());
+    };
+    if event.context_id != collection_id {
+        return Err(collection_view_fixture_error());
+    }
+    let view_sets = event
+        .messages
+        .iter()
+        .filter_map(|message| match message.value.as_ref() {
+            Some(EventValue::BlockDataviewViewSet(view_set)) => Some((message, view_set)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if view_sets.len() != 1 {
+        return Err(collection_view_fixture_error());
+    }
+    let (message, view_set) = view_sets[0];
+    let mut expected_view = requested_view.clone();
+    expected_view.id.clone_from(&response.view_id);
+    if message.space_id != space_id
+        || view_set.id != block_id
+        || view_set.view_id != response.view_id
+        || view_set.view.as_ref() != Some(&expected_view)
+    {
+        return Err(collection_view_fixture_error());
+    }
+    Ok(response.view_id.clone())
+}
+
+fn valid_collection_view_id(id: &str) -> bool {
+    !id.is_empty()
+        && !matches!(id, "." | "..")
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || b"._~-".contains(&character))
+}
+
+fn create_collection_view_succeeded(error_code: Option<i32>) -> bool {
+    error_code == Some(create_dataview_view::response::error::Code::Null as i32)
+}
+
+fn object_show_succeeded(error_code: Option<i32>) -> bool {
+    error_code == Some(object_show::response::error::Code::Null as i32)
+}
+
+fn collection_view_snapshot_matches(
+    views: &[RestCollectionView],
+    expected: &BTreeMap<String, RestCollectionView>,
+) -> bool {
+    if views.len() != expected.len() || !collection_view_ids_are_unique(views) {
+        return false;
+    }
+    let actual = views
+        .iter()
+        .cloned()
+        .map(|view| (view.id.clone(), view))
+        .collect::<BTreeMap<_, _>>();
+    &actual == expected
+}
+
+fn collection_view_fixture_error() -> TestError {
+    TestError::Assertion {
+        message: "cleanup-safe collection view fixture creation failed".to_owned(),
+    }
+}
+
+fn collection_view_fixture_code_error(code: &'static str) -> TestError {
+    TestError::Assertion {
+        message: format!("cleanup-safe collection view fixture failed: {code}"),
+    }
+}
+
+fn collection_view_fixture_api_error() -> AnytypeError {
+    AnytypeError::Other {
+        message: "collection view fixture listing was malformed".to_owned(),
+    }
+}
+
+fn collection_view_fixture_transport_error(_: tonic::Status) -> TestError {
+    collection_view_fixture_error()
+}
+
 fn template_fixture_transport_error(_: tonic::Status) -> TestError {
     template_fixture_error()
 }
@@ -724,164 +1150,6 @@ async fn complete_template_objects(
         .await?
         .into_response();
     if response.pagination.offset != 0
-        || response.pagination.has_more
-        || response.pagination.total != response.items.len()
-        || response.items.len() > COLLECTION_VIEW_FIXTURE_SCAN_LIMIT as usize
-    {
-        return Err(collection_view_fixture_api_error());
-    }
-    Ok(response.items)
-}
-
-fn collection_view_ids_are_unique(views: &[View]) -> bool {
-    let ids = views
-        .iter()
-        .map(|view| view.id.as_str())
-        .collect::<BTreeSet<_>>();
-    ids.len() == views.len() && ids.iter().all(|id| valid_collection_view_id(id))
-}
-
-fn resolve_collection_dataview(
-    blocks: &[anytype_rpc::model::Block],
-    rest_views: &[View],
-    default_id: &str,
-    default_name: Option<&str>,
-) -> TestResult<ResolvedCollectionDataview> {
-    let mut matches = blocks.iter().filter_map(|block| {
-        let Some(ContentValue::Dataview(dataview)) = block.content_value.as_ref() else {
-            return None;
-        };
-        let default_views = dataview
-            .views
-            .iter()
-            .filter(|view| view.id == default_id)
-            .collect::<Vec<_>>();
-        (default_views.len() == 1).then(|| (block, dataview, default_views[0]))
-    });
-    let Some((block, dataview, default_view)) = matches.next() else {
-        return Err(collection_view_fixture_error());
-    };
-    if matches.next().is_some()
-        || !valid_collection_view_id(&block.id)
-        || !dataview.is_collection
-        || normalized_proto_view_name(&default_view.name) != default_name
-        || !dataview_view_snapshot_matches(&dataview.views, rest_views)
-    {
-        return Err(collection_view_fixture_error());
-    }
-    Ok(ResolvedCollectionDataview {
-        block_id: block.id.clone(),
-        default_view: default_view.clone(),
-        source: dataview.source.clone(),
-    })
-}
-
-fn normalized_proto_view_name(name: &str) -> Option<&str> {
-    (!name.is_empty()).then_some(name)
-}
-
-fn dataview_view_snapshot_matches(proto_views: &[DataviewView], rest_views: &[View]) -> bool {
-    if proto_views.len() != rest_views.len() {
-        return false;
-    }
-    let proto = proto_views
-        .iter()
-        .map(|view| (view.id.as_str(), normalized_proto_view_name(&view.name)))
-        .collect::<BTreeMap<_, _>>();
-    let rest = rest_views
-        .iter()
-        .map(|view| (view.id.as_str(), view.name.as_deref()))
-        .collect::<BTreeMap<_, _>>();
-    proto.len() == proto_views.len() && rest.len() == rest_views.len() && proto == rest
-}
-
-fn clone_collection_view(default_view: &DataviewView, id: &str, name: &str) -> DataviewView {
-    let mut view = default_view.clone();
-    view.id = id.to_owned();
-    view.name = name.to_owned();
-    view
-}
-
-fn validate_created_collection_view(
-    response: &create_dataview_view::Response,
-    space_id: &str,
-    collection_id: &str,
-    block_id: &str,
-    name: &str,
-    existing: &[View],
-) -> TestResult<String> {
-    if !create_collection_view_succeeded(response.error.as_ref().map(|error| error.code))
-        || !valid_collection_view_id(&response.view_id)
-        || existing.iter().any(|view| view.id == response.view_id)
-    {
-        return Err(collection_view_fixture_error());
-    }
-    let event_matches = response.event.as_ref().is_some_and(|event| {
-        event.context_id == collection_id
-            && event.messages.iter().any(|message| {
-                message.space_id == space_id
-                    && matches!(
-                        message.value.as_ref(),
-                        Some(EventValue::BlockDataviewViewSet(view_set))
-                            if view_set.id == block_id
-                                && view_set.view_id == response.view_id
-                                && view_set.view.as_ref().is_some_and(|view| {
-                                    view.id == response.view_id && view.name == name
-                                })
-                    )
-            })
-    });
-    if !event_matches {
-        return Err(collection_view_fixture_error());
-    }
-    Ok(response.view_id.clone())
-}
-
-fn valid_collection_view_id(id: &str) -> bool {
-    !id.is_empty()
-        && !matches!(id, "." | "..")
-        && id.len() <= 256
-        && id
-            .bytes()
-            .all(|character| character.is_ascii_alphanumeric() || b"._~-".contains(&character))
-}
-
-fn create_collection_view_succeeded(error_code: Option<i32>) -> bool {
-    error_code == Some(create_dataview_view::response::error::Code::Null as i32)
-}
-
-fn object_show_succeeded(error_code: Option<i32>) -> bool {
-    error_code == Some(object_show::response::error::Code::Null as i32)
-}
-
-fn collection_view_snapshot_matches(
-    views: &[View],
-    expected: &BTreeMap<String, Option<String>>,
-) -> bool {
-    if views.len() != expected.len() || !collection_view_ids_are_unique(views) {
-        return false;
-    }
-    let actual = views
-        .iter()
-        .map(|view| (view.id.clone(), view.name.clone()))
-        .collect::<BTreeMap<_, _>>();
-    &actual == expected
-}
-
-fn collection_view_fixture_error() -> TestError {
-    TestError::Assertion {
-        message: "cleanup-safe collection view fixture creation failed".to_owned(),
-    }
-}
-
-fn collection_view_fixture_api_error() -> AnytypeError {
-    AnytypeError::Other {
-        message: "collection view fixture listing was malformed".to_owned(),
-    }
-}
-
-fn collection_view_fixture_transport_error(_: tonic::Status) -> TestError {
-    collection_view_fixture_error()
         || response.pagination.limit != TEMPLATE_FIXTURE_LIMIT
         || response.pagination.has_more
         || response.pagination.total != response.items.len()
@@ -1356,6 +1624,7 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
 #[derive(Default)]
 pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
+    collection_fixtures: Mutex<BTreeSet<(String, String)>>,
     space_fixtures: Mutex<BTreeSet<String>>,
     template_resources: Mutex<Vec<TemplateFixtureResource>>,
     registered_ids: Mutex<BTreeSet<String>>,
@@ -1392,6 +1661,7 @@ impl TemplateFixtureResource {
 impl TestCleanup {
     pub fn is_empty(&self) -> bool {
         self.objects.lock().is_empty()
+            && self.collection_fixtures.lock().is_empty()
             && self.space_fixtures.lock().is_empty()
             && self.template_resources.lock().is_empty()
             && self.registered_ids.lock().is_empty()
@@ -1403,13 +1673,25 @@ impl TestCleanup {
         self.add_generic_resource(space_id, id, DataModel::Object);
     }
 
-    fn has_object(&self, space_id: &str, id: &str) -> bool {
+    fn has_type(&self, space_id: &str, id: &str) -> bool {
         self.objects
             .lock()
             .iter()
             .any(|(registered_space, registered_id, model)| {
-                registered_space == space_id && registered_id == id && *model == DataModel::Object
+                registered_space == space_id && registered_id == id && *model == DataModel::Type
             })
+    }
+
+    fn add_collection_fixture(&self, space_id: &str, id: &str) -> bool {
+        self.collection_fixtures
+            .lock()
+            .insert((space_id.to_owned(), id.to_owned()))
+    }
+
+    fn has_collection_fixture(&self, space_id: &str, id: &str) -> bool {
+        self.collection_fixtures
+            .lock()
+            .contains(&(space_id.to_owned(), id.to_owned()))
     }
 
     /// Remembers this property for deletion after the test
@@ -1509,6 +1791,7 @@ impl TestCleanup {
         {
             let _ = client.get_type(space_id, type_id).delete().await;
         }
+        self.collection_fixtures.lock().clear();
 
         // Delete disposable spaces only after their possible child resources.
         // SpaceDelete is irreversible, so this registry is private and can be
@@ -1544,6 +1827,48 @@ impl TestCleanup {
             return Err(space_cleanup_error());
         }
         Ok(())
+    }
+}
+
+async fn complete_type_object_id_snapshot(
+    client: &AnytypeClient,
+    space_id: &str,
+    type_id: &str,
+) -> TestResult<BTreeSet<String>> {
+    let response = client
+        .objects(space_id)
+        .filter(Filter::type_in([type_id]))
+        .limit(COLLECTION_VIEW_FIXTURE_SCAN_LIMIT)
+        .offset(0)
+        .list()
+        .await
+        .map_err(|_| collection_fixture_ownership_error())?
+        .into_response();
+    if response.pagination.offset != 0
+        || response.pagination.has_more
+        || response.pagination.total != response.items.len()
+        || response.items.len() > COLLECTION_VIEW_FIXTURE_SCAN_LIMIT as usize
+        || response.items.iter().any(|object| {
+            object.space_id != space_id
+                || object.r#type.as_ref().map(|typ| typ.id.as_str()) != Some(type_id)
+        })
+    {
+        return Err(collection_fixture_ownership_error());
+    }
+    let ids = response
+        .items
+        .into_iter()
+        .map(|object| object.id)
+        .collect::<BTreeSet<_>>();
+    if ids.len() != response.pagination.total {
+        return Err(collection_fixture_ownership_error());
+    }
+    Ok(ids)
+}
+
+fn collection_fixture_ownership_error() -> TestError {
+    TestError::Assertion {
+        message: "cleanup-safe collection fixture ownership could not be established".to_owned(),
     }
 }
 
@@ -1896,17 +2221,27 @@ mod tests {
     const CREATED_VIEW_ID: &str = "9c4d60de-66bb-41b9-984e-ce750e4301e1";
     const BLOCK_ID: &str = "dataview";
 
-    fn rest_view(id: &str, name: &str) -> View {
-        View {
+    fn rest_view(id: &str, name: &str) -> RestCollectionView {
+        RestCollectionView {
             filters: Vec::new(),
             id: id.to_owned(),
             layout: crate::views::ViewLayout::Grid,
-            name: Some(name.to_owned()),
+            name: name.to_owned(),
             sorts: Vec::new(),
         }
     }
 
-    fn create_response(id: &str, name: &str) -> create_dataview_view::Response {
+    fn requested_view(id: &str, name: &str) -> DataviewView {
+        DataviewView {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn create_response(id: &str, requested: &DataviewView) -> create_dataview_view::Response {
+        let mut returned = requested.clone();
+        returned.id = id.to_owned();
         create_dataview_view::Response {
             error: Some(create_dataview_view::response::Error {
                 code: create_dataview_view::response::error::Code::Null as i32,
@@ -1919,11 +2254,7 @@ mod tests {
                         anytype_rpc::anytype::event::block::dataview::ViewSet {
                             id: BLOCK_ID.to_owned(),
                             view_id: id.to_owned(),
-                            view: Some(DataviewView {
-                                id: id.to_owned(),
-                                name: name.to_owned(),
-                                ..Default::default()
-                            }),
+                            view: Some(returned),
                         },
                     )),
                 }],
@@ -1962,12 +2293,14 @@ mod tests {
     }
 
     #[test]
-    fn collection_view_fixture_requires_registered_object_ownership() {
+    fn arbitrary_object_registration_does_not_grant_collection_fixture_ownership() {
         let cleanup = TestCleanup::default();
-        assert!(!cleanup.has_object(SPACE_ID, COLLECTION_ID));
+        assert!(!cleanup.has_collection_fixture(SPACE_ID, COLLECTION_ID));
         cleanup.add_object(SPACE_ID, COLLECTION_ID);
-        assert!(cleanup.has_object(SPACE_ID, COLLECTION_ID));
-        assert!(!cleanup.has_object("different-space", COLLECTION_ID));
+        assert!(!cleanup.has_collection_fixture(SPACE_ID, COLLECTION_ID));
+        assert!(cleanup.add_collection_fixture(SPACE_ID, COLLECTION_ID));
+        assert!(cleanup.has_collection_fixture(SPACE_ID, COLLECTION_ID));
+        assert!(!cleanup.has_collection_fixture("different-space", COLLECTION_ID));
     }
 
     #[test]
@@ -2003,14 +2336,16 @@ mod tests {
     #[test]
     fn collection_view_fixture_accepts_exact_new_event_identity() {
         let existing = vec![rest_view(DEFAULT_VIEW_ID, "All")];
-        let response = create_response(CREATED_VIEW_ID, "Second");
+        let requested = requested_view("request-id", "Second");
+        let response = create_response(CREATED_VIEW_ID, &requested);
         assert_eq!(
             validate_created_collection_view(
                 &response,
                 SPACE_ID,
                 COLLECTION_ID,
                 BLOCK_ID,
-                "Second",
+                "request-id",
+                &requested,
                 &existing,
             )
             .expect("exact response"),
@@ -2021,20 +2356,22 @@ mod tests {
     #[test]
     fn collection_view_fixture_rejects_preexisting_or_unproven_identity() {
         let existing = vec![rest_view(DEFAULT_VIEW_ID, "All")];
-        let duplicate = create_response(DEFAULT_VIEW_ID, "Second");
+        let requested = requested_view("request-id", "Second");
+        let duplicate = create_response(DEFAULT_VIEW_ID, &requested);
         assert!(
             validate_created_collection_view(
                 &duplicate,
                 SPACE_ID,
                 COLLECTION_ID,
                 BLOCK_ID,
-                "Second",
+                "request-id",
+                &requested,
                 &existing,
             )
             .is_err()
         );
 
-        let mut missing_error = create_response(CREATED_VIEW_ID, "Second");
+        let mut missing_error = create_response(CREATED_VIEW_ID, &requested);
         missing_error.error = None;
         assert!(
             validate_created_collection_view(
@@ -2042,13 +2379,14 @@ mod tests {
                 SPACE_ID,
                 COLLECTION_ID,
                 BLOCK_ID,
-                "Second",
+                "request-id",
+                &requested,
                 &existing,
             )
             .is_err()
         );
 
-        let mut wrong_event = create_response(CREATED_VIEW_ID, "Second");
+        let mut wrong_event = create_response(CREATED_VIEW_ID, &requested);
         wrong_event.event.as_mut().unwrap().messages[0].space_id = "wrong-space".to_owned();
         assert!(
             validate_created_collection_view(
@@ -2056,11 +2394,186 @@ mod tests {
                 SPACE_ID,
                 COLLECTION_ID,
                 BLOCK_ID,
-                "Second",
+                "request-id",
+                &requested,
                 &existing,
             )
             .is_err()
         );
+
+        let sentinel = create_response("request-id", &requested);
+        assert!(
+            validate_created_collection_view(
+                &sentinel,
+                SPACE_ID,
+                COLLECTION_ID,
+                BLOCK_ID,
+                "request-id",
+                &requested,
+                &existing,
+            )
+            .is_err()
+        );
+
+        let mut duplicate_event = create_response(CREATED_VIEW_ID, &requested);
+        let duplicate_message = duplicate_event.event.as_ref().unwrap().messages[0].clone();
+        duplicate_event
+            .event
+            .as_mut()
+            .unwrap()
+            .messages
+            .push(duplicate_message);
+        assert!(
+            validate_created_collection_view(
+                &duplicate_event,
+                SPACE_ID,
+                COLLECTION_ID,
+                BLOCK_ID,
+                "request-id",
+                &requested,
+                &existing,
+            )
+            .is_err()
+        );
+
+        let mut mutated_view = create_response(CREATED_VIEW_ID, &requested);
+        let Some(EventValue::BlockDataviewViewSet(view_set)) =
+            mutated_view.event.as_mut().unwrap().messages[0]
+                .value
+                .as_mut()
+        else {
+            panic!("view-set fixture")
+        };
+        view_set.view.as_mut().unwrap().hide_icon = true;
+        assert!(
+            validate_created_collection_view(
+                &mutated_view,
+                SPACE_ID,
+                COLLECTION_ID,
+                BLOCK_ID,
+                "request-id",
+                &requested,
+                &existing,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn collection_view_fixture_cross_checks_every_rest_visible_field() {
+        use anytype_rpc::model::{RelationFormat, block::content::dataview};
+
+        let proto = DataviewView {
+            id: DEFAULT_VIEW_ID.to_owned(),
+            name: "All".to_owned(),
+            filters: vec![dataview::Filter {
+                id: "filter-id".to_owned(),
+                relation_key: "name".to_owned(),
+                condition: dataview::filter::Condition::Equal as i32,
+                value: Some(string_value("alpha")),
+                format: RelationFormat::Longtext as i32,
+                ..Default::default()
+            }],
+            sorts: vec![dataview::Sort {
+                id: "sort-id".to_owned(),
+                relation_key: "name".to_owned(),
+                r#type: dataview::sort::Type::Desc as i32,
+                format: RelationFormat::Longtext as i32,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let exact = dataview_view_as_rest(&proto).expect("supported exact conversion");
+        assert!(dataview_view_snapshot_matches(
+            std::slice::from_ref(&proto),
+            std::slice::from_ref(&exact)
+        ));
+        let mut changed = exact;
+        changed.filters[0].value = "different".to_owned();
+        assert!(!dataview_view_snapshot_matches(
+            std::slice::from_ref(&proto),
+            &[changed]
+        ));
+        let mut unsupported = proto;
+        unsupported.sorts[0].format = RelationFormat::Emoji as i32;
+        assert!(dataview_view_as_rest(&unsupported).is_err());
+    }
+
+    #[test]
+    fn collection_view_fixture_binds_object_show_root_and_exact_block() {
+        let default = requested_view(DEFAULT_VIEW_ID, "All");
+        let rest = vec![dataview_view_as_rest(&default).unwrap()];
+        let block = anytype_rpc::model::Block {
+            id: COLLECTION_DATAVIEW_BLOCK_ID.to_owned(),
+            content_value: Some(ContentValue::Dataview(
+                anytype_rpc::model::block::content::Dataview {
+                    is_collection: true,
+                    views: vec![default],
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        assert!(
+            resolve_collection_dataview(
+                COLLECTION_ID,
+                COLLECTION_ID,
+                std::slice::from_ref(&block),
+                &rest,
+                DEFAULT_VIEW_ID,
+            )
+            .is_ok()
+        );
+        assert!(
+            resolve_collection_dataview(
+                "wrong-root",
+                COLLECTION_ID,
+                std::slice::from_ref(&block),
+                &rest,
+                DEFAULT_VIEW_ID,
+            )
+            .is_err()
+        );
+        let mut wrong_block = block;
+        wrong_block.id = "other-dataview".to_owned();
+        assert!(
+            resolve_collection_dataview(
+                COLLECTION_ID,
+                COLLECTION_ID,
+                &[wrong_block],
+                &rest,
+                DEFAULT_VIEW_ID,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn collection_view_response_description_is_redacted() {
+        const SECRET: &str = "collection-view-response-secret";
+        let existing = vec![rest_view(DEFAULT_VIEW_ID, "All")];
+        let requested = requested_view("request-id", "Second");
+        let mut response = create_response(CREATED_VIEW_ID, &requested);
+        response.error = Some(create_dataview_view::response::Error {
+            code: create_dataview_view::response::error::Code::UnknownError as i32,
+            description: SECRET.to_owned(),
+        });
+        let rendered = validate_created_collection_view(
+            &response,
+            SPACE_ID,
+            COLLECTION_ID,
+            BLOCK_ID,
+            "request-id",
+            &requested,
+            &existing,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            rendered,
+            "Test assertion failed: cleanup-safe collection view fixture creation failed"
+        );
+        assert!(!rendered.contains(SECRET));
     }
 
     #[test]
@@ -2078,7 +2591,14 @@ mod tests {
         };
         let existing = vec![rest_view(DEFAULT_VIEW_ID, "All")];
         assert!(
-            resolve_collection_dataview(&[block], &existing, DEFAULT_VIEW_ID, Some("All")).is_err()
+            resolve_collection_dataview(
+                COLLECTION_ID,
+                COLLECTION_ID,
+                &[block],
+                &existing,
+                DEFAULT_VIEW_ID,
+            )
+            .is_err()
         );
     }
 
@@ -2107,6 +2627,9 @@ mod tests {
             "Test assertion failed: cleanup-safe collection view fixture creation failed"
         );
         assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
     fn template_fixture_requires_explicit_null_and_redacts_response_description() {
         const SECRET: &str = "template-response-secret-sentinel";
         let success = template_create_from_object::response::Error {

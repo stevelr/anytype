@@ -436,15 +436,18 @@ create/update contract rejects collection layout, so this test-only helper uses
 the narrow heart RPC, registers the returned type for cleanup before any
 follow-up read, and verifies it through the ordinary scoped REST getter.
 
-After creating and cleanup-registering an object of that type, tests that need
-two collection views can use `TestContext::create_collection_view_fixture`.
-The helper accepts only a registered collection-layout object with exactly its
-one default view, cross-checks a complete REST view snapshot against the exact
-dataview block returned by authenticated `ObjectShow`, clones the full default
-view, and issues one `BlockDataviewViewCreate` RPC. It accepts only an explicit
-success code with a new server-assigned ID and matching view-set event, then
-requires a finite exact two-view REST read-after-write result. Collection
-teardown owns the added view; there is no general view-create production API.
+Tests must create the object through
+`TestContext::create_collection_fixture`; ordinary cleanup registration does
+not grant view-mutation authority. This helper accepts only a collection type
+owned by the context, takes a complete type-scoped pre-create snapshot, and
+privately records the exact active collection returned in the context space.
+`TestContext::create_collection_view_fixture` then requires that provenance,
+cross-checks every REST-visible default-view field against the exact
+`ObjectShow` root and `dataview` block, clones the full proto, and issues one
+`BlockDataviewViewCreate` RPC. It requires exactly one matching view-set event,
+a distinct server-assigned ID, and complete nested-view equality before a
+finite exact two-view REST verification. Collection teardown owns the added
+view; there is no general view-create production API.
 
 Tests that need disposable spaces should use
 `TestContext::create_space_fixture`. It creates through the authenticated REST

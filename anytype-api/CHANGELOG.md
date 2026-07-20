@@ -58,12 +58,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   through the narrow heart RPC, with immediate safe-id registration and bounded
   exact-layout verification through the ordinary REST getter; production REST
   `TypeLayout` remains restricted to the four layouts the server accepts.
-- Add a test-only second-view fixture for registered self-created collections.
-  It cross-checks the complete one-view REST snapshot against the exact
-  `ObjectShow` dataview block, copies all default-view fields, sends one
-  authenticated create RPC, requires an explicit success code plus matching
-  view-set event with a new server-assigned ID, and finitely verifies the exact
-  two IDs and names through REST. Collection teardown owns the mutation.
+- Add privately proven collection-object and second-view test fixtures. The
+  object helper accepts only a context-owned collection type, snapshots its
+  exact existing object IDs, and binds the create result to active
+  space/type/layout identity; ordinary cleanup registration cannot authorize
+  view mutation. The view helper cross-checks every REST-visible field against
+  the exact `ObjectShow` root and dataview block, copies the complete proto,
+  sends one authenticated create RPC, requires one exact full-view event and a
+  distinct server-assigned ID, and finitely verifies the complete two-view REST
+  result. Collection teardown owns the mutation.
 - Add a test-only disposable-space lifecycle that registers validated REST
   create IDs before verification only after a complete pre-create snapshot
   proves they are neither current nor pre-existing, structurally deduplicates
