@@ -457,8 +457,10 @@ cargo test -p any-mcp
 The ignored live suite uses `with_test_context`, checks authenticated HTTP and
 gRPC before work, and runs serially so mutation verification does not compete
 with itself for the server's rate limit. Every created object, type, and
-property is registered immediately for cleanup. Run all live groups from the
-repository root with one command:
+property is registered immediately for cleanup. It requires a running headless
+server, a test space selected by `.test-env`, and `anyr auth status` reporting
+both HTTP and gRPC pings as OK. Run all passing coverage and known-behavior
+diagnostics from the repository root with one command:
 
 ```sh
 source .test-env
@@ -468,11 +470,25 @@ cargo test -p any-mcp headless_ -- --ignored --test-threads=1
 The exact tests are
 `headless_default_discovery_routes_paginate_and_report_ambiguity`,
 `headless_view_body_and_resource_routes_are_complete_and_bound`, and
-`headless_mutations_are_visible_idempotent_and_conflict_safe`. Together they
-exercise the production router for all 14 default tools plus the complete
-document resource, cursor/query binding, body continuation, explicit view
-selection, ambiguity evidence, idempotent create, read-after-write visibility,
-and stale/count-conflict edits that prove the body was not changed.
+`headless_mutations_are_visible_idempotent_and_conflict_safe`, plus the blocked
+behavior diagnostics
+`headless_diagnostic_archive_applies_before_fixed_error` and
+`headless_diagnostic_create_body_applies_before_indeterminate_error`. The first
+three exercise the production router, complete document resource,
+fixture-backed type/property/tag/object/view-object continuations, cursor/query
+binding, body continuation, explicit view selection, ambiguity evidence,
+idempotent create, read-after-write visibility, and stale/count-conflict edits
+that prove the body was not changed.
+
+The two diagnostic tests are expected to pass while their product bugs remain:
+they prove the exact mutation was applied and cleaned up before asserting the
+fixed error code. A passing diagnostic is evidence of a reproduced blocker,
+not acceptance of the corresponding handler. Space and template list handlers
+currently receive honest terminal-page coverage because the public API has no
+cleanup-safe space deletion or template creation path. Collection objects use
+a dynamically resolved and layout-validated system collection type because
+custom type creation cannot request collection layout. Separate tracker
+dependencies cover those fixture gaps and multi-view `view_list` continuation.
 
 ## Build
 
