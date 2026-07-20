@@ -126,6 +126,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and join every owned worker on success and failure. Assert exact response
   counts separately from byte purity and require JSON-RPC 2.0 on every stdout
   object.
+- Compare the complete real normal/read-only `tools/list` wire payload against
+  the reviewed canonical catalog snapshots, including exact descriptions,
+  nested input/output schemas, annotations, ordering, and omissions without
+  duplicating fixture contents.
 - Add reviewed deterministic normal/read-only catalog snapshots, an independent
   fail-closed local-reference graph audit for recursive schema bounds and exact
   annotation audits, exact character/byte boundary coverage, exhaustive Anytype
