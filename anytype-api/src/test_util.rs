@@ -44,6 +44,9 @@ const SPACE_FIXTURE_SCAN_LIMIT: u32 = 1_000;
 const SPACE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 const SPACE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
 const TEMPLATE_FIXTURE_LIMIT: u32 = 1_000;
+const TEMPLATE_FIXTURE_OBJECT_LIMIT: usize = 10_000;
+const TEMPLATE_FIXTURE_ARCHIVED_LIMIT: usize = 10_000;
+const TEMPLATE_FIXTURE_GLOBAL_TEMPLATE_LIMIT: usize = 10_000;
 const TEMPLATE_FIXTURE_MAX_SOURCES: usize = 16;
 const TEMPLATE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 const TEMPLATE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
@@ -256,10 +259,11 @@ impl TestContext {
     /// Creates a custom type and cleanup-owned templates from new source objects.
     ///
     /// The custom type and every source object use the authenticated REST API
-    /// without built-in verification. Complete bounded pre-create snapshots
-    /// prove each returned ID was not pre-existing before it is registered for
-    /// cleanup and before any fallible follow-up. Each source is converted with exactly one
-    /// authenticated `TemplateCreateFromObject` RPC. The returned template ID
+    /// without built-in verification. Complete bounded pre-create snapshots of
+    /// every type, space-wide object and archived-object ID, and every template
+    /// on every active type prove each returned ID was not pre-existing before
+    /// cleanup registration or any fallible follow-up. Each source is converted
+    /// with exactly one authenticated `TemplateCreateFromObject` RPC. The returned template ID
     /// must be new, distinct from the space/type/source IDs, and is
     /// deduplicated into the private cleanup registry before the RPC response
     /// code or any REST evidence is inspected.
@@ -290,7 +294,8 @@ impl TestContext {
             limits.validate_name(source_name, "template fixture source")?;
         }
 
-        let preexisting_type_ids = complete_type_ids(&self.client, &self.space_id).await?;
+        let type_snapshot =
+            complete_template_ownership_snapshot(&self.client, &self.space_id).await?;
         let type_key = format!("template_fixture_{}", unique_suffix());
         let created_type = self
             .client
@@ -302,14 +307,15 @@ impl TestContext {
             .create()
             .await?;
         limits.validate_id(&created_type.id, "template fixture type")?;
-        if created_type.id == self.space_id || preexisting_type_ids.contains(&created_type.id) {
-            return Err(template_fixture_error());
-        }
-        self.cleanup
-            .add_template_resource(TemplateFixtureResource::Type {
+        authorize_template_resource(
+            &self.cleanup,
+            &type_snapshot,
+            &[self.space_id.as_str()],
+            TemplateFixtureResource::Type {
                 space_id: self.space_id.clone(),
                 type_id: created_type.id.clone(),
-            })?;
+            },
+        )?;
 
         let verify_config = template_fixture_verify_config();
         let expected_type_id = created_type.id.clone();
@@ -332,14 +338,12 @@ impl TestContext {
         )
         .await?;
 
-        let mut known_template_ids =
-            complete_template_ids(&self.client, &self.space_id, &verified_type.id).await?;
         let mut sources = Vec::with_capacity(source_names.len());
         let mut templates = Vec::with_capacity(source_names.len());
 
         for source_name in source_names {
-            let preexisting_object_ids =
-                complete_type_object_ids(&self.client, &self.space_id, &verified_type.key).await?;
+            let source_snapshot =
+                complete_template_ownership_snapshot(&self.client, &self.space_id).await?;
             let source = self
                 .client
                 .new_object(&self.space_id, &verified_type.key)
@@ -348,18 +352,15 @@ impl TestContext {
                 .create()
                 .await?;
             limits.validate_id(&source.id, "template fixture source")?;
-            if source.id == self.space_id
-                || source.id == verified_type.id
-                || known_template_ids.contains(&source.id)
-                || preexisting_object_ids.contains(&source.id)
-            {
-                return Err(template_fixture_error());
-            }
-            self.cleanup
-                .add_template_resource(TemplateFixtureResource::Source {
+            authorize_template_resource(
+                &self.cleanup,
+                &source_snapshot,
+                &[self.space_id.as_str(), verified_type.id.as_str()],
+                TemplateFixtureResource::Source {
                     space_id: self.space_id.clone(),
                     source_id: source.id.clone(),
-                })?;
+                },
+            )?;
 
             let expected_source_id = source.id.clone();
             let expected_source_type = verified_type.id.clone();
@@ -384,6 +385,8 @@ impl TestContext {
             )
             .await?;
 
+            let template_snapshot =
+                complete_template_ownership_snapshot(&self.client, &self.space_id).await?;
             let grpc = self.client.grpc_client().await?;
             let mut commands = grpc.client_commands();
             let request = with_token_request(
@@ -399,21 +402,20 @@ impl TestContext {
                 .into_inner();
 
             limits.validate_id(&response.id, "template fixture")?;
-            if !template_fixture_id_is_owned_candidate(
-                &response.id,
-                &self.space_id,
-                &verified_type.id,
-                &source.id,
-                &known_template_ids,
-            ) {
-                return Err(template_fixture_error());
-            }
-            self.cleanup
-                .add_template_resource(TemplateFixtureResource::Template {
+            authorize_template_resource(
+                &self.cleanup,
+                &template_snapshot,
+                &[
+                    self.space_id.as_str(),
+                    verified_type.id.as_str(),
+                    source.id.as_str(),
+                ],
+                TemplateFixtureResource::Template {
                     space_id: self.space_id.clone(),
                     type_id: verified_type.id.clone(),
                     template_id: response.id.clone(),
-                })?;
+                },
+            )?;
             if !template_fixture_response_succeeded(response.error.as_ref()) {
                 return Err(template_fixture_response_error(response.error.as_ref()));
             }
@@ -426,7 +428,6 @@ impl TestContext {
                 &response.id,
             )
             .await?;
-            known_template_ids.insert(response.id);
             sources.push(source);
             templates.push(template);
         }
@@ -502,17 +503,20 @@ fn template_fixture_response_error(
     template_fixture_error()
 }
 
-fn template_fixture_id_is_owned_candidate(
-    template_id: &str,
-    space_id: &str,
-    type_id: &str,
-    source_id: &str,
-    known_template_ids: &BTreeSet<String>,
-) -> bool {
-    template_id != space_id
-        && template_id != type_id
-        && template_id != source_id
-        && !known_template_ids.contains(template_id)
+fn authorize_template_resource(
+    cleanup: &TestCleanup,
+    snapshot: &TemplateOwnershipSnapshot,
+    forbidden_ids: &[&str],
+    resource: TemplateFixtureResource,
+) -> TestResult<()> {
+    let candidate_id = resource.id();
+    if forbidden_ids.contains(&candidate_id)
+        || snapshot.contains(candidate_id)
+        || cleanup.is_registered_id(candidate_id)
+    {
+        return Err(template_fixture_error());
+    }
+    cleanup.add_template_resource(resource)
 }
 
 fn template_fixture_error() -> TestError {
@@ -540,6 +544,17 @@ async fn complete_template_ids(
     space_id: &str,
     type_id: &str,
 ) -> Result<BTreeSet<String>, AnytypeError> {
+    Ok(complete_template_objects(client, space_id, type_id)
+        .await?
+        .into_keys()
+        .collect())
+}
+
+async fn complete_template_objects(
+    client: &AnytypeClient,
+    space_id: &str,
+    type_id: &str,
+) -> Result<BTreeMap<String, Object>, AnytypeError> {
     let response = client
         .templates(space_id, type_id)
         .limit(TEMPLATE_FIXTURE_LIMIT)
@@ -554,23 +569,49 @@ async fn complete_template_ids(
     {
         return Err(template_fixture_api_error());
     }
-    let mut ids = BTreeSet::new();
+    let mut templates = BTreeMap::new();
     for template in response.items {
-        client
-            .get_config()
-            .limits
-            .validate_id(&template.id, "template fixture evidence")?;
-        if template.space_id != space_id || !ids.insert(template.id) {
+        if !template_has_canonical_identity(client, &template, space_id)
+            || templates.insert(template.id.clone(), template).is_some()
+        {
             return Err(template_fixture_api_error());
         }
     }
-    Ok(ids)
+    Ok(templates)
 }
 
-async fn complete_type_ids(
+fn template_has_canonical_identity(
+    client: &AnytypeClient,
+    template: &Object,
+    space_id: &str,
+) -> bool {
+    client
+        .get_config()
+        .limits
+        .validate_id(&template.id, "template fixture evidence")
+        .is_ok()
+        && template.space_id == space_id
+        && !template.archived
+        && template.r#type.as_ref().is_some_and(|typ| {
+            !typ.archived
+                && typ.key == "template"
+                && client
+                    .get_config()
+                    .limits
+                    .validate_id(&typ.id, "template fixture generic type")
+                    .is_ok()
+        })
+}
+
+struct CompleteTypeInventory {
+    all_ids: BTreeSet<String>,
+    active_ids: Vec<String>,
+}
+
+async fn complete_type_inventory(
     client: &AnytypeClient,
     space_id: &str,
-) -> Result<BTreeSet<String>, AnytypeError> {
+) -> Result<CompleteTypeInventory, AnytypeError> {
     let response = client
         .types(space_id)
         .limit(TEMPLATE_FIXTURE_LIMIT)
@@ -585,58 +626,171 @@ async fn complete_type_ids(
     {
         return Err(template_fixture_api_error());
     }
-    response
-        .items
-        .into_iter()
-        .try_fold(BTreeSet::new(), |mut ids, typ| {
-            client
-                .get_config()
-                .limits
-                .validate_id(&typ.id, "template fixture type evidence")?;
-            if !ids.insert(typ.id) {
-                return Err(template_fixture_api_error());
-            }
-            Ok(ids)
-        })
+    let mut all_ids = BTreeSet::new();
+    let mut active_ids = Vec::new();
+    for typ in response.items {
+        client
+            .get_config()
+            .limits
+            .validate_id(&typ.id, "template fixture type evidence")?;
+        if !all_ids.insert(typ.id.clone()) {
+            return Err(template_fixture_api_error());
+        }
+        if !typ.archived {
+            active_ids.push(typ.id);
+        }
+    }
+    Ok(CompleteTypeInventory {
+        all_ids,
+        active_ids,
+    })
 }
 
-async fn complete_type_object_ids(
+async fn complete_space_object_ids(
     client: &AnytypeClient,
     space_id: &str,
-    type_key: &str,
 ) -> Result<BTreeSet<String>, AnytypeError> {
-    let response = client
-        .objects(space_id)
-        .filter(Filter::type_in([type_key]))
-        .limit(TEMPLATE_FIXTURE_LIMIT)
-        .offset(0)
-        .list()
-        .await?
-        .into_response();
-    if response.pagination.offset != 0
-        || response.pagination.limit != TEMPLATE_FIXTURE_LIMIT
-        || response.pagination.has_more
-        || response.pagination.total != response.items.len()
-    {
-        return Err(template_fixture_api_error());
-    }
-    response
-        .items
-        .into_iter()
-        .try_fold(BTreeSet::new(), |mut ids, object| {
+    let mut all_ids = BTreeSet::new();
+    let mut offset = 0u32;
+    let mut expected_total = None;
+    loop {
+        let response = client
+            .objects(space_id)
+            .limit(TEMPLATE_FIXTURE_LIMIT)
+            .offset(offset)
+            .list()
+            .await?
+            .into_response();
+        let total = response.pagination.total;
+        if response.pagination.offset != offset
+            || response.pagination.limit != TEMPLATE_FIXTURE_LIMIT
+            || response.items.len() > TEMPLATE_FIXTURE_LIMIT as usize
+            || total > TEMPLATE_FIXTURE_OBJECT_LIMIT
+            || expected_total.is_some_and(|expected| expected != total)
+            || (response.pagination.has_more && response.items.is_empty())
+        {
+            return Err(template_fixture_api_error());
+        }
+        expected_total = Some(total);
+        for object in response.items {
             client
                 .get_config()
                 .limits
                 .validate_id(&object.id, "template fixture object evidence")?;
-            if object.space_id != space_id || !ids.insert(object.id) {
+            if object.space_id != space_id || !all_ids.insert(object.id) {
                 return Err(template_fixture_api_error());
             }
-            Ok(ids)
-        })
+        }
+        if !response.pagination.has_more {
+            if all_ids.len() != total {
+                return Err(template_fixture_api_error());
+            }
+            break;
+        }
+        offset = offset
+            .checked_add(TEMPLATE_FIXTURE_LIMIT)
+            .ok_or_else(template_fixture_api_error)?;
+    }
+
+    let mut archived_ids = BTreeSet::new();
+    let mut offset = 0u32;
+    loop {
+        let archived = client
+            .list_archived(space_id)
+            .limit(TEMPLATE_FIXTURE_LIMIT)
+            .offset(offset)
+            .list()
+            .await?
+            .into_response();
+        let total = archived.pagination.total;
+        if archived.pagination.offset != offset
+            || archived.pagination.limit != TEMPLATE_FIXTURE_LIMIT
+            || archived.items.len() > TEMPLATE_FIXTURE_LIMIT as usize
+            || total > TEMPLATE_FIXTURE_ARCHIVED_LIMIT
+            || total != offset as usize + archived.items.len()
+            || (archived.pagination.has_more && archived.items.is_empty())
+        {
+            return Err(template_fixture_api_error());
+        }
+        for object in archived.items {
+            client
+                .get_config()
+                .limits
+                .validate_id(&object.id, "template fixture archived evidence")?;
+            if object.space_id != space_id
+                || !object.archived
+                || !archived_ids.insert(object.id.clone())
+            {
+                return Err(template_fixture_api_error());
+            }
+            all_ids.insert(object.id);
+        }
+        if !archived.pagination.has_more {
+            if archived_ids.len() != total {
+                return Err(template_fixture_api_error());
+            }
+            break;
+        }
+        offset = offset
+            .checked_add(TEMPLATE_FIXTURE_LIMIT)
+            .ok_or_else(template_fixture_api_error)?;
+    }
+    Ok(all_ids)
+}
+
+async fn complete_global_template_owners(
+    client: &AnytypeClient,
+    space_id: &str,
+    active_type_ids: &[String],
+) -> Result<BTreeMap<String, String>, AnytypeError> {
+    let mut owners = BTreeMap::new();
+    for type_id in active_type_ids {
+        let templates = complete_template_objects(client, space_id, type_id).await?;
+        if owners.len().saturating_add(templates.len()) > TEMPLATE_FIXTURE_GLOBAL_TEMPLATE_LIMIT {
+            return Err(template_fixture_api_error());
+        }
+        for id in templates.into_keys() {
+            if owners.insert(id, type_id.clone()).is_some() {
+                return Err(template_fixture_api_error());
+            }
+        }
+    }
+    Ok(owners)
+}
+
+#[derive(Default)]
+struct TemplateOwnershipSnapshot {
+    type_ids: BTreeSet<String>,
+    object_ids: BTreeSet<String>,
+    template_ids: BTreeSet<String>,
+}
+
+impl TemplateOwnershipSnapshot {
+    fn contains(&self, id: &str) -> bool {
+        self.type_ids.contains(id) || self.object_ids.contains(id) || self.template_ids.contains(id)
+    }
+}
+
+async fn complete_template_ownership_snapshot(
+    client: &AnytypeClient,
+    space_id: &str,
+) -> Result<TemplateOwnershipSnapshot, AnytypeError> {
+    let types = complete_type_inventory(client, space_id).await?;
+    let object_ids = complete_space_object_ids(client, space_id).await?;
+    let template_ids = complete_global_template_owners(client, space_id, &types.active_ids)
+        .await?
+        .into_keys()
+        .collect();
+    Ok(TemplateOwnershipSnapshot {
+        type_ids: types.all_ids,
+        object_ids,
+        template_ids,
+    })
 }
 
 struct TemplateFixtureEvidence {
-    ids: BTreeSet<String>,
+    owning_type_id: String,
+    listed: Object,
     template: Object,
 }
 
@@ -653,18 +807,40 @@ async fn verify_template_fixture(
         "template fixture",
         template_id,
         || async {
-            let ids = complete_template_ids(client, space_id, type_id).await?;
+            let types = complete_type_inventory(client, space_id).await?;
+            let owners =
+                complete_global_template_owners(client, space_id, &types.active_ids).await?;
+            let owning_type_id = owners
+                .get(template_id)
+                .cloned()
+                .ok_or_else(template_fixture_api_error)?;
+            let templates = complete_template_objects(client, space_id, type_id).await?;
+            let listed = templates
+                .get(template_id)
+                .cloned()
+                .ok_or_else(template_fixture_api_error)?;
             let template = client
                 .template(space_id, type_id, template_id)
                 .get()
                 .await?;
-            Ok(TemplateFixtureEvidence { ids, template })
+            Ok(TemplateFixtureEvidence {
+                owning_type_id,
+                listed,
+                template,
+            })
         },
         |evidence| {
-            evidence.ids.contains(&expected_id)
+            let listed_type = evidence.listed.r#type.as_ref();
+            let fetched_type = evidence.template.r#type.as_ref();
+            evidence.owning_type_id == type_id
+                && evidence.listed.id == expected_id
+                && template_has_canonical_identity(client, &evidence.template, space_id)
                 && evidence.template.id == expected_id
-                && evidence.template.space_id == space_id
-                && !evidence.template.archived
+                && listed_type
+                    .zip(fetched_type)
+                    .is_some_and(|(listed, fetched)| {
+                        listed.id == fetched.id && listed.key == fetched.key
+                    })
         },
     )
     .await?;
@@ -863,6 +1039,7 @@ pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
     space_fixtures: Mutex<BTreeSet<String>>,
     template_resources: Mutex<Vec<TemplateFixtureResource>>,
+    registered_ids: Mutex<BTreeSet<String>>,
     temp_paths: Mutex<Vec<PathBuf>>,
 }
 
@@ -898,44 +1075,50 @@ impl TestCleanup {
         self.objects.lock().is_empty()
             && self.space_fixtures.lock().is_empty()
             && self.template_resources.lock().is_empty()
+            && self.registered_ids.lock().is_empty()
             && self.temp_paths.lock().is_empty()
     }
 
     /// Remembers this object for deletion after the test
     pub fn add_object(&self, space_id: &str, id: &str) {
-        self.objects
-            .lock()
-            .push((space_id.into(), id.into(), DataModel::Object));
+        self.add_generic_resource(space_id, id, DataModel::Object);
     }
 
     /// Remembers this property for deletion after the test
     pub fn add_property(&self, space_id: &str, id: &str) {
-        self.objects
-            .lock()
-            .push((space_id.into(), id.into(), DataModel::Property));
+        self.add_generic_resource(space_id, id, DataModel::Property);
     }
 
     /// Remembers this Type for deletion after the test
     pub fn add_type(&self, space_id: &str, id: &str) {
-        self.objects
-            .lock()
-            .push((space_id.into(), id.into(), DataModel::Type));
+        self.add_generic_resource(space_id, id, DataModel::Type);
+    }
+
+    fn add_generic_resource(&self, space_id: &str, id: &str, model: DataModel) {
+        if self.registered_ids.lock().insert(id.to_owned()) {
+            self.objects
+                .lock()
+                .push((space_id.to_owned(), id.to_owned(), model));
+        }
+    }
+
+    fn is_registered_id(&self, id: &str) -> bool {
+        self.registered_ids.lock().contains(id)
     }
 
     /// Remembers an exact space ID created by `TestContext::create_space_fixture`.
     fn add_space_fixture(&self, id: &str) -> bool {
+        if !self.registered_ids.lock().insert(id.to_owned()) {
+            return false;
+        }
         self.space_fixtures.lock().insert(id.into())
     }
 
     fn add_template_resource(&self, resource: TemplateFixtureResource) -> TestResult<()> {
-        let mut resources = self.template_resources.lock();
-        if resources
-            .iter()
-            .any(|registered| registered.id() == resource.id())
-        {
+        if !self.registered_ids.lock().insert(resource.id().to_owned()) {
             return Err(template_fixture_error());
         }
-        resources.push(resource);
+        self.template_resources.lock().push(resource);
         Ok(())
     }
 
@@ -1025,6 +1208,7 @@ impl TestCleanup {
                 let _ = std::fs::remove_file(&path);
             }
         }
+        self.registered_ids.lock().clear();
         if template_cleanup_failed {
             return Err(template_fixture_error());
         }
@@ -1458,34 +1642,119 @@ mod tests {
                 .is_err()
         );
         assert_eq!(cleanup.template_resources.lock().len(), 1);
+        assert_eq!(cleanup.registered_ids.lock().len(), 1);
     }
 
     #[test]
     fn template_fixture_rejects_current_source_type_and_preexisting_ids() {
-        let known = BTreeSet::from(["preexisting".to_owned()]);
-        assert!(!template_fixture_id_is_owned_candidate(
-            "space", "space", "type", "source", &known,
-        ));
-        assert!(!template_fixture_id_is_owned_candidate(
-            "type", "space", "type", "source", &known,
-        ));
-        assert!(!template_fixture_id_is_owned_candidate(
-            "source", "space", "type", "source", &known,
-        ));
-        assert!(!template_fixture_id_is_owned_candidate(
-            "preexisting",
-            "space",
-            "type",
-            "source",
-            &known,
-        ));
-        assert!(template_fixture_id_is_owned_candidate(
-            "new-template",
-            "space",
-            "type",
-            "source",
-            &known,
-        ));
+        for candidate in ["space", "type", "source"] {
+            let cleanup = TestCleanup::default();
+            let result = authorize_template_resource(
+                &cleanup,
+                &TemplateOwnershipSnapshot::default(),
+                &["space", "type", "source"],
+                TemplateFixtureResource::Template {
+                    space_id: "space".to_owned(),
+                    type_id: "type".to_owned(),
+                    template_id: candidate.to_owned(),
+                },
+            );
+            assert!(result.is_err());
+            assert!(cleanup.template_resources.lock().is_empty());
+            assert!(cleanup.registered_ids.lock().is_empty());
+        }
+    }
+
+    #[test]
+    fn template_fixture_rejects_cross_type_object_and_existing_template_or_type() {
+        for snapshot in [
+            TemplateOwnershipSnapshot {
+                object_ids: BTreeSet::from(["candidate".to_owned()]),
+                ..Default::default()
+            },
+            TemplateOwnershipSnapshot {
+                template_ids: BTreeSet::from(["candidate".to_owned()]),
+                ..Default::default()
+            },
+            TemplateOwnershipSnapshot {
+                type_ids: BTreeSet::from(["candidate".to_owned()]),
+                ..Default::default()
+            },
+        ] {
+            let cleanup = TestCleanup::default();
+            let result = authorize_template_resource(
+                &cleanup,
+                &snapshot,
+                &["space", "type", "source"],
+                TemplateFixtureResource::Template {
+                    space_id: "space".to_owned(),
+                    type_id: "type".to_owned(),
+                    template_id: "candidate".to_owned(),
+                },
+            );
+            assert!(result.is_err());
+            assert!(cleanup.template_resources.lock().is_empty());
+            assert!(cleanup.registered_ids.lock().is_empty());
+        }
+    }
+
+    #[test]
+    fn template_fixture_rejects_archived_object_id_without_cleanup_authorization() {
+        let cleanup = TestCleanup::default();
+        let snapshot = TemplateOwnershipSnapshot {
+            // Whole-space snapshots merge the explicit archived surface into
+            // this set before any create or RPC mutation is dispatched.
+            object_ids: BTreeSet::from(["archived-candidate".to_owned()]),
+            ..Default::default()
+        };
+        let result = authorize_template_resource(
+            &cleanup,
+            &snapshot,
+            &[],
+            TemplateFixtureResource::Source {
+                space_id: "space".to_owned(),
+                source_id: "archived-candidate".to_owned(),
+            },
+        );
+        assert!(result.is_err());
+        assert!(cleanup.template_resources.lock().is_empty());
+        assert!(cleanup.registered_ids.lock().is_empty());
+    }
+
+    #[test]
+    fn template_fixture_cross_registry_collision_has_one_cleanup_dispatch() {
+        let cleanup = TestCleanup::default();
+        cleanup.add_object("space", "collision");
+        let result = authorize_template_resource(
+            &cleanup,
+            &TemplateOwnershipSnapshot::default(),
+            &[],
+            TemplateFixtureResource::Template {
+                space_id: "space".to_owned(),
+                type_id: "type".to_owned(),
+                template_id: "collision".to_owned(),
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(cleanup.objects.lock().len(), 1);
+        assert!(cleanup.template_resources.lock().is_empty());
+        assert_eq!(cleanup.registered_ids.lock().len(), 1);
+
+        cleanup.add_type("space", "collision");
+        assert_eq!(cleanup.objects.lock().len(), 1);
+        assert_eq!(cleanup.registered_ids.lock().len(), 1);
+
+        let cleanup = TestCleanup::default();
+        cleanup
+            .add_template_resource(TemplateFixtureResource::Source {
+                space_id: "space".to_owned(),
+                source_id: "collision".to_owned(),
+            })
+            .unwrap();
+        cleanup.add_object("space", "collision");
+        assert!(cleanup.objects.lock().is_empty());
+        assert_eq!(cleanup.template_resources.lock().len(), 1);
+        assert_eq!(cleanup.registered_ids.lock().len(), 1);
     }
 
     #[test]

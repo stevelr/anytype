@@ -452,8 +452,11 @@ Tests that need templates can use the hidden
 names. It creates a private custom type and source object for each requested
 template, invokes the authenticated heart template-from-object RPC exactly once
 per source, and verifies the returned IDs through a finite complete type-scoped
-list plus exact GETs. Complete bounded type and type-scoped object snapshots
-prove create responses did not reuse pre-existing IDs. The helper registers every created ID before classifying
+list plus exact GETs. Complete bounded type, space-wide active/archived object,
+and global template inventories prove create responses did not reuse
+pre-existing IDs; the global inventory also proves the new template is owned
+only by the expected type, while list and GET generic-template identities must
+agree. The helper registers every created ID before classifying
 the RPC response or reading it back. Teardown issues each template, source, and
 type archive request once in reverse dependency order, then proves the
 templates absent and the sources and type archived. Production consumers do
