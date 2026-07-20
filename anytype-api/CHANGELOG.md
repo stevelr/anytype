@@ -28,6 +28,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- bounded predicate-based semantic read-after-write verification with finite
+  timeout and validated attempt limits, retry of successful-but-stale values,
+  cancellation-safe backoff, and secret-safe terminal classifications
 - finite, incrementally enforced HTTP response ceilings for generic JSON,
   document JSON, bounded error bodies, and separately governed raw file
   downloads; object reads support a per-request ceiling within the configured

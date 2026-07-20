@@ -168,6 +168,29 @@ impl RuntimeContext {
         F: Future<Output = Result<T, E>>,
         C: Fn(&E) -> OperationFailureDiagnostic,
     {
+        self.execute_classified_with_control(
+            context,
+            cancellation,
+            operation,
+            classify,
+            default_control_failure_diagnostic,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_classified_with_control<F, T, E, C, D>(
+        &self,
+        context: OperationContext,
+        cancellation: &CancellationToken,
+        operation: F,
+        classify: C,
+        classify_control: D,
+    ) -> Result<T, ControlledOperationError<E>>
+    where
+        F: Future<Output = Result<T, E>>,
+        C: Fn(&E) -> OperationFailureDiagnostic,
+        D: Fn(ControlledFailureKind) -> OperationFailureDiagnostic,
+    {
         let started = Instant::now();
         let correlation_id = self
             .next_correlation_id
@@ -208,6 +231,7 @@ impl RuntimeContext {
             started.elapsed(),
             &result,
             &classify,
+            &classify_control,
         );
         result
     }
@@ -329,6 +353,13 @@ pub(crate) enum ControlledOperationError<E> {
     Operation(E),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlledFailureKind {
+    Cancelled,
+    TimedOut,
+    ShuttingDown,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct OperationFailureDiagnostic {
     outcome: &'static str,
@@ -357,19 +388,20 @@ fn log_classified_operation<T, E, C>(
     duration: Duration,
     result: &Result<T, ControlledOperationError<E>>,
     classify: &C,
+    classify_control: &impl Fn(ControlledFailureKind) -> OperationFailureDiagnostic,
 ) where
     C: Fn(&E) -> OperationFailureDiagnostic,
 {
     let diagnostic = match result {
         Ok(_) => OperationFailureDiagnostic::classified("success", "success"),
         Err(ControlledOperationError::Cancelled) => {
-            OperationFailureDiagnostic::classified("cancelled", "not_observed")
+            classify_control(ControlledFailureKind::Cancelled)
         }
         Err(ControlledOperationError::TimedOut) => {
-            OperationFailureDiagnostic::classified("timeout", "not_observed")
+            classify_control(ControlledFailureKind::TimedOut)
         }
         Err(ControlledOperationError::ShuttingDown) => {
-            OperationFailureDiagnostic::classified("shutdown", "not_observed")
+            classify_control(ControlledFailureKind::ShuttingDown)
         }
         Err(ControlledOperationError::Operation(error)) => classify(error),
     };
@@ -385,6 +417,22 @@ fn log_classified_operation<T, E, C>(
         upstream_http_status_present = diagnostic.status.http_status.is_some(),
         "Anytype operation completed"
     );
+}
+
+const fn default_control_failure_diagnostic(
+    failure: ControlledFailureKind,
+) -> OperationFailureDiagnostic {
+    match failure {
+        ControlledFailureKind::Cancelled => {
+            OperationFailureDiagnostic::classified("cancelled", "not_observed")
+        }
+        ControlledFailureKind::TimedOut => {
+            OperationFailureDiagnostic::classified("timeout", "not_observed")
+        }
+        ControlledFailureKind::ShuttingDown => {
+            OperationFailureDiagnostic::classified("shutdown", "not_observed")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

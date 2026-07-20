@@ -173,6 +173,14 @@ property only after the handler validates that key and format against the
 effective object type; select, number, date, icon, and name clears are not
 invented where the upstream API has no distinct supported form.
 
+Mutation handlers also share an opt-in one-way dispatch marker. Cancellation,
+request timeout, or shutdown before the first write poll retains the ordinary
+redacted upstream result. Once a write may have been dispatched, the same
+controlled failures return a fixed `conflict` result stating that the mutation
+may have applied and requiring a reread before retry. The marker is cloneable,
+atomic, sticky, and created once per invocation; normal operation errors remain
+the handler's responsibility to classify explicitly.
+
 ### View discovery workflows
 
 The transport-neutral `view_list` and `view_object_list` handlers provide one
