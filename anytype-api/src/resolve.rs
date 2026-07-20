@@ -60,7 +60,9 @@ pub const MAX_RESOLVE_CANDIDATE_NAME_CHARS: usize = 256;
 
 const MAX_RESOLVE_CANDIDATE_ID_CHARS: usize = 256;
 
-const RESOLVE_PAGE_SIZE: u32 = 100;
+// Deliberately differs from the API's default so list builders take the
+// explicit paged path instead of cache-prime shortcuts.
+const RESOLVE_PAGE_SIZE: u32 = 99;
 
 /// Name of the default chat created in every space.
 ///
@@ -314,9 +316,7 @@ impl AnytypeClient {
             .list()
             .await?
             .into_stream();
-        let mut exact = MatchAccumulator::new();
-        let mut case_insensitive = MatchAccumulator::new();
-        let needle = view_id_or_name.to_lowercase();
+        let mut matches = ViewMatchAccumulator::new(view_id_or_name);
         let mut scanned = 0;
         while let Some(view) = views.next().await {
             let view = view?;
@@ -324,35 +324,12 @@ impl AnytypeClient {
                 return Err(resolution_limit("view", view_id_or_name));
             }
             scanned += 1;
-            if view.id == view_id_or_name {
-                return Ok(view.id);
-            }
-            if view.name.as_deref() == Some(view_id_or_name) {
-                let candidate = view_candidate(&view);
-                exact.push(view, candidate);
-                if exact.is_ambiguous() {
-                    let MatchClassification::Ambiguous(candidates) = exact.finish() else {
-                        unreachable!("ambiguous accumulator must classify as ambiguous");
-                    };
-                    return Err(ambiguous("view", view_id_or_name, candidates));
-                }
-                continue;
-            }
-            if view.name.as_deref().unwrap_or("").to_lowercase() == needle {
-                let candidate = view_candidate(&view);
-                case_insensitive.push(view, candidate);
+            if let Some(id) = matches.push(view) {
+                return Ok(id);
             }
         }
 
-        match exact.finish() {
-            MatchClassification::Unique(view) => return Ok(view.id),
-            MatchClassification::Ambiguous(candidates) => {
-                return Err(ambiguous("view", view_id_or_name, candidates));
-            }
-            MatchClassification::None => {}
-        }
-
-        match case_insensitive.finish() {
+        match matches.finish() {
             MatchClassification::None => Err(not_found("view", view_id_or_name)),
             MatchClassification::Unique(view) => Ok(view.id),
             MatchClassification::Ambiguous(candidates) => {
@@ -540,14 +517,6 @@ impl AnytypeClient {
                 if chat.name.as_deref().unwrap_or("").to_lowercase() == needle {
                     let candidate = object_candidate(&chat);
                     accumulator.push(chat, candidate);
-                    if accumulator.is_ambiguous() {
-                        return match accumulator.finish() {
-                            MatchClassification::Ambiguous(candidates) => {
-                                Err(ambiguous("chat", chat_id_or_name, candidates))
-                            }
-                            _ => unreachable!("ambiguous accumulator must remain ambiguous"),
-                        };
-                    }
                 }
             }
             if page_len < RESOLVE_PAGE_SIZE as usize {
@@ -591,8 +560,41 @@ impl AnytypeClient {
 
     /// Returns true if a chat with this id is accessible.
     async fn chat_exists(&self, chat_id: &str) -> Result<bool> {
-        let chats = self.chats().list_chats().list().await?;
-        Ok(chats.items.iter().any(|chat| chat.id == chat_id))
+        let mut spaces = self
+            .spaces()
+            .limit(RESOLVE_PAGE_SIZE)
+            .list()
+            .await?
+            .into_stream();
+        let mut budget = ResolutionScanBudget::new();
+        while let Some(space) = spaces.next().await {
+            let space = space?;
+            budget.record("chat", chat_id)?;
+            let mut offset = 0;
+            loop {
+                let result = self
+                    .chats()
+                    .search_chats_in(&space.id)
+                    .limit(RESOLVE_PAGE_SIZE)
+                    .offset(offset)
+                    .search()
+                    .await?;
+                let page_len = result.items.len();
+                for chat in result.items {
+                    budget.record("chat", chat_id)?;
+                    if chat.id == chat_id {
+                        return Ok(true);
+                    }
+                }
+                if page_len < RESOLVE_PAGE_SIZE as usize {
+                    break;
+                }
+                offset = offset
+                    .checked_add(RESOLVE_PAGE_SIZE)
+                    .ok_or_else(|| resolution_limit("chat", chat_id))?;
+            }
+        }
+        Ok(false)
     }
 
     /// Finds a space id by case-insensitive name match; `Ok(None)` when
@@ -702,10 +704,67 @@ enum MatchClassification<T> {
     Ambiguous(Vec<ResolveCandidate>),
 }
 
+struct ResolutionScanBudget {
+    scanned: usize,
+}
+
+impl ResolutionScanBudget {
+    const fn new() -> Self {
+        Self { scanned: 0 }
+    }
+
+    fn record(&mut self, obj_type: &str, key: &str) -> Result<()> {
+        if self.scanned == MAX_RESOLVE_SCAN_ITEMS {
+            return Err(resolution_limit(obj_type, key));
+        }
+        self.scanned += 1;
+        Ok(())
+    }
+}
+
 struct MatchAccumulator<T> {
     unique: Option<(ResolveCandidate, T)>,
     ambiguous: bool,
     candidates: Vec<ResolveCandidate>,
+}
+
+struct ViewMatchAccumulator {
+    target: String,
+    needle: String,
+    exact: MatchAccumulator<crate::views::View>,
+    case_insensitive: MatchAccumulator<crate::views::View>,
+}
+
+impl ViewMatchAccumulator {
+    fn new(target: &str) -> Self {
+        Self {
+            target: target.to_string(),
+            needle: target.to_lowercase(),
+            exact: MatchAccumulator::new(),
+            case_insensitive: MatchAccumulator::new(),
+        }
+    }
+
+    fn push(&mut self, view: crate::views::View) -> Option<String> {
+        if view.id == self.target {
+            return Some(view.id);
+        }
+        if view.name.as_deref() == Some(self.target.as_str()) {
+            let candidate = view_candidate(&view);
+            self.exact.push(view, candidate);
+        } else if view.name.as_deref().unwrap_or("").to_lowercase() == self.needle {
+            let candidate = view_candidate(&view);
+            self.case_insensitive.push(view, candidate);
+        }
+        None
+    }
+
+    fn finish(self) -> MatchClassification<crate::views::View> {
+        match self.exact.finish() {
+            MatchClassification::None => self.case_insensitive.finish(),
+            exact => exact,
+        }
+    }
 }
 
 impl<T> MatchAccumulator<T> {
@@ -751,10 +810,6 @@ impl<T> MatchAccumulator<T> {
             MatchClassification::None
         }
     }
-
-    fn is_ambiguous(&self) -> bool {
-        self.ambiguous && !self.candidates.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -769,9 +824,6 @@ fn classify_matches<T>(
         }
         let candidate = candidate_for(&item);
         accumulator.push(item, candidate);
-        if accumulator.is_ambiguous() {
-            break;
-        }
     }
     Ok(accumulator.finish())
 }
@@ -873,9 +925,6 @@ where
         if matches(&item) {
             let candidate = candidate_for(&item);
             accumulator.push(item, candidate);
-            if accumulator.is_ambiguous() {
-                break;
-            }
         }
     }
     Ok(accumulator.finish())
@@ -884,6 +933,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn empty_page_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept fixture request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body =
+                r#"{"items":[],"pagination":{"has_more":false,"limit":99,"offset":0,"total":0}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            String::from_utf8(request).expect("request is utf-8")
+        });
+        (format!("http://{address}"), task)
+    }
+
+    fn fixture_client(base_url: String) -> AnytypeClient {
+        let mut config = crate::client::ClientConfig::default().app_name("resolve-http-fixture");
+        config.base_url = Some(base_url);
+        config.keystore = Some("env".to_string());
+        let client = AnytypeClient::with_config(config).expect("fixture client");
+        client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
+        client
+    }
 
     // a valid space id (CID.HASH form) that passes looks_like_object_id
     const SPACE_ID: &str =
@@ -949,6 +1043,89 @@ mod tests {
     }
 
     #[test]
+    fn domain_candidates_deduplicate_space_type_view_chat_and_property_rows() {
+        let assert_unique = |candidates: Vec<ResolveCandidate>| {
+            let mut accumulator = MatchAccumulator::new();
+            for candidate in candidates {
+                accumulator.push((), candidate);
+            }
+            assert!(matches!(
+                accumulator.finish(),
+                MatchClassification::Unique(())
+            ));
+        };
+
+        let space: crate::spaces::Space = serde_json::from_value(serde_json::json!({
+            "id": "space-a", "name": "Work", "object": "space",
+            "description": null, "icon": null, "gateway_url": null, "network_id": null
+        }))
+        .unwrap();
+        let typ: Type = serde_json::from_value(serde_json::json!({
+            "archived": false, "id": "type-a", "key": "page", "name": "Page"
+        }))
+        .unwrap();
+        let view = crate::views::View {
+            filters: Vec::new(),
+            id: "view-a".to_string(),
+            layout: crate::views::ViewLayout::Grid,
+            name: Some("Roadmap".to_string()),
+            sorts: Vec::new(),
+        };
+        let chat: crate::objects::Object = serde_json::from_value(serde_json::json!({
+            "archived": false, "id": "chat-a", "name": "General", "space_id": "space-a",
+            "type": null
+        }))
+        .unwrap();
+        let property: crate::properties::Property = serde_json::from_value(serde_json::json!({
+            "id": "property-a", "key": "status", "name": "Status", "format": "text"
+        }))
+        .unwrap();
+
+        assert_unique(vec![
+            ResolveCandidate::new(&space.id, &space.name),
+            ResolveCandidate::new(&space.id, &space.name),
+        ]);
+        assert_unique(vec![type_candidate(&typ), type_candidate(&typ)]);
+        assert_unique(vec![view_candidate(&view), view_candidate(&view)]);
+        assert_unique(vec![object_candidate(&chat), object_candidate(&chat)]);
+        assert_unique(vec![
+            property_candidate(&property),
+            property_candidate(&property),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn type_and_property_key_resolution_bypass_cache_prime_paths() {
+        let (base_url, request) = empty_page_server().await;
+        let error = fixture_client(base_url)
+            .resolve_type_id(SPACE_ID, "@page")
+            .await
+            .expect_err("empty fixture has no type");
+        assert!(matches!(error, AnytypeError::NotFound { .. }));
+        let request = request.await.expect("type fixture task");
+        let request_line = request.lines().next().expect("type request line");
+        assert!(
+            request_line.starts_with(&format!("GET /v1/spaces/{SPACE_ID}/types?")),
+            "unexpected type request: {request_line}"
+        );
+        assert!(request_line.contains("limit=99"), "{request_line}");
+
+        let (base_url, request) = empty_page_server().await;
+        let error = fixture_client(base_url)
+            .resolve_property_id(SPACE_ID, "status")
+            .await
+            .expect_err("empty fixture has no property");
+        assert!(matches!(error, AnytypeError::NotFound { .. }));
+        let request = request.await.expect("property fixture task");
+        let request_line = request.lines().next().expect("property request line");
+        assert!(
+            request_line.starts_with(&format!("GET /v1/spaces/{SPACE_ID}/properties?")),
+            "unexpected property request: {request_line}"
+        );
+        assert!(request_line.contains("limit=99"), "{request_line}");
+    }
+
+    #[test]
     fn distinct_stable_ids_produce_deterministic_candidates() {
         let Ok(MatchClassification::Ambiguous(candidates)) =
             classify_matches([row("id-2", "alpha"), row("id-1", "Alpha")], row_candidate)
@@ -961,6 +1138,72 @@ mod tests {
                 ResolveCandidate::new("id-1", "Alpha"),
                 ResolveCandidate::new("id-2", "alpha"),
             ]
+        );
+    }
+
+    #[test]
+    fn candidate_membership_is_independent_of_input_order() {
+        let classify = |rows| {
+            let Ok(MatchClassification::Ambiguous(candidates)) =
+                classify_matches(rows, row_candidate)
+            else {
+                panic!("distinct stable ids must be ambiguous");
+            };
+            candidates
+        };
+        let forward = classify(vec![
+            row("id-z", "Zed"),
+            row("id-y", "Yankee"),
+            row("id-a", "Alpha"),
+        ]);
+        let reverse = classify(vec![
+            row("id-a", "Alpha"),
+            row("id-y", "Yankee"),
+            row("id-z", "Zed"),
+        ]);
+
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward,
+            vec![
+                ResolveCandidate::new("id-a", "Alpha"),
+                ResolveCandidate::new("id-y", "Yankee"),
+                ResolveCandidate::new("id-z", "Zed"),
+            ]
+        );
+    }
+
+    #[test]
+    fn match_classification_selects_deterministic_top_ten() {
+        let rows: Vec<_> = (0..25)
+            .rev()
+            .map(|index| row(format!("id-{index:02}"), format!("Name {index:02}")))
+            .collect();
+        let Ok(MatchClassification::Ambiguous(candidates)) = classify_matches(rows, row_candidate)
+        else {
+            panic!("many stable ids must be ambiguous");
+        };
+
+        assert_eq!(candidates.len(), MAX_RESOLVE_CANDIDATES);
+        assert_eq!(candidates[0].id(), "id-00");
+        assert_eq!(candidates[9].id(), "id-09");
+    }
+
+    #[test]
+    fn later_direct_view_id_wins_over_earlier_name_ambiguity() {
+        let view = |id: &str, name: &str| crate::views::View {
+            filters: Vec::new(),
+            id: id.to_string(),
+            layout: crate::views::ViewLayout::Grid,
+            name: Some(name.to_string()),
+            sorts: Vec::new(),
+        };
+        let mut matches = ViewMatchAccumulator::new("Roadmap");
+        assert_eq!(matches.push(view("view-a", "Roadmap")), None);
+        assert_eq!(matches.push(view("view-b", "Roadmap")), None);
+        assert_eq!(
+            matches.push(view("Roadmap", "Different name")),
+            Some("Roadmap".to_string())
         );
     }
 
@@ -1006,6 +1249,37 @@ mod tests {
         assert!(matches!(
             classify_matches(rows, row_candidate),
             Err(ResolutionScanLimit)
+        ));
+    }
+
+    #[test]
+    fn ambiguous_scans_also_fail_when_candidate_completeness_exceeds_the_limit() {
+        let rows = (0..=MAX_RESOLVE_SCAN_ITEMS)
+            .map(|index| row(format!("id-{index}"), format!("Name {index}")));
+        assert!(matches!(
+            classify_matches(rows, row_candidate),
+            Err(ResolutionScanLimit)
+        ));
+    }
+
+    #[test]
+    fn bare_chat_id_discovery_has_one_global_space_and_chat_budget() {
+        let mut budget = ResolutionScanBudget::new();
+        for _ in 0..400 {
+            budget.record("chat", "chat-id").unwrap();
+        }
+        for _ in 0..600 {
+            budget.record("chat", "chat-id").unwrap();
+        }
+
+        let error = budget.record("chat", "chat-id").unwrap_err();
+        assert!(matches!(
+            error,
+            AnytypeError::ResolutionLimitExceeded {
+                obj_type,
+                key,
+                limit: MAX_RESOLVE_SCAN_ITEMS,
+            } if obj_type == "chat" && key == "chat-id"
         ));
     }
 
