@@ -54,6 +54,8 @@ use crate::{
 pub const MAX_CREATE_REFERENCE_CHARS: usize = 512;
 /// Maximum Unicode scalar values accepted in one document body.
 pub const MAX_CREATE_BODY_CHARS: usize = 100_000;
+/// Stable suffix emitted by Anytype for one plain Markdown line.
+const ANYTYPE_PLAIN_BODY_SUFFIX: &str = "   \n";
 /// Maximum Unicode scalar values accepted in an idempotency key.
 pub const MAX_IDEMPOTENCY_KEY_CHARS: usize = 256;
 /// Maximum retained idempotency entries in one handler instance.
@@ -211,7 +213,9 @@ pub struct ObjectCreateInput {
     #[serde(default)]
     #[schemars(schema_with = "optional_name_schema")]
     name: Omittable<CreateName>,
-    /// Optional complete Markdown body. Explicit null is rejected.
+    /// Optional complete Markdown body. Explicit null is rejected. One plain
+    /// alphanumeric line is sent in Anytype's stable trailing-space form;
+    /// Markdown syntax and all other whitespace remain exact.
     #[serde(default)]
     #[schemars(schema_with = "optional_body_schema")]
     body_markdown: Omittable<CreateBody>,
@@ -287,7 +291,7 @@ impl std::error::Error for CreateInputError {}
 pub fn object_create_tool() -> Result<WorkflowTool<ObjectCreateOutput>, SchemaContractError> {
     workflow_tool::<ObjectCreateInput, ObjectCreateOutput>(
         "object_create",
-        "Create one object, verify it by reading it back, and return only bounded metadata. Optional fields must be omitted rather than null. A retry key deduplicates identical verified creates for this server process; timeout or cancellation can leave mutation outcome uncertain.",
+        "Create one object, verify it by reading it back, and return only bounded metadata. Optional fields must be omitted rather than null. A plain alphanumeric body line is sent in Anytype's stable trailing-space form; Markdown syntax and other whitespace remain exact. A retry key deduplicates identical verified creates for this server process; timeout or cancellation can leave mutation outcome uncertain.",
         ToolProfile::Create,
     )
 }
@@ -461,11 +465,17 @@ impl NormalizedCreate {
             .map(normalized_properties)
             .transpose()
             .map_err(|_| HandlerError::new(ToolError::validation()))?;
+        let body_markdown = input
+            .body_markdown
+            .as_ref()
+            .cloned()
+            .map(normalize_create_body)
+            .transpose()?;
         Ok(Self {
             space: input.space,
             type_reference: input.type_reference,
             name: input.name.as_ref().cloned(),
-            body_markdown: input.body_markdown.as_ref().cloned(),
+            body_markdown,
             properties,
             template: input.template.as_ref().cloned(),
             icon: input.icon.as_ref().cloned(),
@@ -493,6 +503,33 @@ impl NormalizedCreate {
         hasher.update(encoded);
         hasher.finalize().into()
     }
+}
+
+fn normalize_create_body(body: CreateBody) -> Result<CreateBody, HandlerError> {
+    let value = body.as_str();
+    if value.is_empty() || is_canonical_plain_body(value) {
+        return Ok(body);
+    }
+    if !is_plain_body_line(value) {
+        return Ok(body);
+    }
+    BoundedText::new(format!("{value}{ANYTYPE_PLAIN_BODY_SUFFIX}"))
+        .map_err(|_| HandlerError::new(ToolError::validation()))
+}
+
+fn is_canonical_plain_body(value: &str) -> bool {
+    value
+        .strip_suffix(ANYTYPE_PLAIN_BODY_SUFFIX)
+        .is_some_and(is_plain_body_line)
+}
+
+fn is_plain_body_line(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with(' ')
+        && !value.ends_with(' ')
+        && value
+            .chars()
+            .all(|character| character == ' ' || character.is_alphanumeric())
 }
 
 const CREATE_FINGERPRINT_DOMAIN: &str = "any-mcp/object-create";
@@ -732,7 +769,12 @@ async fn execute_create(
             };
             validate_created_response(&created, &space_id, &type_id, &type_key)
                 .map_err(|_| indeterminate_operation())?;
-            let object_id = ObjectId::new(created.id).map_err(|_| indeterminate_operation())?;
+            let object_id =
+                ObjectId::new(created.id.clone()).map_err(|_| indeterminate_operation())?;
+            let created_matches = verify_object_semantics(
+                &created, &object_id, &space_id, &type_id, &type_key, &input,
+            )
+            .map_err(|_| indeterminate_operation())?;
             let verified = verify_semantic(
                 &verify_config,
                 "object",
@@ -747,6 +789,9 @@ async fn execute_create(
             )
             .await
             .map_err(|_| indeterminate_operation())?;
+            if !created_matches {
+                return Err(indeterminate_operation());
+            }
             let object = object_summary(&verified).map_err(|_| indeterminate_operation())?;
             Ok::<_, HandlerOperationError>(ObjectCreateOutput { object })
         },
@@ -1245,6 +1290,13 @@ mod tests {
         serde_json::from_value(value).expect("valid create input")
     }
 
+    fn input_with_body(key: Option<&str>, body: impl Into<String>) -> ObjectCreateInput {
+        let mut request = input(key);
+        request.body_markdown =
+            Omittable::Present(BoundedText::new(body.into()).expect("bounded create body fixture"));
+        request
+    }
+
     fn success_replies() -> Vec<FixtureReply> {
         vec![
             FixtureReply::json(type_value()),
@@ -1396,6 +1448,42 @@ mod tests {
     }
 
     #[test]
+    fn plain_body_normalization_is_closed_stable_and_bounded() {
+        for (requested, expected) in [
+            ("", ""),
+            ("alpha stable body", "alpha stable body   \n"),
+            ("alpha café body", "alpha café body   \n"),
+            ("alpha stable body   \n", "alpha stable body   \n"),
+        ] {
+            let normalized = normalize_create_body(BoundedText::new(requested).unwrap()).unwrap();
+            assert_eq!(normalized.as_str(), expected, "requested {requested:?}");
+        }
+
+        for exact in [
+            " alpha",
+            "alpha ",
+            "alpha  ",
+            "alpha\n",
+            "alpha  \n",
+            "under_score",
+            r"under\_score",
+            r"\*escaped\*",
+            "# Heading",
+            "line one\nline two",
+            "plain.",
+        ] {
+            let normalized = normalize_create_body(BoundedText::new(exact).unwrap()).unwrap();
+            assert_eq!(normalized.as_str(), exact, "near-miss {exact:?}");
+        }
+
+        let expansion_overflow = "a".repeat(MAX_CREATE_BODY_CHARS - 3);
+        assert!(
+            normalize_create_body(BoundedText::new(expansion_overflow).unwrap()).is_err(),
+            "canonical suffix must not exceed the stored-body ceiling"
+        );
+    }
+
+    #[test]
     fn fingerprint_v1_is_domain_separated_golden_and_semantically_canonical() {
         assert_eq!(
             fingerprint_hex(input(Some("ignored-by-fingerprint"))),
@@ -1435,6 +1523,16 @@ mod tests {
         }))
         .unwrap();
         assert_ne!(fingerprint_hex(absent), fingerprint_hex(present_empty));
+
+        let raw_plain = input_with_body(Some("same"), "alpha stable body");
+        let canonical_plain = input_with_body(Some("same"), "alpha stable body   \n");
+        assert_eq!(fingerprint_hex(raw_plain), fingerprint_hex(canonical_plain));
+
+        let meaningful_newline = input_with_body(Some("same"), "alpha stable body\n");
+        assert_ne!(
+            fingerprint_hex(input_with_body(Some("same"), "alpha stable body")),
+            fingerprint_hex(meaningful_newline)
+        );
     }
 
     #[test]
@@ -1541,6 +1639,153 @@ mod tests {
         let encoded = serde_json::to_string(&result).unwrap();
         assert!(!encoded.contains("# Plan"));
         assert!(!encoded.contains("description"));
+    }
+
+    #[tokio::test]
+    async fn plain_body_normalizes_before_fingerprint_post_and_both_verifications() {
+        let canonical = "alpha stable body   \n";
+        let replies = vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, canonical, "Q3")),
+            FixtureReply::json(object_value(OBJECT_ID, canonical, "Q3")),
+        ];
+        let (base_url, server) = fixture(replies).await;
+        let handlers = ObjectCreateHandlers::with_verify_config(
+            runtime(base_url, Duration::from_secs(2)),
+            test_verify_config(),
+        )
+        .unwrap();
+
+        let first = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input_with_body(Some("plain-cohort"), "alpha stable body"),
+                &CancellationToken::new(),
+            )
+            .await;
+        let canonical_retry = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input_with_body(Some("plain-cohort"), canonical),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(first.is_error, Some(false));
+        assert_eq!(first, canonical_retry);
+        let requests = server.await.expect("plain canonical create fixture");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            1
+        );
+        assert_eq!(request_body(&requests[1])["body"], canonical);
+    }
+
+    #[tokio::test]
+    async fn unproven_markdown_rewrites_remain_fixed_indeterminate_and_post_once() {
+        let cases = [
+            ("alpha stable body\n", "alpha stable body   \n"),
+            ("alpha stable body  ", "alpha stable body   \n"),
+            (
+                r"under_score \*escaped\*",
+                "under\\_score \\\\*escaped\\\\*   \n",
+            ),
+            (
+                "# Heading\n\nline one\nline two",
+                "Heading   \nline one\nline two   \n",
+            ),
+        ];
+        for (index, (requested, returned)) in cases.into_iter().enumerate() {
+            let mut replies = vec![
+                FixtureReply::json(type_value()),
+                FixtureReply::json(object_value(OBJECT_ID, returned, "Q3")),
+            ];
+            replies.extend(
+                (0..3).map(|_| FixtureReply::json(object_value(OBJECT_ID, returned, "Q3"))),
+            );
+            let (base_url, server) = fixture(replies).await;
+            let handlers = ObjectCreateHandlers::with_verify_config(
+                runtime(base_url, Duration::from_secs(2)),
+                test_verify_config(),
+            )
+            .unwrap();
+            let result = handlers
+                .object_create(
+                    MutationAccess::Allowed,
+                    input_with_body(Some(&format!("near-miss-{index}")), requested),
+                    &CancellationToken::new(),
+                )
+                .await;
+
+            assert_eq!(result_code(&result), "conflict", "requested {requested:?}");
+            assert_eq!(
+                result.structured_content.as_ref().unwrap()["message"],
+                ToolError::mutation_indeterminate().message()
+            );
+            let requests = server.await.expect("near-miss canonical create fixture");
+            assert_eq!(requests.len(), 5);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.starts_with("POST "))
+                    .count(),
+                1
+            );
+            assert_eq!(request_body(&requests[1])["body"], requested);
+        }
+    }
+
+    #[tokio::test]
+    async fn post_response_and_final_get_must_both_match_normalized_semantics() {
+        let replies = vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, "# changed", "Q3")),
+            FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3")),
+        ];
+        let (base_url, server) = fixture(replies).await;
+        let handlers = ObjectCreateHandlers::with_verify_config(
+            runtime(base_url, Duration::from_secs(2)),
+            test_verify_config(),
+        )
+        .unwrap();
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input(Some("response-mismatch")),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(result_code(&result), "conflict");
+        let requests = server.await.expect("response/final semantic fixture");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_canonical_expansion_overflow_fails_before_io() {
+        let (base_url, no_request) = no_request_fixture().await;
+        let handlers = ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(1)))
+            .expect("create handlers");
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input_with_body(None, "a".repeat(MAX_CREATE_BODY_CHARS - 3)),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result_code(&result), "validation");
+        assert!(no_request.await.expect("no-request fixture"));
     }
 
     #[tokio::test]

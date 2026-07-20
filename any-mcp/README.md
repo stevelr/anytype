@@ -280,11 +280,12 @@ success. Space and full non-archived type references use the bounded
 `anytype-api` resolvers. Optional templates use the public direct-id or exact
 1,000-row resolver and are fetched by id to revalidate archive, space, and type
 id/key for the generic template object; the endpoint path scopes the owning
-object type. Create and verification responses are also revalidated. A success
-requires safe matching object, space, and type id/key plus semantic agreement
-for each caller-supplied name, Markdown body, icon, and typed property. The MCP
-result contains only a bounded object summary and canonical resource link—not
-the body or an implicit property projection.
+object type. The immediate POST response and final verification GET are both
+revalidated. A success requires safe matching object, space, and type id/key
+plus semantic agreement for each caller-supplied name, Markdown body, icon,
+and typed property in both representations. The MCP result contains only a
+bounded object summary and canonical resource link—not the body or an implicit
+property projection.
 
 All optional fields reject explicit JSON `null`; omission means that the field
 is absent from the create payload. Names are nonempty, while an explicitly
@@ -293,11 +294,26 @@ empty relation lists explicitly clear those assignments. Create consumes the
 shared closed mutation values: property keys are strict ASCII, numbers and RFC
 3339 timestamps are canonical, set-valued identifiers are capped before being
 sorted and deduplicated, and all eleven current property formats and three icon
-forms are bounded. Markdown accepts exactly 100,000 Unicode scalar values.
+forms are bounded. Markdown input accepts at most 100,000 Unicode scalar
+values.
+
+Headless Anytype serializes a nonempty plain Markdown line with exactly three
+trailing ASCII spaces and one newline. `object_create` pre-normalizes only a
+closed, evidence-backed class: a single line containing Unicode alphanumeric
+characters and internal ASCII spaces, or that same line already carrying the
+exact `"   \n"` suffix. Empty bodies stay empty. The suffix is included in the
+100,000-character stored-body ceiling; an expansion that would cross it fails
+validation before I/O. Leading or trailing spaces, other newline forms,
+Markdown punctuation, underscores, backslashes, escapes, and multiline bodies
+remain byte-exact. If Anytype rewrites one of those unproven forms, verification
+returns the fixed post-dispatch conflict instead of trimming whitespace or
+weakening Markdown meaning.
 
 An optional caller-generated `idempotency_key` deduplicates the explicit,
 domain-separated version-1 canonical create fingerprint for the process
-lifetime. Identical sequential or concurrent calls share one supervised
+lifetime. The fingerprint uses the body form actually sent, so a supported raw
+plain line and its exact already-canonical form join the same cohort; meaningful
+near-misses remain distinct. Identical sequential or concurrent calls share one supervised
 in-flight attempt without holding the registry mutex across network waits, and
 verified successes are returned from the finite cache without I/O. Key reuse
 with different parameters conflicts before a write. Safe pre-POST failures and
@@ -472,23 +488,24 @@ source .test-env
 cargo test -p any-mcp headless_ -- --ignored --test-threads=1
 ```
 
-The exact tests are
+The exact passing representatives are
 `headless_default_discovery_routes_paginate_and_report_ambiguity`,
 `headless_view_body_and_resource_routes_are_complete_and_bound`, and
-`headless_mutations_are_visible_idempotent_and_conflict_safe`, plus the blocked
-behavior diagnostics
-`headless_diagnostic_archive_applies_before_fixed_error` and
-`headless_diagnostic_create_body_applies_before_indeterminate_error`. The first
-three exercise the production router, complete document resource,
+`headless_mutations_are_visible_idempotent_and_conflict_safe`, plus
+`headless_create_body_canonicalization_is_verified_once`. The remaining blocked
+behavior diagnostic is `headless_diagnostic_archive_applies_before_fixed_error`.
+The representatives exercise the production router, complete document resource,
 fixture-backed type/property/tag/object/view-object continuations, cursor/query
 binding, body continuation, explicit view selection, ambiguity evidence,
 idempotent create, read-after-write visibility, and stale/count-conflict edits
-that prove the body was not changed.
+that prove the body was not changed. The create-body representative proves the
+exact canonical stored body, one three-request create/verify exchange, zero
+retries, and a raw/canonical keyed replay with no additional I/O before cleanup.
 
-The two diagnostic tests are expected to pass while their product bugs remain:
-they prove the exact mutation was applied and cleaned up before asserting the
-fixed error code. A passing diagnostic is evidence of a reproduced blocker,
-not acceptance of the corresponding handler. Space and template list handlers
+The archive diagnostic is expected to pass while its product bug remains: it
+proves the exact mutation was applied and cleaned up before asserting the fixed
+error code. A passing diagnostic is evidence of a reproduced blocker, not
+acceptance of the corresponding handler. Space and template list handlers
 cannot both receive fixture-backed continuation coverage because the public API
 has no cleanup-safe space deletion or template creation path. `space_list`
 therefore requests one bounded ambient page, requires the current test space,

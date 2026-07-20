@@ -14,10 +14,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `headless_mutations_are_visible_idempotent_and_conflict_safe`, including
   authenticated dual-protocol prerequisites, cursor binding, explicit view
   selection, complete resources, idempotent create, mutation visibility, and
-  zero-write stale exact-edit conflicts. Add the cleanup-safe blocked-behavior
-  diagnostics `headless_diagnostic_archive_applies_before_fixed_error` and
-  `headless_diagnostic_create_body_applies_before_indeterminate_error`, which
-  prove applied state and cleanup before accepting their fixed error codes.
+  zero-write stale exact-edit conflicts. Add the cleanup-safe create-body
+  canonicalization representative and the blocked-behavior diagnostic
+  `headless_diagnostic_archive_applies_before_fixed_error`, which proves applied
+  state and cleanup before accepting its fixed error code.
   Exercise one bounded ambient `space_list` page with current-space evidence
   and optional cursor validation without assuming terminality.
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
@@ -102,6 +102,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   fingerprint that cannot strand cohorts or issue a duplicate create; identical
   retries of terminal indeterminate keys retain the fixed reread guidance,
   while mismatched fingerprints remain ordinary key conflicts.
+- Normalize only evidence-backed single-line plain Markdown into Anytype's
+  stable three-space/newline form before the create fingerprint and sole POST;
+  require both the POST response and final GET to match all requested semantics.
+  Keep Markdown syntax, escapes, and other whitespace exact and indeterminate
+  when rewritten rather than applying broad trimming or equivalence.
 - Add typed `object_edit` with destructive annotations, required complete-body
   SHA-256 concurrency checks, bounded ordered non-overlapping literal edits,
   zero-write stale/count conflicts, one whole-body no-verify PATCH, finite

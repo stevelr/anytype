@@ -766,14 +766,16 @@ async fn headless_diagnostic_archive_applies_before_fixed_error() {
 }
 
 #[tokio::test]
-#[ignore = "diagnostic for any-uvg; requires source .test-env and headless Anytype"]
-async fn headless_diagnostic_create_body_applies_before_indeterminate_error() {
+#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+async fn headless_create_body_canonicalization_is_verified_once() {
     Box::pin(with_test_context(|ctx| {
         Box::pin(async move {
             let server = live_server(ctx.as_ref()).await;
             let suffix = unique_suffix();
-            let name = format!("MCP create-body diagnostic {suffix}");
+            let name = format!("MCP create-body canonical {suffix}");
             let requested_body = "alpha stable body";
+            let key = format!("mcp-body-canonical-{suffix}");
+            let before = ctx.client.http_metrics();
             let result = call(
                 &server,
                 OBJECT_CREATE,
@@ -782,64 +784,62 @@ async fn headless_diagnostic_create_body_applies_before_indeterminate_error() {
                     "type": "page",
                     "name": name,
                     "body_markdown": requested_body,
-                    "idempotency_key": format!("mcp-body-diagnostic-{suffix}")
+                    "idempotency_key": key
                 }),
             )
             .await;
-            assert_eq!(result.is_error, Some(true));
-            let error = result
-                .structured_content
-                .expect("create-body diagnostic error body");
-            assert_eq!(error["code"], "conflict");
+            assert_eq!(result.is_error, Some(false), "create failed: {result:?}");
+            let after_first = ctx.client.http_metrics();
+            assert_eq!(after_first.total_requests - before.total_requests, 3);
+            assert_eq!(after_first.retries - before.retries, 0);
 
-            let mut applied = None;
-            for _ in 0..10 {
-                let page = ctx
-                    .client
-                    .search_in(&ctx.space_id)
-                    .text(&name)
-                    .limit(20)
-                    .execute()
-                    .await
-                    .expect("bounded search for applied create");
-                let matches = page
-                    .items
-                    .iter()
-                    .filter(|object| object.name.as_deref() == Some(name.as_str()))
-                    .filter(|object| !object.archived)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                assert!(
-                    matches.len() <= 1,
-                    "idempotent create applied more than once"
-                );
-                if let Some(object) = matches.into_iter().next() {
-                    applied = Some(object);
-                    break;
-                }
-                sleep(Duration::from_millis(250)).await;
-            }
-            let applied = applied.expect("indeterminate create was applied exactly once");
-            ctx.register_object(&applied.id);
-            let type_id = applied
+            let cached = call(
+                &server,
+                OBJECT_CREATE,
+                json!({
+                    "space": ctx.space_id.as_str(),
+                    "type": "page",
+                    "name": name,
+                    "body_markdown": "alpha stable body   \n",
+                    "idempotency_key": key
+                }),
+            )
+            .await;
+            assert_eq!(cached, result);
+            assert_eq!(ctx.client.http_metrics(), after_first);
+
+            let output = result.structured_content.expect("create-body success body");
+            let object_id = output["object"]["id"]
+                .as_str()
+                .expect("created object id")
+                .to_owned();
+            ctx.register_object(&object_id);
+            let created = ctx
+                .client
+                .object(&ctx.space_id, &object_id)
+                .get()
+                .await
+                .expect("read canonical created object");
+            assert_eq!(created.name.as_deref(), Some(name.as_str()));
+            let type_id = created
                 .r#type
                 .as_ref()
-                .expect("create diagnostic type")
+                .expect("create canonical type")
                 .id
                 .clone();
-            let stored_body = read_body(ctx.as_ref(), &applied.id).await;
+            let stored_body = created.markdown.expect("canonical created body");
             assert_eq!(stored_body, "alpha stable body   \n");
             assert_ne!(stored_body, requested_body);
 
             ctx.client
-                .object(&ctx.space_id, &applied.id)
+                .object(&ctx.space_id, &object_id)
                 .delete()
                 .await
-                .expect("archive applied create diagnostic fixture");
-            assert_archive_evidence(ctx.as_ref(), &applied.id, &type_id).await;
+                .expect("archive canonical create fixture");
+            assert_archive_evidence(ctx.as_ref(), &object_id, &type_id).await;
             Ok(())
         })
     }))
     .await
-    .expect("cleanup-safe any-uvg diagnostic");
+    .expect("cleanup-safe any-uvg representative");
 }

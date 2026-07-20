@@ -92,7 +92,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Create one object, verify it by reading it back, and return only bounded metadata. Optional fields must be omitted rather than null. A retry key deduplicates identical verified creates for this server process; timeout or cancellation can leave mutation outcome uncertain.",
+      "description": "Create one object, verify it by reading it back, and return only bounded metadata. Optional fields must be omitted rather than null. A plain alphanumeric body line is sent in Anytype's stable trailing-space form; Markdown syntax and other whitespace remain exact. A retry key deduplicates identical verified creates for this server process; timeout or cancellation can leave mutation outcome uncertain.",
       "inputSchema": {
         "$defs": {
           "BoundedList50OfMutationProperty": {
@@ -557,7 +557,7 @@
         "properties": {
           "body_markdown": {
             "$ref": "#/$defs/BoundedText100000",
-            "description": "Optional complete Markdown body. Explicit null is rejected."
+            "description": "Optional complete Markdown body. Explicit null is rejected. One plain\nalphanumeric line is sent in Anytype's stable trailing-space form;\nMarkdown syntax and all other whitespace remain exact."
           },
           "icon": {
             "$ref": "#/$defs/MutationIcon",
