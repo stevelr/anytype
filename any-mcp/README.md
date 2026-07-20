@@ -193,8 +193,18 @@ The transport-neutral `object_update` handler replaces only fields explicitly
 supplied by the caller. Omitted name, body, properties, type, and icon fields
 remain unchanged, and JSON `null` is rejected rather than treated as omission.
 `body_markdown` is a complete body replacement; an empty string is its explicit
-clear form. Name and icon clearing are not advertised because the upstream
-object-update API has no distinct supported clear form.
+clear form. Replacement bodies accept at most 100,000 Unicode characters and
+remain subject to the 10 MiB document-byte ceiling. Empty text, URL, email, and
+phone strings plus empty multi-select, file, and object lists are the only
+property clear forms. Select, number, date, checkbox, name, and icon clearing
+are not advertised because the upstream object-update API has no distinct
+supported clear form.
+
+Before writing, the handler resolves the complete effective object type,
+rejects archived or malformed type metadata, and requires every supplied
+property key and format to match its schema exactly. Property assignments are
+sent in deterministic key order, and semantic verification accounts for
+canonical numbers and timestamps plus reordered or deduplicated set values.
 
 Callers can supply the complete-body SHA-256 returned by `object_get` as
 `expected_body_sha256`, including when guarding a non-body mutation. The
@@ -205,11 +215,15 @@ overwrite a concurrent edit. Anytype does not provide an atomic compare-and-
 swap primitive, so a best-effort race remains between the precondition read and
 the update.
 
-After one update request, the handler performs an explicit read-after-write
-GET and verifies safe object/space identity, every requested observable field,
-and the relevant complete body hash. Results contain only the bounded updated
-summary, canonical resource link, and body hash when a body or hash
-precondition was supplied; they never echo the document body.
+After one update request, the handler performs bounded semantic GET retries for
+eventual consistency and verifies safe object/space identity, the effective
+type, every requested observable field, and the relevant complete body hash.
+A malformed or mismatched update response, transport uncertainty, exhausted
+verification, or cancellation, timeout, or shutdown after dispatch returns the
+fixed `conflict` outcome requiring a reread before retry. A definitive 4xx
+response remains an ordinary classified error. Results contain only the
+bounded updated summary, canonical resource link, and body hash when a body or
+hash precondition was supplied; they never echo the document body.
 
 ### View discovery workflows
 
