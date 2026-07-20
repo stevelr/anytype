@@ -5,10 +5,19 @@
 
 //! Authenticated client ownership and MCP service lifecycle.
 
-use std::{fmt, future::Future, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anytype::prelude::AnytypeClient;
-use rmcp::{RoleServer, ServiceExt, service::QuitReason, transport::IntoTransport};
+use rmcp::{
+    RoleServer, ServiceExt,
+    service::{QuitReason, RxJsonRpcMessage, TxJsonRpcMessage},
+    transport::{IntoTransport, Transport},
+};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +41,7 @@ pub struct StartupStatus {
 pub struct RuntimeContext {
     client: Arc<AnytypeClient>,
     permits: Arc<Semaphore>,
+    shutdown: CancellationToken,
     request_timeout: Duration,
     startup_status: StartupStatus,
 }
@@ -52,7 +62,7 @@ impl RuntimeContext {
     ///
     /// HTTP credentials and ping success are required. gRPC is checked when
     /// gRPC credentials are configured; absent gRPC credentials do not prevent
-    /// the REST-backed default toolset from starting.
+    /// the deliberately REST-backed Phase 1 default toolset from starting.
     ///
     /// # Errors
     ///
@@ -65,36 +75,20 @@ impl RuntimeContext {
             .auth_status()
             .map_err(|_| StartupError::CredentialLookup)?;
 
-        if !auth.http.is_authenticated() {
-            return Err(StartupError::MissingHttpCredentials);
-        }
-        startup_check(config.startup_timeout, client.ping_http())
-            .await
-            .map_err(|error| match error {
-                StartupCheckError::Timeout => StartupError::HttpTimeout,
-                StartupCheckError::Unavailable => StartupError::HttpUnavailable,
-            })?;
-
-        let grpc_available = if auth.grpc.is_authenticated() {
-            startup_check(config.startup_timeout, client.ping_grpc())
-                .await
-                .map_err(|error| match error {
-                    StartupCheckError::Timeout => StartupError::GrpcTimeout,
-                    StartupCheckError::Unavailable => StartupError::GrpcUnavailable,
-                })?;
-            true
-        } else {
-            false
-        };
+        let startup_status = verify_startup_probes(
+            auth.http.is_authenticated(),
+            auth.grpc.is_authenticated(),
+            config.startup_timeout,
+            || client.ping_http(),
+            || client.ping_grpc(),
+        )
+        .await?;
 
         Ok(Self::from_parts(
             client,
             config.max_concurrency,
             config.request_timeout,
-            StartupStatus {
-                http_available: true,
-                grpc_available,
-            },
+            startup_status,
         ))
     }
 
@@ -110,23 +104,45 @@ impl RuntimeContext {
         self.startup_status
     }
 
+    /// Starts process shutdown, rejects new work, and cancels running or
+    /// permit-waiting operations.
+    ///
+    /// This operation is idempotent. The stdio transport invokes it as soon as
+    /// EOF is observed, before rmcp performs its bounded in-flight drain.
+    pub fn begin_shutdown(&self) {
+        self.permits.close();
+        self.shutdown.cancel();
+    }
+
+    /// Returns whether process shutdown has started.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
+
     /// Executes one upstream operation with concurrency, timeout, and MCP
     /// cancellation controls.
     ///
     /// The timeout covers both waiting for a permit and the upstream future.
-    /// A handler should pass the cancellation token from its rmcp request
-    /// context, which rmcp cancels on `notifications/cancelled`.
+    /// A handler should pass the cancellation token from its rmcp
+    /// `RequestContext`, which rmcp cancels on `notifications/cancelled`.
+    /// Until concrete handlers land, this explicit token parameter is the
+    /// tested integration seam. Request identifiers are intentionally omitted
+    /// from diagnostics because they are controlled by the MCP peer.
     pub async fn execute<F, T, E>(
         &self,
+        context: OperationContext,
         cancellation: &CancellationToken,
         operation: F,
     ) -> Result<T, RuntimeError<E>>
     where
         F: Future<Output = Result<T, E>>,
     {
+        let started = Instant::now();
         let controlled = async {
             let permit = tokio::select! {
                 biased;
+                () = self.shutdown.cancelled() => return Err(RuntimeError::ShuttingDown),
                 () = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
                 permit = self.permits.acquire() => {
                     permit.map_err(|_| RuntimeError::ShuttingDown)?
@@ -135,6 +151,7 @@ impl RuntimeContext {
 
             let result = tokio::select! {
                 biased;
+                () = self.shutdown.cancelled() => Err(RuntimeError::ShuttingDown),
                 () = cancellation.cancelled() => Err(RuntimeError::Cancelled),
                 result = operation => result.map_err(RuntimeError::Upstream),
             };
@@ -142,9 +159,11 @@ impl RuntimeContext {
             result
         };
 
-        tokio::time::timeout(self.request_timeout, controlled)
+        let result = tokio::time::timeout(self.request_timeout, controlled)
             .await
-            .unwrap_or(Err(RuntimeError::TimedOut))
+            .unwrap_or(Err(RuntimeError::TimedOut));
+        log_operation(context, started.elapsed(), &result);
+        result
     }
 
     pub(crate) fn from_parts(
@@ -156,10 +175,52 @@ impl RuntimeContext {
         Self {
             client: Arc::new(client),
             permits: Arc::new(Semaphore::new(max_concurrency)),
+            shutdown: CancellationToken::new(),
             request_timeout,
             startup_status,
         }
     }
+}
+
+async fn verify_startup_probes<FH, FG, HH, HG, EH, EG>(
+    http_configured: bool,
+    grpc_configured: bool,
+    timeout: Duration,
+    http_probe: FH,
+    grpc_probe: FG,
+) -> Result<StartupStatus, StartupError>
+where
+    FH: FnOnce() -> HH,
+    FG: FnOnce() -> HG,
+    HH: Future<Output = Result<(), EH>>,
+    HG: Future<Output = Result<(), EG>>,
+{
+    if !http_configured {
+        return Err(StartupError::MissingHttpCredentials);
+    }
+    startup_check(timeout, http_probe())
+        .await
+        .map_err(|error| match error {
+            StartupCheckError::Timeout => StartupError::HttpTimeout,
+            StartupCheckError::Unavailable => StartupError::HttpUnavailable,
+        })?;
+
+    let grpc_available = if grpc_configured {
+        startup_check(timeout, grpc_probe())
+            .await
+            .map_err(|error| match error {
+                StartupCheckError::Timeout => StartupError::GrpcTimeout,
+                StartupCheckError::Unavailable => StartupError::GrpcUnavailable,
+            })?;
+        true
+    } else {
+        false
+    };
+
+    Ok(StartupStatus {
+        http_available: true,
+        grpc_available,
+    })
 }
 
 async fn startup_check<F, T, E>(timeout: Duration, operation: F) -> Result<(), StartupCheckError>
@@ -177,6 +238,64 @@ where
 enum StartupCheckError {
     Timeout,
     Unavailable,
+}
+
+/// Static diagnostic context for one bounded Anytype operation.
+///
+/// Operation names should be short lowercase identifiers such as
+/// `object_get`. Invalid names are replaced with `invalid_operation` rather
+/// than logged. MCP request IDs are deliberately omitted because they are
+/// peer-controlled and may contain sensitive text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OperationContext {
+    operation: &'static str,
+}
+
+impl OperationContext {
+    /// Creates operation context from a compile-time name.
+    #[must_use]
+    pub const fn new(operation: &'static str) -> Self {
+        Self { operation }
+    }
+
+    fn safe_operation(self) -> &'static str {
+        const MAX_OPERATION_LEN: usize = 64;
+        if !self.operation.is_empty()
+            && self.operation.len() <= MAX_OPERATION_LEN
+            && self
+                .operation
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            self.operation
+        } else {
+            "invalid_operation"
+        }
+    }
+}
+
+fn log_operation<T, E>(
+    context: OperationContext,
+    duration: Duration,
+    result: &Result<T, RuntimeError<E>>,
+) {
+    let (outcome, upstream_status) = match result {
+        Ok(_) => ("success", "success"),
+        Err(RuntimeError::Cancelled) => ("cancelled", "not_observed"),
+        Err(RuntimeError::TimedOut) => ("timeout", "not_observed"),
+        Err(RuntimeError::ShuttingDown) => ("shutdown", "not_observed"),
+        Err(RuntimeError::Upstream(_)) => ("upstream_error", "error"),
+    };
+    let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(
+        target: "any_mcp::operation",
+        operation = context.safe_operation(),
+        request_id = "omitted",
+        duration_ms,
+        outcome,
+        upstream_status,
+        "Anytype operation completed"
+    );
 }
 
 /// A controlled upstream operation failure.
@@ -282,15 +401,60 @@ where
     T: IntoTransport<RoleServer, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
+    let runtime = server.runtime().clone();
+    let transport = ShutdownTransport {
+        inner: transport.into_transport(),
+        runtime: runtime.clone(),
+    };
     let running = match server.serve(transport).await {
         Ok(running) => running,
-        Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => return Ok(()),
-        Err(_) => return Err(ServeError::Initialization),
+        Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => {
+            runtime.begin_shutdown();
+            return Ok(());
+        }
+        Err(_) => {
+            runtime.begin_shutdown();
+            return Err(ServeError::Initialization);
+        }
     };
 
-    match running.waiting().await {
+    let result = match running.waiting().await {
         Ok(QuitReason::Closed | QuitReason::Cancelled) => Ok(()),
         Ok(QuitReason::JoinError(_)) | Ok(_) | Err(_) => Err(ServeError::ServiceTask),
+    };
+    runtime.begin_shutdown();
+    result
+}
+
+struct ShutdownTransport<T> {
+    inner: T,
+    runtime: RuntimeContext,
+}
+
+impl<T> Transport<RoleServer> for ShutdownTransport<T>
+where
+    T: Transport<RoleServer>,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleServer>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
+        let message = self.inner.receive().await;
+        if message.is_none() {
+            self.runtime.begin_shutdown();
+        }
+        message
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.runtime.begin_shutdown();
+        self.inner.close()
     }
 }
 
@@ -318,12 +482,13 @@ impl std::error::Error for ServeError {}
 mod tests {
     use std::{
         convert::Infallible,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         time::Duration,
     };
 
     use anytype::prelude::ClientConfig;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
+    use tracing::instrument::WithSubscriber;
 
     use super::*;
 
@@ -348,13 +513,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_requires_http_without_running_probes() {
+        let http_calls = AtomicUsize::new(0);
+        let grpc_calls = AtomicUsize::new(0);
+        let result = verify_startup_probes(
+            false,
+            true,
+            Duration::from_secs(1),
+            || async {
+                http_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+            || async {
+                grpc_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+        )
+        .await;
+
+        assert_eq!(result, Err(StartupError::MissingHttpCredentials));
+        assert_eq!(http_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_runs_http_and_only_configured_grpc_probe_once() {
+        let http_calls = AtomicUsize::new(0);
+        let grpc_calls = AtomicUsize::new(0);
+        let http_only = verify_startup_probes(
+            true,
+            false,
+            Duration::from_secs(1),
+            || async {
+                http_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+            || async {
+                grpc_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+        )
+        .await
+        .expect("HTTP-only startup");
+        assert_eq!(
+            http_only,
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            }
+        );
+        assert_eq!(http_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
+
+        let both = verify_startup_probes(
+            true,
+            true,
+            Duration::from_secs(1),
+            || async {
+                http_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+            || async {
+                grpc_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+        )
+        .await
+        .expect("HTTP and gRPC startup");
+        assert_eq!(
+            both,
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            }
+        );
+        assert_eq!(http_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(grpc_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_fails_when_a_mandatory_configured_probe_fails() {
+        let http_failure = verify_startup_probes(
+            true,
+            false,
+            Duration::from_secs(1),
+            || async { Err::<(), _>(()) },
+            || async { Ok::<_, ()>(()) },
+        )
+        .await;
+        assert_eq!(http_failure, Err(StartupError::HttpUnavailable));
+
+        let grpc_failure = verify_startup_probes(
+            true,
+            true,
+            Duration::from_secs(1),
+            || async { Ok::<_, ()>(()) },
+            || async { Err::<(), _>(()) },
+        )
+        .await;
+        assert_eq!(grpc_failure, Err(StartupError::GrpcUnavailable));
+    }
+
+    #[tokio::test]
     async fn execute_honors_request_cancellation() {
         let runtime = runtime(1, Duration::from_secs(1));
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
         let result = runtime
-            .execute(&cancellation, async {
+            .execute(OperationContext::new("test_cancel"), &cancellation, async {
                 std::future::pending::<Result<(), Infallible>>().await
             })
             .await;
@@ -368,13 +635,76 @@ mod tests {
         let cancellation = CancellationToken::new();
 
         let result = runtime
-            .execute(&cancellation, async {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                Ok::<_, Infallible>(())
-            })
+            .execute(
+                OperationContext::new("test_timeout"),
+                &cancellation,
+                async {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok::<_, Infallible>(())
+                },
+            )
             .await;
 
         assert!(matches!(result, Err(RuntimeError::TimedOut)));
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_permit_for_next_operation() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let operation_started = started.clone();
+        let first_runtime = runtime.clone();
+        let first = tokio::spawn(async move {
+            first_runtime
+                .execute(
+                    OperationContext::new("cancel_release"),
+                    &cancellation,
+                    async move {
+                        operation_started.notify_one();
+                        std::future::pending::<Result<(), Infallible>>().await
+                    },
+                )
+                .await
+        });
+        started.notified().await;
+        cancel.cancel();
+        assert!(matches!(
+            first.await.expect("cancelled operation"),
+            Err(RuntimeError::Cancelled)
+        ));
+
+        let next = runtime
+            .execute(
+                OperationContext::new("after_cancel"),
+                &CancellationToken::new(),
+                async { Ok::<_, Infallible>(()) },
+            )
+            .await;
+        assert!(next.is_ok());
+    }
+
+    #[tokio::test]
+    async fn timeout_releases_permit_for_next_operation() {
+        let runtime = runtime(1, Duration::from_millis(20));
+        let timed_out = runtime
+            .execute(
+                OperationContext::new("timeout_release"),
+                &CancellationToken::new(),
+                std::future::pending::<Result<(), Infallible>>(),
+            )
+            .await;
+        assert!(matches!(timed_out, Err(RuntimeError::TimedOut)));
+
+        let next = runtime
+            .execute(
+                OperationContext::new("after_timeout"),
+                &CancellationToken::new(),
+                async { Ok::<_, Infallible>(()) },
+            )
+            .await;
+        assert!(next.is_ok());
     }
 
     #[tokio::test]
@@ -387,11 +717,15 @@ mod tests {
         let release = release_first.clone();
         let first = tokio::spawn(async move {
             first_runtime
-                .execute(&CancellationToken::new(), async move {
-                    started.notify_one();
-                    release.notified().await;
-                    Ok::<_, Infallible>(())
-                })
+                .execute(
+                    OperationContext::new("test_first"),
+                    &CancellationToken::new(),
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok::<_, Infallible>(())
+                    },
+                )
                 .await
         });
         first_started.notified().await;
@@ -403,10 +737,14 @@ mod tests {
         let second_runtime = runtime.clone();
         let second = tokio::spawn(async move {
             second_runtime
-                .execute(&second_cancellation, async move {
-                    executed.store(true, Ordering::SeqCst);
-                    Ok::<_, Infallible>(())
-                })
+                .execute(
+                    OperationContext::new("test_second"),
+                    &second_cancellation,
+                    async move {
+                        executed.store(true, Ordering::SeqCst);
+                        Ok::<_, Infallible>(())
+                    },
+                )
                 .await
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -426,7 +764,7 @@ mod tests {
         let runtime = runtime(1, Duration::from_secs(1));
         let cancellation = CancellationToken::new();
         let result = runtime
-            .execute(&cancellation, async {
+            .execute(OperationContext::new("test_error"), &cancellation, async {
                 Err::<(), _>("secret-token-and-upstream-body")
             })
             .await
@@ -434,6 +772,154 @@ mod tests {
 
         assert_eq!(result.to_string(), "Anytype request failed");
         assert!(!format!("{result:?}").contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn operation_diagnostic_contains_only_safe_bounded_context() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let secret = "secret-token-and-upstream-body";
+        let (dispatch, output) = crate::logging::test_support::capture("any_mcp::operation=trace");
+
+        let result = runtime
+            .execute(
+                OperationContext::new("diagnostic_test"),
+                &CancellationToken::new(),
+                async { Err::<(), _>(secret) },
+            )
+            .with_subscriber(dispatch)
+            .await;
+        assert!(matches!(result, Err(RuntimeError::Upstream(_))));
+
+        let output = output.contents();
+        assert!(output.contains("operation=\"diagnostic_test\""));
+        assert!(output.contains("request_id=\"omitted\""));
+        assert!(output.contains("outcome=\"upstream_error\""));
+        assert!(output.contains("upstream_status=\"error\""));
+        assert!(output.contains("duration_ms="));
+        assert!(!output.contains(secret));
+    }
+
+    #[tokio::test]
+    async fn operation_diagnostic_classifies_every_outcome() {
+        let (dispatch, output) = crate::logging::test_support::capture("any_mcp::operation=trace");
+        let active_runtime = runtime(1, Duration::from_millis(20));
+
+        active_runtime
+            .execute(
+                OperationContext::new("outcome_success"),
+                &CancellationToken::new(),
+                async { Ok::<_, Infallible>(()) },
+            )
+            .with_subscriber(dispatch.clone())
+            .await
+            .expect("successful operation");
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let _ = active_runtime
+            .execute(
+                OperationContext::new("outcome_cancel"),
+                &cancelled,
+                std::future::pending::<Result<(), Infallible>>(),
+            )
+            .with_subscriber(dispatch.clone())
+            .await;
+        let _ = active_runtime
+            .execute(
+                OperationContext::new("outcome_timeout"),
+                &CancellationToken::new(),
+                std::future::pending::<Result<(), Infallible>>(),
+            )
+            .with_subscriber(dispatch.clone())
+            .await;
+        let _ = active_runtime
+            .execute(
+                OperationContext::new("outcome_upstream"),
+                &CancellationToken::new(),
+                async { Err::<(), _>("SECRET_UPSTREAM_ERROR") },
+            )
+            .with_subscriber(dispatch.clone())
+            .await;
+
+        let shutdown_runtime = runtime(1, Duration::from_secs(1));
+        shutdown_runtime.begin_shutdown();
+        let _ = shutdown_runtime
+            .execute(
+                OperationContext::new("outcome_shutdown"),
+                &CancellationToken::new(),
+                std::future::pending::<Result<(), Infallible>>(),
+            )
+            .with_subscriber(dispatch)
+            .await;
+
+        let output = output.contents();
+        for outcome in [
+            "success",
+            "cancelled",
+            "timeout",
+            "upstream_error",
+            "shutdown",
+        ] {
+            assert!(output.contains(&format!("outcome=\"{outcome}\"")));
+        }
+        assert!(!output.contains("SECRET_UPSTREAM_ERROR"));
+    }
+
+    #[test]
+    fn unsafe_operation_name_is_omitted_from_diagnostics() {
+        let unsafe_name = OperationContext::new("secret/value");
+        assert_eq!(unsafe_name.safe_operation(), "invalid_operation");
+    }
+
+    #[tokio::test]
+    async fn process_shutdown_cancels_in_flight_operation_and_permit_waiter() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let started = first_started.clone();
+        let first_runtime = runtime.clone();
+        let first = tokio::spawn(async move {
+            first_runtime
+                .execute(
+                    OperationContext::new("shutdown_active"),
+                    &CancellationToken::new(),
+                    async move {
+                        started.notify_one();
+                        std::future::pending::<Result<(), Infallible>>().await
+                    },
+                )
+                .await
+        });
+        first_started.notified().await;
+
+        let waiter_executed = Arc::new(AtomicBool::new(false));
+        let executed = waiter_executed.clone();
+        let second_runtime = runtime.clone();
+        let second = tokio::spawn(async move {
+            second_runtime
+                .execute(
+                    OperationContext::new("shutdown_waiter"),
+                    &CancellationToken::new(),
+                    async move {
+                        executed.store(true, Ordering::SeqCst);
+                        Ok::<_, Infallible>(())
+                    },
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        runtime.begin_shutdown();
+
+        assert!(matches!(
+            first.await.expect("active operation"),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        assert!(matches!(
+            second.await.expect("permit waiter"),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        assert!(!waiter_executed.load(Ordering::SeqCst));
+        assert!(runtime.is_shutting_down());
+        assert!(runtime.permits.is_closed());
     }
 
     #[tokio::test]
@@ -453,8 +939,41 @@ mod tests {
     #[tokio::test]
     async fn initialized_transport_shuts_down_cleanly_on_eof() {
         let (client_transport, server_transport) = duplex(4096);
+        let runtime = runtime(1, Duration::from_secs(2));
+        let operation_started = Arc::new(tokio::sync::Notify::new());
+        let started = operation_started.clone();
+        let operation_runtime = runtime.clone();
+        let operation = tokio::spawn(async move {
+            operation_runtime
+                .execute(
+                    OperationContext::new("eof_active"),
+                    &CancellationToken::new(),
+                    async move {
+                        started.notify_one();
+                        std::future::pending::<Result<(), Infallible>>().await
+                    },
+                )
+                .await
+        });
+        operation_started.notified().await;
+        let waiter_executed = Arc::new(AtomicBool::new(false));
+        let executed = waiter_executed.clone();
+        let waiter_runtime = runtime.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_runtime
+                .execute(
+                    OperationContext::new("eof_waiter"),
+                    &CancellationToken::new(),
+                    async move {
+                        executed.store(true, Ordering::SeqCst);
+                        Ok::<_, Infallible>(())
+                    },
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
         let server = tokio::spawn(serve_transport(
-            AnyMcpServer::new(runtime(1, Duration::from_secs(1))),
+            AnyMcpServer::new(runtime.clone()),
             server_transport,
         ));
         let (reader, mut writer) = split(client_transport);
@@ -475,9 +994,27 @@ mod tests {
             .expect("read initialize response");
         assert!(response.contains("\"id\":1"));
         assert!(response.contains("\"protocolVersion\":\"2026-07-28\""));
+        assert_eq!(
+            response.lines().count(),
+            1,
+            "stdout contains one JSON frame"
+        );
+        let frame: rmcp::serde_json::Value =
+            rmcp::serde_json::from_str(&response).expect("valid protocol JSON");
+        assert_eq!(frame["jsonrpc"], "2.0");
 
         drop(writer);
         drop(reader);
         assert_eq!(server.await.expect("server task"), Ok(()));
+        assert!(matches!(
+            operation.await.expect("EOF operation"),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        assert!(matches!(
+            waiter.await.expect("EOF permit waiter"),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        assert!(!waiter_executed.load(Ordering::SeqCst));
+        assert!(runtime.is_shutting_down());
     }
 }

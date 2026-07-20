@@ -1,2 +1,3 @@
 # Agent Notes
 [pattern] rmcp 2.2.0 exposes per-request cancellation through `RequestContext.ct`; `RunningService::waiting` returns `QuitReason::Closed` on stdio EOF.
+[gotcha] rmcp 2.2.0 drains handlers for up to 5 seconds on EOF without cancelling their request tokens; a transport wrapper must signal application shutdown as soon as `receive` returns `None`.

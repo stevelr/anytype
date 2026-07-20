@@ -11,8 +11,10 @@ mirror of the Anytype API.
 The server keeps one authenticated `anytype-api` client alive for the process
 and serves MCP over stdin/stdout. At startup it loads credentials using the
 same environment and keystore configuration as `anyr`, requires a successful
-HTTP ping, and checks gRPC when gRPC credentials are configured. Startup
-failures exit non-zero with a concise diagnostic on stderr.
+HTTP ping, and checks gRPC when gRPC credentials are configured. HTTP-only
+startup is deliberate because the Phase 1 default tools are REST-backed; gRPC
+becomes mandatory only when configured credentials select gRPC capability.
+Startup failures exit non-zero with a concise diagnostic on stderr.
 
 Supported Anytype settings:
 
@@ -31,7 +33,13 @@ Operational settings are bounded defensively:
 Every future workflow handler uses the runtime execution seam, which includes
 permit wait in its timeout and observes rmcp request cancellation. The client
 is shared without a mutex held across upstream awaits. Closing stdin cleanly
-stops the service.
+closes the permit pool, signals the process shutdown token, cancels running and
+waiting operations, and then uses rmcp's bounded in-flight drain.
+
+Each operation emits a structured completion diagnostic with a validated
+static operation name, elapsed milliseconds, outcome, and coarse upstream
+status. Peer-controlled request IDs are explicitly omitted. Error values,
+URLs, bodies, and credentials are never formatted.
 
 The crate also establishes these protocol boundaries:
 
@@ -42,8 +50,8 @@ The crate also establishes these protocol boundaries:
 - an `anytype-api`-only application dependency through the `anytype` crate;
   `any-mcp` never depends directly on generated `anytype-rpc` support; and
 - diagnostics use a tracing subscriber whose writer is always stderr; verbose
-  dependency targets that can expose protocol or upstream payloads remain
-  disabled even under a broad `RUST_LOG` filter.
+  `anytype` and `rmcp` target prefixes that can expose protocol or upstream
+  payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.
 
 Workflow tools and resources are added in subsequent Phase 1 work.
 

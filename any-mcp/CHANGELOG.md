@@ -13,3 +13,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add authenticated long-lived Anytype client startup, bounded and cancellable
   upstream execution, request/startup timeouts, stderr-only diagnostics, and
   clean stdio EOF shutdown.
+- Harden runtime shutdown to cancel active and queued operations on EOF, emit
+  safe structured operation outcomes, and deny payload-bearing dependency
+  tracing targets independently of `RUST_LOG` directives.
