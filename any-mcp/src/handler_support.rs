@@ -19,7 +19,9 @@ use crate::{
     pagination::{MAX_PAGE_LIMIT, Page, PageLimit, PageOffset},
     protocol::WorkflowTool,
     result::tool_error,
-    runtime::{OperationContext, RuntimeContext, RuntimeError},
+    runtime::{
+        ControlledOperationError, OperationContext, OperationFailureDiagnostic, RuntimeContext,
+    },
     validation::ValidationError,
 };
 
@@ -95,29 +97,64 @@ where
     CF: Future<Output = Result<O, HandlerError>>,
 {
     let result = runtime
-        .execute(context, cancellation, async {
-            let upstream = operation.await?;
-            Ok(convert(upstream).await)
-        })
+        .execute_classified(
+            context,
+            cancellation,
+            async {
+                let upstream = operation.await.map_err(HandlerExecutionError::Upstream)?;
+                let output = convert(upstream)
+                    .await
+                    .map_err(HandlerExecutionError::Conversion)?;
+                contract
+                    .success(&output)
+                    .map_err(|_| HandlerExecutionError::Encoding)
+            },
+            HandlerExecutionError::diagnostic,
+        )
         .await;
 
     match result {
-        Ok(Ok(output)) => contract
-            .success(&output)
-            .unwrap_or_else(|_| tool_error(&ToolError::upstream())),
-        Ok(Err(error)) => tool_error(error.tool_error()),
-        Err(error) => tool_error(&runtime_tool_error(&error)),
+        Ok(output) => output,
+        Err(error) => tool_error(&execution_tool_error(error)),
     }
 }
 
-fn runtime_tool_error(error: &RuntimeError) -> ToolError {
+fn execution_tool_error(error: ControlledOperationError<HandlerExecutionError>) -> ToolError {
     match error {
-        RuntimeError::Upstream(source) => match ToolError::from_anytype(source) {
-            AnytypeErrorMapping::Ready(error) => error,
-            AnytypeErrorMapping::AmbiguityRequiresCandidates => ToolError::upstream(),
-        },
-        RuntimeError::Cancelled | RuntimeError::TimedOut | RuntimeError::ShuttingDown => {
-            ToolError::upstream()
+        ControlledOperationError::Operation(error) => error.into_tool_error(),
+        ControlledOperationError::Cancelled
+        | ControlledOperationError::TimedOut
+        | ControlledOperationError::ShuttingDown => ToolError::upstream(),
+    }
+}
+
+enum HandlerExecutionError {
+    Upstream(AnytypeError),
+    Conversion(HandlerError),
+    Encoding,
+}
+
+impl HandlerExecutionError {
+    fn diagnostic(&self) -> OperationFailureDiagnostic {
+        match self {
+            Self::Upstream(error) => OperationFailureDiagnostic::from_anytype(error),
+            Self::Conversion(_) => {
+                OperationFailureDiagnostic::classified("conversion_error", "handler_conversion")
+            }
+            Self::Encoding => {
+                OperationFailureDiagnostic::classified("encoding_error", "result_encoding")
+            }
+        }
+    }
+
+    fn into_tool_error(self) -> ToolError {
+        match self {
+            Self::Upstream(source) => match ToolError::from_anytype(&source) {
+                AnytypeErrorMapping::Ready(error) => error,
+                AnytypeErrorMapping::AmbiguityRequiresCandidates => ToolError::upstream(),
+            },
+            Self::Conversion(error) => error.0,
+            Self::Encoding => ToolError::upstream(),
         }
     }
 }
@@ -306,6 +343,7 @@ mod tests {
     use rmcp::schemars::JsonSchema;
     use serde::{Deserialize, Serializer};
     use serde_json::json;
+    use tracing::instrument::WithSubscriber;
 
     use super::*;
     use crate::{
@@ -364,6 +402,18 @@ mod tests {
                 grpc_available: false,
             },
         )
+    }
+
+    fn run_trace_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let _guard = crate::logging::test_support::trace_test_guard();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("handler trace test runtime")
+            .block_on(future)
     }
 
     #[test]
@@ -633,13 +683,13 @@ mod tests {
     fn entropy_and_runtime_control_failures_map_to_fixed_errors() {
         let entropy = HandlerError::from(CursorStoreError);
         assert_eq!(entropy.tool_error().code(), ToolErrorCode::Upstream);
-        for runtime_error in [
-            RuntimeError::Cancelled,
-            RuntimeError::TimedOut,
-            RuntimeError::ShuttingDown,
+        for controlled_error in [
+            ControlledOperationError::Cancelled,
+            ControlledOperationError::TimedOut,
+            ControlledOperationError::ShuttingDown,
         ] {
             assert_eq!(
-                runtime_tool_error(&runtime_error).code(),
+                execution_tool_error(controlled_error).code(),
                 ToolErrorCode::Upstream
             );
         }
@@ -771,5 +821,88 @@ mod tests {
                 .text
                 .contains("private")
         );
+    }
+
+    #[test]
+    fn conversion_and_encoding_failures_emit_one_safe_failure_diagnostic() {
+        run_trace_test(async {
+            let runtime = runtime();
+            let cancellation = CancellationToken::new();
+            let output_contract = contract::<Output>();
+            let secret = "SECRET_CONVERSION_INPUT";
+            let (dispatch, captured) =
+                crate::logging::test_support::capture("any_mcp::operation=trace");
+            let conversion = execute_handler(
+                &runtime,
+                &output_contract,
+                OperationContext::new("conversion_probe"),
+                &cancellation,
+                async { Ok::<_, AnytypeError>(secret) },
+                |_| async { Err::<Output, _>(HandlerError::new(ToolError::bounded_result())) },
+            )
+            .with_subscriber(dispatch)
+            .await;
+            assert_eq!(conversion.is_error, Some(true));
+            assert_eq!(
+                conversion.structured_content.as_ref().unwrap()["code"],
+                "bounded_result"
+            );
+            let output = captured.contents();
+            assert_eq!(output.matches("Anytype operation completed").count(), 1);
+            assert!(output.contains("operation=\"conversion_probe\""));
+            assert!(output.contains("outcome=\"conversion_error\""));
+            assert!(output.contains("upstream_status=\"handler_conversion\""));
+            assert!(!output.contains("outcome=\"success\""));
+            assert!(!output.contains(secret));
+
+            #[derive(JsonSchema)]
+            #[serde(transparent)]
+            #[expect(dead_code, reason = "serializer intentionally fails before reading")]
+            struct SecretFailing(#[schemars(length(max = 1))] String);
+            impl Serialize for SecretFailing {
+                fn serialize<S>(&self, _: S) -> Result<S::Ok, S::Error>
+                where
+                    S: Serializer,
+                {
+                    Err(serde::ser::Error::custom("SECRET_ENCODER_DETAIL"))
+                }
+            }
+            #[derive(Serialize, JsonSchema)]
+            #[serde(deny_unknown_fields)]
+            struct FailingOutput {
+                /// Value whose serializer intentionally fails.
+                value: SecretFailing,
+            }
+
+            let encoding_contract = contract::<FailingOutput>();
+            let (dispatch, captured) =
+                crate::logging::test_support::capture("any_mcp::operation=trace");
+            let encoding = execute_handler(
+                &runtime,
+                &encoding_contract,
+                OperationContext::new("encoding_probe"),
+                &cancellation,
+                async { Ok::<_, AnytypeError>(()) },
+                |_| async {
+                    Ok(FailingOutput {
+                        value: SecretFailing("x".to_owned()),
+                    })
+                },
+            )
+            .with_subscriber(dispatch)
+            .await;
+            assert_eq!(encoding.is_error, Some(true));
+            assert_eq!(
+                encoding.structured_content.as_ref().unwrap()["code"],
+                "upstream"
+            );
+            let output = captured.contents();
+            assert_eq!(output.matches("Anytype operation completed").count(), 1);
+            assert!(output.contains("operation=\"encoding_probe\""));
+            assert!(output.contains("outcome=\"encoding_error\""));
+            assert!(output.contains("upstream_status=\"result_encoding\""));
+            assert!(!output.contains("outcome=\"success\""));
+            assert!(!output.contains("SECRET_ENCODER_DETAIL"));
+        });
     }
 }

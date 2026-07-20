@@ -203,8 +203,92 @@ fn validate_identifier(value: &str) -> Result<(), DomainValueError> {
 
 /// A bounded object display name.
 pub type DisplayName = BoundedText<MAX_DISPLAY_NAME_CHARS>;
-/// A bounded RFC 3339 timestamp string.
-pub type LastModified = BoundedText<MAX_TIMESTAMP_CHARS>;
+
+/// Failure to construct an RFC 3339 last-modified timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastModifiedError {
+    /// The timestamp was empty.
+    Empty,
+    /// The timestamp exceeded its finite wire bound.
+    TooLong,
+    /// The timestamp was not valid RFC 3339.
+    InvalidFormat,
+}
+
+impl fmt::Display for LastModifiedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Empty => "last-modified timestamp must not be empty",
+            Self::TooLong => "last-modified timestamp exceeds its maximum length",
+            Self::InvalidFormat => "last-modified timestamp must be RFC 3339",
+        })
+    }
+}
+
+impl std::error::Error for LastModifiedError {}
+
+/// A nonempty, bounded RFC 3339 last-modified timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LastModified(String);
+
+impl LastModified {
+    /// Validates and constructs an RFC 3339 timestamp.
+    pub fn new(value: impl Into<String>) -> Result<Self, LastModifiedError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(LastModifiedError::Empty);
+        }
+        if value.chars().count() > MAX_TIMESTAMP_CHARS {
+            return Err(LastModifiedError::TooLong);
+        }
+        chrono::DateTime::parse_from_rfc3339(&value)
+            .map_err(|_| LastModifiedError::InvalidFormat)?;
+        Ok(Self(value))
+    }
+
+    /// Borrows the validated timestamp.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for LastModified {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for LastModified {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LastModified {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for LastModified {
+    fn schema_name() -> Cow<'static, str> {
+        "LastModified".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_TIMESTAMP_CHARS,
+            "format": "date-time",
+        })
+    }
+}
 
 /// A nonempty, bounded Anytype type key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -504,6 +588,64 @@ mod tests {
         let schema = rmcp::handler::server::tool::schema_for_type::<TypeKey>();
         assert_eq!(schema["minLength"], json!(1));
         assert_eq!(schema["maxLength"], json!(MAX_TYPE_KEY_CHARS));
+    }
+
+    #[test]
+    fn last_modified_runtime_deserialization_and_schema_are_rfc3339_exact() {
+        let valid = "2026-07-20T06:00:00+02:00";
+        assert_eq!(LastModified::new(valid).unwrap().as_str(), valid);
+        assert_eq!(LastModified::new(""), Err(LastModifiedError::Empty));
+        assert_eq!(
+            LastModified::new("2026-07-20 06:00:00"),
+            Err(LastModifiedError::InvalidFormat)
+        );
+        assert_eq!(
+            LastModified::new("x".repeat(MAX_TIMESTAMP_CHARS + 1)),
+            Err(LastModifiedError::TooLong)
+        );
+
+        assert_eq!(
+            serde_json::from_value::<LastModified>(json!(valid))
+                .unwrap()
+                .as_str(),
+            valid
+        );
+        for invalid in [json!(""), json!("not-rfc3339"), json!("x".repeat(65))] {
+            assert!(serde_json::from_value::<LastModified>(invalid).is_err());
+        }
+
+        let schema = rmcp::handler::server::tool::schema_for_type::<LastModified>();
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["minLength"], 1);
+        assert_eq!(schema["maxLength"], MAX_TIMESTAMP_CHARS);
+        assert_eq!(schema["format"], "date-time");
+    }
+
+    #[test]
+    fn object_summary_deserialization_enforces_last_modified_contract() {
+        let base = json!({
+            "id": "obj-1",
+            "name": "Roadmap",
+            "type_key": "page",
+            "space_id": "space-1",
+            "last_modified": "2026-07-20T06:00:00Z",
+            "resource_uri": "anytype://spaces/space-1/objects/obj-1"
+        });
+        assert!(serde_json::from_value::<ObjectSummary>(base.clone()).is_ok());
+        for invalid in ["", "not-rfc3339"] {
+            let mut value = base.clone();
+            value["last_modified"] = json!(invalid);
+            assert!(serde_json::from_value::<ObjectSummary>(value).is_err());
+        }
+        let mut oversized = base;
+        oversized["last_modified"] = json!("x".repeat(MAX_TIMESTAMP_CHARS + 1));
+        assert!(serde_json::from_value::<ObjectSummary>(oversized).is_err());
+
+        let schema = crate::schema::output_schema::<ObjectSummary>().unwrap();
+        let last_modified = &schema["$defs"]["LastModified"];
+        assert_eq!(last_modified["minLength"], 1);
+        assert_eq!(last_modified["maxLength"], MAX_TIMESTAMP_CHARS);
+        assert_eq!(last_modified["format"], "date-time");
     }
 
     #[test]

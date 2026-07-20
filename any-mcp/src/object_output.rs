@@ -18,8 +18,8 @@ use serde_json::Number;
 
 use crate::{
     domain::{
-        BoundedText, DisplayName, DomainValueError, EntityId, LastModified, MAX_TIMESTAMP_CHARS,
-        ObjectId, ObjectSummary, SpaceId, TypeKey,
+        BoundedText, DisplayName, DomainValueError, EntityId, LastModified, LastModifiedError,
+        MAX_TIMESTAMP_CHARS, ObjectId, ObjectSummary, SpaceId, TypeKey,
     },
     error::ToolError,
     validation::{BoundedList, MAX_PROJECTIONS},
@@ -518,12 +518,14 @@ fn last_modified(object: &Object) -> Result<Option<LastModified>, ObjectOutputEr
     let PropertyValue::Date { date } = &property.value else {
         return Err(ObjectOutputError::InvalidMetadata);
     };
-    if chrono::DateTime::parse_from_rfc3339(date).is_err() {
-        return Err(ObjectOutputError::InvalidMetadata);
-    }
     LastModified::new(date.clone())
         .map(Some)
-        .map_err(metadata_domain)
+        .map_err(|error| match error {
+            LastModifiedError::TooLong => ObjectOutputError::BoundedValue,
+            LastModifiedError::Empty | LastModifiedError::InvalidFormat => {
+                ObjectOutputError::InvalidMetadata
+            }
+        })
 }
 
 fn metadata_domain(error: DomainValueError) -> ObjectOutputError {

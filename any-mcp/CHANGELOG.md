@@ -30,6 +30,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   from exact requested/upstream page metadata after bounded result-count
   checks, and deterministic object summary/property adapters with explicit
   finite projection modes and closed value schemas.
+- Validate object-summary last-modified timestamps as nonempty bounded RFC 3339
+  date-times at construction, deserialization, and schema boundaries.
+- Classify handler conversion and result-encoding failures inside the runtime
+  operation boundary so diagnostics cannot report false success outcomes.
 
 ### Changed
 
