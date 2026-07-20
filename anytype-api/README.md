@@ -77,6 +77,19 @@ bodies, and 1 GiB for raw files. `AnytypeError::ResponseTooLarge` contains only
 the selected ceiling and optional declared length; it never retains a response
 body, URL, request payload, or credential.
 
+### Retry safety
+
+Automatic response, rate-limit, and transport retries are restricted to HTTP
+methods already classified as replay-safe: `GET`, `HEAD`, `PUT`, `DELETE`, and
+`OPTIONS`. `POST` and `PATCH` are sent exactly once. A 429, timeout-status,
+server-status, disconnect, or timeout from one of those mutation methods is
+returned to the caller without replaying its body, because the server may have
+applied a write even when the client did not receive a usable response.
+
+`ClientConfig::rate_limit_max_retries` continues to control consecutive 429
+retries for replay-safe requests; zero means no retry-count cap for those
+methods. It does not opt mutation requests into retries.
+
 ## Quick start
 
 ```rust

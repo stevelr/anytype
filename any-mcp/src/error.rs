@@ -126,6 +126,65 @@ pub enum AnytypeErrorMapping {
     AmbiguityRequiresCandidates,
 }
 
+/// Returns whether an Anytype failure definitively rejected a mutation.
+///
+/// `false` means that a write may have reached Anytype and the handler must
+/// return [`ToolError::mutation_indeterminate`] rather than ordinary retry
+/// guidance. The classifier is intentionally conservative and inspects only
+/// the error variant or numeric HTTP status. It never formats or copies URLs,
+/// credentials, response bodies, or diagnostic messages.
+#[must_use]
+pub const fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) -> bool {
+    use anytype::error::AnytypeError;
+
+    match error {
+        // These failures are produced before dispatch or prove that Anytype
+        // rejected the operation without applying it.
+        AnytypeError::Auth { .. }
+        | AnytypeError::Unauthorized
+        | AnytypeError::Forbidden
+        | AnytypeError::Serialization { .. }
+        | AnytypeError::NotFound { .. }
+        | AnytypeError::Ambiguous { .. }
+        | AnytypeError::ResolutionLimitExceeded { .. }
+        | AnytypeError::RateLimitExceeded { .. }
+        | AnytypeError::Validation { .. }
+        | AnytypeError::NoKeyStore
+        | AnytypeError::KeyStore { .. }
+        | AnytypeError::GrpcUnavailable { .. }
+        | AnytypeError::CacheDisabled => true,
+        AnytypeError::ApiError { code, .. } => matches!(
+            code,
+            400 | 401
+                | 403
+                | 404
+                | 405
+                | 409
+                | 410
+                | 411
+                | 412
+                | 413
+                | 414
+                | 415
+                | 416
+                | 417
+                | 422
+                | 429
+        ),
+
+        // A transport failure, partial/oversized/malformed response, exhausted
+        // retry sequence, verification timeout, or unclassified failure does
+        // not prove whether a dispatched mutation took effect.
+        AnytypeError::Http { .. }
+        | AnytypeError::ResponseTooLarge { .. }
+        | AnytypeError::TooManyRetries { .. }
+        | AnytypeError::Deserialization { .. }
+        | AnytypeError::Grpc { .. }
+        | AnytypeError::VerifyTimeout { .. }
+        | AnytypeError::Other { .. } => false,
+    }
+}
+
 impl ToolError {
     const fn from_code(code: ToolErrorCode) -> Self {
         Self {
@@ -295,6 +354,8 @@ impl ToolError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::json;
 
     use super::*;
@@ -304,6 +365,227 @@ mod tests {
         ErrorCandidate {
             id: EntityId::new(format!("id-{index}")).unwrap(),
             name: BoundedText::new(format!("Candidate {index}")).unwrap(),
+        }
+    }
+
+    fn api_error(code: u16) -> anytype::error::AnytypeError {
+        anytype::error::AnytypeError::ApiError {
+            code,
+            method: "SECRET_METHOD_TOKEN".to_owned(),
+            url: "http://localhost/private?token=SECRET_URL_TOKEN".to_owned(),
+            message: "SECRET_RESPONSE_BODY".to_owned(),
+        }
+    }
+
+    #[test]
+    fn mutation_http_rejection_allowlist_is_conservative_at_boundaries() {
+        let cases = [
+            (399, false),
+            (400, true),
+            (401, true),
+            (402, false),
+            (403, true),
+            (404, true),
+            (405, true),
+            (406, false),
+            (407, false),
+            (408, false),
+            (409, true),
+            (410, true),
+            (411, true),
+            (412, true),
+            (413, true),
+            (414, true),
+            (415, true),
+            (416, true),
+            (417, true),
+            (418, false),
+            (421, false),
+            (422, true),
+            (423, false),
+            (425, false),
+            (428, false),
+            (429, true),
+            (430, false),
+            (499, false),
+            (500, false),
+            (599, false),
+            (600, false),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(
+                mutation_rejection_is_definitive(&api_error(status)),
+                expected,
+                "unexpected mutation classification for HTTP {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_rejection_classifier_covers_every_directly_constructible_error_variant() {
+        use anytype::error::{AnytypeError, KeyStoreError};
+
+        let definitive = vec![
+            AnytypeError::Auth {
+                message: "SECRET_AUTH_TOKEN".to_owned(),
+            },
+            AnytypeError::Unauthorized,
+            AnytypeError::Forbidden,
+            AnytypeError::Serialization {
+                source: serde_json::from_str::<u8>("not-json").unwrap_err(),
+            },
+            AnytypeError::NotFound {
+                obj_type: "SECRET_TYPE".to_owned(),
+                key: "SECRET_KEY".to_owned(),
+            },
+            AnytypeError::Ambiguous {
+                obj_type: "SECRET_TYPE".to_owned(),
+                key: "SECRET_KEY".to_owned(),
+                candidates: Vec::new(),
+            },
+            AnytypeError::ResolutionLimitExceeded {
+                obj_type: "SECRET_TYPE".to_owned(),
+                key: "SECRET_KEY".to_owned(),
+                limit: 1,
+            },
+            AnytypeError::RateLimitExceeded {
+                header: "SECRET_RATE_HEADER".to_owned(),
+                duration: Duration::from_secs(1),
+            },
+            AnytypeError::Validation {
+                message: "SECRET_VALIDATION".to_owned(),
+            },
+            AnytypeError::NoKeyStore,
+            AnytypeError::KeyStore {
+                source: KeyStoreError::Config {
+                    message: "SECRET_KEYSTORE".to_owned(),
+                },
+            },
+            AnytypeError::GrpcUnavailable {
+                message: "SECRET_GRPC_CONFIG".to_owned(),
+            },
+            AnytypeError::CacheDisabled,
+        ];
+        for error in &definitive {
+            assert!(
+                mutation_rejection_is_definitive(error),
+                "definitive variant was classified as indeterminate"
+            );
+        }
+
+        let indeterminate = vec![
+            AnytypeError::ResponseTooLarge {
+                limit: 1,
+                declared: Some(2),
+            },
+            AnytypeError::TooManyRetries { n: 3 },
+            AnytypeError::Deserialization {
+                source: serde_json::from_str::<u8>("not-json").unwrap_err(),
+            },
+            AnytypeError::VerifyTimeout {
+                obj_type: "SECRET_TYPE".to_owned(),
+                key: "SECRET_KEY".to_owned(),
+                attempts: 3,
+                timeout: Duration::from_secs(1),
+                last_error: Some("SECRET_LAST_ERROR".to_owned()),
+            },
+            AnytypeError::Other {
+                message: "SECRET_OTHER".to_owned(),
+            },
+        ];
+        for error in &indeterminate {
+            assert!(
+                !mutation_rejection_is_definitive(error),
+                "ambiguous variant was classified as definitive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_http_and_grpc_transport_variants_are_indeterminate() {
+        use anytype::prelude::{
+            AnytypeClient, AnytypeError, ClientConfig, GrpcCredentials, HttpCredentials,
+        };
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind disconnect fixture");
+        let address = listener.local_addr().expect("disconnect address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read HTTP request");
+            // Drop without returning an HTTP status.
+        });
+        let mut http_config = ClientConfig::default().app_name("mutation-http-classifier");
+        http_config.base_url = Some(format!("http://{address}"));
+        http_config.keystore = Some("env".to_owned());
+        http_config.disable_cache = true;
+        let http_client = AnytypeClient::with_config(http_config).expect("HTTP fixture client");
+        http_client.set_api_key(HttpCredentials::new("SECRET_HTTP_TOKEN"));
+        let http_error = http_client
+            .spaces()
+            .limit(1)
+            .list()
+            .await
+            .expect_err("disconnect must produce an HTTP error");
+        server.await.expect("disconnect fixture task");
+        assert!(matches!(http_error, AnytypeError::Http { .. }));
+        assert!(!mutation_rejection_is_definitive(&http_error));
+
+        let mut grpc_config = ClientConfig::default()
+            .app_name("mutation-grpc-classifier")
+            .grpc_endpoint("not a valid SECRET_GRPC_ENDPOINT".to_owned());
+        grpc_config.keystore = Some("env".to_owned());
+        let grpc_client = AnytypeClient::with_config(grpc_config).expect("gRPC fixture client");
+        grpc_client
+            .get_key_store()
+            .update_grpc_credentials(&GrpcCredentials::from_token("SECRET_GRPC_TOKEN"))
+            .expect("set fixture gRPC credentials");
+        let grpc_error = grpc_client
+            .grpc_client()
+            .await
+            .expect_err("invalid endpoint must produce a gRPC error");
+        assert!(matches!(grpc_error, AnytypeError::Grpc { .. }));
+        assert!(!mutation_rejection_is_definitive(&grpc_error));
+
+        let encoded = format!(
+            "{:?}{:?}",
+            mutation_rejection_is_definitive(&http_error),
+            mutation_rejection_is_definitive(&grpc_error)
+        );
+        assert!(!encoded.contains("SECRET"));
+    }
+
+    #[test]
+    fn mutation_rejection_classification_and_wire_errors_never_copy_source_text() {
+        for code in [400, 408, 429, 499, 500] {
+            let source = api_error(code);
+            let classification = mutation_rejection_is_definitive(&source);
+            let wire_error = if classification {
+                match ToolError::from_anytype(&source) {
+                    AnytypeErrorMapping::Ready(error) => error,
+                    AnytypeErrorMapping::AmbiguityRequiresCandidates => {
+                        panic!("HTTP errors never require candidates")
+                    }
+                }
+            } else {
+                ToolError::mutation_indeterminate()
+            };
+            let encoded = format!(
+                "{classification:?} {}",
+                serde_json::to_string(&wire_error).unwrap()
+            );
+            for secret in [
+                "SECRET_METHOD_TOKEN",
+                "SECRET_URL_TOKEN",
+                "SECRET_RESPONSE_BODY",
+                "localhost",
+            ] {
+                assert!(!encoded.contains(secret));
+            }
         }
     }
 

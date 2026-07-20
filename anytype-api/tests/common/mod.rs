@@ -63,7 +63,8 @@ where
             Err(e) => {
                 let retryable = match &e {
                     AnytypeError::ApiError { code, message, .. } => {
-                        *code == 500
+                        *code == 429
+                            || *code == 500
                             || (*code == 400
                                 && (message.contains("invalid multi_select option")
                                     || message.contains("invalid select option")
@@ -153,7 +154,8 @@ where
             Err(e) => {
                 let retryable = match &e {
                     AnytypeError::ApiError { code, message, .. } => {
-                        *code == 500
+                        *code == 429
+                            || *code == 500
                             || (*code == 400
                                 && (message.contains("invalid multi_select option")
                                     || message.contains("invalid select option")

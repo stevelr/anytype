@@ -873,6 +873,12 @@ impl HttpClient {
         req: HttpRequest,
         response_limit: u64,
     ) -> Result<T> {
+        // A retry clones and replays the complete request. Restrict every
+        // retry path, including rate-limit handling, to methods whose HTTP
+        // semantics make that replay safe. In particular, a POST or PATCH
+        // response proves only that a response arrived; it does not make the
+        // mutation safe to send again.
+        let retryable_method = is_idempotent_method(&req.method);
         // attempt counter is for server busy and connection drop errors
         // counter is reset to 0 whenever we wait based on 429 rate limit response
         let mut attempt = 0u32;
@@ -972,6 +978,21 @@ impl HttpClient {
                         },
                         StatusCode::TOO_MANY_REQUESTS /* 429 */ => {
                             self.metrics.increment_rate_limit_errors();
+                            if !retryable_method {
+                                let message = self
+                                    .read_error_body(
+                                        response,
+                                        req.method.as_str(),
+                                        &req.path,
+                                    )
+                                    .await?;
+                                return Err(AnytypeError::ApiError {
+                                    code: code.as_u16(),
+                                    method: req.method.to_string(),
+                                    url: req.path,
+                                    message,
+                                });
+                            }
                             rate_limit_retries = rate_limit_retries.saturating_add(1);
                             let headers = response.headers();
                             match parse_retry_after(headers) {
@@ -1058,7 +1079,7 @@ impl HttpClient {
                             self.metrics.increment_errors();
                             let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
                             error!(?code, ?req, attempt, "http");
-                            if attempt < MAX_RETRIES && retry_for_status(code) && is_idempotent_method(&req.method)
+                            if attempt < MAX_RETRIES && retry_for_status(code) && retryable_method
                             {
                               log_and_backoff(attempt, "retryable HTTP status").await;
                               self.metrics.increment_retries();
@@ -1077,7 +1098,7 @@ impl HttpClient {
                 Err(err) => {
                     error!(?req, "HTTP transport failure");
                     // Check for connection or timeout errors
-                    if (err.is_connect() || err.is_timeout()) && is_idempotent_method(&req.method) {
+                    if (err.is_connect() || err.is_timeout()) && retryable_method {
                         rate_limit_retries = 0;
                         if attempt < MAX_RETRIES {
                             log_and_backoff(attempt, "transport failure").await;
@@ -1239,7 +1260,7 @@ mod tests {
     use std::sync::Arc;
 
     use reqwest::{
-        ClientBuilder, StatusCode,
+        ClientBuilder, Method, StatusCode,
         header::{HeaderMap, HeaderValue},
     };
     use tokio::{
@@ -1250,8 +1271,13 @@ mod tests {
 
     use super::{HttpClient, HttpRequest, deserialize_json, parse_retry_after};
     use crate::prelude::{
-        HttpCredentials, MAX_JSON_RESPONSE_BYTES, ResponseLimits, ValidationLimits,
+        AnytypeClient, AnytypeError, ClientConfig, HttpCredentials, MAX_JSON_RESPONSE_BYTES,
+        ResponseLimits, ValidationLimits,
     };
+
+    const TEST_SPACE_ID: &str =
+        "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
+    const TEST_OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
 
     fn test_limits(json_bytes: u64, document_bytes: u64, error_bytes: u64) -> ResponseLimits {
         ResponseLimits {
@@ -1299,6 +1325,214 @@ mod tests {
             query: Vec::new(),
             body: None,
         }
+    }
+
+    fn fixture_response(status: &str, body: &str, extra_headers: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    async fn public_fixture_client(
+        responses: Vec<Vec<u8>>,
+        rate_limit_max_retries: u32,
+    ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind public-path fixture");
+        let address = listener.local_addr().expect("public fixture address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(responses.len());
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept public request");
+                let mut request = Vec::new();
+                let mut expected_len = None;
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut buffer).await.expect("read public request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if expected_len.is_none()
+                        && let Some(header_end) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let body_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or_default();
+                        expected_len = Some(header_end + 4 + body_len);
+                    }
+                    if expected_len.is_some_and(|length| request.len() >= length) {
+                        break;
+                    }
+                }
+                socket
+                    .write_all(&response)
+                    .await
+                    .expect("write public response");
+                requests.push(String::from_utf8(request).expect("request is UTF-8"));
+            }
+            requests
+        });
+
+        let mut config = ClientConfig::default().app_name("retry-safety-http-fixture");
+        config.base_url = Some(format!("http://{address}"));
+        config.keystore = Some("env".to_string());
+        config.disable_cache = true;
+        config.rate_limit_max_retries = rate_limit_max_retries;
+        let client = AnytypeClient::with_config(config).expect("create public fixture client");
+        client.set_api_key(HttpCredentials::new("fixture-secret-token"));
+        (client, server)
+    }
+
+    async fn assert_public_mutation_sent_once(
+        method: Method,
+        status: &'static str,
+        code: u16,
+        rate_limit_max_retries: u32,
+    ) {
+        let retry_header = if code == 429 {
+            "Retry-After: 0\r\nRateLimit-Reset: 0\r\n"
+        } else {
+            ""
+        };
+        let response = fixture_response(status, "fixture rejection", retry_header);
+        let (client, server) = public_fixture_client(vec![response], rate_limit_max_retries).await;
+
+        let result = public_mutation(&client, &method).await;
+        let error = result.expect_err("mutation fixture must reject");
+        assert!(
+            matches!(&error, AnytypeError::ApiError { code: actual, .. } if *actual == code),
+            "unexpected mutation error: {error:?}"
+        );
+
+        let requests = server.await.expect("public fixture task");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(method.as_str()));
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.retries, 0);
+    }
+
+    async fn public_mutation(
+        client: &AnytypeClient,
+        method: &Method,
+    ) -> crate::Result<crate::objects::Object> {
+        if *method == Method::POST {
+            client
+                .new_object(TEST_SPACE_ID, "page")
+                .name("retry safety")
+                .no_verify()
+                .create()
+                .await
+        } else {
+            client
+                .update_object(TEST_SPACE_ID, TEST_OBJECT_ID)
+                .name("retry safety")
+                .no_verify()
+                .update()
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn public_post_and_patch_429_and_500_are_each_sent_exactly_once() {
+        // Exercise default, unlimited, and high custom retry settings. None may
+        // broaden replay permission for a non-idempotent method.
+        assert_public_mutation_sent_once(Method::POST, "429 Too Many Requests", 429, 0).await;
+        assert_public_mutation_sent_once(
+            Method::PATCH,
+            "429 Too Many Requests",
+            429,
+            crate::config::RATE_LIMIT_MAX_RETRIES_DEFAULT,
+        )
+        .await;
+        assert_public_mutation_sent_once(Method::POST, "500 Internal Server Error", 500, 99).await;
+        assert_public_mutation_sent_once(Method::PATCH, "500 Internal Server Error", 500, 0).await;
+    }
+
+    #[tokio::test]
+    async fn public_post_and_patch_disconnects_are_each_sent_exactly_once() {
+        for (method, retry_limit) in [
+            (Method::POST, 0),
+            (Method::PATCH, crate::config::RATE_LIMIT_MAX_RETRIES_DEFAULT),
+        ] {
+            // An empty fixture response closes the connection after the full
+            // request has arrived but before an HTTP status is available.
+            let (client, server) = public_fixture_client(vec![Vec::new()], retry_limit).await;
+            let error = public_mutation(&client, &method)
+                .await
+                .expect_err("disconnect must fail");
+            assert!(
+                matches!(&error, AnytypeError::Http { .. }),
+                "unexpected disconnect error: {error:?}"
+            );
+            let requests = server.await.expect("disconnect fixture task");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with(method.as_str()));
+            let metrics = client.http_metrics();
+            assert_eq!(metrics.total_requests, 1);
+            assert_eq!(metrics.retries, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn public_get_still_retries_429_after_retry_after_without_wall_delay() {
+        let rejected = fixture_response(
+            "429 Too Many Requests",
+            "rate limited",
+            "Retry-After: 0\r\nRateLimit-Reset: 0\r\n",
+        );
+        let body = r#"{"items":[],"pagination":{"has_more":false,"limit":1,"offset":0,"total":0}}"#;
+        let success = fixture_response("200 OK", body, "");
+        let (client, server) = public_fixture_client(vec![rejected, success], 1).await;
+
+        let page = client
+            .spaces()
+            .limit(1)
+            .list()
+            .await
+            .expect("GET retries after rate limiting");
+        assert!(page.is_empty());
+        let requests = server.await.expect("GET rate-limit fixture");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.total_requests, 2);
+        assert_eq!(metrics.retries, 1);
+        assert_eq!(metrics.rate_limit_errors, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn public_get_status_backoff_retry_remains_enabled_without_wall_delay() {
+        let rejected = fixture_response("504 Gateway Timeout", "gateway timeout", "");
+        let body = r#"{"items":[],"pagination":{"has_more":false,"limit":1,"offset":0,"total":0}}"#;
+        let success = fixture_response("200 OK", body, "");
+        let (client, server) = public_fixture_client(vec![rejected, success], 1).await;
+
+        let page = client
+            .spaces()
+            .limit(1)
+            .list()
+            .await
+            .expect("GET retries after replay-safe status");
+        assert!(page.is_empty());
+        let requests = server.await.expect("GET status fixture");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.total_requests, 2);
+        assert_eq!(metrics.retries, 1);
     }
 
     #[test]

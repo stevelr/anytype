@@ -117,14 +117,18 @@ pub struct ClientConfig {
     /// therefore do not use these success-response limits.
     pub response_limits: ResponseLimits,
 
-    /// Maximum consecutive 429 retries before failing (0 disables the cap).
+    /// Maximum consecutive 429 retries before failing for replay-safe HTTP
+    /// methods (0 disables the cap).
     ///
     /// When the anytype server rate limit is exceeded and responds with http 429 status,
-    /// the http client in this library throttles requests (to 1 per second)
+    /// the HTTP client throttles and retries replay-safe methods
     /// until the server stops returning errors, or up to `rate_limit_max_retries` times
     /// before giving up and returning an error to the client. This setting can be increased
     /// to handle arbitrary-sized bursts, with the result that the app may spend more time waiting.
-    /// If `rate_limit_max_retries` is 0, the http client will always wait and retry.
+    /// If `rate_limit_max_retries` is 0, replay-safe requests wait and retry
+    /// without a retry-count cap. Mutation methods such as `POST` and `PATCH`
+    /// are never replayed automatically; their 429 response is returned to the
+    /// caller so application-level recovery can determine whether to retry.
     ///
     /// Defaults to `RATE_LIMIT_MAX_RETRIES_DEFAULT`, or the env override if set:
     /// `ANYTYPE_RATE_LIMIT_MAX_RETRIES`.

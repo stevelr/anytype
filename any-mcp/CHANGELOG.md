@@ -60,6 +60,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   that distinguishes safe pre-dispatch cancellation, timeout, and shutdown
   from fixed conflict-class indeterminate outcomes that require rereading
   before retry.
+- Add one secret-safe, conservative mutation-rejection classifier so create
+  and update can distinguish definitive local/HTTP rejection from ambiguous
+  transport, timeout, response, retry, and server outcomes after dispatch.
 - Add the typed `object_archive` soft-delete workflow with destructive
   annotations, pre-I/O read-only enforcement, safe resolver/response identity
   validation, and a minimal verified archived-state result.
