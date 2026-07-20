@@ -11,7 +11,8 @@ use anytype_rpc::model::account::auth::LocalApiScope;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = std::env::var("ANYTYPE_GRPC").unwrap_or_else(|_| "http://127.0.0.1:31007".into());
+    let endpoint =
+        std::env::var("ANYTYPE_GRPC").unwrap_or_else(|_| "http://127.0.0.1:31007".into());
     let root = std::env::var("ROOT").unwrap_or_else(|_| "/tmp/anytype-data".into());
     let json_api = std::env::var("JSON_API").unwrap_or_else(|_| "127.0.0.1:31009".into());
 
@@ -66,7 +67,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("AccountCreate error {}: {}", err.code, err.description).into());
         }
     }
-    let account_id = ac.account.as_ref().map(|a| a.id.clone()).unwrap_or_default();
+    let account_id = ac
+        .account
+        .as_ref()
+        .map(|a| a.id.clone())
+        .unwrap_or_default();
     println!("ACCOUNT_ID={account_id}");
     println!("JSON_API=http://{json_api}");
 
@@ -74,7 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("WalletCreateSession");
     let session = client
         .wallet_create_session(wallet::create_session::Request {
-            auth: Some(wallet::create_session::request::Auth::Mnemonic(wc.mnemonic.clone())),
+            auth: Some(wallet::create_session::request::Auth::Mnemonic(
+                wc.mnemonic.clone(),
+            )),
         })
         .await?
         .into_inner();

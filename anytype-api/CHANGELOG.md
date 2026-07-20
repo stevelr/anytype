@@ -49,6 +49,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Normalized troubleshooting examples and repository configuration formatting.
 - `list_chats_in` now uses REST; cross-space chat discovery, structured message
   publishing/full-fidelity reads, and reconnecting multi-chat subscriptions
   continue to use gRPC
