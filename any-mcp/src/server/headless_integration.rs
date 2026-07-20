@@ -5,7 +5,10 @@
 
 //! Cleanup-safe tests of the production router against a headless Anytype server.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 use anytype::{
     prelude::{Color, Object, ObjectLayout, PropertyFormat},
@@ -213,6 +216,127 @@ async fn assert_fixture_space_continuation(
     }
 }
 
+async fn assert_collection_view_continuation(
+    ctx: &TestContext,
+    server: &AnyMcpServer,
+    collection_id: &str,
+    changed_list_id: &str,
+    added_view_id: &str,
+    added_view_name: &str,
+) {
+    const MAX_VIEW_LIST_PAGES: usize = 8;
+
+    let response = ctx
+        .client
+        .list_views(&ctx.space_id, collection_id)
+        .limit(1_000)
+        .offset(0)
+        .list()
+        .await
+        .expect("list complete collection view fixture")
+        .into_response();
+    assert_eq!(response.pagination.offset, 0);
+    assert!(!response.pagination.has_more);
+    assert_eq!(response.pagination.total, response.items.len());
+    assert_eq!(
+        response.items.len(),
+        2,
+        "fixture has default plus added view"
+    );
+    let expected = response
+        .items
+        .iter()
+        .map(|view| (view.id.clone(), view.name.clone().unwrap_or_default()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(expected.len(), response.items.len());
+    assert_eq!(
+        expected.get(added_view_id).map(String::as_str),
+        Some(added_view_name)
+    );
+    assert!(
+        expected.keys().any(|view_id| view_id != added_view_id),
+        "fixture must retain its distinct server-created default view"
+    );
+
+    let mut next_cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut observed = BTreeMap::new();
+    let mut binding_checked = false;
+    let mut reached_terminal = false;
+    for _ in 0..MAX_VIEW_LIST_PAGES {
+        let mut request = arguments(json!({
+            "space": ctx.space_id.as_str(),
+            "list_id": collection_id,
+            "limit": 1
+        }));
+        if let Some(cursor) = &next_cursor {
+            request.insert("cursor".to_owned(), json!(cursor));
+        }
+        let page = success(server, VIEW_LIST, Value::Object(request)).await;
+        let items = page["items"]
+            .as_array()
+            .expect("view_list items must be an array");
+        assert_eq!(items.len(), 1, "each bounded view page must progress");
+        let id = items[0]["id"].as_str().expect("view_list item id");
+        let name = items[0]["name"].as_str().expect("view_list item name");
+        assert!(
+            observed.insert(id.to_owned(), name.to_owned()).is_none(),
+            "view_list must not repeat an item while advancing"
+        );
+
+        let Some(cursor) = page.get("next_cursor") else {
+            reached_terminal = true;
+            break;
+        };
+        let cursor = cursor
+            .as_str()
+            .filter(|cursor| !cursor.is_empty())
+            .expect("view_list next_cursor must be a nonempty string")
+            .to_owned();
+        assert!(
+            seen_cursors.insert(cursor.clone()),
+            "view_list cursor chain must not loop"
+        );
+
+        if !binding_checked {
+            let changed_limit = failure(
+                server,
+                VIEW_LIST,
+                json!({
+                    "space": ctx.space_id.as_str(),
+                    "list_id": collection_id,
+                    "limit": 2,
+                    "cursor": cursor.as_str()
+                }),
+            )
+            .await;
+            assert_eq!(changed_limit["code"], "validation");
+            let changed_query = failure(
+                server,
+                VIEW_LIST,
+                json!({
+                    "space": ctx.space_id.as_str(),
+                    "list_id": changed_list_id,
+                    "limit": 1,
+                    "cursor": cursor.as_str()
+                }),
+            )
+            .await;
+            assert_eq!(changed_query["code"], "validation");
+            binding_checked = true;
+        }
+        next_cursor = Some(cursor);
+    }
+
+    assert!(
+        binding_checked,
+        "fixture-backed view list must expose a cursor"
+    );
+    assert!(
+        reached_terminal,
+        "view_list must terminate within its hard bound"
+    );
+    assert_eq!(observed, expected, "MCP and ordinary API view lists differ");
 async fn assert_fixture_template_continuation(
     server: &AnyMcpServer,
     space_id: &str,
@@ -569,6 +693,11 @@ async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
                 "",
             )
             .await;
+            let second_view_name = format!("MCP second view {}", unique_suffix());
+            let second_view = ctx
+                .create_collection_view_fixture(&collection.id, &second_view_name)
+                .await
+                .expect("create cleanup-owned second collection view");
             let first = create_object(
                 ctx.as_ref(),
                 "page",
@@ -591,36 +720,16 @@ async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
                 )
                 .await
                 .expect("add live collection members");
-
-            let mut view_page = None;
-            for _ in 0..10 {
-                let result = call(
-                    &server,
-                    VIEW_LIST,
-                    json!({
-                        "space": ctx.space_id.as_str(),
-                        "list_id": collection.id.as_str(),
-                        "limit": 1
-                    }),
-                )
-                .await;
-                if result.is_error == Some(false)
-                    && result
-                        .structured_content
-                        .as_ref()
-                        .and_then(|value| value["items"].as_array())
-                        .is_some_and(|items| !items.is_empty())
-                {
-                    view_page = result.structured_content;
-                    break;
-                }
-                sleep(Duration::from_millis(500)).await;
-            }
-            let view_page = view_page.expect("new collection exposes a readable view");
-            let view_id = view_page["items"][0]["id"]
-                .as_str()
-                .expect("safe discovered view id")
-                .to_owned();
+            assert_collection_view_continuation(
+                ctx.as_ref(),
+                &server,
+                &collection.id,
+                &first.id,
+                &second_view.id,
+                &second_view_name,
+            )
+            .await;
+            let view_id = second_view.id;
 
             let mut listed = None;
             for _ in 0..10 {
