@@ -52,7 +52,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   display names through the new `ResolveCandidate` type; resolver scans use a
   hard 1,000-row limit and return `ResolutionLimitExceeded` rather than a
   possibly false unique/not-found result, preserve direct view-id priority,
-  and select candidates independently of upstream row order
+  and select candidates independently of upstream row order; safe duplicate
+  representatives take precedence over malformed alternatives with the same id
 
 ### Changed
 

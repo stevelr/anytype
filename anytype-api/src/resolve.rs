@@ -60,8 +60,9 @@ pub const MAX_RESOLVE_CANDIDATE_NAME_CHARS: usize = 256;
 
 const MAX_RESOLVE_CANDIDATE_ID_CHARS: usize = 256;
 
-// Deliberately differs from the API's default so list builders take the
-// explicit paged path instead of cache-prime shortcuts.
+// An explicit limit bypasses cache-prime shortcuts. Choosing 99 also makes
+// short-page completion unambiguous around the 1,000-row scan ceiling and for
+// chat searches, whose gRPC response has no total/has-more metadata.
 const RESOLVE_PAGE_SIZE: u32 = 99;
 
 /// Name of the default chat created in every space.
@@ -783,7 +784,7 @@ impl<T> MatchAccumulator<T> {
                     self.unique = Some((candidate, item));
                 }
                 Some((current, current_item)) if current.id == candidate.id => {
-                    if compare_candidates(&candidate, current).is_lt() {
+                    if compare_duplicate_representatives(&candidate, current).is_lt() {
                         *current = candidate;
                         *current_item = item;
                     }
@@ -879,6 +880,17 @@ fn compare_candidates(left: &ResolveCandidate, right: &ResolveCandidate) -> std:
         .then_with(|| left.id.cmp(&right.id))
 }
 
+fn compare_duplicate_representatives(
+    left: &ResolveCandidate,
+    right: &ResolveCandidate,
+) -> std::cmp::Ordering {
+    match (candidate_is_safe(left), candidate_is_safe(right)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (true, true) | (false, false) => compare_candidates(left, right),
+    }
+}
+
 fn type_candidate(typ: &Type) -> ResolveCandidate {
     ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
 }
@@ -970,12 +982,67 @@ mod tests {
         (format!("http://{address}"), task)
     }
 
+    async fn paged_fixture_server(
+        bodies: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind paged fixture server");
+        let address = listener.local_addr().expect("paged fixture address");
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(bodies.len());
+            for body in bodies {
+                let (mut stream, _) = listener.accept().await.expect("accept paged request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).await.expect("read paged request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write paged response");
+                requests.push(String::from_utf8(request).expect("request is utf-8"));
+            }
+            requests
+        });
+        (format!("http://{address}"), task)
+    }
+
     fn fixture_client(base_url: String) -> AnytypeClient {
         let mut config = crate::client::ClientConfig::default().app_name("resolve-http-fixture");
         config.base_url = Some(base_url);
         config.keystore = Some("env".to_string());
         let client = AnytypeClient::with_config(config).expect("fixture client");
         client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
+        client
+    }
+
+    fn fixture_client_with_grpc(base_url: String, grpc_endpoint: String) -> AnytypeClient {
+        let mut config = crate::client::ClientConfig::default()
+            .app_name("resolve-grpc-fixture")
+            .grpc_endpoint(grpc_endpoint);
+        config.base_url = Some(base_url);
+        config.keystore = Some("env".to_string());
+        let client = AnytypeClient::with_config(config).expect("gRPC fixture client");
+        client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
+        client
+            .keystore
+            .update_grpc_credentials(&crate::keystore::GrpcCredentials::from_token("token-alice"))
+            .expect("set mock gRPC credentials");
         client
     }
 
@@ -1094,6 +1161,47 @@ mod tests {
         ]);
     }
 
+    #[test]
+    fn safe_same_id_type_representative_wins_in_every_input_order() {
+        let type_fixture = |id: &str, name: String| -> Type {
+            serde_json::from_value(serde_json::json!({
+                "archived": false,
+                "id": id,
+                "key": "page",
+                "name": name,
+            }))
+            .unwrap()
+        };
+        let rows = [
+            type_fixture("type-a", "A".repeat(MAX_RESOLVE_CANDIDATE_NAME_CHARS + 1)),
+            type_fixture("type-a", "Zulu".to_string()),
+            type_fixture("type-b", "Beta".to_string()),
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let ordered = order.map(|index| rows[index].clone());
+            let Ok(MatchClassification::Ambiguous(candidates)) =
+                classify_matches(ordered, type_candidate)
+            else {
+                panic!("two stable type ids must be ambiguous");
+            };
+            assert_eq!(
+                candidates,
+                vec![
+                    ResolveCandidate::new("type-b", "Beta"),
+                    ResolveCandidate::new("type-a", "Zulu"),
+                ],
+                "candidate choice changed for order {order:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn type_and_property_key_resolution_bypass_cache_prime_paths() {
         let (base_url, request) = empty_page_server().await;
@@ -1123,6 +1231,110 @@ mod tests {
             "unexpected property request: {request_line}"
         );
         assert!(request_line.contains("limit=99"), "{request_line}");
+    }
+
+    #[tokio::test]
+    async fn public_space_resolution_deduplicates_across_http_pages() {
+        let space = serde_json::json!({
+            "id": "space-a", "name": "Work", "object": "space",
+            "description": null, "icon": null, "gateway_url": null, "network_id": null
+        });
+        let first = serde_json::json!({
+            "items": [space.clone()],
+            "pagination": {"has_more": true, "limit": 99, "offset": 0, "total": 2}
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "items": [space],
+            "pagination": {"has_more": false, "limit": 99, "offset": 99, "total": 2}
+        })
+        .to_string();
+        let (base_url, requests) = paged_fixture_server(vec![first, second]).await;
+
+        let resolved = fixture_client(base_url)
+            .resolve_space_id("Work")
+            .await
+            .expect("duplicate rows for one space id remain unique");
+        assert_eq!(resolved, "space-a");
+        let requests = requests.await.expect("space fixture task");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].lines().next().unwrap().contains("limit=99"));
+        assert!(requests[1].lines().next().unwrap().contains("offset=99"));
+    }
+
+    #[tokio::test]
+    async fn public_view_resolution_preserves_later_direct_id_across_pages() {
+        let view = |id: &str, name: &str| {
+            serde_json::json!({
+                "filters": [], "id": id, "layout": "grid", "name": name, "sorts": []
+            })
+        };
+        let first = serde_json::json!({
+            "items": [view("view-a", "Roadmap"), view("view-b", "Roadmap")],
+            "pagination": {"has_more": true, "limit": 99, "offset": 0, "total": 3}
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "items": [view("Roadmap", "Different name")],
+            "pagination": {"has_more": false, "limit": 99, "offset": 99, "total": 3}
+        })
+        .to_string();
+        let (base_url, requests) = paged_fixture_server(vec![first, second]).await;
+
+        let resolved = fixture_client(base_url)
+            .resolve_view_id(SPACE_ID, OBJECT_ID, "Roadmap")
+            .await
+            .expect("later direct view id must outrank earlier duplicate names");
+        assert_eq!(resolved, "Roadmap");
+        let requests = requests.await.expect("view fixture task");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].lines().next().unwrap().contains("limit=99"));
+        assert!(requests[1].lines().next().unwrap().contains("offset=99"));
+    }
+
+    #[tokio::test]
+    async fn public_chat_resolution_composes_bounded_http_and_grpc_discovery() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gRPC probe");
+        let grpc_address = probe.local_addr().expect("gRPC fixture address");
+        drop(probe);
+        let mock = crate::mock::MockChatServer::start(grpc_address).expect("start chat mock");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let spaces = serde_json::json!({
+            "items": [{
+                "id": "space-default", "name": "Workspace", "object": "space",
+                "description": null, "icon": null, "gateway_url": null, "network_id": null
+            }],
+            "pagination": {"has_more": false, "limit": 99, "offset": 0, "total": 1}
+        })
+        .to_string();
+        let (base_url, requests) = paged_fixture_server(vec![spaces]).await;
+        let client = fixture_client_with_grpc(base_url, format!("http://{grpc_address}"));
+        client
+            .chats()
+            .add_message(OBJECT_ID)
+            .content(crate::chats::MessageContent::new().text("fixture"))
+            .send()
+            .await
+            .expect("create CID-shaped mock chat");
+
+        let target = client
+            .resolve_chat_target(None, OBJECT_ID)
+            .await
+            .expect("bare chat id discovery");
+        assert_eq!(target.chat_id, OBJECT_ID);
+        assert_eq!(target.space_id, None);
+        let named = client
+            .resolve_chat_target(Some("space-default"), "General")
+            .await
+            .expect("space-scoped chat name discovery");
+        assert_eq!(named.chat_id, "chat-default");
+        assert_eq!(named.space_id.as_deref(), Some("space-default"));
+
+        let requests = requests.await.expect("chat HTTP fixture task");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].lines().next().unwrap().contains("limit=99"));
+        mock.shutdown().await;
     }
 
     #[test]
