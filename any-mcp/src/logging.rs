@@ -9,8 +9,11 @@ use std::fmt;
 
 use tracing::{Metadata, Subscriber};
 use tracing_subscriber::{
-    EnvFilter, Layer, fmt as tracing_fmt, fmt::writer::MakeWriter, layer::SubscriberExt,
+    EnvFilter, Layer, filter::Directive, fmt as tracing_fmt, fmt::writer::MakeWriter,
+    layer::SubscriberExt,
 };
+
+const OPERATION_TARGET: &str = "any_mcp::operation";
 
 /// Installs the process-wide diagnostic subscriber with stderr as its writer.
 ///
@@ -22,13 +25,50 @@ use tracing_subscriber::{
 /// Returns a redacted [`LoggingError`] if the filter is invalid or another
 /// subscriber has already been installed.
 pub fn init() -> Result<(), LoggingError> {
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(value) => EnvFilter::try_new(value).map_err(|_| LoggingError::InvalidFilter)?,
-        Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
+    let configured = match std::env::var("RUST_LOG") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err(LoggingError::InvalidFilter),
     };
+    let filter = build_filter(configured.as_deref())?;
     tracing::subscriber::set_global_default(subscriber(filter, std::io::stderr))
         .map_err(|_| LoggingError::AlreadyInitialized)
+}
+
+fn build_filter(configured: Option<&str>) -> Result<EnvFilter, LoggingError> {
+    let mut filter = EnvFilter::try_new(configured.unwrap_or("warn"))
+        .map_err(|_| LoggingError::InvalidFilter)?;
+    if !operator_configures_operation(configured.unwrap_or_default()) {
+        filter = filter.add_directive(operation_info_directive());
+    }
+    Ok(filter)
+}
+
+fn operator_configures_operation(configured: &str) -> bool {
+    configured.split(',').any(|directive| {
+        let directive = directive.trim();
+        if !directive.is_empty()
+            && directive
+                .parse::<tracing_subscriber::filter::LevelFilter>()
+                .is_ok()
+        {
+            return true;
+        }
+        let Some((selector, _level)) = directive.rsplit_once('=') else {
+            return false;
+        };
+        let target = selector
+            .trim()
+            .split_once('[')
+            .map_or(selector.trim(), |(target, _)| target.trim());
+        has_target_prefix(OPERATION_TARGET, target)
+    })
+}
+
+fn operation_info_directive() -> Directive {
+    format!("{OPERATION_TARGET}=info")
+        .parse()
+        .expect("static operation tracing directive is valid")
 }
 
 fn subscriber<W>(filter: EnvFilter, writer: W) -> impl Subscriber + Send + Sync
@@ -82,12 +122,23 @@ impl std::error::Error for LoggingError {}
 pub(crate) mod test_support {
     use std::{
         io::{self, Write},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, MutexGuard, Once},
     };
 
     use tracing::Dispatch;
 
     use super::*;
+
+    static TRACE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static TRACE_TEST_INTEREST: Once = Once::new();
+
+    fn ensure_trace_interest() {
+        TRACE_TEST_INTEREST.call_once(|| {
+            let subscriber =
+                tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::TRACE);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
 
     #[derive(Clone, Default)]
     pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -122,19 +173,35 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn capture(filter: &str) -> (Dispatch, Capture) {
+        ensure_trace_interest();
         let writer = Capture::default();
-        let filter = EnvFilter::try_new(filter).expect("test filter");
+        let filter = build_filter(Some(filter)).expect("test filter");
         let dispatch = Dispatch::new(subscriber(filter, writer.clone()));
         (dispatch, writer)
+    }
+
+    pub(crate) fn capture_default() -> (Dispatch, Capture) {
+        ensure_trace_interest();
+        let writer = Capture::default();
+        let filter = build_filter(None).expect("default test filter");
+        let dispatch = Dispatch::new(subscriber(filter, writer.clone()));
+        (dispatch, writer)
+    }
+
+    pub(crate) fn trace_test_guard() -> MutexGuard<'static, ()> {
+        TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{has_target_prefix, test_support::capture};
+    use super::{OPERATION_TARGET, has_target_prefix, test_support::capture};
 
     #[test]
     fn dependency_payload_targets_cannot_override_metadata_deny_filter() {
+        let _guard = super::test_support::trace_test_guard();
         let sentinel = "SECRET_SENTINEL_PAYLOAD";
         let (dispatch, output) =
             capture("anytype::http_json=trace,rmcp::transport=trace,any_mcp::logging_test=trace");
@@ -150,6 +217,22 @@ mod tests {
         assert!(!output.contains(sentinel));
         assert!(!output.contains("upstream body"));
         assert!(!output.contains("protocol frame"));
+    }
+
+    #[test]
+    fn operation_diagnostics_are_enabled_by_default_unless_explicitly_overridden() {
+        let _guard = super::test_support::trace_test_guard();
+        let (default_dispatch, default_output) = super::test_support::capture_default();
+        tracing::dispatcher::with_default(&default_dispatch, || {
+            tracing::info!(target: OPERATION_TARGET, correlation_id = 1, "operation event");
+        });
+        assert!(default_output.contents().contains("operation event"));
+
+        let (disabled_dispatch, disabled_output) = capture("error");
+        tracing::dispatcher::with_default(&disabled_dispatch, || {
+            tracing::info!(target: OPERATION_TARGET, correlation_id = 2, "disabled event");
+        });
+        assert!(!disabled_output.contents().contains("disabled event"));
     }
 
     #[test]
