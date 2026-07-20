@@ -7,10 +7,8 @@
 
 use std::fmt;
 
+use crate::error::ToolError;
 use rmcp::model::CallToolResult;
-use serde::Serialize;
-
-use crate::error::{ToolError, ToolErrorCode};
 
 /// Opaque failure to serialize a typed tool result.
 ///
@@ -27,17 +25,6 @@ impl fmt::Display for ResultEncodingError {
 
 impl std::error::Error for ResultEncodingError {}
 
-/// Serializes a typed success into both `structuredContent` and compact JSON
-/// text for clients that do not consume structured results.
-pub fn tool_success<T>(value: &T) -> Result<CallToolResult, ResultEncodingError>
-where
-    T: Serialize,
-{
-    serde_json::to_value(value)
-        .map(CallToolResult::structured)
-        .map_err(|_| ResultEncodingError)
-}
-
 /// Converts a stable tool execution error into an MCP `isError=true` result.
 ///
 /// Serialization of the fixed error model cannot normally fail. The fallback
@@ -48,7 +35,7 @@ pub fn tool_error(error: &ToolError) -> CallToolResult {
     let value = serde_json::to_value(error).unwrap_or_else(|_| {
         serde_json::json!({
             "code": "upstream",
-            "message": ToolError::new(ToolErrorCode::Upstream).message(),
+            "message": ToolError::upstream().message(),
         })
     });
     CallToolResult::structured_error(value)
@@ -57,11 +44,20 @@ pub fn tool_error(error: &ToolError) -> CallToolResult {
 #[cfg(test)]
 mod tests {
     use rmcp::schemars::JsonSchema;
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use super::*;
     use crate::domain::{DisplayName, ObjectId, ObjectSummary, SpaceId, TypeKey};
+    use crate::protocol::{ToolProfile, workflow_tool};
+
+    #[derive(Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[expect(dead_code, reason = "schema-only representative input")]
+    struct SummaryInput {
+        /// Whether to return a summary.
+        enabled: bool,
+    }
 
     #[derive(Serialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
@@ -82,7 +78,13 @@ mod tests {
             ),
         };
 
-        let result = tool_success(&value).unwrap();
+        let contract = workflow_tool::<SummaryInput, SummaryResult>(
+            "object_get",
+            "Retrieve bounded object metadata.",
+            ToolProfile::Read,
+        )
+        .unwrap();
+        let result = contract.success(&value).unwrap();
         let expected = json!({
             "object": {
                 "id": "obj-1",
@@ -104,7 +106,7 @@ mod tests {
 
     #[test]
     fn error_contains_stable_structured_and_compact_json_content() {
-        let result = tool_error(&ToolError::new(ToolErrorCode::Authentication));
+        let result = tool_error(&ToolError::authentication());
         let expected = json!({
             "code": "authentication",
             "message": "Anytype authentication failed. Verify the configured credentials and retry."

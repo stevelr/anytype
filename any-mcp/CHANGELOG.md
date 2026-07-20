@@ -13,3 +13,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add strict JSON Schema 2020-12 input/output contracts, bounded object
   summaries and resource URIs, standard tool annotations, structured results
   with compact JSON text fallbacks, and stable secret-safe execution errors.
+
+### Changed
+
+- Harden schema contracts to reject unconstrained nested values, maps, arrays,
+  numbers, and untagged unions; link success encoding to each declared output
+  type and require bounded candidates before returning ambiguity errors.

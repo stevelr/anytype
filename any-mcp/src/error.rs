@@ -15,6 +15,18 @@ pub const MAX_ERROR_CANDIDATES: usize = 10;
 /// Maximum number of characters in an ambiguity candidate's display name.
 pub const MAX_CANDIDATE_NAME_CHARS: usize = 256;
 
+/// Error returned when an ambiguity response has no candidates to present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmbiguityCandidatesError;
+
+impl std::fmt::Display for AmbiguityCandidatesError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("at least one ambiguity candidate is required")
+    }
+}
+
+impl std::error::Error for AmbiguityCandidatesError {}
+
 /// Stable machine-readable codes for tool execution failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -80,41 +92,95 @@ pub struct ErrorCandidate {
 #[serde(deny_unknown_fields)]
 pub struct ToolError {
     /// Stable machine-readable failure category.
-    pub code: ToolErrorCode,
+    code: ToolErrorCode,
     /// Short, fixed corrective message safe to show to a caller.
     #[schemars(length(max = 160))]
     message: &'static str,
     /// Bounded alternatives supplied only for ambiguity errors.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(length(max = MAX_ERROR_CANDIDATES))]
-    candidates: Vec<ErrorCandidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = MAX_ERROR_CANDIDATES))]
+    candidates: Option<Vec<ErrorCandidate>>,
+}
+
+/// Classification produced when mapping an `anytype-api` failure.
+///
+/// Ambiguity is deliberately not a completed [`ToolError`]: concrete handlers
+/// must obtain bounded candidate identifiers and names before returning it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnytypeErrorMapping {
+    /// A complete, secret-safe error that can be returned immediately.
+    Ready(ToolError),
+    /// The handler must enrich the error with ambiguity candidates.
+    AmbiguityRequiresCandidates,
 }
 
 impl ToolError {
-    /// Creates a stable error without accepting untrusted diagnostic text.
-    #[must_use]
-    pub const fn new(code: ToolErrorCode) -> Self {
+    const fn from_code(code: ToolErrorCode) -> Self {
         Self {
             code,
             message: code.corrective_message(),
-            candidates: Vec::new(),
+            candidates: None,
         }
     }
 
-    /// Creates an ambiguity error and caps the returned candidate list.
+    /// Creates an authentication error with fixed corrective text.
     #[must_use]
-    pub fn ambiguous(candidates: impl IntoIterator<Item = ErrorCandidate>) -> Self {
-        Self {
+    pub const fn authentication() -> Self {
+        Self::from_code(ToolErrorCode::Authentication)
+    }
+
+    /// Creates a validation error with fixed corrective text.
+    #[must_use]
+    pub const fn validation() -> Self {
+        Self::from_code(ToolErrorCode::Validation)
+    }
+
+    /// Creates a not-found error with fixed corrective text.
+    #[must_use]
+    pub const fn not_found() -> Self {
+        Self::from_code(ToolErrorCode::NotFound)
+    }
+
+    /// Creates a conflict error with fixed corrective text.
+    #[must_use]
+    pub const fn conflict() -> Self {
+        Self::from_code(ToolErrorCode::Conflict)
+    }
+
+    /// Creates a bounded-result error with fixed corrective text.
+    #[must_use]
+    pub const fn bounded_result() -> Self {
+        Self::from_code(ToolErrorCode::BoundedResult)
+    }
+
+    /// Creates a redacted upstream error with fixed corrective text.
+    #[must_use]
+    pub const fn upstream() -> Self {
+        Self::from_code(ToolErrorCode::Upstream)
+    }
+
+    /// Creates an ambiguity error, requiring at least one candidate and
+    /// capping the returned list at [`MAX_ERROR_CANDIDATES`].
+    pub fn ambiguous(
+        candidates: impl IntoIterator<Item = ErrorCandidate>,
+    ) -> Result<Self, AmbiguityCandidatesError> {
+        let candidates: Vec<_> = candidates.into_iter().take(MAX_ERROR_CANDIDATES).collect();
+        if candidates.is_empty() {
+            return Err(AmbiguityCandidatesError);
+        }
+        Ok(Self {
             code: ToolErrorCode::Ambiguous,
             message: ToolErrorCode::Ambiguous.corrective_message(),
-            candidates: candidates.into_iter().take(MAX_ERROR_CANDIDATES).collect(),
-        }
+            candidates: Some(candidates),
+        })
     }
 
     /// Maps an `anytype-api` failure to a stable category without copying its
-    /// URL, response body, credential text, or diagnostic message.
+    /// URL, response body, credential text, or diagnostic message. Ambiguity
+    /// remains incomplete until the handler supplies candidates through
+    /// [`ToolError::ambiguous`].
     #[must_use]
-    pub fn from_anytype(error: &anytype::error::AnytypeError) -> Self {
+    pub fn from_anytype(error: &anytype::error::AnytypeError) -> AnytypeErrorMapping {
         use anytype::error::AnytypeError;
 
         let code = match error {
@@ -125,7 +191,9 @@ impl ToolError {
             | AnytypeError::KeyStore { .. }
             | AnytypeError::GrpcUnavailable { .. } => ToolErrorCode::Authentication,
             AnytypeError::Validation { .. } => ToolErrorCode::Validation,
-            AnytypeError::Ambiguous { .. } => ToolErrorCode::Ambiguous,
+            AnytypeError::Ambiguous { .. } => {
+                return AnytypeErrorMapping::AmbiguityRequiresCandidates;
+            }
             AnytypeError::NotFound { .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
                 code: 400 | 422, ..
@@ -148,7 +216,13 @@ impl ToolError {
             | AnytypeError::VerifyTimeout { .. }
             | AnytypeError::Other { .. } => ToolErrorCode::Upstream,
         };
-        Self::new(code)
+        AnytypeErrorMapping::Ready(Self::from_code(code))
+    }
+
+    /// Returns the stable machine-readable failure code.
+    #[must_use]
+    pub const fn code(&self) -> ToolErrorCode {
+        self.code
     }
 
     /// Returns the caller-visible corrective message.
@@ -160,7 +234,7 @@ impl ToolError {
     /// Returns bounded ambiguity candidates, if present.
     #[must_use]
     pub fn candidates(&self) -> &[ErrorCandidate] {
-        &self.candidates
+        self.candidates.as_deref().unwrap_or_default()
     }
 }
 
@@ -180,7 +254,7 @@ mod tests {
 
     #[test]
     fn upstream_error_is_stable_and_contains_no_diagnostic_input() {
-        let error = ToolError::new(ToolErrorCode::Upstream);
+        let error = ToolError::upstream();
 
         assert_eq!(
             serde_json::to_value(error).unwrap(),
@@ -193,11 +267,23 @@ mod tests {
 
     #[test]
     fn ambiguity_candidates_are_bounded() {
-        let error = ToolError::ambiguous((0..25).map(candidate));
+        let error = ToolError::ambiguous((0..25).map(candidate)).unwrap();
 
         assert_eq!(error.candidates().len(), MAX_ERROR_CANDIDATES);
         assert_eq!(error.candidates()[0].id.as_str(), "id-0");
         assert_eq!(error.candidates()[9].id.as_str(), "id-9");
+        assert_eq!(error.code(), ToolErrorCode::Ambiguous);
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_ERROR_CANDIDATES
+        );
+        assert_eq!(
+            ToolError::ambiguous(std::iter::empty()),
+            Err(AmbiguityCandidatesError)
+        );
     }
 
     #[test]
@@ -209,14 +295,27 @@ mod tests {
             message: "Bearer super-secret response body".to_owned(),
         };
 
-        let encoded = serde_json::to_string(&ToolError::from_anytype(&source)).unwrap();
-        assert_eq!(
-            ToolError::from_anytype(&source).code,
-            ToolErrorCode::Upstream
-        );
+        let AnytypeErrorMapping::Ready(error) = ToolError::from_anytype(&source) else {
+            panic!("HTTP 500 must map to a ready upstream error");
+        };
+        let encoded = serde_json::to_string(&error).unwrap();
+        assert_eq!(error.code(), ToolErrorCode::Upstream);
         assert!(!encoded.contains("secret"));
         assert!(!encoded.contains("Bearer"));
         assert!(!encoded.contains("localhost"));
+    }
+
+    #[test]
+    fn anytype_ambiguity_requires_explicit_candidate_enrichment() {
+        let source = anytype::error::AnytypeError::Ambiguous {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+        };
+
+        assert_eq!(
+            ToolError::from_anytype(&source),
+            AnytypeErrorMapping::AmbiguityRequiresCandidates
+        );
     }
 
     #[test]
@@ -229,6 +328,7 @@ mod tests {
             schema["properties"]["candidates"]["maxItems"],
             json!(MAX_ERROR_CANDIDATES)
         );
+        assert_eq!(schema["properties"]["candidates"]["minItems"], json!(1));
         assert_eq!(
             schema["$defs"]["ErrorCandidate"]["additionalProperties"],
             json!(false)
