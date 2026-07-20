@@ -483,6 +483,10 @@ impl fmt::Display for ServerBuildError {
 impl std::error::Error for ServerBuildError {}
 
 #[cfg(test)]
+#[path = "server/headless_integration.rs"]
+mod headless_integration;
+
+#[cfg(test)]
 mod tests {
     use std::{fs, path::Path, time::Duration};
 
