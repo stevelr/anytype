@@ -75,6 +75,30 @@ impl From<CursorStoreError> for HandlerError {
     }
 }
 
+/// Defense-in-depth policy checked by mutation handlers before resolution or
+/// upstream I/O.
+///
+/// Catalog filtering remains the primary read-only control. Passing this
+/// policy into each mutation handler ensures that a stale, already-discovered
+/// direct call still fails closed at the handler seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationAccess {
+    /// Mutating workflows may proceed.
+    Allowed,
+    /// Mutating workflows must be rejected before any upstream work.
+    ReadOnly,
+}
+
+/// Rejects a mutation when the current handler invocation is read-only.
+///
+/// Call this before resolving names or constructing an upstream future.
+pub fn require_mutation_access(access: MutationAccess) -> Result<(), HandlerError> {
+    match access {
+        MutationAccess::Allowed => Ok(()),
+        MutationAccess::ReadOnly => Err(HandlerError::new(ToolError::read_only())),
+    }
+}
+
 /// Executes one upstream call and its conversion under runtime controls, then
 /// encodes the typed result through its declared workflow contract.
 ///

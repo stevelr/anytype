@@ -115,7 +115,25 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   `anytype` and `rmcp` target prefixes that can expose protocol or upstream
   payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.
 
-Workflow tools and resources are added in subsequent Phase 1 work.
+The remaining workflow tools and resources are added in subsequent Phase 1
+work.
+
+### Object archive workflow
+
+The transport-neutral `object_archive` handler soft-archives exactly one
+object through the ordinary Anytype object DELETE endpoint. It never invokes
+archived-object purge, bulk deletion, delete-all, or space mutation APIs. The
+handler resolves and validates the space before constructing the request,
+uses the shared runtime controls and document-response ceiling, and accepts a
+success only when Anytype returns the same safe object and space identifiers
+with `archived=true`.
+
+Its typed result contains the archived object id, the confirmed boolean state,
+and the canonical Anytype resource URI. The tool contract is destructive,
+non-idempotent, read-write, and closed-world. A reusable mutation-access gate
+also rejects stale direct calls before resolver or upstream I/O when a future
+production catalog selects read-only operation; environment parsing and
+catalog filtering are intentionally owned by the catalog integration phase.
 
 ## Source layout
 
@@ -132,6 +150,7 @@ Workflow tools and resources are added in subsequent Phase 1 work.
 - `src/handler_support.rs` — controlled handler execution and checked page
   continuation helpers.
 - `src/object_output.rs` — validated summaries and bounded property projection.
+- `src/object_archive.rs` — single-object soft archive contract and handler.
 - `src/validation.rs` — reusable collection, filter, and body chunk bounds.
 - `src/pagination.rs` — bounded pagination inputs and result pages.
 - `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.

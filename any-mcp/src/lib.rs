@@ -16,6 +16,7 @@ pub mod domain;
 pub mod error;
 pub mod handler_support;
 pub mod logging;
+pub mod object_archive;
 pub mod object_output;
 pub mod pagination;
 pub mod protocol;
