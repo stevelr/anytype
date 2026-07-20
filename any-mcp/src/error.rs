@@ -377,6 +377,22 @@ mod tests {
         }
     }
 
+    fn assert_anytype_mapping(
+        error: &anytype::error::AnytypeError,
+        expected: Option<ToolErrorCode>,
+    ) {
+        match (ToolError::from_anytype(error), expected) {
+            (AnytypeErrorMapping::Ready(error), Some(expected)) => {
+                assert_eq!(error.code(), expected);
+                let encoded = serde_json::to_string(&error).expect("serialize mapped error");
+                assert!(!encoded.contains("SECRET"));
+                assert!(!encoded.contains("localhost"));
+            }
+            (AnytypeErrorMapping::AmbiguityRequiresCandidates, None) => {}
+            (actual, expected) => panic!("unexpected mapping {actual:?}, expected {expected:?}"),
+        }
+    }
+
     #[test]
     fn mutation_http_rejection_allowlist_is_conservative_at_boundaries() {
         let cases = [
@@ -414,91 +430,150 @@ mod tests {
         ];
 
         for (status, expected) in cases {
+            let source = api_error(status);
             assert_eq!(
-                mutation_rejection_is_definitive(&api_error(status)),
+                mutation_rejection_is_definitive(&source),
                 expected,
                 "unexpected mutation classification for HTTP {status}"
             );
+            let mapped = match status {
+                400 | 422 => ToolErrorCode::Validation,
+                401 | 403 => ToolErrorCode::Authentication,
+                404 => ToolErrorCode::NotFound,
+                409 | 412 => ToolErrorCode::Conflict,
+                _ => ToolErrorCode::Upstream,
+            };
+            assert_anytype_mapping(&source, Some(mapped));
         }
     }
 
     #[test]
-    fn mutation_rejection_classifier_covers_every_directly_constructible_error_variant() {
+    fn anytype_classifiers_cover_every_directly_constructible_error_variant() {
         use anytype::error::{AnytypeError, KeyStoreError};
 
         let definitive = vec![
-            AnytypeError::Auth {
-                message: "SECRET_AUTH_TOKEN".to_owned(),
-            },
-            AnytypeError::Unauthorized,
-            AnytypeError::Forbidden,
-            AnytypeError::Serialization {
-                source: serde_json::from_str::<u8>("not-json").unwrap_err(),
-            },
-            AnytypeError::NotFound {
-                obj_type: "SECRET_TYPE".to_owned(),
-                key: "SECRET_KEY".to_owned(),
-            },
-            AnytypeError::Ambiguous {
-                obj_type: "SECRET_TYPE".to_owned(),
-                key: "SECRET_KEY".to_owned(),
-                candidates: Vec::new(),
-            },
-            AnytypeError::ResolutionLimitExceeded {
-                obj_type: "SECRET_TYPE".to_owned(),
-                key: "SECRET_KEY".to_owned(),
-                limit: 1,
-            },
-            AnytypeError::RateLimitExceeded {
-                header: "SECRET_RATE_HEADER".to_owned(),
-                duration: Duration::from_secs(1),
-            },
-            AnytypeError::Validation {
-                message: "SECRET_VALIDATION".to_owned(),
-            },
-            AnytypeError::NoKeyStore,
-            AnytypeError::KeyStore {
-                source: KeyStoreError::Config {
-                    message: "SECRET_KEYSTORE".to_owned(),
+            (
+                AnytypeError::Auth {
+                    message: "SECRET_AUTH_TOKEN".to_owned(),
                 },
-            },
-            AnytypeError::GrpcUnavailable {
-                message: "SECRET_GRPC_CONFIG".to_owned(),
-            },
-            AnytypeError::CacheDisabled,
+                Some(ToolErrorCode::Authentication),
+            ),
+            (
+                AnytypeError::Unauthorized,
+                Some(ToolErrorCode::Authentication),
+            ),
+            (AnytypeError::Forbidden, Some(ToolErrorCode::Authentication)),
+            (
+                AnytypeError::Serialization {
+                    source: serde_json::from_str::<u8>("not-json").unwrap_err(),
+                },
+                Some(ToolErrorCode::Upstream),
+            ),
+            (
+                AnytypeError::NotFound {
+                    obj_type: "SECRET_TYPE".to_owned(),
+                    key: "SECRET_KEY".to_owned(),
+                },
+                Some(ToolErrorCode::NotFound),
+            ),
+            (
+                AnytypeError::Ambiguous {
+                    obj_type: "SECRET_TYPE".to_owned(),
+                    key: "SECRET_KEY".to_owned(),
+                    candidates: Vec::new(),
+                },
+                None,
+            ),
+            (
+                AnytypeError::ResolutionLimitExceeded {
+                    obj_type: "SECRET_TYPE".to_owned(),
+                    key: "SECRET_KEY".to_owned(),
+                    limit: 1,
+                },
+                Some(ToolErrorCode::BoundedResult),
+            ),
+            (
+                AnytypeError::RateLimitExceeded {
+                    header: "SECRET_RATE_HEADER".to_owned(),
+                    duration: Duration::from_secs(1),
+                },
+                Some(ToolErrorCode::Upstream),
+            ),
+            (
+                AnytypeError::Validation {
+                    message: "SECRET_VALIDATION".to_owned(),
+                },
+                Some(ToolErrorCode::Validation),
+            ),
+            (
+                AnytypeError::NoKeyStore,
+                Some(ToolErrorCode::Authentication),
+            ),
+            (
+                AnytypeError::KeyStore {
+                    source: KeyStoreError::Config {
+                        message: "SECRET_KEYSTORE".to_owned(),
+                    },
+                },
+                Some(ToolErrorCode::Authentication),
+            ),
+            (
+                AnytypeError::GrpcUnavailable {
+                    message: "SECRET_GRPC_CONFIG".to_owned(),
+                },
+                Some(ToolErrorCode::Authentication),
+            ),
+            (AnytypeError::CacheDisabled, Some(ToolErrorCode::Upstream)),
         ];
-        for error in &definitive {
+        for (error, mapped) in &definitive {
             assert!(
                 mutation_rejection_is_definitive(error),
                 "definitive variant was classified as indeterminate"
             );
+            assert_anytype_mapping(error, *mapped);
         }
 
         let indeterminate = vec![
-            AnytypeError::ResponseTooLarge {
-                limit: 1,
-                declared: Some(2),
-            },
-            AnytypeError::TooManyRetries { n: 3 },
-            AnytypeError::Deserialization {
-                source: serde_json::from_str::<u8>("not-json").unwrap_err(),
-            },
-            AnytypeError::VerifyTimeout {
-                obj_type: "SECRET_TYPE".to_owned(),
-                key: "SECRET_KEY".to_owned(),
-                attempts: 3,
-                timeout: Duration::from_secs(1),
-                last_error: Some("SECRET_LAST_ERROR".to_owned()),
-            },
-            AnytypeError::Other {
-                message: "SECRET_OTHER".to_owned(),
-            },
+            (
+                AnytypeError::ResponseTooLarge {
+                    limit: 1,
+                    declared: Some(2),
+                },
+                ToolErrorCode::BoundedResult,
+            ),
+            (
+                AnytypeError::TooManyRetries { n: 3 },
+                ToolErrorCode::Upstream,
+            ),
+            (
+                AnytypeError::Deserialization {
+                    source: serde_json::from_str::<u8>("not-json").unwrap_err(),
+                },
+                ToolErrorCode::Upstream,
+            ),
+            (
+                AnytypeError::VerifyTimeout {
+                    obj_type: "SECRET_TYPE".to_owned(),
+                    key: "SECRET_KEY".to_owned(),
+                    attempts: 3,
+                    timeout: Duration::from_secs(1),
+                    last_error: Some("SECRET_LAST_ERROR".to_owned()),
+                },
+                ToolErrorCode::Upstream,
+            ),
+            (
+                AnytypeError::Other {
+                    message: "SECRET_OTHER".to_owned(),
+                },
+                ToolErrorCode::Upstream,
+            ),
         ];
-        for error in &indeterminate {
+        for (error, mapped) in &indeterminate {
             assert!(
                 !mutation_rejection_is_definitive(error),
                 "ambiguous variant was classified as definitive"
             );
+            assert_anytype_mapping(error, Some(*mapped));
         }
     }
 
@@ -534,6 +609,7 @@ mod tests {
         server.await.expect("disconnect fixture task");
         assert!(matches!(http_error, AnytypeError::Http { .. }));
         assert!(!mutation_rejection_is_definitive(&http_error));
+        assert_anytype_mapping(&http_error, Some(ToolErrorCode::Upstream));
 
         let mut grpc_config = ClientConfig::default()
             .app_name("mutation-grpc-classifier")
@@ -550,6 +626,7 @@ mod tests {
             .expect_err("invalid endpoint must produce a gRPC error");
         assert!(matches!(grpc_error, AnytypeError::Grpc { .. }));
         assert!(!mutation_rejection_is_definitive(&grpc_error));
+        assert_anytype_mapping(&grpc_error, Some(ToolErrorCode::Upstream));
 
         let encoded = format!(
             "{:?}{:?}",

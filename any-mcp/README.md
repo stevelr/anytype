@@ -426,6 +426,27 @@ runtime and advertises their static capability alongside the tool catalog.
   listing workflows.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
+- `tests/snapshots/` — reviewed deterministic normal/read-only tool catalogs,
+  including every schema and annotation.
+
+## Testing
+
+The unit suite locks every Phase 1 tool input schema, output schema, and exact
+annotation in deterministic normal and read-only catalog snapshots. A separate
+recursive audit rejects any catalog string without `maxLength`, array without
+`maxItems`, or object schema that permits unknown map keys. Security-focused
+tests also cover cursor tamper/expiry/capacity, exact Unicode character and
+response-byte boundaries, zero-write mutation conflicts, complete Anytype
+error classification, redaction across protocol/error/diagnostic surfaces,
+and read-only defense in depth.
+
+Catalog changes are never accepted through an environment variable. Follow
+the explicit regeneration and review procedure in
+[`tests/snapshots/README.md`](tests/snapshots/README.md), then run:
+
+```sh
+cargo test -p any-mcp
+```
 
 ## Build
 

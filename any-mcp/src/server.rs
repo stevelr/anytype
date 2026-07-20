@@ -484,7 +484,7 @@ impl std::error::Error for ServerBuildError {}
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{fs, path::Path, time::Duration};
 
     use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
     use serde_json::{Value, json};
@@ -507,6 +507,9 @@ mod tests {
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
     const OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
     const RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+    const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("../tests/snapshots/catalog-normal.json");
+    const READ_ONLY_CATALOG_SNAPSHOT: &str =
+        include_str!("../tests/snapshots/catalog-read-only.json");
 
     fn runtime(read_only: bool) -> RuntimeContext {
         runtime_at("http://127.0.0.1:1".to_owned(), read_only)
@@ -540,6 +543,156 @@ mod tests {
             .iter()
             .map(|tool| tool.name.as_ref())
             .collect()
+    }
+
+    fn canonical_json(value: Value) -> Value {
+        match value {
+            Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+            Value::Object(object) => {
+                let mut entries = object.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, canonical_json(value)))
+                        .collect(),
+                )
+            }
+            scalar => scalar,
+        }
+    }
+
+    fn catalog_snapshot(read_only: bool) -> String {
+        let server = AnyMcpServer::new(runtime(read_only)).expect("static catalog");
+        let value = canonical_json(json!({
+            "read_only": read_only,
+            "tools": server.tools(),
+        }));
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&value).expect("serialize static catalog")
+        )
+    }
+
+    fn assert_schema_node_is_bounded(value: &Value, path: &str) {
+        if value == &Value::Bool(false) {
+            return;
+        }
+        let schema = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{path} must be an object or false schema"));
+
+        if let Some(definitions) = schema.get("$defs").and_then(Value::as_object) {
+            for (name, definition) in definitions {
+                assert_schema_node_is_bounded(definition, &format!("{path}/$defs/{name}"));
+            }
+        }
+        if schema.contains_key("$ref") {
+            return;
+        }
+        for keyword in ["allOf", "anyOf", "oneOf"] {
+            if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+                for (index, branch) in branches.iter().enumerate() {
+                    assert_schema_node_is_bounded(branch, &format!("{path}/{keyword}/{index}"));
+                }
+            }
+        }
+
+        let has_type = |expected: &str| match schema.get("type") {
+            Some(Value::String(kind)) => kind == expected,
+            Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == expected),
+            _ => false,
+        };
+        if has_type("object") {
+            assert_eq!(
+                schema.get("additionalProperties"),
+                Some(&Value::Bool(false)),
+                "{path} must reject unconstrained map keys"
+            );
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (name, property) in properties {
+                    assert_schema_node_is_bounded(property, &format!("{path}/properties/{name}"));
+                }
+            }
+        }
+        if has_type("array") {
+            let maximum = schema
+                .get("maxItems")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| panic!("{path} array must have maxItems"));
+            assert!(maximum <= 10_000, "{path} array bound is impractical");
+            let items = schema
+                .get("items")
+                .unwrap_or_else(|| panic!("{path} array must constrain its items"));
+            assert_schema_node_is_bounded(items, &format!("{path}/items"));
+        }
+        if has_type("string") && !schema.contains_key("const") && !schema.contains_key("enum") {
+            let maximum = schema
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| panic!("{path} string must have maxLength"));
+            assert!(maximum <= 100_000, "{path} string bound is impractical");
+        }
+    }
+
+    fn assert_catalog_contracts(server: &AnyMcpServer) {
+        for tool in server.tools() {
+            assert_schema_node_is_bounded(
+                &Value::Object(tool.input_schema.as_ref().clone()),
+                &format!("{}/inputSchema", tool.name),
+            );
+            assert_schema_node_is_bounded(
+                &Value::Object(
+                    tool.output_schema
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{} must declare outputSchema", tool.name))
+                        .as_ref()
+                        .clone(),
+                ),
+                &format!("{}/outputSchema", tool.name),
+            );
+
+            let expected = if READ_TOOL_NAMES.contains(&tool.name.as_ref()) {
+                json!({
+                    "readOnlyHint": true,
+                    "destructiveHint": false,
+                    "openWorldHint": false
+                })
+            } else if tool.name == OBJECT_CREATE {
+                json!({
+                    "readOnlyHint": false,
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": false
+                })
+            } else {
+                json!({
+                    "readOnlyHint": false,
+                    "destructiveHint": true,
+                    "idempotentHint": false,
+                    "openWorldHint": false
+                })
+            };
+            assert_eq!(
+                serde_json::to_value(
+                    tool.annotations
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{} must declare annotations", tool.name))
+                )
+                .expect("serialize annotations"),
+                expected,
+                "{} annotation profile drifted",
+                tool.name
+            );
+        }
+    }
+
+    fn write_snapshot(name: &str, contents: &str) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("snapshots")
+            .join(name);
+        fs::write(path, contents).expect("write reviewed catalog snapshot");
     }
 
     async fn write_frame(writer: &mut WriteHalf<DuplexStream>, frame: Value) {
@@ -665,6 +818,35 @@ mod tests {
                     .is_some_and(|schema| schema["additionalProperties"] == json!(false))
                 && tool.annotations.is_some()
         }));
+    }
+
+    #[test]
+    fn serialized_catalog_snapshots_are_exact_and_deterministic() {
+        let normal = catalog_snapshot(false);
+        assert!(
+            normal == NORMAL_CATALOG_SNAPSHOT,
+            "normal catalog snapshot drifted; review and run the documented explicit updater"
+        );
+        let read_only = catalog_snapshot(true);
+        assert!(
+            read_only == READ_ONLY_CATALOG_SNAPSHOT,
+            "read-only catalog snapshot drifted; review and run the documented explicit updater"
+        );
+    }
+
+    #[test]
+    fn every_catalog_schema_is_recursively_bounded_and_annotations_are_exact() {
+        let normal = AnyMcpServer::new(runtime(false)).expect("normal static catalog");
+        assert_catalog_contracts(&normal);
+        let read_only = AnyMcpServer::new(runtime(true)).expect("read-only static catalog");
+        assert_catalog_contracts(&read_only);
+    }
+
+    #[test]
+    #[ignore = "manual updater; review every schema and annotation diff before committing"]
+    fn write_catalog_snapshots() {
+        write_snapshot("catalog-normal.json", &catalog_snapshot(false));
+        write_snapshot("catalog-read-only.json", &catalog_snapshot(true));
     }
 
     #[tokio::test]

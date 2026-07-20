@@ -653,26 +653,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn document_response_byte_ceiling_is_enforced_before_conversion() {
-        let response_limits = ResponseLimits {
-            document_bytes: 512,
-            ..ResponseLimits::default()
-        };
-        let (base_url, server) = fixture(vec![FixtureReply::json(object_response(
-            Some("x".repeat(1_000)),
-            SPACE_ID,
-            OBJECT_ID,
-        ))])
-        .await;
+    async fn document_response_byte_ceiling_is_exact_before_conversion() {
+        let body = "é🦀".repeat(40);
+        let response = object_response(Some(body.clone()), SPACE_ID, OBJECT_ID);
+        let response_bytes = response.to_string().len() as u64;
+
+        let (base_url, server) = fixture(vec![FixtureReply::json(response.clone())]).await;
         let handlers = AnytypeResources::new(runtime_with_limits(
             base_url,
             Duration::from_secs(3),
-            response_limits,
+            ResponseLimits {
+                document_bytes: response_bytes,
+                ..ResponseLimits::default()
+            },
+        ));
+        let exact = handlers
+            .read_resource(request(RESOURCE_URI), &CancellationToken::new())
+            .await
+            .expect("response exactly at the byte ceiling");
+        assert_eq!(text(&exact), body);
+        assert_eq!(server.await.unwrap().len(), 1);
+
+        let (base_url, server) = fixture(vec![FixtureReply::json(response)]).await;
+        let handlers = AnytypeResources::new(runtime_with_limits(
+            base_url,
+            Duration::from_secs(3),
+            ResponseLimits {
+                document_bytes: response_bytes - 1,
+                ..ResponseLimits::default()
+            },
         ));
         let error = handlers
             .read_resource(request(RESOURCE_URI), &CancellationToken::new())
             .await
-            .expect_err("document response ceiling");
+            .expect_err("response one byte above the ceiling");
         assert_eq!(error_code(&error), "bounded_result");
         assert_eq!(error.message, BOUNDED_MESSAGE);
         assert_eq!(server.await.unwrap().len(), 1);
