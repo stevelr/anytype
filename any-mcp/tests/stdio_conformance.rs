@@ -1102,22 +1102,76 @@ fn production_stdio_read_only_mode_supports_stateless_2026_revision() {
     run_modern_stdio_acceptance(true);
 }
 
+fn run_legacy_malformed_recovery(read_only: bool) {
+    let fixture = HttpFixture::start();
+    let mut process = ProtocolProcess::start(&fixture, read_only);
+    initialize_legacy_session(&mut process);
+
+    process.send_bytes(b"{malformed-json");
+    let first_parse_error = process.read_frame();
+    assert_eq!(first_parse_error["id"], Value::Null);
+    assert_eq!(first_parse_error["error"]["code"], -32700);
+
+    process.send_bytes(b"[");
+    let second_parse_error = process.read_frame();
+    assert_eq!(second_parse_error["id"], Value::Null);
+    assert_eq!(second_parse_error["error"]["code"], -32700);
+
+    let oversized = vec![b'x'; MAX_STDOUT_LINE_BYTES + 1];
+    process.send_bytes(&oversized);
+    let oversized_error = process.read_frame();
+    assert_eq!(oversized_error["id"], Value::Null);
+    assert_eq!(oversized_error["error"]["code"], -32600);
+
+    process.notification("$/setTrace", json!({"value": "off"}));
+
+    let ping = process.request(2, "ping", json!({}));
+    assert_eq!(ping["result"], json!({}));
+    let status = process.request(
+        3,
+        "tools/call",
+        json!({"name": "server_status", "arguments": {}}),
+    );
+    assert_structured_result(&status["result"], false);
+
+    let output = process.finish();
+    fixture.finish();
+    assert_stdout_purity(&output.stdout);
+    assert_exchange_depth(&output.stdout, 6);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8 diagnostics");
+    for secret in [HTTP_TOKEN, INPUT_SECRET, DOCUMENT_BODY] {
+        assert!(
+            !stderr.contains(secret),
+            "stderr redacts malformed input data"
+        );
+    }
+}
+
 #[test]
-#[ignore = "blocked by any-m2u: rmcp stdio currently drops syntactically malformed JSON"]
 fn malformed_json_returns_parse_error_and_preserves_the_stream() {
+    run_legacy_malformed_recovery(true);
+}
+
+#[test]
+fn malformed_json_recovery_is_identical_in_normal_mode() {
+    run_legacy_malformed_recovery(false);
+}
+
+#[test]
+fn malformed_first_frame_returns_parse_error_and_selects_modern_mode() {
     let fixture = HttpFixture::start();
     let mut process = ProtocolProcess::start(&fixture, true);
-    initialize_legacy_session(&mut process);
 
     process.send_bytes(b"{malformed-json");
     let parse_error = process.read_frame();
     assert_eq!(parse_error["id"], Value::Null);
     assert_eq!(parse_error["error"]["code"], -32700);
 
-    let ping = process.request(2, "ping", json!({}));
-    assert_eq!(ping["result"], json!({}));
+    let discovered = process.modern_request(2, "server/discover", json!({"_meta": modern_meta()}));
+    assert_eq!(discovered["result"]["resultType"], "complete");
+
     let output = process.finish();
     fixture.finish();
     assert_stdout_purity(&output.stdout);
-    assert_exchange_depth(&output.stdout, 3);
+    assert_exchange_depth(&output.stdout, 2);
 }

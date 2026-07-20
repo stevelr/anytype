@@ -87,10 +87,12 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   tool/resource catalogs carry positive public cache hints, while authenticated
   document reads are immediately stale and private. Unsupported versions use
   error `-32022` with exact `supported` and `requested` data;
-- modern newline-delimited input/output frames are capped at 2 MiB with at most
-  64 active requests, one stdout writer, per-request cancellation, and prompt
-  EOF shutdown. The separate legacy malformed-frame defect remains tracked by
-  `any-m2u` because rmcp still drops syntactically invalid JSON;
+- newline-delimited input/output frames in both eras are capped at 2 MiB. The
+  legacy transport preserves rmcp dispatch while a cancellation-safe decoder
+  returns one `-32700` response per syntactically malformed frame and one
+  `-32600` response per oversized or well-formed invalid frame. Decoder and
+  service responses share one stdout writer. The modern path allows at most 64
+  active requests; both paths preserve cancellation and prompt EOF shutdown;
 - modern request IDs accept every bounded string, including the schema-valid
   empty string, plus exactly represented signed/unsigned JSON integers. Strings
   are capped at 256 bytes and integers at serde_json's exact i64/u64 range as
@@ -559,9 +561,9 @@ included in runtime error formatting or startup diagnostics.
 The production-process regression harness checks the complete advertised
 catalog, document resources, structured success and error results,
 cancellation, malformed and unknown requests, clean EOF, and stdout/stderr
-purity in normal and read-only modes. Modern stateless discovery and malformed
-JSON parse errors remain explicit ignored acceptance tests tied to their
-blocking issues. See [stdio protocol verification](STDIO_CONFORMANCE.md)
+purity in normal and read-only modes. It also verifies modern stateless
+discovery and exact malformed-frame recovery before and after legacy
+initialization. See [stdio protocol verification](STDIO_CONFORMANCE.md)
 for commands, external-tool evidence, and the precise limits of the current
 compatibility claim.
 
