@@ -1028,6 +1028,120 @@ mod tests {
         (format!("http://{address}"), task)
     }
 
+    #[derive(Debug, Default)]
+    struct TypeRouteTraffic {
+        requests: Vec<String>,
+        type_list_pages: usize,
+        direct_type_gets: usize,
+    }
+
+    async fn route_aware_type_server() -> (
+        String,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<TypeRouteTraffic>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind route-aware type fixture server");
+        let address = listener.local_addr().expect("type fixture address");
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut traffic = TypeRouteTraffic::default();
+            loop {
+                let accepted = tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (mut stream, _) = accepted.expect("accept route-aware type request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).await.expect("read type request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).expect("request is utf-8");
+                let request_line = request.lines().next().expect("type request line");
+                let path = request_line
+                    .split_ascii_whitespace()
+                    .nth(1)
+                    .expect("type request path");
+                let collection_path = format!("/v1/spaces/{SPACE_ID}/types");
+                let direct_path = format!("{collection_path}/{OBJECT_ID}");
+                let body = if path == collection_path
+                    || path.starts_with(&format!("{collection_path}?"))
+                {
+                    let page = traffic.type_list_pages;
+                    traffic.type_list_pages += 1;
+                    if page == 0 {
+                        serde_json::json!({
+                            "items": [{
+                                "archived": false,
+                                "id": OTHER_OBJECT_ID,
+                                "key": "note",
+                                "name": "Note"
+                            }],
+                            "pagination": {
+                                "has_more": true,
+                                "limit": 100,
+                                "offset": 0,
+                                "total": 101
+                            }
+                        })
+                        .to_string()
+                    } else {
+                        serde_json::json!({
+                            "items": [{
+                                "archived": false,
+                                "id": OBJECT_ID,
+                                "key": "page",
+                                "name": "Page"
+                            }],
+                            "pagination": {
+                                "has_more": false,
+                                "limit": 100,
+                                "offset": 100,
+                                "total": 101
+                            }
+                        })
+                        .to_string()
+                    }
+                } else if path == direct_path {
+                    traffic.direct_type_gets += 1;
+                    serde_json::json!({
+                        "type": {
+                            "archived": false,
+                            "id": OBJECT_ID,
+                            "key": "page",
+                            "name": "Page"
+                        }
+                    })
+                    .to_string()
+                } else {
+                    panic!("unexpected type fixture route: {request_line}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                traffic.requests.push(request);
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write type response");
+            }
+            traffic
+        });
+        (format!("http://{address}"), shutdown_tx, task)
+    }
+
     fn fixture_client(base_url: String) -> AnytypeClient {
         let mut config = crate::client::ClientConfig::default().app_name("resolve-http-fixture");
         config.base_url = Some(base_url);
@@ -1243,16 +1357,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_type_id_resolution_uses_one_direct_get_with_cache_enabled() {
         for resolve_key in [false, true] {
-            let body = serde_json::json!({
-                "type": {
-                    "archived": false,
-                    "id": OBJECT_ID,
-                    "key": "page",
-                    "name": "Page"
-                }
-            })
-            .to_string();
-            let (base_url, requests) = paged_fixture_server(vec![body]).await;
+            let (base_url, shutdown, traffic) = route_aware_type_server().await;
             let client = fixture_client(base_url);
             assert!(
                 client.cache().is_enabled(),
@@ -1278,9 +1383,15 @@ mod tests {
                 );
             }
 
-            let requests = requests.await.expect("direct type fixture task");
-            assert_eq!(requests.len(), 1);
-            let request_line = requests[0].lines().next().expect("type request line");
+            shutdown.send(()).expect("stop route-aware type fixture");
+            let traffic = traffic.await.expect("route-aware type fixture task");
+            assert_eq!(traffic.type_list_pages, 0, "must not prime type cache");
+            assert_eq!(traffic.direct_type_gets, 1);
+            assert_eq!(traffic.requests.len(), 1);
+            let request_line = traffic.requests[0]
+                .lines()
+                .next()
+                .expect("type request line");
             assert_eq!(
                 request_line,
                 format!("GET /v1/spaces/{SPACE_ID}/types/{OBJECT_ID} HTTP/1.1")
