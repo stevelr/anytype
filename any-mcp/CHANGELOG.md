@@ -14,9 +14,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   negotiation errors, complete-result discrimination, cache hints, concurrent
   cancellation, clean EOF, and the full normal/read-only tool and resource
   surface. Validate real modern process exchanges against the official draft
-  schema while retaining the legacy malformed-frame blocker separately. Treat
-  client identity as optional per the locked schema and preserve empty-string
-  request IDs through response correlation.
+  schema. The legacy decoder now emits exactly one JSON-RPC parse error for
+  each syntactically malformed newline frame, distinguishes oversized and
+  well-formed invalid requests, and remains usable for subsequent requests.
+  Decoder errors and rmcp service responses share one bounded stdout writer;
+  input framing is cancellation-safe and capped at 2 MiB. Treat client identity
+  as optional per the locked schema and preserve empty-string request IDs
+  through response correlation.
 - Add ignored, cleanup-safe headless production-router coverage in
   `headless_default_discovery_routes_paginate_and_report_ambiguity`,
   `headless_view_body_and_resource_routes_are_complete_and_bound`, and
@@ -138,9 +142,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   bounded deadlines, authenticated loopback fixtures, exact normal/read-only
   catalogs, all-tool dispatch, resource reads, structured results,
   cancellation, unknown and invalid requests, clean EOF, and complete
-  stdout/stderr purity checks. Freeze modern MCP 2026-07-28 discovery and
-  malformed-JSON parse handling as ignored acceptance tests until their
-  tracked blockers are implemented, without claiming conformance prematurely.
+  stdout/stderr purity checks. Cover modern MCP 2026-07-28 discovery plus
+  malformed-first and post-initialize parse recovery, including repeated and
+  oversized frames followed by successful requests in both server modes.
 - Bound each captured protocol frame, diagnostic line, aggregate stream, and
   in-process frame queue; make process and fixture teardown close, kill, wait,
   and join every owned worker on success and failure. Assert exact response

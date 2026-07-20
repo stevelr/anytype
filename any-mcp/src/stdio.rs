@@ -5,15 +5,18 @@
 
 //! Dual-era stdio framing for stateless MCP 2026-07-28 and legacy clients.
 
-use std::{collections::HashMap, io::Cursor, sync::Arc};
+use std::{collections::HashMap, io, sync::Arc};
 
-use rmcp::model::{
-    CallToolRequestParams, ErrorData, PaginatedRequestParams, ReadResourceRequestParams,
+use rmcp::{
+    RoleServer,
+    model::{CallToolRequestParams, ErrorData, PaginatedRequestParams, ReadResourceRequestParams},
+    service::{RxJsonRpcMessage, TxJsonRpcMessage},
+    transport::Transport,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{Mutex, Semaphore, mpsc},
     task::JoinSet,
 };
@@ -62,13 +65,292 @@ pub(crate) async fn serve_dual_stdio(server: AnyMcpServer) -> Result<(), ServeEr
     };
 
     if is_legacy_initialize(&first) {
-        let mut prefix = first;
-        prefix.push(b'\n');
-        let prefixed = Cursor::new(prefix).chain(reader);
-        serve_transport(server, (prefixed, stdout)).await
+        serve_transport(server, LegacyStdioTransport::new(first, reader, stdout)).await
     } else {
         serve_modern(server, reader, stdout, FirstFrame::Bytes(first)).await
     }
+}
+
+/// Bounded legacy line transport that preserves rmcp dispatch and lifecycle.
+///
+/// The decoder and rmcp response path share one writer lock. This ensures a
+/// malformed frame's JSON-RPC error cannot interleave with a normal response,
+/// while keeping all service dispatch inside rmcp.
+struct LegacyStdioTransport<R, W> {
+    first: Option<Vec<u8>>,
+    reader: R,
+    line: Vec<u8>,
+    draining_oversize: bool,
+    pending_decoder_frame: Option<Vec<u8>>,
+    outbound: Option<mpsc::Sender<Vec<u8>>>,
+    writer_task: Option<tokio::task::JoinHandle<io::Result<()>>>,
+    writer: std::marker::PhantomData<fn() -> W>,
+}
+
+impl<R, W> LegacyStdioTransport<R, W>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    fn new(first: Vec<u8>, reader: R, writer: W) -> Self {
+        let (outbound, receiver) = mpsc::channel(MAX_IN_FLIGHT_REQUESTS);
+        Self {
+            first: Some(first),
+            reader,
+            line: Vec::new(),
+            draining_oversize: false,
+            pending_decoder_frame: None,
+            outbound: Some(outbound),
+            writer_task: Some(tokio::spawn(write_legacy_responses(writer, receiver))),
+            writer: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<R, W> LegacyStdioTransport<R, W>
+where
+    R: AsyncBufRead + Unpin,
+{
+    async fn queue_decoder_message(
+        &mut self,
+        item: TxJsonRpcMessage<RoleServer>,
+    ) -> io::Result<()> {
+        debug_assert!(self.pending_decoder_frame.is_none());
+        self.pending_decoder_frame = Some(encode_legacy_message(item)?);
+        self.flush_pending_decoder_frame().await
+    }
+
+    async fn flush_pending_decoder_frame(&mut self) -> io::Result<()> {
+        let outbound = self
+            .outbound
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport is closed"))?
+            .clone();
+        let permit = outbound.reserve_owned().await.map_err(|_| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "stdout writer is unavailable")
+        })?;
+        let encoded = self
+            .pending_decoder_frame
+            .take()
+            .expect("pending decoder frame survives cancellation");
+        permit.send(encoded);
+        Ok(())
+    }
+
+    /// Reads one bounded frame without losing partially read bytes when rmcp
+    /// cancels a pending receive future to send an outgoing response.
+    async fn receive_frame(&mut self) -> Result<Option<Vec<u8>>, FrameReadError> {
+        if let Some(first) = self.first.take() {
+            return Ok(Some(first));
+        }
+
+        loop {
+            let available = self
+                .reader
+                .fill_buf()
+                .await
+                .map_err(|_| FrameReadError::Io)?;
+            if available.is_empty() {
+                if self.draining_oversize {
+                    self.draining_oversize = false;
+                    return Err(FrameReadError::TooLarge);
+                }
+                self.line.clear();
+                return Ok(None);
+            }
+
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let take = newline.map_or(available.len(), |position| position + 1);
+            if self.draining_oversize {
+                self.reader.consume(take);
+                if newline.is_some() {
+                    self.draining_oversize = false;
+                    return Err(FrameReadError::TooLarge);
+                }
+                continue;
+            }
+
+            if self.line.len().saturating_add(take) > MAX_FRAME_BYTES {
+                self.line.clear();
+                self.reader.consume(take);
+                if newline.is_some() {
+                    return Err(FrameReadError::TooLarge);
+                }
+                self.draining_oversize = true;
+                continue;
+            }
+
+            self.line.extend_from_slice(&available[..take]);
+            self.reader.consume(take);
+            if newline.is_some() {
+                self.line.pop();
+                if self.line.last() == Some(&b'\r') {
+                    self.line.pop();
+                }
+                return Ok(Some(std::mem::take(&mut self.line)));
+            }
+        }
+    }
+}
+
+impl<R, W> Transport<RoleServer> for LegacyStdioTransport<R, W>
+where
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    type Error = io::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleServer>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let outbound = self.outbound.clone();
+        async move {
+            let encoded = encode_legacy_message(item)?;
+            outbound
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport is closed"))?
+                .send(encoded)
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "stdout writer is unavailable")
+                })
+        }
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
+        if self.pending_decoder_frame.is_some() {
+            self.flush_pending_decoder_frame().await.ok()?;
+        }
+        loop {
+            let frame = match self.receive_frame().await {
+                Ok(Some(frame)) => frame,
+                Ok(None) | Err(FrameReadError::Io) => return None,
+                Err(FrameReadError::TooLarge) => {
+                    let error = TxJsonRpcMessage::<RoleServer>::error(
+                        ErrorData::invalid_request("Invalid request", None),
+                        None,
+                    );
+                    self.queue_decoder_message(error).await.ok()?;
+                    continue;
+                }
+            };
+            if frame.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+
+            let frame = frame.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&frame);
+            let value = match serde_json::from_slice::<Value>(frame) {
+                Ok(value) => value,
+                Err(_) => {
+                    let error = TxJsonRpcMessage::<RoleServer>::error(
+                        ErrorData::parse_error("Parse error", None),
+                        None,
+                    );
+                    self.queue_decoder_message(error).await.ok()?;
+                    continue;
+                }
+            };
+            if should_ignore_legacy_notification(&value) {
+                continue;
+            }
+            match serde_json::from_value(value) {
+                Ok(message) => return Some(message),
+                Err(_) => {
+                    let error = TxJsonRpcMessage::<RoleServer>::error(
+                        ErrorData::invalid_request("Invalid request", None),
+                        None,
+                    );
+                    self.queue_decoder_message(error).await.ok()?;
+                }
+            }
+        }
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.outbound.take();
+        let writer_task = self.writer_task.take();
+        async move {
+            if let Some(writer_task) = writer_task {
+                writer_task
+                    .await
+                    .map_err(|_| io::Error::other("stdout writer task failed"))??;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn encode_legacy_message(item: TxJsonRpcMessage<RoleServer>) -> io::Result<Vec<u8>> {
+    let encoded = serde_json::to_vec(&item)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "JSON-RPC encoding failed"))?;
+    if encoded.len().saturating_add(1) > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON-RPC frame exceeds byte cap",
+        ));
+    }
+    Ok(encoded)
+}
+
+async fn write_legacy_responses<W>(
+    mut writer: W,
+    mut outbound: mpsc::Receiver<Vec<u8>>,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(encoded) = outbound.recv().await {
+        writer.write_all(&encoded).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+    }
+    writer.shutdown().await
+}
+
+fn should_ignore_legacy_notification(value: &Value) -> bool {
+    let Some(method) = value.get("method").and_then(Value::as_str) else {
+        return false;
+    };
+    if value.get("id").is_some() {
+        return false;
+    }
+    !is_standard_legacy_method(method)
+        || (method.starts_with("notifications/") && !is_standard_legacy_notification(method))
+}
+
+fn is_standard_legacy_method(method: &str) -> bool {
+    matches!(
+        method,
+        "initialize"
+            | "ping"
+            | "prompts/get"
+            | "prompts/list"
+            | "resources/list"
+            | "resources/read"
+            | "resources/subscribe"
+            | "resources/unsubscribe"
+            | "resources/templates/list"
+            | "tools/call"
+            | "tools/list"
+            | "completion/complete"
+            | "logging/setLevel"
+            | "roots/list"
+            | "sampling/createMessage"
+    ) || is_standard_legacy_notification(method)
+}
+
+fn is_standard_legacy_notification(method: &str) -> bool {
+    matches!(
+        method,
+        "notifications/cancelled"
+            | "notifications/initialized"
+            | "notifications/message"
+            | "notifications/progress"
+            | "notifications/prompts/list_changed"
+            | "notifications/resources/list_changed"
+            | "notifications/resources/updated"
+            | "notifications/roots/list_changed"
+            | "notifications/tools/list_changed"
+    )
 }
 
 enum FirstFrame {
