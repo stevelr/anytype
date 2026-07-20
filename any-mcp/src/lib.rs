@@ -6,13 +6,18 @@
 //! Shared foundations for the `any-mcp` binary.
 //!
 //! The crate exposes authenticated Anytype client startup, bounded upstream
-//! execution controls, and the stdio MCP service lifecycle. It depends on
-//! `anytype-api` through the `anytype` crate and never directly on generated
-//! `anytype-rpc` support.
+//! execution controls, strict MCP schemas, typed results and errors, and the
+//! stdio service lifecycle. It depends on `anytype-api` through the `anytype`
+//! crate and never directly on generated `anytype-rpc` support.
 
 pub mod config;
+pub mod domain;
+pub mod error;
 pub mod logging;
+pub mod protocol;
+pub mod result;
 pub mod runtime;
+pub mod schema;
 pub mod server;
 
 pub use config::RuntimeConfig;

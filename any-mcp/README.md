@@ -6,7 +6,12 @@ A bounded, workflow-oriented Model Context Protocol server for Anytype.
 reading, and safely editing documents. It is intentionally not a one-for-one
 mirror of the Anytype API.
 
-## Authenticated stdio runtime
+## Phase 1 foundations
+
+The crate now establishes both the authenticated stdio runtime and the shared
+bounded wire contracts used by later workflow handlers.
+
+### Authenticated stdio runtime
 
 The server keeps one authenticated `anytype-api` client alive for the process
 and serves MCP over stdin/stdout. At startup it loads credentials using the
@@ -44,14 +49,27 @@ peer-controlled MCP request ID. Error values, URLs, bodies, credentials, and
 raw MCP IDs are never formatted. Operators can explicitly override the
 `any_mcp::operation=info` level through `RUST_LOG`.
 
-The crate also establishes these protocol boundaries:
+### Protocol and wire-contract boundaries
 
 - [`rmcp`](https://docs.rs/rmcp/) 2.2.0 with the `server`, `macros`, `schemars`,
   and `transport-io` features;
 - upcoming MCP protocol revision `2026-07-28`, selected explicitly to align with
   the SDK's imminent release/API direction;
 - an `anytype-api`-only application dependency through the `anytype` crate;
-  `any-mcp` never depends directly on generated `anytype-rpc` support; and
+  `any-mcp` never depends directly on generated `anytype-rpc` support;
+- reusable strict JSON Schema 2020-12 input/output contracts with
+  `additionalProperties: false`, bounded domain strings, stable object
+  summaries, and canonical
+  `anytype://spaces/<space_id>/objects/<object_id>` resource URIs;
+- fail-closed rejection of free-form JSON/maps, unbounded arrays and strings,
+  impractically bounded numbers, undiscriminated unions, and unsupported
+  patterned-object or tuple-array schema applicators;
+- typed tool contracts that link each validated output schema to its success
+  encoder and select only the exact read, create, or destructive-update
+  annotation profile;
+- compact JSON text fallbacks matching each typed `structuredContent` result;
+  and stable, bounded, secret-safe execution error bodies that require
+  candidate enrichment before an ambiguity can be returned; and
 - diagnostics use a tracing subscriber whose writer is always stderr; verbose
   `anytype` and `rmcp` target prefixes that can expose protocol or upstream
   payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.
@@ -65,6 +83,11 @@ Workflow tools and resources are added in subsequent Phase 1 work.
 - `src/runtime.rs` — authenticated client, controls, and stdio lifecycle.
 - `src/main.rs` — non-interactive startup and binary exit behavior.
 - `src/lib.rs` — shared crate surface for the binary and tests.
+- `src/domain.rs` — bounded values, object summaries, and resource URIs.
+- `src/schema.rs` — strict input/output schema generation.
+- `src/protocol.rs` — tool contracts and annotation profiles.
+- `src/result.rs` — structured results with compact JSON text fallbacks.
+- `src/error.rs` — stable, redacted tool execution errors.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
 
