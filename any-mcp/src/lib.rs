@@ -22,6 +22,7 @@ pub mod object_output;
 pub mod object_read;
 pub mod pagination;
 pub mod protocol;
+pub mod resources;
 pub mod result;
 pub mod runtime;
 pub mod schema;

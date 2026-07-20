@@ -369,6 +369,38 @@ impl ObjectResourceUri {
         ))
     }
 
+    /// Parses an exact canonical Anytype object resource URI.
+    ///
+    /// The parser deliberately accepts no URI normalization. Percent escapes,
+    /// alternate authorities, query strings, fragments, user information,
+    /// extra path segments, and dot segments are rejected rather than decoded
+    /// into a potentially ambiguous object identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainValueError`] unless `value` is already in the exact
+    /// canonical shape and both identifiers satisfy the resource-path grammar.
+    pub fn parse(value: &str) -> Result<(Self, SpaceId, ObjectId), DomainValueError> {
+        if value.chars().count() > MAX_RESOURCE_URI_CHARS {
+            return Err(DomainValueError::TooLong {
+                max_chars: MAX_RESOURCE_URI_CHARS,
+            });
+        }
+        let suffix = value
+            .strip_prefix("anytype://spaces/")
+            .ok_or(DomainValueError::InvalidIdentifierCharacter)?;
+        let (space_id, object_id) = suffix
+            .split_once("/objects/")
+            .ok_or(DomainValueError::InvalidIdentifierCharacter)?;
+        let space_id = SpaceId::new(space_id)?;
+        let object_id = ObjectId::new(object_id)?;
+        let uri = Self::new(&space_id, &object_id);
+        if uri.as_str() != value {
+            return Err(DomainValueError::InvalidIdentifierCharacter);
+        }
+        Ok((uri, space_id, object_id))
+    }
+
     /// Borrows the canonical resource URI.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -388,15 +420,9 @@ impl<'de> Deserialize<'de> for ObjectResourceUri {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let suffix = value
-            .strip_prefix("anytype://spaces/")
-            .ok_or_else(|| de::Error::custom("invalid Anytype object resource URI"))?;
-        let (space_id, object_id) = suffix
-            .split_once("/objects/")
-            .ok_or_else(|| de::Error::custom("invalid Anytype object resource URI"))?;
-        let space_id = SpaceId::new(space_id).map_err(de::Error::custom)?;
-        let object_id = ObjectId::new(object_id).map_err(de::Error::custom)?;
-        Ok(Self::new(&space_id, &object_id))
+        Self::parse(&value)
+            .map(|(uri, _, _)| uri)
+            .map_err(|_| de::Error::custom("invalid Anytype object resource URI"))
     }
 }
 
