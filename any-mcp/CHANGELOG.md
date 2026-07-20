@@ -78,6 +78,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   conflict checks before writing, one no-verify update, bounded semantic
   read-after-write retries, and fixed indeterminate conflict handling for every
   post-dispatch ambiguity.
+- Add typed `object_create` with create annotations, closed and bounded
+  property/icon inputs, non-null omission semantics, bounded space/type/template
+  resolution, explicit read-after-write verification, summary-only output, and
+  a finite process-lifetime idempotency registry that deduplicates concurrent
+  calls and retains post-dispatch uncertainty to prevent duplicate creates.
 
 ### Changed
 

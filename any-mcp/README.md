@@ -225,6 +225,37 @@ response remains an ordinary classified error. Results contain only the
 bounded updated summary, canonical resource link, and body hash when a body or
 hash precondition was supplied; they never echo the document body.
 
+### Object create workflow
+
+The transport-neutral `object_create` handler creates exactly one object and
+then performs an explicit object GET before reporting success. Space and type
+references use the bounded `anytype-api` resolvers; an optional template is
+located by a capped 1,000-item paged scan and then fetched by id. Every
+resolver result and both create/read responses are revalidated. A success
+requires safe matching object, space, and type identities plus exact agreement
+for each caller-supplied name, Markdown body, icon, and typed property. The MCP
+result contains only a bounded object summary and canonical resource link—not
+the body or an implicit property projection.
+
+All optional fields reject explicit JSON `null`; omission means that the field
+is absent from the create payload. Explicitly supplied empty name/body values
+are sent, and empty property or relation lists mean no assignments or
+references. Properties use a closed tagged union for the current Anytype
+property formats. Property keys, tag/file/object references, icon fields,
+scalar lengths, numeric values, collection sizes, body length, and the complete
+request schema are bounded.
+
+An optional caller-generated `idempotency_key` deduplicates normalized creates
+for the process lifetime. Identical concurrent calls share one in-flight
+attempt without holding the registry mutex across network waits, and verified
+successes are returned from the finite cache without I/O. Key reuse with
+different parameters conflicts before a write. Safe pre-POST failures and
+definitive validation/authentication rejections are removed so they can be
+retried; after possible acceptance, a timeout, cancellation, transport/server
+error, malformed response, or failed verification is retained as an
+indeterminate terminal conflict so the same key can never create a duplicate.
+The registry has a fixed capacity and fails closed when full. Read-only access
+is rejected before even a cached success is inspected.
 ### View discovery workflows
 
 The transport-neutral `view_list` and `view_object_list` handlers provide one
@@ -328,6 +359,8 @@ the final catalog integration phase.
 - `src/object_archive.rs` — single-object soft archive contract and handler.
 - `src/object_update.rs` — conflict-aware whole-field update contract and
   read-after-write verifier.
+- `src/object_create.rs` — verified create contract, closed write inputs, and
+  bounded process-lifetime idempotency coordination.
 - `src/validation.rs` — reusable collection, filter, and body chunk bounds.
 - `src/pagination.rs` — bounded pagination inputs and result pages.
 - `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.
