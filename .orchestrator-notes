@@ -1,7 +1,5 @@
 # Orchestrator Notes
 
-- Current loop scope is limited to br issues labeled `mcp`.
-- `any-cut` remains tracker-ready but was session-deferred after workspace setup failed.
-- `/home/user/project/anytype/.work/it1` exists but is not registered as a jj workspace. Do not reuse, remove, or relocate it without operator approval or a recovery procedure that preserves unknown concurrent work.
-- Final wrap-up audit (2026-07-20): no implementation, integration, closure, security diff, gate-config edit, or pending human review occurred; no crate changelog entry applies because no product crate changed and the repository has no root `CHANGELOG.md`.
-- Final filtered ready state: `any-cut` is tracker-ready but session-deferred; orchestrator OFIs `any-5vg` and `any-g8g` are also ready. The full `mcp` queue has 43 open issues: 34 tasks, 6 reviews, 1 chore, and 2 OFIs.
+- Current loop scope is limited to priority 0-2 bug, chore, and task issues labeled `mcp`.
+- Setup ready set: `any-cut` and `any-g8g`; no matching issues are in progress.
+- `any-g8g` was promoted from P3 OFI to P2 task because tracker/session readiness reconciliation is straightforward and directly benefits this loop.

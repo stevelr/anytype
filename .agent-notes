@@ -1,5 +1,3 @@
 # Agent Notes
 
 No active entries.
-
-- Durable workflow learning (2026-07-20): workspace setup must preflight helper availability and candidate paths, use atomic or unique creation, and preserve any partially created directory until its ownership is known.
