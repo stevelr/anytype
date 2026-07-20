@@ -447,6 +447,18 @@ through Anytype's irreversible `SpaceDelete` RPC, then requires complete
 bounded REST evidence that each is gone. There is intentionally no general test
 registration or production space-delete API.
 
+Tests that need templates can use the hidden
+`TestContext::create_template_fixtures` helper with one to sixteen source
+names. It creates a private custom type and source object for each requested
+template, invokes the authenticated heart template-from-object RPC exactly once
+per source, and verifies the returned IDs through a finite complete type-scoped
+list plus exact GETs. Complete bounded type and type-scoped object snapshots
+prove create responses did not reuse pre-existing IDs. The helper registers every created ID before classifying
+the RPC response or reading it back. Teardown issues each template, source, and
+type archive request once in reverse dependency order, then proves the
+templates absent and the sources and type archived. Production consumers do
+not gain a template mutation API.
+
 ## License
 
 Apache License, Version 2.0

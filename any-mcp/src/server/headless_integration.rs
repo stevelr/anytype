@@ -109,19 +109,6 @@ async fn assert_cursor_continuation(
     (first, second)
 }
 
-async fn assert_terminal_page(
-    server: &AnyMcpServer,
-    name: &'static str,
-    mut base: JsonObject,
-    limit: u16,
-) -> Value {
-    base.insert("limit".to_owned(), json!(limit));
-    let page = success(server, name, Value::Object(base)).await;
-    assert!(page["items"].is_array());
-    assert!(page.get("next_cursor").is_none(), "{name} must be terminal");
-    page
-}
-
 async fn assert_fixture_space_continuation(
     ctx: &TestContext,
     server: &AnyMcpServer,
@@ -224,6 +211,84 @@ async fn assert_fixture_space_continuation(
             "cursor walk must observe each registered fixture id"
         );
     }
+}
+
+async fn assert_fixture_template_continuation(
+    server: &AnyMcpServer,
+    space_id: &str,
+    type_id: &str,
+    fixture_ids: &HashSet<&str>,
+) {
+    const PAGE_HARD_BOUND: usize = 32;
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut seen_ids = HashSet::new();
+    let mut terminal = false;
+
+    for page_index in 0..PAGE_HARD_BOUND {
+        let mut request = arguments(json!({
+            "space": space_id,
+            "type": type_id,
+            "limit": 1
+        }));
+        if let Some(cursor) = cursor.as_ref() {
+            request.insert("cursor".to_owned(), json!(cursor));
+        }
+        let page = success(server, TEMPLATE_LIST, Value::Object(request.clone())).await;
+        let items = page["items"]
+            .as_array()
+            .expect("template_list items must be an array");
+        assert_eq!(items.len(), 1, "each fixture page has exactly one item");
+        let id = item_id(&items[0])
+            .and_then(Value::as_str)
+            .expect("template summary has an exact id");
+        assert!(
+            seen_ids.insert(id.to_owned()),
+            "template page repeated an id"
+        );
+
+        let Some(next_cursor) = page.get("next_cursor") else {
+            terminal = true;
+            break;
+        };
+        let next_cursor = next_cursor
+            .as_str()
+            .filter(|cursor| !cursor.is_empty())
+            .expect("template continuation cursor is nonempty")
+            .to_owned();
+        assert!(
+            seen_cursors.insert(next_cursor.clone()),
+            "template continuation cursor loop"
+        );
+
+        if page_index == 0 {
+            let mut changed_limit = request.clone();
+            changed_limit.insert("limit".to_owned(), json!(2));
+            changed_limit.insert("cursor".to_owned(), json!(next_cursor.clone()));
+            let mismatch = failure(server, TEMPLATE_LIST, Value::Object(changed_limit)).await;
+            assert_eq!(mismatch["code"], "validation", "template limit binding");
+
+            let mut changed_type = request;
+            changed_type.insert("type".to_owned(), json!("page"));
+            changed_type.insert("cursor".to_owned(), json!(next_cursor.clone()));
+            let mismatch = failure(server, TEMPLATE_LIST, Value::Object(changed_type)).await;
+            assert_eq!(mismatch["code"], "validation", "template query binding");
+        }
+        cursor = Some(next_cursor);
+    }
+
+    assert!(
+        terminal,
+        "template pagination must reach a bounded terminal page"
+    );
+    assert_eq!(
+        seen_ids,
+        fixture_ids
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect::<HashSet<_>>(),
+        "template wire pages contain exactly the cleanup-owned fixtures"
+    );
 }
 
 async fn create_object(ctx: &TestContext, type_key: &str, name: &str, body: &str) -> Object {
@@ -352,6 +417,17 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
                 .expect("create second pagination type");
             ctx.register_type(&second_type.id);
 
+            let template_fixtures = ctx
+                .create_template_fixtures(
+                    format!("MCP template type {}", unique_suffix()),
+                    [
+                        format!("MCP template first {}", unique_suffix()),
+                        format!("MCP template second {}", unique_suffix()),
+                    ],
+                )
+                .await
+                .expect("create cleanup-owned template fixtures");
+
             let property = ctx
                 .client
                 .new_property(
@@ -419,17 +495,17 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
             )
             .await;
 
-            let templates = assert_terminal_page(
+            assert_fixture_template_continuation(
                 &server,
-                TEMPLATE_LIST,
-                arguments(json!({
-                    "space": ctx.space_id.as_str(),
-                    "type": first_type.id.as_str()
-                })),
-                1,
+                ctx.space_id.as_str(),
+                template_fixtures.type_.id.as_str(),
+                &template_fixtures
+                    .templates
+                    .iter()
+                    .map(|template| template.id.as_str())
+                    .collect(),
             )
             .await;
-            assert!(templates["items"].as_array().unwrap().is_empty());
             let (search_first, search_second) = assert_cursor_continuation(
                 &server,
                 OBJECT_SEARCH,

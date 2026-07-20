@@ -15,13 +15,17 @@ use std::{
 };
 
 use anytype_rpc::{
-    anytype::rpc::{object::create_object_type, space::delete as space_delete},
+    anytype::rpc::{
+        object::create_object_type, space::delete as space_delete,
+        template::create_from_object as template_create_from_object,
+    },
     model::object_type::Layout,
 };
 use chrono::Utc;
 use futures::FutureExt;
 use parking_lot::Mutex;
 use prost_types::{Struct, Value, value::Kind};
+use serde::Deserialize;
 use snafu::prelude::*;
 use tonic::Request;
 
@@ -30,16 +34,19 @@ use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
 use crate::{
     filters::Filter,
     grpc_util::with_token_request,
-    objects::{DataModel, ObjectLayout},
+    objects::{DataModel, Object, ObjectLayout},
     spaces::Space,
-    types::Type,
+    types::{Type, TypeLayout},
     verify::verify_semantic,
 };
 
 const SPACE_FIXTURE_SCAN_LIMIT: u32 = 1_000;
 const SPACE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 const SPACE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
-
+const TEMPLATE_FIXTURE_LIMIT: u32 = 1_000;
+const TEMPLATE_FIXTURE_MAX_SOURCES: usize = 16;
+const TEMPLATE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+const TEMPLATE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
 // =============================================================================
 // TestError
 // =============================================================================
@@ -81,6 +88,18 @@ pub struct TestContext {
     start_time: Instant,
     api_call_count: AtomicUsize,
     cleanup: TestCleanup,
+}
+
+/// Cleanup-owned custom type, source objects, and templates created for tests.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct TemplateFixtureSet {
+    /// Custom type targeted by every template in this fixture set.
+    pub type_: Type,
+    /// Exact source objects converted into templates.
+    pub sources: Vec<Object>,
+    /// Exact templates returned by heart's template-from-object RPC.
+    pub templates: Vec<Object>,
 }
 
 impl TestContext {
@@ -234,6 +253,191 @@ impl TestContext {
         Ok(created)
     }
 
+    /// Creates a custom type and cleanup-owned templates from new source objects.
+    ///
+    /// The custom type and every source object use the authenticated REST API
+    /// without built-in verification. Complete bounded pre-create snapshots
+    /// prove each returned ID was not pre-existing before it is registered for
+    /// cleanup and before any fallible follow-up. Each source is converted with exactly one
+    /// authenticated `TemplateCreateFromObject` RPC. The returned template ID
+    /// must be new, distinct from the space/type/source IDs, and is
+    /// deduplicated into the private cleanup registry before the RPC response
+    /// code or any REST evidence is inspected.
+    ///
+    /// Creation succeeds only after a finite, complete type-scoped list and an
+    /// exact template GET agree on every returned ID.
+    pub async fn create_template_fixtures<I, S>(
+        &self,
+        type_name: impl Into<String>,
+        source_names: I,
+    ) -> TestResult<TemplateFixtureSet>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let type_name = type_name.into();
+        let source_names = source_names
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<String>>();
+        if source_names.is_empty() || source_names.len() > TEMPLATE_FIXTURE_MAX_SOURCES {
+            return Err(template_fixture_error());
+        }
+        let limits = &self.client.get_config().limits;
+        limits.validate_id(&self.space_id, "space_id")?;
+        limits.validate_name(&type_name, "template fixture type")?;
+        for source_name in &source_names {
+            limits.validate_name(source_name, "template fixture source")?;
+        }
+
+        let preexisting_type_ids = complete_type_ids(&self.client, &self.space_id).await?;
+        let type_key = format!("template_fixture_{}", unique_suffix());
+        let created_type = self
+            .client
+            .new_type(&self.space_id, &type_name)
+            .key(&type_key)
+            .plural_name(format!("{type_name}s"))
+            .layout(TypeLayout::Basic)
+            .no_verify()
+            .create()
+            .await?;
+        limits.validate_id(&created_type.id, "template fixture type")?;
+        if created_type.id == self.space_id || preexisting_type_ids.contains(&created_type.id) {
+            return Err(template_fixture_error());
+        }
+        self.cleanup
+            .add_template_resource(TemplateFixtureResource::Type {
+                space_id: self.space_id.clone(),
+                type_id: created_type.id.clone(),
+            })?;
+
+        let verify_config = template_fixture_verify_config();
+        let expected_type_id = created_type.id.clone();
+        let expected_type_key = type_key.clone();
+        let verified_type = verify_semantic(
+            &verify_config,
+            "template fixture type",
+            &expected_type_id,
+            || {
+                self.client
+                    .get_type(&self.space_id, &expected_type_id)
+                    .get_direct()
+            },
+            |typ| {
+                typ.id == expected_type_id
+                    && typ.key == expected_type_key
+                    && !typ.archived
+                    && typ.layout == ObjectLayout::Basic
+            },
+        )
+        .await?;
+
+        let mut known_template_ids =
+            complete_template_ids(&self.client, &self.space_id, &verified_type.id).await?;
+        let mut sources = Vec::with_capacity(source_names.len());
+        let mut templates = Vec::with_capacity(source_names.len());
+
+        for source_name in source_names {
+            let preexisting_object_ids =
+                complete_type_object_ids(&self.client, &self.space_id, &verified_type.key).await?;
+            let source = self
+                .client
+                .new_object(&self.space_id, &verified_type.key)
+                .name(source_name)
+                .no_verify()
+                .create()
+                .await?;
+            limits.validate_id(&source.id, "template fixture source")?;
+            if source.id == self.space_id
+                || source.id == verified_type.id
+                || known_template_ids.contains(&source.id)
+                || preexisting_object_ids.contains(&source.id)
+            {
+                return Err(template_fixture_error());
+            }
+            self.cleanup
+                .add_template_resource(TemplateFixtureResource::Source {
+                    space_id: self.space_id.clone(),
+                    source_id: source.id.clone(),
+                })?;
+
+            let expected_source_id = source.id.clone();
+            let expected_source_type = verified_type.id.clone();
+            let source = verify_semantic(
+                &verify_config,
+                "template fixture source",
+                &expected_source_id,
+                || {
+                    self.client
+                        .object(&self.space_id, &expected_source_id)
+                        .get()
+                },
+                |object| {
+                    object.id == expected_source_id
+                        && object.space_id == self.space_id
+                        && !object.archived
+                        && object
+                            .r#type
+                            .as_ref()
+                            .is_some_and(|typ| typ.id == expected_source_type)
+                },
+            )
+            .await?;
+
+            let grpc = self.client.grpc_client().await?;
+            let mut commands = grpc.client_commands();
+            let request = with_token_request(
+                Request::new(template_create_from_object::Request {
+                    context_id: source.id.clone(),
+                }),
+                grpc.token(),
+            )?;
+            let response = commands
+                .template_create_from_object(request)
+                .await
+                .map_err(template_fixture_transport_error)?
+                .into_inner();
+
+            limits.validate_id(&response.id, "template fixture")?;
+            if !template_fixture_id_is_owned_candidate(
+                &response.id,
+                &self.space_id,
+                &verified_type.id,
+                &source.id,
+                &known_template_ids,
+            ) {
+                return Err(template_fixture_error());
+            }
+            self.cleanup
+                .add_template_resource(TemplateFixtureResource::Template {
+                    space_id: self.space_id.clone(),
+                    type_id: verified_type.id.clone(),
+                    template_id: response.id.clone(),
+                })?;
+            if !template_fixture_response_succeeded(response.error.as_ref()) {
+                return Err(template_fixture_response_error(response.error.as_ref()));
+            }
+
+            let template = verify_template_fixture(
+                &self.client,
+                &verify_config,
+                &self.space_id,
+                &verified_type.id,
+                &response.id,
+            )
+            .await?;
+            known_template_ids.insert(response.id);
+            sources.push(source);
+            templates.push(template);
+        }
+
+        Ok(TemplateFixtureSet {
+            type_: verified_type,
+            sources,
+            templates,
+        })
+    }
+
     pub fn temp_dir(&self, prefix: &str) -> TestResult<PathBuf> {
         let dir = std::env::temp_dir().join(format!("anytype_test_{prefix}_{}", unique_suffix()));
         std::fs::create_dir_all(&dir).map_err(|err| TestError::Config {
@@ -278,6 +482,193 @@ fn collection_fixture_transport_error(_: tonic::Status) -> AnytypeError {
     AnytypeError::Other {
         message: "collection type fixture gRPC request failed".to_owned(),
     }
+}
+
+fn template_fixture_transport_error(_: tonic::Status) -> TestError {
+    template_fixture_error()
+}
+
+fn template_fixture_response_succeeded(
+    error: Option<&template_create_from_object::response::Error>,
+) -> bool {
+    error.is_some_and(|error| {
+        error.code == template_create_from_object::response::error::Code::Null as i32
+    })
+}
+
+fn template_fixture_response_error(
+    _: Option<&template_create_from_object::response::Error>,
+) -> TestError {
+    template_fixture_error()
+}
+
+fn template_fixture_id_is_owned_candidate(
+    template_id: &str,
+    space_id: &str,
+    type_id: &str,
+    source_id: &str,
+    known_template_ids: &BTreeSet<String>,
+) -> bool {
+    template_id != space_id
+        && template_id != type_id
+        && template_id != source_id
+        && !known_template_ids.contains(template_id)
+}
+
+fn template_fixture_error() -> TestError {
+    TestError::Assertion {
+        message: "cleanup-owned template fixture operation failed".to_owned(),
+    }
+}
+
+fn template_fixture_api_error() -> AnytypeError {
+    AnytypeError::Other {
+        message: "template fixture evidence was incomplete".to_owned(),
+    }
+}
+
+fn template_fixture_verify_config() -> VerifyConfig {
+    VerifyConfig {
+        timeout: TEMPLATE_FIXTURE_VERIFY_TIMEOUT,
+        max_attempts: TEMPLATE_FIXTURE_VERIFY_ATTEMPTS,
+        ..VerifyConfig::default()
+    }
+}
+
+async fn complete_template_ids(
+    client: &AnytypeClient,
+    space_id: &str,
+    type_id: &str,
+) -> Result<BTreeSet<String>, AnytypeError> {
+    let response = client
+        .templates(space_id, type_id)
+        .limit(TEMPLATE_FIXTURE_LIMIT)
+        .offset(0)
+        .list()
+        .await?
+        .into_response();
+    if response.pagination.offset != 0
+        || response.pagination.limit != TEMPLATE_FIXTURE_LIMIT
+        || response.pagination.has_more
+        || response.pagination.total != response.items.len()
+    {
+        return Err(template_fixture_api_error());
+    }
+    let mut ids = BTreeSet::new();
+    for template in response.items {
+        client
+            .get_config()
+            .limits
+            .validate_id(&template.id, "template fixture evidence")?;
+        if template.space_id != space_id || !ids.insert(template.id) {
+            return Err(template_fixture_api_error());
+        }
+    }
+    Ok(ids)
+}
+
+async fn complete_type_ids(
+    client: &AnytypeClient,
+    space_id: &str,
+) -> Result<BTreeSet<String>, AnytypeError> {
+    let response = client
+        .types(space_id)
+        .limit(TEMPLATE_FIXTURE_LIMIT)
+        .offset(0)
+        .list()
+        .await?
+        .into_response();
+    if response.pagination.offset != 0
+        || response.pagination.limit != TEMPLATE_FIXTURE_LIMIT
+        || response.pagination.has_more
+        || response.pagination.total != response.items.len()
+    {
+        return Err(template_fixture_api_error());
+    }
+    response
+        .items
+        .into_iter()
+        .try_fold(BTreeSet::new(), |mut ids, typ| {
+            client
+                .get_config()
+                .limits
+                .validate_id(&typ.id, "template fixture type evidence")?;
+            if !ids.insert(typ.id) {
+                return Err(template_fixture_api_error());
+            }
+            Ok(ids)
+        })
+}
+
+async fn complete_type_object_ids(
+    client: &AnytypeClient,
+    space_id: &str,
+    type_key: &str,
+) -> Result<BTreeSet<String>, AnytypeError> {
+    let response = client
+        .objects(space_id)
+        .filter(Filter::type_in([type_key]))
+        .limit(TEMPLATE_FIXTURE_LIMIT)
+        .offset(0)
+        .list()
+        .await?
+        .into_response();
+    if response.pagination.offset != 0
+        || response.pagination.limit != TEMPLATE_FIXTURE_LIMIT
+        || response.pagination.has_more
+        || response.pagination.total != response.items.len()
+    {
+        return Err(template_fixture_api_error());
+    }
+    response
+        .items
+        .into_iter()
+        .try_fold(BTreeSet::new(), |mut ids, object| {
+            client
+                .get_config()
+                .limits
+                .validate_id(&object.id, "template fixture object evidence")?;
+            if object.space_id != space_id || !ids.insert(object.id) {
+                return Err(template_fixture_api_error());
+            }
+            Ok(ids)
+        })
+}
+
+struct TemplateFixtureEvidence {
+    ids: BTreeSet<String>,
+    template: Object,
+}
+
+async fn verify_template_fixture(
+    client: &AnytypeClient,
+    config: &VerifyConfig,
+    space_id: &str,
+    type_id: &str,
+    template_id: &str,
+) -> Result<Object, AnytypeError> {
+    let expected_id = template_id.to_owned();
+    let evidence = verify_semantic(
+        config,
+        "template fixture",
+        template_id,
+        || async {
+            let ids = complete_template_ids(client, space_id, type_id).await?;
+            let template = client
+                .template(space_id, type_id, template_id)
+                .get()
+                .await?;
+            Ok(TemplateFixtureEvidence { ids, template })
+        },
+        |evidence| {
+            evidence.ids.contains(&expected_id)
+                && evidence.template.id == expected_id
+                && evidence.template.space_id == space_id
+                && !evidence.template.archived
+        },
+    )
+    .await?;
+    Ok(evidence.template)
 }
 
 #[doc(hidden)]
@@ -471,13 +862,42 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
 pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
     space_fixtures: Mutex<BTreeSet<String>>,
+    template_resources: Mutex<Vec<TemplateFixtureResource>>,
     temp_paths: Mutex<Vec<PathBuf>>,
+}
+
+#[derive(Clone, Debug)]
+enum TemplateFixtureResource {
+    Type {
+        space_id: String,
+        type_id: String,
+    },
+    Source {
+        space_id: String,
+        source_id: String,
+    },
+    Template {
+        space_id: String,
+        type_id: String,
+        template_id: String,
+    },
+}
+
+impl TemplateFixtureResource {
+    fn id(&self) -> &str {
+        match self {
+            Self::Type { type_id, .. } => type_id,
+            Self::Source { source_id, .. } => source_id,
+            Self::Template { template_id, .. } => template_id,
+        }
+    }
 }
 
 impl TestCleanup {
     pub fn is_empty(&self) -> bool {
         self.objects.lock().is_empty()
             && self.space_fixtures.lock().is_empty()
+            && self.template_resources.lock().is_empty()
             && self.temp_paths.lock().is_empty()
     }
 
@@ -507,6 +927,18 @@ impl TestCleanup {
         self.space_fixtures.lock().insert(id.into())
     }
 
+    fn add_template_resource(&self, resource: TemplateFixtureResource) -> TestResult<()> {
+        let mut resources = self.template_resources.lock();
+        if resources
+            .iter()
+            .any(|registered| registered.id() == resource.id())
+        {
+            return Err(template_fixture_error());
+        }
+        resources.push(resource);
+        Ok(())
+    }
+
     /// Deletes this file or folder after the test
     pub fn add_temp_path(&self, path: PathBuf) {
         self.temp_paths.lock().push(path);
@@ -514,9 +946,22 @@ impl TestCleanup {
 
     /// Cleans up all remembered items.
     /// Child resources are deleted in reverse creation order and grouped as
-    /// objects, properties, then types. The deduplicated disposable-space set
-    /// is processed only after all child resources.
+    /// template-owned resources, objects, properties, then types. The
+    /// deduplicated disposable-space set is processed only after all child
+    /// resources.
     pub async fn cleanup(&self, client: &AnytypeClient) -> TestResult<()> {
+        let mut template_resources = {
+            let mut guard = self.template_resources.lock();
+            std::mem::take(&mut *guard)
+        };
+        template_resources.reverse();
+        let mut template_cleanup_failed = false;
+        for resource in template_resources {
+            if cleanup_template_resource(client, &resource).await.is_err() {
+                template_cleanup_failed = true;
+            }
+        }
+
         let mut objects = {
             let mut guard = self.objects.lock();
             std::mem::take(&mut *guard)
@@ -580,11 +1025,105 @@ impl TestCleanup {
                 let _ = std::fs::remove_file(&path);
             }
         }
-
+        if template_cleanup_failed {
+            return Err(template_fixture_error());
+        }
         if space_cleanup_failed {
             return Err(space_cleanup_error());
         }
         Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct TypeFixtureDeleteResponse {
+    #[serde(rename = "type")]
+    type_: Type,
+}
+
+async fn cleanup_template_resource(
+    client: &AnytypeClient,
+    resource: &TemplateFixtureResource,
+) -> TestResult<()> {
+    let config = template_fixture_verify_config();
+    match resource {
+        TemplateFixtureResource::Template {
+            space_id,
+            type_id,
+            template_id,
+        } => {
+            let deleted = client
+                .object(space_id, template_id)
+                .delete_once()
+                .await
+                .map_err(|_| template_fixture_error())?;
+            if deleted.id != *template_id || deleted.space_id != *space_id {
+                return Err(template_fixture_error());
+            }
+            verify_semantic(
+                &config,
+                "deleted template fixture",
+                template_id,
+                || complete_template_ids(client, space_id, type_id),
+                |ids| !ids.contains(template_id),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| template_fixture_error())
+        }
+        TemplateFixtureResource::Source {
+            space_id,
+            source_id,
+        } => {
+            let deleted = client
+                .object(space_id, source_id)
+                .delete_once()
+                .await
+                .map_err(|_| template_fixture_error())?;
+            if deleted.id != *source_id || deleted.space_id != *space_id {
+                return Err(template_fixture_error());
+            }
+            verify_semantic(
+                &config,
+                "deleted template source fixture",
+                source_id,
+                || client.object(space_id, source_id).get(),
+                |object| object.id == *source_id && object.space_id == *space_id && object.archived,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| template_fixture_error())
+        }
+        TemplateFixtureResource::Type { space_id, type_id } => {
+            client
+                .get_config()
+                .limits
+                .validate_id(space_id, "template fixture space")
+                .map_err(|_| template_fixture_error())?;
+            client
+                .get_config()
+                .limits
+                .validate_id(type_id, "template fixture type")
+                .map_err(|_| template_fixture_error())?;
+            let response: TypeFixtureDeleteResponse = client
+                .client
+                .delete_request_once(&format!("/v1/spaces/{space_id}/types/{type_id}"))
+                .await
+                .map_err(|_| template_fixture_error())?;
+            if response.type_.id != *type_id {
+                return Err(template_fixture_error());
+            }
+            verify_semantic(
+                &config,
+                "deleted template type fixture",
+                type_id,
+                || client.get_type(space_id, type_id).get_direct(),
+                |typ| typ.id == *type_id && typ.archived,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| template_fixture_error())
+        }
     }
 }
 
@@ -836,7 +1375,7 @@ mod space_tests {
 }
 
 #[cfg(test)]
-mod collection_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -864,5 +1403,96 @@ mod collection_tests {
         let rendered = error.to_string();
         assert_eq!(rendered, "collection type fixture gRPC request failed");
         assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
+    fn template_fixture_requires_explicit_null_and_redacts_response_description() {
+        const SECRET: &str = "template-response-secret-sentinel";
+        let success = template_create_from_object::response::Error {
+            code: template_create_from_object::response::error::Code::Null as i32,
+            description: String::new(),
+        };
+        assert!(template_fixture_response_succeeded(Some(&success)));
+        assert!(!template_fixture_response_succeeded(None));
+
+        let rejected = template_create_from_object::response::Error {
+            code: template_create_from_object::response::error::Code::UnknownError as i32,
+            description: SECRET.to_owned(),
+        };
+        assert!(!template_fixture_response_succeeded(Some(&rejected)));
+        let rendered = template_fixture_response_error(Some(&rejected)).to_string();
+        assert_eq!(
+            rendered,
+            "Test assertion failed: cleanup-owned template fixture operation failed"
+        );
+        assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
+    fn template_fixture_transport_error_redacts_tonic_status() {
+        const SECRET: &str = "template-transport-secret-sentinel";
+        let rendered =
+            template_fixture_transport_error(tonic::Status::internal(SECRET)).to_string();
+        assert_eq!(
+            rendered,
+            "Test assertion failed: cleanup-owned template fixture operation failed"
+        );
+        assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
+    fn template_fixture_registry_deduplicates_every_owned_id() {
+        let cleanup = TestCleanup::default();
+        cleanup
+            .add_template_resource(TemplateFixtureResource::Type {
+                space_id: "space".to_owned(),
+                type_id: "owned-id".to_owned(),
+            })
+            .unwrap();
+        assert!(
+            cleanup
+                .add_template_resource(TemplateFixtureResource::Source {
+                    space_id: "space".to_owned(),
+                    source_id: "owned-id".to_owned(),
+                })
+                .is_err()
+        );
+        assert_eq!(cleanup.template_resources.lock().len(), 1);
+    }
+
+    #[test]
+    fn template_fixture_rejects_current_source_type_and_preexisting_ids() {
+        let known = BTreeSet::from(["preexisting".to_owned()]);
+        assert!(!template_fixture_id_is_owned_candidate(
+            "space", "space", "type", "source", &known,
+        ));
+        assert!(!template_fixture_id_is_owned_candidate(
+            "type", "space", "type", "source", &known,
+        ));
+        assert!(!template_fixture_id_is_owned_candidate(
+            "source", "space", "type", "source", &known,
+        ));
+        assert!(!template_fixture_id_is_owned_candidate(
+            "preexisting",
+            "space",
+            "type",
+            "source",
+            &known,
+        ));
+        assert!(template_fixture_id_is_owned_candidate(
+            "new-template",
+            "space",
+            "type",
+            "source",
+            &known,
+        ));
+    }
+
+    #[test]
+    fn template_fixture_verification_bounds_are_fixed_and_finite() {
+        let config = template_fixture_verify_config();
+        assert_eq!(config.timeout, TEMPLATE_FIXTURE_VERIFY_TIMEOUT);
+        assert_eq!(config.max_attempts, TEMPLATE_FIXTURE_VERIFY_ATTEMPTS);
+        assert!(config.effective_max_attempts() > 0);
     }
 }

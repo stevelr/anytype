@@ -526,7 +526,8 @@ The exact passing representatives are
 `headless_archive_applies_and_returns_verified_success`. These five exercise
 the production router, complete document resource,
 fixture-backed type/property/tag/object/view-object continuations, cursor/query
-binding, body continuation, explicit view selection, ambiguity evidence,
+binding, a two-template `limit=1` continuation with exact fixture identities
+and terminal proof, body continuation, explicit view selection, ambiguity evidence,
 idempotent create, read-after-write visibility, and stale/count-conflict edits
 that prove the body was not changed. The create-body representative proves the
 exact canonical stored body, one three-request create/verify exchange, zero
@@ -541,13 +542,15 @@ REST visibility proves that `limit=1` must continue before the production MCP
 router walks the hard-bounded cursor chain to terminality, rejects a cursor
 rebound to a different limit, detects repeated items/cursors, and observes both
 exact fixture IDs; teardown irreversibly deletes only those self-created IDs
-and requires bounded absence evidence. `template_list` covers
-its cleanup-safe terminal route. Collection coverage creates and immediately
-registers a custom collection-layout type through the narrow test helper owned
-by `anytype-api`; the helper contains the required heart RPC, so `any-mcp`
-retains its `anytype-api`-only dependency boundary. Separate tracker
-dependencies cover the remaining fixture gaps and multi-view `view_list`
-continuation.
+and requires bounded absence evidence. `template_list` uses a private custom
+type and two cleanup-owned templates from the narrow test helper owned by
+`anytype-api`; it walks `limit=1` cursors until both exact fixture IDs are seen
+and the terminal page is proven, rejecting query changes, cursor or item loops,
+and traversal beyond a fixed bound. The helper contains the required heart RPC,
+so `any-mcp` retains its `anytype-api`-only dependency boundary. Collection
+coverage similarly creates and immediately registers a custom
+collection-layout type through `anytype-api`. Separate tracker dependencies
+cover the remaining fixture gaps and multi-view `view_list` continuation.
 
 ## Build
 
