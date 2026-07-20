@@ -169,10 +169,20 @@ resolver errors, response ceilings, and secret-safe upstream failures.
 The transport-neutral `object_archive` handler soft-archives exactly one
 object through the ordinary Anytype object DELETE endpoint. It never invokes
 archived-object purge, bulk deletion, delete-all, or space mutation APIs. The
-handler resolves and validates the space before constructing the request,
-uses the shared runtime controls and document-response ceiling, and accepts a
-success only when Anytype returns the same safe object and space identifiers
-with `archived=true`.
+handler resolves the space, reads the active object, and validates its exact
+safe object, space, and type identities before mutation. It marks dispatch
+immediately before one non-replayed DELETE under the shared runtime controls
+and document-response ceiling.
+
+An immediate response succeeds only when it contains the same safe object and
+space identifiers with `archived=true`. A false, malformed, mismatched,
+oversized, transport, timeout-status, redirect, or other uncertain response
+starts finite read-after-write confirmation instead of another DELETE. Within
+hard attempt, time, page, and item caps, confirmation must prove the exact id
+absent from the active object surface and present in the original-type-scoped
+archived surface. Unproven, incomplete, or unsafe evidence returns fixed
+mutation-indeterminate guidance. Definitive authentication, validation,
+not-found, conflict, and rate-limit rejections retain their ordinary errors.
 
 Its typed result contains the archived object id, the confirmed boolean state,
 and the canonical Anytype resource URI. The tool contract is destructive,
@@ -491,21 +501,21 @@ cargo test -p any-mcp headless_ -- --ignored --test-threads=1
 The exact passing representatives are
 `headless_default_discovery_routes_paginate_and_report_ambiguity`,
 `headless_view_body_and_resource_routes_are_complete_and_bound`, and
-`headless_mutations_are_visible_idempotent_and_conflict_safe`, plus
-`headless_create_body_canonicalization_is_verified_once`. The remaining blocked
-behavior diagnostic is `headless_diagnostic_archive_applies_before_fixed_error`.
-The representatives exercise the production router, complete document resource,
+`headless_mutations_are_visible_idempotent_and_conflict_safe`,
+`headless_create_body_canonicalization_is_verified_once`, and
+`headless_archive_applies_and_returns_verified_success`. These five exercise
+the production router, complete document resource,
 fixture-backed type/property/tag/object/view-object continuations, cursor/query
 binding, body continuation, explicit view selection, ambiguity evidence,
 idempotent create, read-after-write visibility, and stale/count-conflict edits
 that prove the body was not changed. The create-body representative proves the
 exact canonical stored body, one three-request create/verify exchange, zero
 retries, and a raw/canonical keyed replay with no additional I/O before cleanup.
+The archive case independently proves the exact id absent from active results
+and present in the bounded type-scoped archive before teardown, and asserts
+that middleware issued no retry.
 
-The archive diagnostic is expected to pass while its product bug remains: it
-proves the exact mutation was applied and cleaned up before asserting the fixed
-error code. A passing diagnostic is evidence of a reproduced blocker, not
-acceptance of the corresponding handler. Space and template list handlers
+Space and template list handlers
 cannot both receive fixture-backed continuation coverage because the public API
 has no cleanup-safe space deletion or template creation path. `space_list`
 therefore requests one bounded ambient page, requires the current test space,

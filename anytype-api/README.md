@@ -196,6 +196,11 @@ async fn main() -> Result<(), AnytypeError> {
 
 See the [Examples](./examples/README.md) folder for more code samples.
 
+For soft-delete workflows that reconcile uncertain responses themselves,
+`client.object(space_id, object_id).delete_once()` sends exactly one HTTP
+request attempt. Ordinary `delete()` retains the client's replay-safe DELETE
+retry policy.
+
 ## Archived Object Cleanup
 
 ```rust,no_run

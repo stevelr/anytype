@@ -6,8 +6,9 @@
 //! Single-object soft-archive workflow.
 //!
 //! This module deliberately exposes only Anytype's ordinary object DELETE,
-//! which archives one object. It does not call the archived-object listing,
-//! permanent batch deletion, delete-all, or space mutation APIs.
+//! which archives one object. It uses bounded active and archived reads only
+//! to confirm an uncertain DELETE outcome; it never calls permanent batch
+//! deletion, delete-all, or space mutation APIs.
 
 use std::{borrow::Cow, fmt, future::Future, time::Duration};
 
@@ -277,7 +278,7 @@ pub async fn object_archive(
             Ok(_) | Err(_) => {}
         }
 
-        verify_archive_state(&client, &verification, &identity)
+        verify_archive_state(client, &verification, &identity)
             .await
             .map_err(|_| HandlerError::new(ToolError::mutation_indeterminate()))?;
         Ok::<_, HandlerOperationError>(archive_output(&identity))
@@ -1245,10 +1246,12 @@ mod tests {
         .await
         .expect("bounded active scan");
         assert_eq!(active, ScanResult::Incomplete);
-        let active_calls = active_calls.lock().unwrap();
-        assert_eq!(active_calls.len(), 10);
-        assert_eq!(active_calls.first(), Some(&(ACTIVE_PAGE_SIZE, 0)));
-        assert_eq!(active_calls.last(), Some(&(ACTIVE_PAGE_SIZE, 900)));
+        {
+            let active_calls = active_calls.lock().unwrap();
+            assert_eq!(active_calls.len(), 10);
+            assert_eq!(active_calls.first(), Some(&(ACTIVE_PAGE_SIZE, 0)));
+            assert_eq!(active_calls.last(), Some(&(ACTIVE_PAGE_SIZE, 900)));
+        }
 
         let archived_calls = Arc::new(Mutex::new(Vec::new()));
         let recorded_archived = archived_calls.clone();
