@@ -438,11 +438,14 @@ follow-up read, and verifies it through the ordinary scoped REST getter.
 
 Tests that need disposable spaces should use
 `TestContext::create_space_fixture`. It creates through the authenticated REST
-API, validates and registers the returned ID before complete bounded-list
-verification, and removes only those registered IDs during teardown through
-Anytype's irreversible `SpaceDelete` RPC. Teardown then requires complete
-bounded REST evidence that each created ID is gone; there is intentionally no
-general test registration or production space-delete API.
+API after taking a complete bounded snapshot of existing IDs. A returned ID is
+registered exactly once only when it is valid, is not the context space, and
+was absent from that snapshot; untrusted duplicate responses are allowed to
+leak rather than authorize deletion of pre-existing state. Registration occurs
+before follow-up verification. Teardown removes only those privately owned IDs
+through Anytype's irreversible `SpaceDelete` RPC, then requires complete
+bounded REST evidence that each is gone. There is intentionally no general test
+registration or production space-delete API.
 
 ## License
 

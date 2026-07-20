@@ -127,6 +127,8 @@ async fn assert_fixture_space_continuation(
     server: &AnyMcpServer,
     fixture_ids: &[&str],
 ) {
+    const MAX_SPACE_LIST_PAGES: usize = 1_000;
+
     let response = ctx
         .client
         .spaces()
@@ -139,6 +141,12 @@ async fn assert_fixture_space_continuation(
     assert_eq!(response.pagination.offset, 0);
     assert!(!response.pagination.has_more);
     assert_eq!(response.pagination.total, response.items.len());
+    let expected_ids: HashSet<String> = response
+        .items
+        .iter()
+        .map(|space| space.id.clone())
+        .collect();
+    assert_eq!(expected_ids.len(), response.items.len());
     for fixture_id in fixture_ids {
         assert!(
             response.items.iter().any(|space| space.id == *fixture_id),
@@ -149,8 +157,73 @@ async fn assert_fixture_space_continuation(
         response.items.len() >= 2,
         "two registered fixtures must force limit=1 continuation"
     );
+    assert!(response.items.len() <= MAX_SPACE_LIST_PAGES);
 
-    assert_cursor_continuation(server, SPACE_LIST, arguments(json!({}))).await;
+    let mut next_cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut seen_ids = HashSet::new();
+    let mut binding_checked = false;
+    let mut reached_terminal = false;
+    for _ in 0..MAX_SPACE_LIST_PAGES {
+        let mut request = arguments(json!({"limit": 1}));
+        if let Some(cursor) = &next_cursor {
+            request.insert("cursor".to_owned(), json!(cursor));
+        }
+        let page = success(server, SPACE_LIST, Value::Object(request)).await;
+        let items = page["items"]
+            .as_array()
+            .expect("space_list items must be an array");
+        assert_eq!(items.len(), 1, "each bounded space page must progress");
+        let id = item_id(&items[0])
+            .and_then(Value::as_str)
+            .expect("space_list item id");
+        assert!(
+            seen_ids.insert(id.to_owned()),
+            "space_list must not repeat an item while advancing"
+        );
+
+        let Some(cursor) = page.get("next_cursor") else {
+            reached_terminal = true;
+            break;
+        };
+        let cursor = cursor
+            .as_str()
+            .filter(|cursor| !cursor.is_empty())
+            .expect("space_list next_cursor must be a nonempty string")
+            .to_owned();
+        assert!(
+            seen_cursors.insert(cursor.clone()),
+            "space_list cursor chain must not loop"
+        );
+
+        if !binding_checked {
+            let mismatch = failure(
+                server,
+                SPACE_LIST,
+                json!({"limit": 2, "cursor": cursor.as_str()}),
+            )
+            .await;
+            assert_eq!(mismatch["code"], "validation", "space_list cursor binding");
+            binding_checked = true;
+        }
+        next_cursor = Some(cursor);
+    }
+
+    assert!(
+        binding_checked,
+        "fixture-backed listing must expose a cursor"
+    );
+    assert!(
+        reached_terminal,
+        "space_list must terminate within its hard bound"
+    );
+    assert_eq!(seen_ids, expected_ids);
+    for fixture_id in fixture_ids {
+        assert!(
+            seen_ids.contains(*fixture_id),
+            "cursor walk must observe each registered fixture id"
+        );
+    }
 }
 
 async fn create_object(ctx: &TestContext, type_key: &str, name: &str, body: &str) -> Object {
