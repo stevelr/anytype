@@ -452,7 +452,7 @@ mod tests {
         );
     }
     #[test]
-    fn body_limits_and_utf8_boundaries() {
+    fn body_limits_and_exact_unicode_boundaries() {
         assert_eq!(BodyCharLimit::default().get(), DEFAULT_BODY_CHARS);
         assert!(BodyCharLimit::new(0).is_err());
         assert!(BodyCharLimit::new(MAX_BODY_CHARS).is_ok());
@@ -464,8 +464,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.text, "é🦀");
+        assert_eq!(c.text.chars().count(), 2);
+        assert_eq!(c.text.len(), 6);
         assert_eq!(c.next_offset, Some(BodyOffset::new(3).unwrap()));
         assert_eq!(c.sha256.len(), 64);
+        let complete = chunk_body(
+            "aé🦀z",
+            BodyOffset::default(),
+            BodyCharLimit::new(4).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(complete.text, "aé🦀z");
+        assert_eq!(complete.text.len(), 8);
+        assert_eq!(complete.next_offset, None);
+        let at_end = chunk_body(
+            "aé🦀z",
+            BodyOffset::new(4).unwrap(),
+            BodyCharLimit::new(1).unwrap(),
+        )
+        .unwrap();
+        assert!(at_end.text.is_empty());
+        assert_eq!(at_end.next_offset, None);
         assert_eq!(
             chunk_body("abc", BodyOffset::new(4).unwrap(), BodyCharLimit::default())
                 .unwrap_err()

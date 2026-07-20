@@ -1135,20 +1135,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upstream_error_formatting_is_redacted() {
+    async fn upstream_error_display_debug_and_tool_result_surfaces_are_redacted() {
         let runtime = runtime(1, Duration::from_secs(1));
         let cancellation = CancellationToken::new();
-        let result = runtime
+        let secrets = [
+            "SECRET_CREDENTIAL",
+            "SECRET_URL_TOKEN",
+            "SECRET_RESPONSE_BODY",
+            "localhost",
+        ];
+        let runtime_error = runtime
             .execute(OperationContext::new("test_error"), &cancellation, async {
-                Err::<(), _>(AnytypeError::Other {
-                    message: "secret-token-and-upstream-body".to_string(),
+                Err::<(), _>(AnytypeError::ApiError {
+                    code: 500,
+                    method: "Bearer SECRET_CREDENTIAL".to_owned(),
+                    url: "http://localhost/private?token=SECRET_URL_TOKEN".to_owned(),
+                    message: "SECRET_RESPONSE_BODY".to_owned(),
                 })
             })
             .await
             .expect_err("upstream failure");
 
-        assert_eq!(result.to_string(), "Anytype request failed");
-        assert!(!format!("{result:?}").contains("secret-token"));
+        assert_eq!(runtime_error.to_string(), "Anytype request failed");
+        let RuntimeError::Upstream(source) = &runtime_error else {
+            panic!("fixture must remain an upstream runtime error");
+        };
+        let crate::error::AnytypeErrorMapping::Ready(tool_error) =
+            crate::error::ToolError::from_anytype(source)
+        else {
+            panic!("HTTP errors map directly to a tool error");
+        };
+        let result = crate::result::tool_error(&tool_error);
+        let surfaces = format!(
+            "{} {runtime_error:?} {} {} {result:?}",
+            runtime_error,
+            result
+                .structured_content
+                .as_ref()
+                .expect("structured tool error"),
+            result.content[0].as_text().expect("text tool error").text,
+        );
+        for secret in secrets {
+            assert!(!surfaces.contains(secret), "leaked {secret}");
+        }
     }
 
     #[test]
