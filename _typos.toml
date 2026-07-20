@@ -1,0 +1,26 @@
+# Workspace-wide typos configuration.
+#
+# The root gate runs `typos` once for the whole workspace, so crate-local
+# configurations are not applied during that invocation. Keep shared protocol
+# tokens and generated-source exclusions here.
+
+[files]
+extend-exclude = [
+  "anyback/docs/cli-plan.md",
+  "anytype-api/docs/cli-plan.md",
+  "anytype-api/spec/*.yaml",
+  "anytype-rpc/src/gen/*.rs",
+]
+
+[default.extend-identifiers]
+ba000000 = "ba000000" # example object id
+ba111111 = "ba111111" # example object id
+FilterConditionNin = "FilterConditionNin"
+nin = "nin" # serialized NotIn condition and CLI identifiers
+oif = "oif" # nftables output-interface keyword
+ratatui = "ratatui" # dependency name
+
+[default.extend-words]
+nin = "nin" # word-split form of ext_nin identifiers
+oif = "oif" # nftables output-interface keyword
+ratatui = "ratatui" # word-split form of ratatui_image

@@ -203,7 +203,7 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
         .await
     {
         Err(AnytypeError::NotFound { .. }) => {
-            eprintln!("due_date not found in space {}, creating", &ctx.space_id);
+            eprintln!("due_date not found in space {}, creating", ctx.space_id);
             match ctx
                 .client
                 .new_property(&ctx.space_id, "Due Date", PropertyFormat::Date)
@@ -235,7 +235,7 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
 
     // create a type with these properties
     let type_key = unique_type_key("my_page");
-    eprintln!("creating type {type_key} in space {}", &ctx.space_id);
+    eprintln!("creating type {type_key} in space {}", ctx.space_id);
     match ctx
         .client
         .new_type(&ctx.space_id, "MyPage")

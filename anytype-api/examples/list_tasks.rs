@@ -23,7 +23,7 @@ async fn main() -> Result<(), AnytypeError> {
         .await?;
 
     let space = client.space(&space_id).get().await?;
-    println!("Listing {} tasks in {}\n", tasks.len(), &space.name);
+    println!("Listing {} tasks in {}\n", tasks.len(), space.name);
 
     println!("{:20} {:10} {:10} Id", "Task", "Created", "Due");
     for task in tasks.iter() {
@@ -39,7 +39,7 @@ async fn main() -> Result<(), AnytypeError> {
         println!(
             "{:20} {created_date:10} {due_date:10} {}",
             task.name.as_deref().unwrap_or("(Unnamed)"),
-            &task.id,
+            task.id,
         )
     }
 

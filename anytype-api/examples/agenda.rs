@@ -8,8 +8,12 @@
 //! Setup:
 //!  - set PROJECT_SPACE below to the name of your project space
 //!  - set CHAT_SPACE to name of a chat-style space
+//!
 //! Run:
-//!  cargo run --example agenda
+//!
+//! ```sh
+//! cargo run --example agenda
+//! ```
 //!
 use anytype::prelude::*;
 
