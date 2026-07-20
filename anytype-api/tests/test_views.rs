@@ -9,6 +9,7 @@ use anytype::{
     prelude::*,
     test_util::{TestError, TestResult, unique_suffix, with_test_context},
 };
+use common::retry_definitive_rate_limit;
 use serial_test::serial;
 use tokio::time::{Duration, sleep};
 
@@ -54,12 +55,15 @@ async fn ensure_list_object(
             ),
         })?;
 
-    let obj = ctx
-        .client
-        .new_object(&ctx.space_id, &typ.key)
-        .name(format!("Test {layout} {}", unique_suffix()))
-        .create()
-        .await?;
+    let object_name = format!("Test {layout} {}", unique_suffix());
+    let obj = retry_definitive_rate_limit("view list setup object", || async {
+        ctx.client
+            .new_object(&ctx.space_id, &typ.key)
+            .name(&object_name)
+            .create()
+            .await
+    })
+    .await?;
     ctx.register_object(&obj.id);
     let views = list_views_with_retry(ctx, &obj.id).await?;
     let view = views.items.first().ok_or_else(|| TestError::Assertion {
@@ -267,12 +271,14 @@ async fn test_view_list_objects_collection_and_set() -> TestResult<()> {
 #[serial]
 async fn test_view_add_remove_objects_collection() -> TestResult<()> {
     with_test_context(|ctx| async move {
-        let obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name("Test Collection Item")
-            .create()
-            .await?;
+        let obj = retry_definitive_rate_limit("collection member setup object", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name("Test Collection Item")
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&obj.id);
 
         let collection = ensure_list_object(ctx.as_ref(), ObjectLayout::Collection).await?;

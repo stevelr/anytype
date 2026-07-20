@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-pub use anytype::test_util::{TestContext, TestResult};
+pub use anytype::test_util::{TestContext, TestResult, retry_definitive_rate_limit};
 use anytype::{prelude::*, test_util::TestError};
 use tokio::time::sleep;
 use tracing::error;
@@ -54,44 +54,9 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Object, AnytypeError>>,
 {
-    let mut delay_ms = 200u64;
-    let max_attempts = 5;
-
-    for attempt in 1..=max_attempts {
-        match f().await {
-            Ok(obj) => return Ok(obj),
-            Err(e) => {
-                let retryable = match &e {
-                    AnytypeError::ApiError { code, message, .. } => {
-                        *code == 429
-                            || *code == 500
-                            || (*code == 400
-                                && (message.contains("invalid multi_select option")
-                                    || message.contains("invalid select option")
-                                    || message.contains("unknown property key")))
-                    }
-                    AnytypeError::Validation { message } => {
-                        message.contains("invalid multi_select option")
-                            || message.contains("invalid select option")
-                            || message.contains("unknown property key")
-                    }
-                    _ => false,
-                };
-                if retryable && attempt < max_attempts {
-                    eprintln!("{label} create failed (attempt {attempt}), retrying: {e}");
-                    sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = (delay_ms * 2).min(1500);
-                    continue;
-                }
-                eprintln!("failed to create {label}: {e}");
-                return Err(e.into());
-            }
-        }
-    }
-
-    Err(TestError::Assertion {
-        message: format!("failed to create {label} after {max_attempts} attempts"),
-    })
+    retry_definitive_rate_limit(label, &mut f)
+        .await
+        .map_err(Into::into)
 }
 
 pub async fn lookup_property_tag_with_retry(
@@ -140,52 +105,6 @@ pub async fn lookup_property_tag_with_retry(
     })
 }
 
-pub async fn update_object_with_retry<F, Fut>(label: &str, mut f: F) -> TestResult<Object>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Object, AnytypeError>>,
-{
-    let mut delay_ms = 200u64;
-    let max_attempts = 5;
-
-    for attempt in 1..=max_attempts {
-        match f().await {
-            Ok(obj) => return Ok(obj),
-            Err(e) => {
-                let retryable = match &e {
-                    AnytypeError::ApiError { code, message, .. } => {
-                        *code == 429
-                            || *code == 500
-                            || (*code == 400
-                                && (message.contains("invalid multi_select option")
-                                    || message.contains("invalid select option")
-                                    || message.contains("unknown property key")))
-                    }
-                    AnytypeError::Validation { message } => {
-                        message.contains("invalid multi_select option")
-                            || message.contains("invalid select option")
-                            || message.contains("unknown property key")
-                    }
-                    _ => false,
-                };
-
-                if retryable && attempt < max_attempts {
-                    eprintln!("{label} update failed (attempt {attempt}), retrying: {e}");
-                    sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = (delay_ms * 2).min(1500);
-                    continue;
-                }
-                eprintln!("failed to update {label}: {e}");
-                return Err(e.into());
-            }
-        }
-    }
-
-    Err(TestError::Assertion {
-        message: format!("failed to update {label} after {max_attempts} attempts"),
-    })
-}
-
 // =============================================================================
 // Property Setup Utilities
 // =============================================================================
@@ -206,12 +125,14 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
     {
         Err(AnytypeError::NotFound { .. }) => {
             eprintln!("due_date not found in space {}, creating", ctx.space_id);
-            match ctx
-                .client
-                .new_property(&ctx.space_id, "Due Date", PropertyFormat::Date)
-                .key("due_date")
-                .create()
-                .await
+            match retry_definitive_rate_limit("due_date setup property", || async {
+                ctx.client
+                    .new_property(&ctx.space_id, "Due Date", PropertyFormat::Date)
+                    .key("due_date")
+                    .create()
+                    .await
+            })
+            .await
             {
                 Ok(prop) => {
                     ctx.register_property(&prop.id);
@@ -238,17 +159,19 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
     // create a type with these properties
     let type_key = unique_type_key("my_page");
     eprintln!("creating type {type_key} in space {}", ctx.space_id);
-    match ctx
-        .client
-        .new_type(&ctx.space_id, "MyPage")
-        .key(&type_key)
-        .property("Priority", "priority", PropertyFormat::Number)
-        .property("Done", "done", PropertyFormat::Checkbox)
-        .property("Description", "description", PropertyFormat::Text)
-        .property("Due Date", "due_date", PropertyFormat::Date)
-        .property("Status", "status", PropertyFormat::Select)
-        .create()
-        .await
+    match retry_definitive_rate_limit("filter setup type", || async {
+        ctx.client
+            .new_type(&ctx.space_id, "MyPage")
+            .key(&type_key)
+            .property("Priority", "priority", PropertyFormat::Number)
+            .property("Done", "done", PropertyFormat::Checkbox)
+            .property("Description", "description", PropertyFormat::Text)
+            .property("Due Date", "due_date", PropertyFormat::Date)
+            .property("Status", "status", PropertyFormat::Select)
+            .create()
+            .await
+    })
+    .await
     {
         Ok(typ) => {
             ctx.register_type(&typ.id);

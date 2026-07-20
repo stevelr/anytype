@@ -45,10 +45,11 @@ async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, Stri
     let mut objects = Vec::new();
 
     // Object 1: High priority, checked, recent date
+    let obj1_name = unique_test_name("Filter Test High Priority");
     let obj1 = create_object_with_retry("Filter Test High Priority", || async {
         ctx.client
             .new_object(&ctx.space_id, &type_key)
-            .name(unique_test_name("Filter Test High Priority"))
+            .name(&obj1_name)
             .body("Important task")
             .set_text("description", "High priority item")
             .set_number("priority", 1)
@@ -61,10 +62,11 @@ async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, Stri
     objects.push(obj1);
 
     // Object 2: Medium priority, unchecked
+    let obj2_name = unique_test_name("Filter Test Medium Priority");
     let obj2 = create_object_with_retry("Filter Test Medium Priority", || async {
         ctx.client
             .new_object(&ctx.space_id, &type_key)
-            .name(unique_test_name("Filter Test Medium Priority"))
+            .name(&obj2_name)
             .body("Normal task")
             .set_text("description", "Medium priority item")
             .set_number("priority", 5)
@@ -77,10 +79,11 @@ async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, Stri
     objects.push(obj2);
 
     // Object 3: Low priority, unchecked, empty description
+    let obj3_name = unique_test_name("Filter Test Low Priority");
     let obj3 = create_object_with_retry("Filter Test Low Priority", || async {
         ctx.client
             .new_object(&ctx.space_id, &type_key)
-            .name(unique_test_name("Filter Test Low Priority"))
+            .name(&obj3_name)
             .body("Low priority task")
             .set_number("priority", 10)
             .set_checkbox("done", false)
@@ -92,10 +95,11 @@ async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, Stri
     objects.push(obj3);
 
     // Object 4: No priority set, has description
+    let obj4_name = unique_test_name("Filter Test No Priority");
     let obj4 = create_object_with_retry("Filter Test No Priority", || async {
         ctx.client
             .new_object(&ctx.space_id, &type_key)
-            .name(unique_test_name("Filter Test No Priority"))
+            .name(&obj4_name)
             .body("Task without priority")
             .set_text("description", "Item without priority value")
             .create()
@@ -176,10 +180,11 @@ async fn test_filter_is_empty() -> TestResult<()> {
 #[serial]
 async fn test_filter_checkbox_true() -> TestResult<()> {
     with_test_context(|ctx| async move {
+        let task_name = unique_test_name("test checkbox task done");
         let task = create_object_with_retry("Filter Checkbox True", || async {
             ctx.client
                 .new_object(&ctx.space_id, "task")
-                .name(unique_test_name("test checkbox task done"))
+                .name(&task_name)
                 .body("Important task")
                 .set_checkbox("done", true)
                 .create()
@@ -219,10 +224,11 @@ async fn test_filter_checkbox_true() -> TestResult<()> {
 #[serial]
 async fn test_filter_checkbox_false() -> TestResult<()> {
     with_test_context(|ctx| async move {
+        let task_name = unique_test_name("test checkbox task not done");
         let task = create_object_with_retry("Filter Checkbox False", || async {
             ctx.client
                 .new_object(&ctx.space_id, "task")
-                .name(unique_test_name("test checkbox task not done"))
+                .name(&task_name)
                 .body("Important task")
                 .set_checkbox("done", false)
                 .create()
@@ -394,10 +400,11 @@ async fn test_filter_date_equal() -> TestResult<()> {
         let (_test_objs, type_key) = create_test_objects(&ctx).await?;
 
         let date = "2025-06-15";
+        let obj_name = unique_test_name("Date Equal Test");
         let obj = create_object_with_retry("Filter Date Equal", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Date Equal Test"))
+                .name(&obj_name)
                 .body("Test")
                 .set_date("due_date", date)
                 .create()
@@ -430,10 +437,11 @@ async fn test_filter_date_after() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let (_test_objs, type_key) = create_test_objects(&ctx).await?;
         let future_date = "2030-12-31";
+        let obj_name = unique_test_name("Date After Test");
         let obj = create_object_with_retry("Filter Date After", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Date After Test"))
+                .name(&obj_name)
                 .body("Test")
                 .set_date("due_date", future_date)
                 .create()
@@ -469,10 +477,11 @@ async fn test_filter_date_before() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let (_test_objs, type_key) = create_test_objects(&ctx).await?;
         let past_date = "2025-01-01";
+        let obj_name = unique_test_name("Date Before Test");
         let obj = create_object_with_retry("Filter Date Before", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Date Before Test"))
+                .name(&obj_name)
                 .body("Test")
                 .set_date("due_date", past_date)
                 .create()
@@ -515,10 +524,11 @@ async fn test_filter_select_in_single_with_id() -> TestResult<()> {
         let in_progress =
             lookup_property_tag_with_retry(ctx.as_ref(), "status", "In Progress").await?;
 
+        let obj_name = unique_test_name("Select In Test");
         let obj = create_object_with_retry("Filter Select In", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Select In Test"))
+                .name(&obj_name)
                 .body("Test")
                 .set_select("status", &in_progress.id)
                 .create()
@@ -560,10 +570,11 @@ async fn test_filter_select_in_multiple() -> TestResult<()> {
         let done = lookup_property_tag_with_retry(ctx.as_ref(), "status", "Done").await?;
 
         // this object is in_progress
+        let obj1_name = unique_test_name("Select Multi 1");
         let obj1 = create_object_with_retry("Filter Select Multi 1", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Select Multi 1"))
+                .name(&obj1_name)
                 .body("Test")
                 .set_select("status", &in_progress.id)
                 .create()
@@ -573,10 +584,11 @@ async fn test_filter_select_in_multiple() -> TestResult<()> {
         ctx.register_object(&obj1.id);
 
         // this object has status=done
+        let obj2_name = unique_test_name("Select Multi 2");
         let obj2 = create_object_with_retry("Filter Select Multi 2", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Select Multi 2"))
+                .name(&obj2_name)
                 .body("Test")
                 .set_select("status", &done.id)
                 .create()
@@ -622,10 +634,11 @@ async fn test_filter_select_not_in() -> TestResult<()> {
         let to_do = lookup_property_tag_with_retry(ctx.as_ref(), "status", "To Do").await?;
         let done = lookup_property_tag_with_retry(ctx.as_ref(), "status", "Done").await?;
 
+        let obj_name = unique_test_name("Select Not In Test");
         let obj = create_object_with_retry("Filter Select Not In", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Select Not In Test"))
+                .name(&obj_name)
                 .body("Test")
                 .set_select("status", &done.id)
                 .create()
@@ -726,10 +739,11 @@ async fn test_filter_expression_empty() -> TestResult<()> {
 #[serial]
 async fn test_objects_list_with_filter() -> TestResult<()> {
     with_test_context(|ctx| async move {
+        let obj_name = unique_test_name("List With Filter");
         let obj = create_object_with_retry("Filter List With Filter", || async {
             ctx.client
                 .new_object(&ctx.space_id, "page")
-                .name(unique_test_name("List With Filter"))
+                .name(&obj_name)
                 .body("Test")
                 .create()
                 .await
@@ -759,10 +773,11 @@ async fn test_objects_list_with_filter() -> TestResult<()> {
 #[serial]
 async fn test_objects_list_multiple_filters() -> TestResult<()> {
     with_test_context(|ctx| async move {
+        let obj_name = unique_test_name("Multiple Filters");
         let obj = create_object_with_retry("Filter Multiple Filters", || async {
             ctx.client
                 .new_object(&ctx.space_id, "page")
-                .name(unique_test_name("Multiple Filters"))
+                .name(&obj_name)
                 .body("Test body content")
                 .set_text("description", "Has description")
                 .create()
@@ -796,10 +811,11 @@ async fn test_objects_list_filter_with_sort() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let type_key = ensure_properties_and_type(&ctx).await?;
         // Create two objects with different priorities
+        let obj1_name = unique_test_name("Sort Test 1");
         let obj1 = create_object_with_retry("Filter Sort 1", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Sort Test 1"))
+                .name(&obj1_name)
                 .body("Test")
                 .set_number("priority", 10)
                 .create()
@@ -808,10 +824,11 @@ async fn test_objects_list_filter_with_sort() -> TestResult<()> {
         .await?;
         ctx.register_object(&obj1.id);
 
+        let obj2_name = unique_test_name("Sort Test 2");
         let obj2 = create_object_with_retry("Filter Sort 2", || async {
             ctx.client
                 .new_object(&ctx.space_id, &type_key)
-                .name(unique_test_name("Sort Test 2"))
+                .name(&obj2_name)
                 .body("Test")
                 .set_number("priority", 5)
                 .create()
@@ -851,10 +868,11 @@ async fn test_objects_list_filter_with_pagination() -> TestResult<()> {
         // Create multiple objects
         for i in 1..=5 {
             let label = format!("Filter Pagination {i}");
+            let obj_name = unique_test_name(&format!("Pagination Test {i}"));
             let obj = create_object_with_retry(&label, || async {
                 ctx.client
                     .new_object(&ctx.space_id, "page")
-                    .name(unique_test_name(&format!("Pagination Test {}", i)))
+                    .name(&obj_name)
                     .body("Test")
                     .create()
                     .await
@@ -973,10 +991,11 @@ async fn test_filter_text_not_equal() -> TestResult<()> {
 #[serial]
 async fn test_filter_text_contains() -> TestResult<()> {
     with_test_context(|ctx| async move {
+        let obj_name = unique_test_name("Normal Name Contains");
         let obj = create_object_with_retry("Filter Text Contains", || async {
             ctx.client
                 .new_object(&ctx.space_id, "page")
-                .name(unique_test_name("Normal Name Contains"))
+                .name(&obj_name)
                 .body("Test")
                 .create()
                 .await
@@ -1006,10 +1025,11 @@ async fn test_filter_text_contains() -> TestResult<()> {
 #[serial]
 async fn test_filter_text_not_contains() -> TestResult<()> {
     with_test_context(|ctx| async move {
+        let obj_name = unique_test_name("Normal Name Not Contains");
         let obj = create_object_with_retry("Filter Text Not Contains", || async {
             ctx.client
                 .new_object(&ctx.space_id, "page")
-                .name(unique_test_name("Normal Name Not Contains"))
+                .name(&obj_name)
                 .body("Test")
                 .create()
                 .await
@@ -1046,10 +1066,11 @@ async fn test_filter_text_not_contains() -> TestResult<()> {
 #[serial]
 async fn test_filter_type_in() -> TestResult<()> {
     with_test_context(|ctx| async move {
+        let obj_name = unique_test_name("Type Test Page");
         let page_obj = create_object_with_retry("Filter Type In", || async {
             ctx.client
                 .new_object(&ctx.space_id, "page")
-                .name(unique_test_name("Type Test Page"))
+                .name(&obj_name)
                 .body("Test")
                 .create()
                 .await

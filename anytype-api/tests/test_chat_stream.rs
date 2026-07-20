@@ -1,3 +1,5 @@
+mod common;
+
 use std::net::SocketAddr;
 
 use anyhow::Result;
@@ -6,6 +8,7 @@ use anytype::{
     test_util::{unique_suffix, with_test_context},
 };
 use chrono::Utc;
+use common::retry_definitive_rate_limit;
 use futures::StreamExt;
 use tokio::{
     net::TcpStream,
@@ -40,18 +43,21 @@ async fn setup_mock_client() -> Result<(AnytypeClient, anytype::mock::MockChatSe
 #[serial_test::serial(chat_stream)]
 async fn chat_stream_receives_messages() -> Result<()> {
     with_test_context(|ctx| async move {
-        let chat = ctx
-            .client
-            .chats()
-            .in_space(&ctx.space_id)
-            .create(
-                format!("chat-stream-{}", unique_suffix()),
-                Icon::Emoji {
-                    emoji: "📡".to_string(),
-                },
-            )
-            .create()
-            .await?;
+        let chat_name = format!("chat-stream-{}", unique_suffix());
+        let chat = retry_definitive_rate_limit("chat stream setup chat", || async {
+            ctx.client
+                .chats()
+                .in_space(&ctx.space_id)
+                .create(
+                    &chat_name,
+                    Icon::Emoji {
+                        emoji: "📡".to_string(),
+                    },
+                )
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&chat.id);
 
         let message_id = ctx
@@ -99,20 +105,27 @@ async fn chat_stream_receives_messages() -> Result<()> {
 async fn rest_chat_stream_receives_initial_message() -> Result<()> {
     with_test_context(|ctx| async move {
         let chats = ctx.client.chats().in_space(&ctx.space_id);
-        let chat = chats
-            .create(
-                format!("rest-chat-stream-{}", unique_suffix()),
-                Icon::Emoji {
-                    emoji: "📨".to_string(),
-                },
-            )
-            .create()
-            .await?;
+        let chat_name = format!("rest-chat-stream-{}", unique_suffix());
+        let chat = retry_definitive_rate_limit("REST SSE setup chat", || async {
+            chats
+                .create(
+                    &chat_name,
+                    Icon::Emoji {
+                        emoji: "📨".to_string(),
+                    },
+                )
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&chat.id);
-        let message_id = chats
-            .add_message(&chat.id, MessageContent::new().text("hello from REST SSE"))
-            .send()
-            .await?;
+        let message_id = retry_definitive_rate_limit("REST SSE setup message", || async {
+            chats
+                .add_message(&chat.id, MessageContent::new().text("hello from REST SSE"))
+                .send()
+                .await
+        })
+        .await?;
 
         let mut events = chats
             .message_stream(&chat.id)

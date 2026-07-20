@@ -1,23 +1,29 @@
+mod common;
+
 use anytype::{
     prelude::*,
     test_util::{TestResult, unique_suffix, with_test_context},
 };
+use common::retry_definitive_rate_limit;
 
 #[tokio::test]
 async fn test_chat_message_crud() -> TestResult<()> {
     with_test_context(|ctx| async move {
-        let chat = ctx
-            .client
-            .chats()
-            .in_space(&ctx.space_id)
-            .create(
-                format!("chat-crud-{}", unique_suffix()),
-                Icon::Emoji {
-                    emoji: "🧪".to_string(),
-                },
-            )
-            .create()
-            .await?;
+        let chat_name = format!("chat-crud-{}", unique_suffix());
+        let chat = retry_definitive_rate_limit("chat CRUD setup chat", || async {
+            ctx.client
+                .chats()
+                .in_space(&ctx.space_id)
+                .create(
+                    &chat_name,
+                    Icon::Emoji {
+                        emoji: "🧪".to_string(),
+                    },
+                )
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&chat.id);
 
         let message_id = ctx
@@ -88,15 +94,19 @@ async fn test_chat_message_crud() -> TestResult<()> {
 async fn test_rest_chat_message_crud() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let chats = ctx.client.chats().in_space(&ctx.space_id);
-        let chat = chats
-            .create(
-                format!("rest-chat-crud-{}", unique_suffix()),
-                Icon::Emoji {
-                    emoji: "🌐".to_string(),
-                },
-            )
-            .create()
-            .await?;
+        let chat_name = format!("rest-chat-crud-{}", unique_suffix());
+        let chat = retry_definitive_rate_limit("REST chat CRUD setup chat", || async {
+            chats
+                .create(
+                    &chat_name,
+                    Icon::Emoji {
+                        emoji: "🌐".to_string(),
+                    },
+                )
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&chat.id);
 
         let message_id = chats

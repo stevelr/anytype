@@ -23,6 +23,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   only the response path and discard raw reqwest errors so Display, Debug, and
   source chains cannot expose URL userinfo, queries, fragments, tokens, or
   upstream bodies.
+- live integration-test setup mutations now retry only typed, definitive HTTP
+  429 rejections through one finite test-only seam; transport, timeout, 5xx,
+  validation, and other indeterminate failures remain single-attempt, and the
+  audited validation/optional-success/mutation-contract cases are unchanged
 - direct property-ID reads now offer a metadata-only, cache-independent,
   exact-identity scoped GET that never expands tags; explicit-ID tag lookup
   follows it with a separately paginated 1,000-row scan, validates a stable

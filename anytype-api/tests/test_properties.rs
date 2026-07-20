@@ -22,7 +22,7 @@ use anytype::{
 };
 use serde_json::Number;
 
-use crate::common::{create_object_with_retry, unique_test_name};
+use crate::common::{create_object_with_retry, retry_definitive_rate_limit, unique_test_name};
 
 // =============================================================================
 // Property Format Setters - Create objects with each format
@@ -71,12 +71,14 @@ async fn test_set_number_property() -> TestResult<()> {
         let prop_name = unique_test_name("TestNumber");
         let prop_key = format!("test_number_{}", unique_suffix());
 
-        let number_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Number)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let number_prop = retry_definitive_rate_limit("number setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Number)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
 
         ctx.register_property(&number_prop.id);
 
@@ -115,13 +117,15 @@ async fn test_set_select_property() -> TestResult<()> {
 
         let prop_name = unique_test_name("TestSelect");
         let prop_key = format!("test_select_{}", unique_suffix());
-        let select_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
-            .key(&prop_key)
-            .tag("Test Value", Some("test_value".into()), Color::Blue)
-            .create()
-            .await?;
+        let select_prop = retry_definitive_rate_limit("select setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Select)
+                .key(&prop_key)
+                .tag("Test Value", Some("test_value".into()), Color::Blue)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_property(&select_prop.id);
 
         let tags = ctx
@@ -157,15 +161,17 @@ async fn test_set_multiselect_property() -> TestResult<()> {
 
         let prop_name = unique_test_name("TestMultiSelect");
         let prop_key = format!("test_multiselect_{}", unique_suffix());
-        let multi_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect)
-            .key(&prop_key)
-            .tag("Value 1", Some("value1".into()), Color::Lime)
-            .tag("Value 2", Some("value2".into()), Color::Yellow)
-            .tag("Value 3", Some("value3".into()), Color::Red)
-            .create()
-            .await?;
+        let multi_prop = retry_definitive_rate_limit("multi-select setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::MultiSelect)
+                .key(&prop_key)
+                .tag("Value 1", Some("value1".into()), Color::Lime)
+                .tag("Value 2", Some("value2".into()), Color::Yellow)
+                .tag("Value 3", Some("value3".into()), Color::Red)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_property(&multi_prop.id);
 
         let tags = ctx
@@ -202,12 +208,14 @@ async fn test_set_date_property() -> TestResult<()> {
 
         let prop_name = unique_test_name("TestDate");
         let prop_key = format!("test_date_{}", unique_suffix());
-        let date_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Date)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let date_prop = retry_definitive_rate_limit("date setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Date)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_property(&date_prop.id);
 
         let obj = create_object_with_retry("Date Property Test", || async {
@@ -244,12 +252,14 @@ async fn test_set_checkbox_property() -> TestResult<()> {
         let prop_name = unique_test_name("TestCheckbox");
         let prop_key = format!("test_checkbox_{}", unique_suffix());
 
-        let checkbox_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Checkbox)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let checkbox_prop = retry_definitive_rate_limit("checkbox setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Checkbox)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
 
         ctx.register_property(&checkbox_prop.id);
 
@@ -290,12 +300,14 @@ async fn test_set_url_property() -> TestResult<()> {
         let prop_name = unique_test_name("TestURL");
         let prop_key = format!("test_url_{}", unique_suffix());
 
-        let url_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Url)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let url_prop = retry_definitive_rate_limit("URL setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Url)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
 
         ctx.register_property(&url_prop.id);
 
@@ -331,12 +343,14 @@ async fn test_set_email_property() -> TestResult<()> {
         let prop_name = unique_test_name("TestEmail");
         let prop_key = format!("test_email_{}", unique_suffix());
 
-        let email_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Email)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let email_prop = retry_definitive_rate_limit("email setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Email)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_property(&email_prop.id);
 
         let obj = create_object_with_retry("Email Property Test", || async {
@@ -375,12 +389,14 @@ async fn test_set_phone_property() -> TestResult<()> {
         let prop_name = unique_test_name("TestPhone");
         let prop_key = format!("test_phone_{}", unique_suffix());
 
-        let phone_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Phone)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let phone_prop = retry_definitive_rate_limit("phone setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Phone)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_property(&phone_prop.id);
 
         let obj = create_object_with_retry("Phone Property Test", || async {
@@ -416,30 +432,36 @@ async fn test_set_objects_property() -> TestResult<()> {
         let name = unique_test_name("Objects Property Test");
 
         // First create some objects to link to
-        let obj1 = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(format!("{} Target 1", name))
-            .create()
-            .await?;
+        let obj1 = retry_definitive_rate_limit("objects property target 1", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(format!("{} Target 1", name))
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&obj1.id);
 
-        let obj2 = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(format!("{} Target 2", name))
-            .create()
-            .await?;
+        let obj2 = retry_definitive_rate_limit("objects property target 2", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(format!("{} Target 2", name))
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&obj2.id);
 
         let prop_name = unique_test_name("TestObjects");
         let prop_key = format!("test_objects_{}", unique_suffix());
-        let objects_prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Objects)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let objects_prop = retry_definitive_rate_limit("objects setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Objects)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_property(&objects_prop.id);
 
         let linked_ids = vec![obj1.id.clone(), obj2.id.clone()];
@@ -478,13 +500,15 @@ async fn test_read_text_property_value() -> TestResult<()> {
         let name = unique_test_name("Read Text Test");
         let description = "Test description for reading";
 
-        let obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(&name)
-            .set_text("description", description)
-            .create()
-            .await?;
+        let obj = retry_definitive_rate_limit("read text setup object", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&name)
+                .set_text("description", description)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&obj.id);
 
         // Test get_property_str
@@ -523,13 +547,15 @@ async fn test_read_number_property_value() -> TestResult<()> {
             let name = unique_test_name("Read Number Test");
             let number_val = 123;
 
-            let obj = ctx
-                .client
-                .new_object(&ctx.space_id, "page")
-                .name(&name)
-                .set_number(&prop.key, Number::from(number_val))
-                .create()
-                .await?;
+            let obj = retry_definitive_rate_limit("read number setup object", || async {
+                ctx.client
+                    .new_object(&ctx.space_id, "page")
+                    .name(&name)
+                    .set_number(&prop.key, Number::from(number_val))
+                    .create()
+                    .await
+            })
+            .await?;
             ctx.register_object(&obj.id);
 
             // Test number getters
@@ -562,12 +588,14 @@ async fn test_read_checkbox_property_value() -> TestResult<()> {
         let prop_name = unique_test_name("ReadCheckbox");
         let prop_key = format!("read_checkbox_{}", unique_suffix());
 
-        let prop = ctx
-            .client
-            .new_property(&ctx.space_id, &prop_name, PropertyFormat::Checkbox)
-            .key(&prop_key)
-            .create()
-            .await?;
+        let prop = retry_definitive_rate_limit("read checkbox setup property", || async {
+            ctx.client
+                .new_property(&ctx.space_id, &prop_name, PropertyFormat::Checkbox)
+                .key(&prop_key)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_property(&prop.id);
 
         let name = unique_test_name("Read Checkbox Test");

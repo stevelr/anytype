@@ -22,7 +22,7 @@ mod common;
 use std::time::Duration;
 
 use anytype::{prelude::*, test_util::with_test_context_unit};
-use common::unique_test_name;
+use common::{retry_definitive_rate_limit, unique_test_name};
 
 // =============================================================================
 // Global Search Tests
@@ -202,17 +202,19 @@ async fn test_search_with_text_query() {
     with_test_context_unit(|ctx| async move {
         // Create an object with unique searchable text
         let unique_term = format!("SearchText{}", chrono::Utc::now().timestamp_millis());
-        let obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(&unique_term)
-            .body(format!(
-                "This is a test document containing {}",
-                unique_term
-            ))
-            .create()
-            .await
-            .expect("Failed to create searchable object");
+        let obj = retry_definitive_rate_limit("searchable text setup object", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&unique_term)
+                .body(format!(
+                    "This is a test document containing {}",
+                    unique_term
+                ))
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create searchable object");
 
         ctx.register_object(&obj.id);
 
@@ -243,13 +245,15 @@ async fn test_search_text_case_insensitive() {
     with_test_context_unit(|ctx| async move {
         // Create object with mixed case name
         let base_term = format!("CaseSensitive{}", chrono::Utc::now().timestamp_millis());
-        let obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(&base_term)
-            .create()
-            .await
-            .expect("Failed to create object");
+        let obj = retry_definitive_rate_limit("case-insensitive search setup", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&base_term)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create object");
         ctx.register_object(&obj.id);
 
         // Wait for indexing
@@ -288,13 +292,15 @@ async fn test_search_text_partial_match() {
     with_test_context_unit(|ctx| async move {
         // Create object with specific text
         let full_term = format!("PartialMatchTest{}", chrono::Utc::now().timestamp_millis());
-        let obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(&full_term)
-            .create()
-            .await
-            .expect("Failed to create object");
+        let obj = retry_definitive_rate_limit("partial search setup object", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&full_term)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create object");
         ctx.register_object(&obj.id);
 
         // Wait for indexing
@@ -397,13 +403,15 @@ async fn test_search_type_filter_validates_results() {
     with_test_context_unit(|ctx| async move {
         // Create a page object
         let page_name = unique_test_name("TypeFilterPage");
-        let page_obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(&page_name)
-            .create()
-            .await
-            .expect("Failed to create page object");
+        let page_obj = retry_definitive_rate_limit("type-filter search setup", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&page_name)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create page object");
         ctx.register_object(&page_obj.id);
 
         // Wait for indexing
@@ -570,13 +578,15 @@ async fn test_search_text_and_type_filter() {
     with_test_context_unit(|ctx| async move {
         // Create a page with unique text
         let unique_term = format!("CombinedSearch{}", chrono::Utc::now().timestamp_millis());
-        let page_obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(&unique_term)
-            .create()
-            .await
-            .expect("Failed to create page object");
+        let page_obj = retry_definitive_rate_limit("combined search setup object", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&unique_term)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create page object");
         ctx.register_object(&page_obj.id);
 
         // Wait for indexing
@@ -699,23 +709,27 @@ async fn test_search_with_combined_text_and_filters() {
         // Create objects with specific characteristics
         let base_name = unique_test_name("FilteredSearch");
 
-        let obj1 = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(format!("{} One", base_name))
-            .description("Has description")
-            .create()
-            .await
-            .expect("Failed to create object 1");
+        let obj1 = retry_definitive_rate_limit("filtered search setup object 1", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(format!("{} One", base_name))
+                .description("Has description")
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create object 1");
         ctx.register_object(&obj1.id);
 
-        let obj2 = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(format!("{} Two", base_name))
-            .create()
-            .await
-            .expect("Failed to create object 2");
+        let obj2 = retry_definitive_rate_limit("filtered search setup object 2", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(format!("{} Two", base_name))
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create object 2");
         ctx.register_object(&obj2.id);
 
         // Wait for indexing
