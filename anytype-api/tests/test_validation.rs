@@ -20,7 +20,7 @@
 mod common;
 
 use anytype::{prelude::*, test_util::with_test_context_unit};
-use common::unique_test_name;
+use common::{create_object_with_retry, unique_test_name};
 
 // =============================================================================
 // Invalid ID Errors
@@ -259,13 +259,16 @@ async fn test_create_property_without_name() {
 async fn test_update_without_changes() {
     with_test_context_unit(|ctx| async move {
         // First create an object
-        let obj = ctx
-            .client
-            .new_object(ctx.space_id(), "page")
-            .name(unique_test_name("Update Test"))
-            .create()
-            .await
-            .expect("Failed to create test object");
+        let object_name = unique_test_name("Update Test");
+        let obj = create_object_with_retry("Update Test setup object", || async {
+            ctx.client
+                .new_object(ctx.space_id(), "page")
+                .name(&object_name)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create test object");
         ctx.register_object(&obj.id);
 
         // Try to update without setting any fields
@@ -380,13 +383,16 @@ async fn test_invalid_email_format() {
         // For this test, we'll create an object and try to set an invalid email
         // The API might not validate email format client-side, so we expect server validation
 
-        let obj = ctx
-            .client
-            .new_object(ctx.space_id(), "page")
-            .name(unique_test_name("Email Test"))
-            .create()
-            .await
-            .expect("Failed to create test object");
+        let object_name = unique_test_name("Email Test");
+        let obj = create_object_with_retry("Email Test setup object", || async {
+            ctx.client
+                .new_object(ctx.space_id(), "page")
+                .name(&object_name)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create test object");
         ctx.register_object(&obj.id);
 
         // Try to set an invalid email using set_email
@@ -419,13 +425,16 @@ async fn test_invalid_email_format() {
 async fn test_invalid_url_format() {
     with_test_context_unit(|ctx| async move {
         // Create an object and set an invalid URL
-        let obj = ctx
-            .client
-            .new_object(ctx.space_id(), "page")
-            .name(unique_test_name("URL Test"))
-            .create()
-            .await
-            .expect("Failed to create test object");
+        let object_name = unique_test_name("URL Test");
+        let obj = create_object_with_retry("URL Test setup object", || async {
+            ctx.client
+                .new_object(ctx.space_id(), "page")
+                .name(&object_name)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create test object");
         ctx.register_object(&obj.id);
 
         // Try to set an invalid URL
@@ -457,13 +466,16 @@ async fn test_invalid_url_format() {
 async fn test_invalid_date_format() {
     with_test_context_unit(|ctx| async move {
         // Create an object and try to set an invalid date
-        let obj = ctx
-            .client
-            .new_object(ctx.space_id(), "page")
-            .name(unique_test_name("Date Test"))
-            .create()
-            .await
-            .expect("Failed to create test object");
+        let object_name = unique_test_name("Date Test");
+        let obj = create_object_with_retry("Date Test setup object", || async {
+            ctx.client
+                .new_object(ctx.space_id(), "page")
+                .name(&object_name)
+                .create()
+                .await
+        })
+        .await
+        .expect("Failed to create test object");
         ctx.register_object(&obj.id);
 
         // Try to set an invalid date using set_date with a malformed string
