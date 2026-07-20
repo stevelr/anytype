@@ -1,3 +1,1 @@
 # Agent Notes
-
-[state] `any-cut` and `any-g8g` are resolved pre-close but remain tracker-in-progress for the designated closer; after closure, recheck the exact scoped ready query before dispatching dependents.

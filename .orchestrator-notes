@@ -1,5 +1,8 @@
 # Orchestrator Notes
 
-- Resolved pre-close: `any-cut` and `any-g8g`; both remain tracker-in-progress for the designated closer.
-- Blocked: 18 scoped MCP issues remain dependency-blocked pending closure and subsequent dependency progression.
-- Next: close both resolved items, then rerun `br ready -l mcp -p 0 -p 1 -p 2 -t bug -t chore -t task --json` before dispatch.
+- Filter: `mcp`, actionable types bug/chore/task, priorities 0-2.
+- Closed this session: `any-cut`, `any-g8g` after local acceptance checks.
+- Audited: all 18 remaining Phase 1 tickets (`any-kus` through `any-zk6`). Their phase ordering and transitive dependencies match the canonical design; no missing dependency or scope split is currently required.
+- Ready: `any-kus` (shared protocol/schema foundation) and `any-mtc` (authenticated stdio runtime). They are intentionally parallel and own different primary modules.
+- Blockers: the other 16 Phase 1 tickets are dependency-blocked; later phases are deferred P4 design/review work and out of this active P0-P2 implementation filter.
+- Next: dispatch `any-kus` and `any-mtc` in isolated jj workspaces, integrate fixed revisions, run any-mcp gates, close verified tickets, and re-query readiness.
