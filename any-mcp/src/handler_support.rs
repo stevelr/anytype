@@ -75,6 +75,68 @@ impl From<CursorStoreError> for HandlerError {
     }
 }
 
+/// A handler's secret-safe preflight or upstream operation failure.
+///
+/// This wrapper lets one controlled operation combine resolver/API failures
+/// with checks that must happen after resolution, such as binding a cursor to
+/// resolved identifiers. Debug and display output never reveal the source.
+pub struct HandlerOperationError(HandlerOperationErrorKind);
+
+enum HandlerOperationErrorKind {
+    Upstream(AnytypeError),
+    Handler(HandlerError),
+}
+
+impl From<AnytypeError> for HandlerOperationError {
+    fn from(error: AnytypeError) -> Self {
+        Self(HandlerOperationErrorKind::Upstream(error))
+    }
+}
+
+impl From<HandlerError> for HandlerOperationError {
+    fn from(error: HandlerError) -> Self {
+        Self(HandlerOperationErrorKind::Handler(error))
+    }
+}
+
+impl fmt::Debug for HandlerOperationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HandlerOperationError(<redacted>)")
+    }
+}
+
+impl fmt::Display for HandlerOperationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MCP workflow operation failed")
+    }
+}
+
+impl std::error::Error for HandlerOperationError {}
+
+/// Defense-in-depth policy checked by mutation handlers before resolution or
+/// upstream I/O.
+///
+/// Catalog filtering remains the primary read-only control. Passing this
+/// policy into each mutation handler ensures that a stale, already-discovered
+/// direct call still fails closed at the handler seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationAccess {
+    /// Mutating workflows may proceed.
+    Allowed,
+    /// Mutating workflows must be rejected before any upstream work.
+    ReadOnly,
+}
+
+/// Rejects a mutation when the current handler invocation is read-only.
+///
+/// Call this before resolving names or constructing an upstream future.
+pub fn require_mutation_access(access: MutationAccess) -> Result<(), HandlerError> {
+    match access {
+        MutationAccess::Allowed => Ok(()),
+        MutationAccess::ReadOnly => Err(HandlerError::new(ToolError::read_only())),
+    }
+}
+
 /// Executes one upstream call and its conversion under runtime controls, then
 /// encodes the typed result through its declared workflow contract.
 ///
@@ -96,12 +158,45 @@ where
     C: FnOnce(U) -> CF,
     CF: Future<Output = Result<O, HandlerError>>,
 {
+    execute_prepared_handler(
+        runtime,
+        contract,
+        context,
+        cancellation,
+        async { operation.await.map_err(HandlerOperationError::from) },
+        convert,
+    )
+    .await
+}
+
+/// Executes one operation that can combine upstream and post-resolution
+/// handler preflight failures, followed by bounded conversion and encoding.
+///
+/// Use this variant when cursor binding or another validation step must occur
+/// after an asynchronous resolver but before the primary upstream request.
+pub async fn execute_prepared_handler<U, O, F, C, CF, E>(
+    runtime: &RuntimeContext,
+    contract: &WorkflowTool<O>,
+    context: OperationContext,
+    cancellation: &CancellationToken,
+    operation: F,
+    convert: C,
+) -> CallToolResult
+where
+    O: Serialize,
+    F: Future<Output = Result<U, E>>,
+    E: Into<HandlerOperationError>,
+    C: FnOnce(U) -> CF,
+    CF: Future<Output = Result<O, HandlerError>>,
+{
     let result = runtime
         .execute_classified(
             context,
             cancellation,
             async {
-                let upstream = operation.await.map_err(HandlerExecutionError::Upstream)?;
+                let upstream = operation
+                    .await
+                    .map_err(|error| HandlerExecutionError::Operation(error.into()))?;
                 let output = convert(upstream)
                     .await
                     .map_err(HandlerExecutionError::Conversion)?;
@@ -129,7 +224,7 @@ fn execution_tool_error(error: ControlledOperationError<HandlerExecutionError>) 
 }
 
 enum HandlerExecutionError {
-    Upstream(AnytypeError),
+    Operation(HandlerOperationError),
     Conversion(HandlerError),
     Encoding,
 }
@@ -137,7 +232,12 @@ enum HandlerExecutionError {
 impl HandlerExecutionError {
     fn diagnostic(&self) -> OperationFailureDiagnostic {
         match self {
-            Self::Upstream(error) => OperationFailureDiagnostic::from_anytype(error),
+            Self::Operation(HandlerOperationError(HandlerOperationErrorKind::Upstream(error))) => {
+                OperationFailureDiagnostic::from_anytype(error)
+            }
+            Self::Operation(HandlerOperationError(HandlerOperationErrorKind::Handler(_))) => {
+                OperationFailureDiagnostic::classified("preflight_error", "handler_preflight")
+            }
             Self::Conversion(_) => {
                 OperationFailureDiagnostic::classified("conversion_error", "handler_conversion")
             }
@@ -149,10 +249,15 @@ impl HandlerExecutionError {
 
     fn into_tool_error(self) -> ToolError {
         match self {
-            Self::Upstream(source) => match ToolError::from_anytype(&source) {
-                AnytypeErrorMapping::Ready(error) => error,
-                AnytypeErrorMapping::AmbiguityRequiresCandidates => ToolError::upstream(),
-            },
+            Self::Operation(HandlerOperationError(HandlerOperationErrorKind::Upstream(source))) => {
+                match ToolError::from_anytype(&source) {
+                    AnytypeErrorMapping::Ready(error) => error,
+                    AnytypeErrorMapping::AmbiguityRequiresCandidates => ToolError::upstream(),
+                }
+            }
+            Self::Operation(HandlerOperationError(HandlerOperationErrorKind::Handler(error))) => {
+                error.0
+            }
             Self::Conversion(error) => error.0,
             Self::Encoding => ToolError::upstream(),
         }
@@ -226,6 +331,12 @@ impl PageRequest {
     #[must_use]
     pub const fn offset(self) -> PageOffset {
         self.offset
+    }
+
+    /// Returns the exact requested upstream page limit.
+    #[must_use]
+    pub const fn limit(self) -> PageLimit {
+        self.limit
     }
 }
 

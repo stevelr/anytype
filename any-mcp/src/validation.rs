@@ -6,6 +6,62 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use sha2::{Digest, Sha256};
 use std::{borrow::Cow, fmt};
 
+/// An input field that may be omitted but may not be explicit JSON `null`.
+///
+/// The type intentionally does not implement `Serialize`. Schemars therefore
+/// cannot advertise the missing default as `null`; with `#[serde(default)]`,
+/// the field is optional while its present schema and decoder are exactly `T`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Omittable<T> {
+    /// The field was absent from the input object.
+    #[default]
+    Missing,
+    /// The field was present with one non-null typed value.
+    Present(T),
+}
+
+impl<T> Omittable<T> {
+    /// Borrows the present value, if the field was supplied.
+    #[must_use]
+    pub const fn as_ref(&self) -> Option<&T> {
+        match self {
+            Self::Missing => None,
+            Self::Present(value) => Some(value),
+        }
+    }
+
+    /// Returns whether the field was omitted.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Omittable<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+impl<T: JsonSchema> JsonSchema for Omittable<T> {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Owned(format!("Omittable{}", T::schema_name()))
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        generator.subschema_for::<T>()
+    }
+}
+
+/// Produces the non-null schema for a field represented in Rust as `Option<T>`
+/// solely to distinguish omission from presence.
+pub fn optional_non_null_schema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
+    generator.subschema_for::<T>()
+}
+
 /// Maximum IDs in one request.
 pub const MAX_IDS: usize = 100;
 /// Maximum projected property keys.
@@ -121,6 +177,11 @@ pub(crate) const fn error(code: ValidationCode) -> ValidationError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct BoundedList<T, const MAX: usize>(Vec<T>);
+impl<T, const MAX: usize> Default for BoundedList<T, MAX> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
 impl<T, const MAX: usize> BoundedList<T, MAX> {
     /// Validates and constructs the list.
     pub fn new(values: Vec<T>) -> Result<Self, ValidationError> {

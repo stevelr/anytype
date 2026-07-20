@@ -1,7 +1,7 @@
 # Orchestrator Notes
 
 - Filter: `mcp`, actionable types bug/chore/task, priorities 0-2.
-- Closed this session: `any-cut`, `any-g8g`, `any-kus`, `any-mtc`, `any-ch6`, `any-nzd`, `any-ce6`, and `any-8dy` after local and independent acceptance review.
+- Closed this session: `any-cut`, `any-g8g`, `any-kus`, `any-mtc`, `any-ch6`, `any-nzd`, `any-ce6`, `any-8dy`, `any-inq`, `any-ega`, `any-qwo`, and `any-tb2` after local and independent acceptance review.
 - Audited: all 18 original Phase 1 tickets (`any-kus` through `any-zk6`) plus their concrete anytype-api/any-mcp seams. The deeper seam pass found and corrected missing resolver and response-bound dependencies before handler work.
 - Integrated: reviewed `any-kus` and `any-mtc` stacks in `vsonxszx`; combined 53 tests, clippy, format, rustdoc, dependency tree, auth pings, and protocol initialize/EOF smoke passed.
 - Integrated: reviewed pagination/validation and resolver stacks in `lrvkyvmz`; combined any-mcp 69 tests, anytype 110/1 ignored, clippy, format, rustdoc, downstream checks, dependency tree, live auth pings, and protocol initialize/EOF smoke passed.
@@ -10,6 +10,8 @@
 - Added `any-8dy` (P1 foundation) for common handler encoding, checked continuation, object-summary conversion, and projected-property schemas; it blocks those same handler roots and prevents parallel implementations from drifting.
 - Integrated: reviewed bounded-response and shared-handler stacks in `quoysqrx` (`30363198`); combined any-mcp 89 tests, full anytype integration suite and 111 doctests, clippy, format, rustdoc, downstream checks, dependency tree, live dual-protocol auth, and MCP 2026-07-28 initialize smoke passed.
 - Added P3 security OFI `any-zd7` for bounded chat SSE frames and redacted stream URLs. OFIs retained P3: `any-ipy` (safe nested gRPC classification) and `any-8nl` (broader anytype-api diagnostic redaction); none blocks REST-backed Phase 1.
-- Ready after exact reconciliation: `any-inq`, `any-ega`, `any-qwo`, and `any-tb2`.
-- Blockers: none among these four direct handler roots; later phases remain deferred P4 design/review work.
-- Next: dispatch the first three read-handler tickets in isolated workspaces, independently review fixed revisions, integrate, then pick up `any-tb2` and re-query the corrected graph.
+- Integrated: independently reviewed discovery, object-read, view-read, and archive stacks in `swroolpx` (`57968b67`); combined any-mcp 135 tests, full anytype integration suite and 111 doctests, clippy, format, rustdoc, downstream checks, dependency tree, live dual-protocol auth, and MCP 2026-07-28 initialize smoke passed.
+- Review fixes included strict omission-versus-null inputs, resolver-output revalidation, view-path hardening in both MCP and anytype-api, tag-count pagination consistency, exact two-call continuation fixtures, and duplicate-query rejection in the fixture parser.
+- Ready after exact reconciliation: `any-2fu`, `any-89d`, and `any-mll`.
+- Blockers: none among these resource/create/update roots; `any-6nj` remains correctly blocked by `any-mll`, and production routing/tests/docs remain downstream of the handler graph.
+- Next: dispatch all three newly ready tickets in isolated workspaces, independently review fixed revisions, integrate, close, and re-query.

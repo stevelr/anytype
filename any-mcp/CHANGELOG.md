@@ -41,6 +41,21 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   resolver-backed view selection, exact one-page reads, checked continuations,
   stable resource-linked object summaries, bounded property projections, and
   fail-closed validation of resolver-returned view identifiers.
+- Add typed `server_status`, `space_list`, `type_list`, `property_list`,
+  `tag_list`, and `template_list` handlers with one-page opaque continuations,
+  resolver-backed references, redacted endpoint status, summary-only template
+  output, and bounded tag counts that never expand property options and verify
+  the first page's item/total/continuation consistency.
+- Add typed, bounded `object_search` and `object_get` workflow handlers with
+  resolver-backed references, constrained filters and sorting, exact one-page
+  cursor integrity, explicit property projections, Unicode-safe body chunks,
+  and complete-current-body SHA-256 values.
+- Reject explicit null for every omittable object-read input, validate file
+  and object filter operands as safe ids before I/O, and revalidate resolved
+  type keys before cursor binding or search dispatch.
+- Add the typed `object_archive` soft-delete workflow with destructive
+  annotations, pre-I/O read-only enforcement, safe resolver/response identity
+  validation, and a minimal verified archived-state result.
 
 ### Changed
 
