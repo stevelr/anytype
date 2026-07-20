@@ -79,8 +79,9 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 - [`rmcp`](https://docs.rs/rmcp/) 2.2.0 with the `server`, `macros`, `schemars`,
   and `transport-io` features;
-- upcoming MCP protocol revision `2026-07-28`, selected explicitly to align with
-  the SDK's imminent release/API direction;
+- an explicit `2026-07-28` protocol declaration that is not yet a conformance
+  claim: the locked revision is stateless, while the current `rmcp` 2.2.0
+  transport still uses the legacy initialization lifecycle;
 - an `anytype-api`-only application dependency through the `anytype` crate;
   `any-mcp` never depends directly on generated `anytype-rpc` support;
 - reusable strict JSON Schema 2020-12 input/output contracts with
@@ -430,6 +431,10 @@ runtime and advertises their static capability alongside the tool catalog.
   tests against an authenticated headless Anytype server.
 - `tests/snapshots/` — reviewed deterministic normal/read-only tool catalogs,
   including every schema and annotation.
+- `tests/stdio_conformance.rs` — portable production-process protocol
+  regression harness and ignored modern acceptance tests.
+- `STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client discovery
+  evidence with current compatibility limits.
 
 ## Testing
 
@@ -505,6 +510,15 @@ cargo build -p any-mcp
 Stdout is reserved exclusively for MCP protocol frames. Redacted diagnostics
 are emitted to stderr; credentials and full upstream response bodies are never
 included in runtime error formatting or startup diagnostics.
+
+The production-process regression harness checks the complete advertised
+catalog, document resources, structured success and error results,
+cancellation, malformed and unknown requests, clean EOF, and stdout/stderr
+purity in normal and read-only modes. Modern stateless discovery and malformed
+JSON parse errors remain explicit ignored acceptance tests tied to their
+blocking issues. See [stdio protocol verification](STDIO_CONFORMANCE.md)
+for commands, external-tool evidence, and the precise limits of the current
+compatibility claim.
 
 ## License
 
