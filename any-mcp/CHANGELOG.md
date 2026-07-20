@@ -22,7 +22,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   summaries and resource URIs, standard tool annotations, structured results
   with compact JSON text fallbacks, and stable secret-safe execution errors.
 - Convert candidate-rich `anytype-api` resolver ambiguities directly into
-  bounded MCP errors while refusing empty or wire-invalid alternatives.
+  bounded MCP errors, retaining valid alternatives alongside malformed ones;
+  resolver scan-limit failures map to the stable `bounded_result` code.
 
 ### Changed
 

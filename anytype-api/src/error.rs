@@ -64,6 +64,15 @@ pub enum AnytypeError {
         candidates: Vec<ResolveCandidate>,
     },
 
+    /// A resolver could not prove a unique or missing result within its hard
+    /// upstream scan bound. Retry with an id or an explicit unique key.
+    #[snafu(display("{obj_type} resolution exceeded the {limit}-item scan limit: {key}"))]
+    ResolutionLimitExceeded {
+        obj_type: String,
+        key: String,
+        limit: usize,
+    },
+
     /// Client is not authenticated.
     #[snafu(display("Client is not authenticated. Log in first."))]
     Unauthorized,

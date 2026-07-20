@@ -26,6 +26,9 @@
 //! - Name matches are case-insensitive and must be unique:
 //!   no match returns [`AnytypeError::NotFound`], more than one match
 //!   returns [`AnytypeError::Ambiguous`].
+//! - Name scans examine at most [`MAX_RESOLVE_SCAN_ITEMS`] upstream rows.
+//!   If uniqueness cannot be proved within that bound, they return
+//!   [`AnytypeError::ResolutionLimitExceeded`] instead of guessing.
 //!
 //! ## Quick Start
 //!
@@ -40,6 +43,8 @@
 //! # }
 //! ```
 
+use futures::StreamExt;
+
 use crate::{
     Result, client::AnytypeClient, error::AnytypeError, types::Type,
     validation::looks_like_object_id,
@@ -47,6 +52,15 @@ use crate::{
 
 /// Maximum number of alternatives retained for an ambiguous resolution.
 pub const MAX_RESOLVE_CANDIDATES: usize = 10;
+/// Maximum number of upstream rows a name resolver examines before refusing
+/// to guess from an incomplete scan.
+pub const MAX_RESOLVE_SCAN_ITEMS: usize = 1_000;
+/// Maximum number of characters retained in a resolver candidate name.
+pub const MAX_RESOLVE_CANDIDATE_NAME_CHARS: usize = 256;
+
+const MAX_RESOLVE_CANDIDATE_ID_CHARS: usize = 256;
+
+const RESOLVE_PAGE_SIZE: u32 = 100;
 
 /// Name of the default chat created in every space.
 ///
@@ -125,23 +139,22 @@ impl AnytypeClient {
             return Ok(space_id_or_name.to_string());
         }
 
-        let spaces = self.spaces().list().await?.collect_all().await?;
         let needle = space_id_or_name.to_lowercase();
-        let matches: Vec<_> = spaces
-            .into_iter()
-            .filter(|space| space.name.to_lowercase() == needle)
-            .collect();
+        let matches = scan_paged_matches(
+            self.spaces().limit(RESOLVE_PAGE_SIZE).list().await?,
+            "space",
+            space_id_or_name,
+            |space| space.name.to_lowercase() == needle,
+            |space| ResolveCandidate::new(&space.id, &space.name),
+        )
+        .await?;
 
-        match matches.len() {
-            0 => Err(not_found("space", space_id_or_name)),
-            1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous(
-                "space",
-                space_id_or_name,
-                matches
-                    .iter()
-                    .map(|space| ResolveCandidate::new(&space.id, &space.name)),
-            )),
+        match matches {
+            MatchClassification::None => Err(not_found("space", space_id_or_name)),
+            MatchClassification::Unique(space) => Ok(space.id),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("space", space_id_or_name, candidates))
+            }
         }
     }
 
@@ -155,7 +168,16 @@ impl AnytypeClient {
     /// - [`AnytypeError::Ambiguous`] if more than one type matches
     pub async fn resolve_type(&self, space_id: &str, type_key_or_id: &str) -> Result<Type> {
         if let Some(stripped) = type_key_or_id.strip_prefix('@') {
-            return self.lookup_type_by_key(space_id, stripped).await;
+            return match self
+                .scan_type_matches(space_id, stripped, TypeMatchMode::Key)
+                .await?
+            {
+                MatchClassification::None => Err(not_found("type", stripped)),
+                MatchClassification::Unique(typ) => Ok(typ),
+                MatchClassification::Ambiguous(candidates) => {
+                    Err(ambiguous("type", stripped, candidates))
+                }
+            };
         }
         if looks_like_object_id(type_key_or_id) {
             return self.get_type(space_id, type_key_or_id).get().await;
@@ -163,17 +185,15 @@ impl AnytypeClient {
         if starts_with_uppercase(type_key_or_id) {
             return self.resolve_type_by_name(space_id, type_key_or_id).await;
         }
-        let matches = self.lookup_types(space_id, type_key_or_id).await?;
-        match matches.len() {
-            0 => Err(not_found("type", type_key_or_id)),
-            1 => Ok(matches[0].clone()),
-            _ => Err(ambiguous(
-                "type",
-                type_key_or_id,
-                matches.iter().map(|typ| {
-                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
-                }),
-            )),
+        match self
+            .scan_type_matches(space_id, type_key_or_id, TypeMatchMode::Any)
+            .await?
+        {
+            MatchClassification::None => Err(not_found("type", type_key_or_id)),
+            MatchClassification::Unique(typ) => Ok(typ),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("type", type_key_or_id, candidates))
+            }
         }
     }
 
@@ -192,8 +212,16 @@ impl AnytypeClient {
     ) -> Result<String> {
         let key_or_id = key_or_id.into();
         if let Some(stripped) = key_or_id.strip_prefix('@') {
-            let typ = self.lookup_type_by_key(space_id, stripped).await?;
-            return Ok(typ.id);
+            return match self
+                .scan_type_matches(space_id, stripped, TypeMatchMode::Key)
+                .await?
+            {
+                MatchClassification::None => Err(not_found("type", stripped)),
+                MatchClassification::Unique(typ) => Ok(typ.id),
+                MatchClassification::Ambiguous(candidates) => {
+                    Err(ambiguous("type", stripped, candidates))
+                }
+            };
         }
         if looks_like_object_id(&key_or_id) {
             return Ok(key_or_id);
@@ -201,17 +229,15 @@ impl AnytypeClient {
         if starts_with_uppercase(&key_or_id) {
             return Ok(self.resolve_type_by_name(space_id, &key_or_id).await?.id);
         }
-        let matches = self.lookup_types(space_id, &key_or_id).await?;
-        match matches.len() {
-            0 => Err(not_found("type", &key_or_id)),
-            1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous(
-                "type",
-                &key_or_id,
-                matches.iter().map(|typ| {
-                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
-                }),
-            )),
+        match self
+            .scan_type_matches(space_id, &key_or_id, TypeMatchMode::Any)
+            .await?
+        {
+            MatchClassification::None => Err(not_found("type", &key_or_id)),
+            MatchClassification::Unique(typ) => Ok(typ.id),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("type", &key_or_id, candidates))
+            }
         }
     }
 
@@ -255,17 +281,15 @@ impl AnytypeClient {
         if starts_with_uppercase(&key_or_name) {
             return Ok(self.resolve_type_by_name(space_id, &key_or_name).await?.key);
         }
-        let matches = self.lookup_types(space_id, &key_or_name).await?;
-        match matches.len() {
-            0 => Err(not_found("type", &key_or_name)),
-            1 => Ok(matches[0].key.clone()),
-            _ => Err(ambiguous(
-                "type",
-                &key_or_name,
-                matches.iter().map(|typ| {
-                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
-                }),
-            )),
+        match self
+            .scan_type_matches(space_id, &key_or_name, TypeMatchMode::Any)
+            .await?
+        {
+            MatchClassification::None => Err(not_found("type", &key_or_name)),
+            MatchClassification::Unique(typ) => Ok(typ.key),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("type", &key_or_name, candidates))
+            }
         }
     }
 
@@ -284,50 +308,56 @@ impl AnytypeClient {
         list_id: &str,
         view_id_or_name: &str,
     ) -> Result<String> {
-        let views = self
+        let mut views = self
             .list_views(space_id, list_id)
-            .limit(200)
+            .limit(RESOLVE_PAGE_SIZE)
             .list()
             .await?
-            .collect_all()
-            .await?;
-
-        if views.iter().any(|view| view.id == view_id_or_name) {
-            return Ok(view_id_or_name.to_string());
-        }
-
-        let exact: Vec<_> = views
-            .iter()
-            .filter(|view| view.name.as_deref() == Some(view_id_or_name))
-            .collect();
-        if exact.len() == 1 {
-            return Ok(exact[0].id.clone());
-        }
-        if exact.len() > 1 {
-            return Err(ambiguous(
-                "view",
-                view_id_or_name,
-                exact.iter().map(|view| {
-                    ResolveCandidate::new(&view.id, view.name.as_deref().unwrap_or(&view.id))
-                }),
-            ));
-        }
-
+            .into_stream();
+        let mut exact = MatchAccumulator::new();
+        let mut case_insensitive = MatchAccumulator::new();
         let needle = view_id_or_name.to_lowercase();
-        let matches: Vec<_> = views
-            .iter()
-            .filter(|view| view.name.as_deref().unwrap_or("").to_lowercase() == needle)
-            .collect();
-        match matches.len() {
-            0 => Err(not_found("view", view_id_or_name)),
-            1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous(
-                "view",
-                view_id_or_name,
-                matches.iter().map(|view| {
-                    ResolveCandidate::new(&view.id, view.name.as_deref().unwrap_or(&view.id))
-                }),
-            )),
+        let mut scanned = 0;
+        while let Some(view) = views.next().await {
+            let view = view?;
+            if scanned == MAX_RESOLVE_SCAN_ITEMS {
+                return Err(resolution_limit("view", view_id_or_name));
+            }
+            scanned += 1;
+            if view.id == view_id_or_name {
+                return Ok(view.id);
+            }
+            if view.name.as_deref() == Some(view_id_or_name) {
+                let candidate = view_candidate(&view);
+                exact.push(view, candidate);
+                if exact.is_ambiguous() {
+                    let MatchClassification::Ambiguous(candidates) = exact.finish() else {
+                        unreachable!("ambiguous accumulator must classify as ambiguous");
+                    };
+                    return Err(ambiguous("view", view_id_or_name, candidates));
+                }
+                continue;
+            }
+            if view.name.as_deref().unwrap_or("").to_lowercase() == needle {
+                let candidate = view_candidate(&view);
+                case_insensitive.push(view, candidate);
+            }
+        }
+
+        match exact.finish() {
+            MatchClassification::Unique(view) => return Ok(view.id),
+            MatchClassification::Ambiguous(candidates) => {
+                return Err(ambiguous("view", view_id_or_name, candidates));
+            }
+            MatchClassification::None => {}
+        }
+
+        match case_insensitive.finish() {
+            MatchClassification::None => Err(not_found("view", view_id_or_name)),
+            MatchClassification::Unique(view) => Ok(view.id),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("view", view_id_or_name, candidates))
+            }
         }
     }
 
@@ -346,8 +376,25 @@ impl AnytypeClient {
         if looks_like_object_id(&key_or_id) {
             return Ok(key_or_id);
         }
-        let prop = self.lookup_property_by_key(space_id, &key_or_id).await?;
-        Ok(prop.id)
+        let needle = key_or_id.trim().to_lowercase();
+        match scan_paged_matches(
+            self.properties(space_id)
+                .limit(RESOLVE_PAGE_SIZE)
+                .list()
+                .await?,
+            "property",
+            &key_or_id,
+            |property| property.key == needle,
+            property_candidate,
+        )
+        .await?
+        {
+            MatchClassification::None => Err(not_found("property", &key_or_id)),
+            MatchClassification::Unique(property) => Ok(property.id),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("property", &key_or_id, candidates))
+            }
+        }
     }
 
     /// Resolves a chat reference into a [`ChatTarget`].
@@ -471,39 +518,75 @@ impl AnytypeClient {
         space_id: &str,
         chat_id_or_name: &str,
     ) -> Result<String> {
-        let result = self
-            .chats()
-            .search_chats_in(space_id)
-            .text(chat_id_or_name)
-            .search()
-            .await?;
         let needle = chat_id_or_name.to_lowercase();
-        let matches: Vec<_> = result
-            .items
-            .into_iter()
-            .filter(|chat| chat.name.as_deref().unwrap_or("").to_lowercase() == needle)
-            .collect();
+        let mut accumulator = MatchAccumulator::new();
+        let mut scanned = 0;
+        let mut offset = 0;
+        loop {
+            let result = self
+                .chats()
+                .search_chats_in(space_id)
+                .text(chat_id_or_name)
+                .limit(RESOLVE_PAGE_SIZE)
+                .offset(offset)
+                .search()
+                .await?;
+            let page_len = result.items.len();
+            for chat in result.items {
+                if scanned == MAX_RESOLVE_SCAN_ITEMS {
+                    return Err(resolution_limit("chat", chat_id_or_name));
+                }
+                scanned += 1;
+                if chat.name.as_deref().unwrap_or("").to_lowercase() == needle {
+                    let candidate = object_candidate(&chat);
+                    accumulator.push(chat, candidate);
+                    if accumulator.is_ambiguous() {
+                        return match accumulator.finish() {
+                            MatchClassification::Ambiguous(candidates) => {
+                                Err(ambiguous("chat", chat_id_or_name, candidates))
+                            }
+                            _ => unreachable!("ambiguous accumulator must remain ambiguous"),
+                        };
+                    }
+                }
+            }
+            if page_len < RESOLVE_PAGE_SIZE as usize {
+                break;
+            }
+            offset = offset
+                .checked_add(RESOLVE_PAGE_SIZE)
+                .ok_or_else(|| resolution_limit("chat", chat_id_or_name))?;
+        }
 
-        match matches.len() {
-            0 => Err(not_found("chat", chat_id_or_name)),
-            1 => Ok(matches[0].id.clone()),
-            _ => Err(ambiguous(
-                "chat",
-                chat_id_or_name,
-                matches.iter().map(|chat| {
-                    ResolveCandidate::new(&chat.id, chat.name.as_deref().unwrap_or(&chat.id))
-                }),
-            )),
+        match accumulator.finish() {
+            MatchClassification::None => Err(not_found("chat", chat_id_or_name)),
+            MatchClassification::Unique(chat) => Ok(chat.id),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("chat", chat_id_or_name, candidates))
+            }
         }
     }
 
     /// Returns the space id if a space with this id is accessible.
     async fn find_space_id_by_id(&self, space_id: &str) -> Result<Option<String>> {
-        let spaces = self.spaces().list().await?.collect_all().await?;
-        Ok(spaces
-            .into_iter()
-            .find(|space| space.id == space_id)
-            .map(|space| space.id))
+        let mut spaces = self
+            .spaces()
+            .limit(RESOLVE_PAGE_SIZE)
+            .list()
+            .await?
+            .into_stream();
+        let mut scanned = 0;
+        while let Some(space) = spaces.next().await {
+            let space = space?;
+            if scanned == MAX_RESOLVE_SCAN_ITEMS {
+                return Err(resolution_limit("space", space_id));
+            }
+            scanned += 1;
+            if space.id == space_id {
+                return Ok(Some(space.id));
+            }
+        }
+        Ok(None)
     }
 
     /// Returns true if a chat with this id is accessible.
@@ -515,45 +598,73 @@ impl AnytypeClient {
     /// Finds a space id by case-insensitive name match; `Ok(None)` when
     /// no space matches.
     async fn find_space_id_by_name(&self, space_name: &str) -> Result<Option<String>> {
-        let spaces = self.spaces().list().await?.collect_all().await?;
         let needle = space_name.to_lowercase();
-        let matches: Vec<_> = spaces
-            .into_iter()
-            .filter(|space| space.name.to_lowercase() == needle)
-            .collect();
-        match matches.len() {
-            0 => Ok(None),
-            1 => Ok(Some(matches[0].id.clone())),
-            _ => Err(ambiguous(
-                "space",
-                space_name,
-                matches
-                    .iter()
-                    .map(|space| ResolveCandidate::new(&space.id, &space.name)),
-            )),
+        match scan_paged_matches(
+            self.spaces().limit(RESOLVE_PAGE_SIZE).list().await?,
+            "space",
+            space_name,
+            |space| space.name.to_lowercase() == needle,
+            |space| ResolveCandidate::new(&space.id, &space.name),
+        )
+        .await?
+        {
+            MatchClassification::None => Ok(None),
+            MatchClassification::Unique(space) => Ok(Some(space.id)),
+            MatchClassification::Ambiguous(candidates) => {
+                Err(ambiguous("space", space_name, candidates))
+            }
         }
     }
 
     /// Resolves a type name (case-insensitive) into the full [`Type`].
     async fn resolve_type_by_name(&self, space_id: &str, name: &str) -> Result<Type> {
-        let matches = self.lookup_types(space_id, name).await?;
-        let needle = name.to_lowercase();
-        let filtered: Vec<_> = matches
-            .into_iter()
-            .filter(|typ| typ.name.as_deref().unwrap_or("").to_lowercase() == needle)
-            .collect();
-        match filtered.len() {
-            0 => Err(not_found("type", name)),
-            1 => Ok(filtered[0].clone()),
-            _ => Err(ambiguous(
-                "type",
-                name,
-                filtered.iter().map(|typ| {
-                    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
-                }),
-            )),
+        match self
+            .scan_type_matches(space_id, name, TypeMatchMode::Name)
+            .await?
+        {
+            MatchClassification::None => Err(not_found("type", name)),
+            MatchClassification::Unique(typ) => Ok(typ),
+            MatchClassification::Ambiguous(candidates) => Err(ambiguous("type", name, candidates)),
         }
     }
+
+    async fn scan_type_matches(
+        &self,
+        space_id: &str,
+        text: &str,
+        mode: TypeMatchMode,
+    ) -> Result<MatchClassification<Type>> {
+        let needle = text.trim().to_lowercase();
+        scan_paged_matches(
+            self.types(space_id).limit(RESOLVE_PAGE_SIZE).list().await?,
+            "type",
+            text,
+            |typ| {
+                !typ.archived
+                    && match mode {
+                        TypeMatchMode::Key => typ.key == needle,
+                        TypeMatchMode::Name => {
+                            typ.name.as_deref().unwrap_or("").to_lowercase() == needle
+                        }
+                        TypeMatchMode::Any => {
+                            typ.id == needle
+                                || typ.key == needle
+                                || typ.name.as_deref().unwrap_or("").to_lowercase() == needle
+                                || typ.plural_name.as_deref().unwrap_or("").to_lowercase() == needle
+                        }
+                    }
+            },
+            type_candidate,
+        )
+        .await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TypeMatchMode {
+    Any,
+    Key,
+    Name,
 }
 
 fn starts_with_uppercase(value: &str) -> bool {
@@ -578,25 +689,196 @@ fn ambiguous(
     AnytypeError::Ambiguous {
         obj_type: obj_type.to_string(),
         key: key.to_string(),
-        candidates: bounded_candidates(candidates),
+        candidates: candidates
+            .into_iter()
+            .take(MAX_RESOLVE_CANDIDATES)
+            .collect(),
     }
 }
 
-fn bounded_candidates(
-    candidates: impl IntoIterator<Item = ResolveCandidate>,
-) -> Vec<ResolveCandidate> {
-    let mut candidates: Vec<_> = candidates.into_iter().collect();
-    candidates.sort_by(|left, right| {
-        left.name
-            .to_lowercase()
-            .cmp(&right.name.to_lowercase())
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let mut seen_ids = std::collections::HashSet::new();
-    candidates.retain(|candidate| seen_ids.insert(candidate.id.clone()));
-    candidates.truncate(MAX_RESOLVE_CANDIDATES);
-    candidates
+enum MatchClassification<T> {
+    None,
+    Unique(T),
+    Ambiguous(Vec<ResolveCandidate>),
+}
+
+struct MatchAccumulator<T> {
+    unique: Option<(ResolveCandidate, T)>,
+    ambiguous: bool,
+    candidates: Vec<ResolveCandidate>,
+}
+
+impl<T> MatchAccumulator<T> {
+    fn new() -> Self {
+        Self {
+            unique: None,
+            ambiguous: false,
+            candidates: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, item: T, candidate: ResolveCandidate) {
+        if !self.ambiguous {
+            match &mut self.unique {
+                None => {
+                    self.unique = Some((candidate, item));
+                }
+                Some((current, current_item)) if current.id == candidate.id => {
+                    if compare_candidates(&candidate, current).is_lt() {
+                        *current = candidate;
+                        *current_item = item;
+                    }
+                }
+                Some(_) => {
+                    self.ambiguous = true;
+                    let (current, _) = self.unique.take().expect("unique match exists");
+                    insert_bounded_candidate(&mut self.candidates, current);
+                    insert_bounded_candidate(&mut self.candidates, candidate);
+                }
+            }
+            return;
+        }
+
+        insert_bounded_candidate(&mut self.candidates, candidate);
+    }
+
+    fn finish(self) -> MatchClassification<T> {
+        if self.ambiguous {
+            MatchClassification::Ambiguous(self.candidates)
+        } else if let Some((_, item)) = self.unique {
+            MatchClassification::Unique(item)
+        } else {
+            MatchClassification::None
+        }
+    }
+
+    fn is_ambiguous(&self) -> bool {
+        self.ambiguous && !self.candidates.is_empty()
+    }
+}
+
+#[cfg(test)]
+fn classify_matches<T>(
+    matches: impl IntoIterator<Item = T>,
+    candidate_for: impl Fn(&T) -> ResolveCandidate,
+) -> std::result::Result<MatchClassification<T>, ResolutionScanLimit> {
+    let mut accumulator = MatchAccumulator::new();
+    for (index, item) in matches.into_iter().enumerate() {
+        if index == MAX_RESOLVE_SCAN_ITEMS {
+            return Err(ResolutionScanLimit);
+        }
+        let candidate = candidate_for(&item);
+        accumulator.push(item, candidate);
+        if accumulator.is_ambiguous() {
+            break;
+        }
+    }
+    Ok(accumulator.finish())
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct ResolutionScanLimit;
+
+fn insert_bounded_candidate(candidates: &mut Vec<ResolveCandidate>, candidate: ResolveCandidate) {
+    if !candidate_is_safe(&candidate) {
+        return;
+    }
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|existing| existing.id == candidate.id)
+    {
+        if compare_candidates(&candidate, existing).is_lt() {
+            *existing = candidate;
+            candidates.sort_by(compare_candidates);
+        }
+        return;
+    }
+
+    if candidates.len() < MAX_RESOLVE_CANDIDATES {
+        candidates.push(candidate);
+        candidates.sort_by(compare_candidates);
+    } else if candidates
+        .last()
+        .is_some_and(|largest| compare_candidates(&candidate, largest).is_lt())
+    {
+        candidates.pop();
+        candidates.push(candidate);
+        candidates.sort_by(compare_candidates);
+    }
+}
+
+fn candidate_is_safe(candidate: &ResolveCandidate) -> bool {
+    let id = candidate.id();
+    !id.is_empty()
+        && !matches!(id, "." | "..")
+        && id.chars().count() <= MAX_RESOLVE_CANDIDATE_ID_CHARS
+        && id
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || b"._~-".contains(&character))
+        && candidate.name().chars().count() <= MAX_RESOLVE_CANDIDATE_NAME_CHARS
+}
+
+fn compare_candidates(left: &ResolveCandidate, right: &ResolveCandidate) -> std::cmp::Ordering {
+    left.name
+        .to_lowercase()
+        .cmp(&right.name.to_lowercase())
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn type_candidate(typ: &Type) -> ResolveCandidate {
+    ResolveCandidate::new(&typ.id, typ.name.as_deref().unwrap_or(&typ.key))
+}
+
+fn view_candidate(view: &crate::views::View) -> ResolveCandidate {
+    ResolveCandidate::new(&view.id, view.name.as_deref().unwrap_or(&view.id))
+}
+
+fn object_candidate(object: &crate::objects::Object) -> ResolveCandidate {
+    ResolveCandidate::new(&object.id, object.name.as_deref().unwrap_or(&object.id))
+}
+
+fn property_candidate(property: &crate::properties::Property) -> ResolveCandidate {
+    ResolveCandidate::new(&property.id, &property.name)
+}
+
+fn resolution_limit(obj_type: &str, key: &str) -> AnytypeError {
+    AnytypeError::ResolutionLimitExceeded {
+        obj_type: obj_type.to_string(),
+        key: key.to_string(),
+        limit: MAX_RESOLVE_SCAN_ITEMS,
+    }
+}
+
+async fn scan_paged_matches<T>(
+    page: crate::paged::PagedResult<T>,
+    obj_type: &str,
+    key: &str,
+    matches: impl Fn(&T) -> bool,
+    candidate_for: impl Fn(&T) -> ResolveCandidate,
+) -> Result<MatchClassification<T>>
+where
+    T: serde::de::DeserializeOwned + Send + 'static,
+{
+    let mut stream = page.into_stream();
+    let mut accumulator = MatchAccumulator::new();
+    let mut scanned = 0;
+    while let Some(item) = stream.next().await {
+        let item = item?;
+        if scanned == MAX_RESOLVE_SCAN_ITEMS {
+            return Err(resolution_limit(obj_type, key));
+        }
+        scanned += 1;
+        if matches(&item) {
+            let candidate = candidate_for(&item);
+            accumulator.push(item, candidate);
+            if accumulator.is_ambiguous() {
+                break;
+            }
+        }
+    }
+    Ok(accumulator.finish())
 }
 
 #[cfg(test)]
@@ -624,44 +906,130 @@ mod tests {
         assert!(!starts_with_uppercase("@Task"));
     }
 
-    #[test]
-    fn candidate_collection_preserves_zero_and_one_items() {
-        assert!(bounded_candidates(Vec::new()).is_empty());
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+    struct TestRow {
+        id: String,
+        name: String,
+    }
 
-        let one = bounded_candidates([ResolveCandidate::new("id-1", "Only")]);
-        assert_eq!(one, vec![ResolveCandidate::new("id-1", "Only")]);
+    fn row(id: impl Into<String>, name: impl Into<String>) -> TestRow {
+        TestRow {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    fn row_candidate(row: &TestRow) -> ResolveCandidate {
+        ResolveCandidate::new(&row.id, &row.name)
     }
 
     #[test]
-    fn candidate_collection_is_deterministic_and_deduplicates_ids() {
-        let candidates = bounded_candidates([
-            ResolveCandidate::new("id-3", "Gamma"),
-            ResolveCandidate::new("id-2", "alpha"),
-            ResolveCandidate::new("id-1", "Alpha"),
-            ResolveCandidate::new("id-2", "Beta"),
-        ]);
+    fn match_classification_preserves_zero_and_one_items() {
+        assert!(matches!(
+            classify_matches(Vec::<TestRow>::new(), row_candidate),
+            Ok(MatchClassification::None)
+        ));
 
+        let Ok(MatchClassification::Unique(one)) =
+            classify_matches([row("id-1", "Only")], row_candidate)
+        else {
+            panic!("one stable id must resolve uniquely");
+        };
+        assert_eq!(one, row("id-1", "Only"));
+    }
+
+    #[test]
+    fn duplicate_rows_for_one_stable_id_resolve_uniquely() {
+        let Ok(MatchClassification::Unique(unique)) =
+            classify_matches([row("id-1", "Work"), row("id-1", "work")], row_candidate)
+        else {
+            panic!("duplicate rows for one id must not be ambiguous");
+        };
+        assert_eq!(unique, row("id-1", "Work"));
+    }
+
+    #[test]
+    fn distinct_stable_ids_produce_deterministic_candidates() {
+        let Ok(MatchClassification::Ambiguous(candidates)) =
+            classify_matches([row("id-2", "alpha"), row("id-1", "Alpha")], row_candidate)
+        else {
+            panic!("two stable ids must be ambiguous");
+        };
         assert_eq!(
             candidates,
             vec![
                 ResolveCandidate::new("id-1", "Alpha"),
                 ResolveCandidate::new("id-2", "alpha"),
-                ResolveCandidate::new("id-3", "Gamma"),
             ]
         );
     }
 
     #[test]
-    fn candidate_collection_caps_large_ambiguities() {
-        let candidates = bounded_candidates(
-            (0..25)
-                .rev()
-                .map(|index| ResolveCandidate::new(format!("id-{index:02}"), "Same")),
-        );
+    fn candidate_selection_filters_invalid_values_before_its_cap() {
+        let mut candidates = Vec::new();
+        for index in 0..12 {
+            insert_bounded_candidate(
+                &mut candidates,
+                ResolveCandidate::new(format!("bad/{index:02}"), format!("A {index:02}")),
+            );
+        }
+        for index in (0..12).rev() {
+            insert_bounded_candidate(
+                &mut candidates,
+                ResolveCandidate::new(format!("id-{index:02}"), format!("Valid {index:02}")),
+            );
+        }
 
         assert_eq!(candidates.len(), MAX_RESOLVE_CANDIDATES);
         assert_eq!(candidates[0].id(), "id-00");
         assert_eq!(candidates[9].id(), "id-09");
+    }
+
+    #[test]
+    fn invalid_candidates_before_a_valid_match_do_not_hide_it() {
+        let Ok(MatchClassification::Ambiguous(candidates)) = classify_matches(
+            [
+                row("bad/one", "A invalid"),
+                row("bad/two", "B invalid"),
+                row("id-3", "C valid"),
+            ],
+            row_candidate,
+        ) else {
+            panic!("distinct stable ids must remain ambiguous");
+        };
+        assert_eq!(candidates, vec![ResolveCandidate::new("id-3", "C valid")]);
+    }
+
+    #[test]
+    fn unique_scans_fail_explicitly_beyond_the_hard_limit() {
+        let rows = std::iter::repeat_with(|| row("id-1", "Only")).take(MAX_RESOLVE_SCAN_ITEMS + 1);
+        assert!(matches!(
+            classify_matches(rows, row_candidate),
+            Err(ResolutionScanLimit)
+        ));
+    }
+
+    #[tokio::test]
+    async fn paged_type_and_property_scans_return_the_explicit_limit_error() {
+        for obj_type in ["type", "property"] {
+            let page = crate::paged::PagedResult::from_items(
+                std::iter::repeat_with(|| row("id-1", "Only"))
+                    .take(MAX_RESOLVE_SCAN_ITEMS + 1)
+                    .collect(),
+            );
+            let result = scan_paged_matches(page, obj_type, "key", |_| true, row_candidate).await;
+            let Err(AnytypeError::ResolutionLimitExceeded {
+                obj_type: actual_type,
+                key,
+                limit,
+            }) = result
+            else {
+                panic!("{obj_type} scan must return the explicit hard-limit error");
+            };
+            assert_eq!(actual_type, obj_type);
+            assert_eq!(key, "key");
+            assert_eq!(limit, MAX_RESOLVE_SCAN_ITEMS);
+        }
     }
 
     #[test]

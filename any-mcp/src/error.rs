@@ -207,14 +207,14 @@ impl ToolError {
                 let candidates = candidates
                     .iter()
                     .map(ErrorCandidate::try_from)
-                    .collect::<Result<Vec<_>, _>>();
-                return match candidates.and_then(|candidates| {
-                    Self::ambiguous(candidates).map_err(|_| DomainValueError::Empty)
-                }) {
+                    .filter_map(Result::ok)
+                    .take(MAX_ERROR_CANDIDATES);
+                return match Self::ambiguous(candidates) {
                     Ok(error) => AnytypeErrorMapping::Ready(error),
                     Err(_) => AnytypeErrorMapping::AmbiguityRequiresCandidates,
                 };
             }
+            AnytypeError::ResolutionLimitExceeded { .. } => ToolErrorCode::BoundedResult,
             AnytypeError::NotFound { .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
                 code: 400 | 422, ..
@@ -395,6 +395,45 @@ mod tests {
             ToolError::from_anytype(&source),
             AnytypeErrorMapping::AmbiguityRequiresCandidates
         );
+    }
+
+    #[test]
+    fn mixed_anytype_candidates_retain_valid_alternatives() {
+        let source = anytype::error::AnytypeError::Ambiguous {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+            candidates: vec![
+                anytype::resolve::ResolveCandidate::new("unsafe/id", "First"),
+                anytype::resolve::ResolveCandidate::new("space-a", "Roadmap A"),
+                anytype::resolve::ResolveCandidate::new(
+                    "space-b",
+                    "x".repeat(MAX_CANDIDATE_NAME_CHARS + 1),
+                ),
+                anytype::resolve::ResolveCandidate::new("space-c", "Roadmap C"),
+            ],
+        };
+
+        let AnytypeErrorMapping::Ready(error) = ToolError::from_anytype(&source) else {
+            panic!("valid alternatives must survive malformed neighbors");
+        };
+        assert_eq!(error.candidates().len(), 2);
+        assert_eq!(error.candidates()[0].id.as_str(), "space-a");
+        assert_eq!(error.candidates()[1].id.as_str(), "space-c");
+    }
+
+    #[test]
+    fn resolution_scan_limit_maps_to_bounded_result() {
+        let source = anytype::error::AnytypeError::ResolutionLimitExceeded {
+            obj_type: "space".to_owned(),
+            key: "Roadmap".to_owned(),
+            limit: anytype::resolve::MAX_RESOLVE_SCAN_ITEMS,
+        };
+
+        let AnytypeErrorMapping::Ready(error) = ToolError::from_anytype(&source) else {
+            panic!("scan limits must map directly to a bounded-result error");
+        };
+        assert_eq!(error.code(), ToolErrorCode::BoundedResult);
+        assert!(error.candidates().is_empty());
     }
 
     #[test]
