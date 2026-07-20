@@ -1,14 +1,15 @@
 # Orchestrator Notes
 
 - Filter: `mcp`, actionable types bug/chore/task, priorities 0-2.
-- Closed this session: `any-cut`, `any-g8g`, `any-kus`, `any-mtc`, `any-ch6`, and `any-nzd` after local and independent acceptance review.
+- Closed this session: `any-cut`, `any-g8g`, `any-kus`, `any-mtc`, `any-ch6`, `any-nzd`, `any-ce6`, and `any-8dy` after local and independent acceptance review.
 - Audited: all 18 original Phase 1 tickets (`any-kus` through `any-zk6`) plus their concrete anytype-api/any-mcp seams. The deeper seam pass found and corrected missing resolver and response-bound dependencies before handler work.
 - Integrated: reviewed `any-kus` and `any-mtc` stacks in `vsonxszx`; combined 53 tests, clippy, format, rustdoc, dependency tree, auth pings, and protocol initialize/EOF smoke passed.
 - Integrated: reviewed pagination/validation and resolver stacks in `lrvkyvmz`; combined any-mcp 69 tests, anytype 110/1 ignored, clippy, format, rustdoc, downstream checks, dependency tree, live auth pings, and protocol initialize/EOF smoke passed.
 - Dependency corrections: `any-nzd` now blocks `any-inq`, `any-ega`, `any-qwo`, and `any-tb2`, because each accepts resolver-backed space/type/view references. All later mutation/resource consumers are covered transitively; the graph is cycle-clean.
 - Added `any-ce6` (P1 security) to bound generic Anytype JSON response reads before handler-side projection; it blocks all four direct Phase 1 handler roots.
 - Added `any-8dy` (P1 foundation) for common handler encoding, checked continuation, object-summary conversion, and projected-property schemas; it blocks those same handler roots and prevents parallel implementations from drifting.
-- OFIs retained P3: `any-ipy` (safe nested gRPC classification) and `any-8nl` (anytype-api diagnostic redaction); neither blocks REST-backed Phase 1.
-- Ready after exact reconciliation: `any-ce6` and `any-8dy`.
-- Blockers: concrete handlers wait on both explicit foundations; later phases remain deferred P4 design/review work.
-- Next: dispatch `any-ce6` and `any-8dy` in isolated workspaces, independently review fixed revisions, integrate, close, and re-query.
+- Integrated: reviewed bounded-response and shared-handler stacks in `quoysqrx` (`30363198`); combined any-mcp 89 tests, full anytype integration suite and 111 doctests, clippy, format, rustdoc, downstream checks, dependency tree, live dual-protocol auth, and MCP 2026-07-28 initialize smoke passed.
+- Added P3 security OFI `any-zd7` for bounded chat SSE frames and redacted stream URLs. OFIs retained P3: `any-ipy` (safe nested gRPC classification) and `any-8nl` (broader anytype-api diagnostic redaction); none blocks REST-backed Phase 1.
+- Ready after exact reconciliation: `any-inq`, `any-ega`, `any-qwo`, and `any-tb2`.
+- Blockers: none among these four direct handler roots; later phases remain deferred P4 design/review work.
+- Next: dispatch the first three read-handler tickets in isolated workspaces, independently review fixed revisions, integrate, then pick up `any-tb2` and re-query the corrected graph.

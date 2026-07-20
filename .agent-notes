@@ -10,3 +10,7 @@
 [pattern] Resolver scans use an explicit 1,000-row policy: unique/not-found requires complete bounded evidence, ambiguity retains a deterministic safe top ten, and view resolution scans for a later exact ID before classifying names.
 [gotcha] Handler-side pagination/projection does not bound upstream allocation when the HTTP client first calls `response.bytes().await`; enforce response-byte ceilings while reading the Anytype JSON body.
 [pattern] Body-bearing object create/get/delete/update and template-get responses use the document JSON ceiling; lists/search/views use the generic ceiling, errors and raw files have separate policies, and HEAD/304 representation lengths do not imply buffered bodies.
+[pattern] MCP continuation offsets must advance from validated upstream pagination offset+limit, not returned item count; sparse pages otherwise repeat data.
+[invariant] MCP page completion must verify upstream offset and limit exactly match the request and returned count does not exceed the requested limit before issuing any continuation cursor.
+[pattern] Runtime operation diagnostics must enclose upstream calls, handler conversion, and typed result encoding; conversion/encoding failures use static categories and never log error values.
+[pattern] Object discovery uses explicit SummaryOnly/Selected/AllBounded projection modes; AllBounded fails rather than truncating, while cursor projection fingerprints sort/dedup keys even though selected output preserves first-request order.

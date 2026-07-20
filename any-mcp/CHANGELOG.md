@@ -29,6 +29,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Enforce configurable finite Anytype JSON and document response budgets while
   chunks arrive, and map secret-safe oversized-response failures to
   `bounded_result`.
+- Add transport-neutral handler execution/encoding, checked cursor advancement
+  from exact requested/upstream page metadata after bounded result-count
+  checks, and deterministic object summary/property adapters with explicit
+  finite projection modes and closed value schemas.
+- Validate object-summary last-modified timestamps as nonempty bounded RFC 3339
+  date-times at construction, deserialization, and schema boundaries.
+- Classify handler conversion and result-encoding failures inside the runtime
+  operation boundary so diagnostics cannot report false success outcomes.
 
 ### Changed
 
