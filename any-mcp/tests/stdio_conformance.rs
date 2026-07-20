@@ -401,9 +401,13 @@ impl ProtocolProcess {
     }
 
     fn modern_request(&mut self, id: u64, method: &str, params: Value) -> Value {
+        self.modern_request_with_id(json!(id), method, params)
+    }
+
+    fn modern_request_with_id(&mut self, id: Value, method: &str, params: Value) -> Value {
         let request = json!({
             "jsonrpc": "2.0",
-            "id": id,
+            "id": id.clone(),
             "method": method,
             "params": params
         });
@@ -421,17 +425,7 @@ impl ProtocolProcess {
         self.send_modern_request(id, method, request)
     }
 
-    fn unchecked_modern_request(&mut self, id: u64, method: &str, params: Value) -> Value {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params
-        });
-        self.send_modern_request(id, method, request)
-    }
-
-    fn send_modern_request(&mut self, id: u64, method: &str, request: Value) -> Value {
+    fn send_modern_request(&mut self, id: Value, method: &str, request: Value) -> Value {
         self.send(request);
         let response = self.read_frame();
         assert_eq!(response["id"], id, "response id for {method}");
@@ -1035,16 +1029,33 @@ fn run_modern_stdio_acceptance(read_only: bool) {
         json!(["2026-07-28"])
     );
 
-    let mut incomplete_meta = modern_meta();
-    incomplete_meta
+    let mut anonymous_meta = modern_meta();
+    anonymous_meta
         .as_object_mut()
         .unwrap()
         .remove("io.modelcontextprotocol/clientInfo");
-    let incomplete =
-        process.unchecked_modern_request(71, "tools/list", json!({"_meta": incomplete_meta}));
-    assert_eq!(incomplete["error"]["code"], -32602);
+    let anonymous_discover = process.modern_request_with_id(
+        json!(""),
+        "server/discover",
+        json!({"_meta": anonymous_meta.clone()}),
+    );
+    assert_eq!(anonymous_discover["id"], "");
+    assert_eq!(anonymous_discover["result"]["resultType"], "complete");
+    let anonymous_list =
+        process.modern_request(71, "tools/list", json!({"_meta": anonymous_meta.clone()}));
+    assert_eq!(anonymous_list["result"]["resultType"], "complete");
+    let anonymous_tool = process.modern_request(
+        72,
+        "tools/call",
+        json!({
+            "name": "server_status",
+            "arguments": {},
+            "_meta": anonymous_meta
+        }),
+    );
+    assert_structured_result(&anonymous_tool["result"], false);
 
-    let initialize = process.modern_request(72, "initialize", json!({"_meta": modern_meta()}));
+    let initialize = process.modern_request(73, "initialize", json!({"_meta": modern_meta()}));
     assert_eq!(initialize["error"]["code"], -32601);
 
     fixture.arm_hanging_request();
@@ -1067,7 +1078,7 @@ fn run_modern_stdio_acceptance(read_only: bool) {
     let output = process.finish();
     fixture.finish();
     assert_stdout_purity(&output.stdout);
-    assert_exchange_depth(&output.stdout, if read_only { 19 } else { 23 });
+    assert_exchange_depth(&output.stdout, if read_only { 21 } else { 25 });
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("\"id\":80"),
         "modern cancellation suppresses the cancelled request response"
