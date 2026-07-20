@@ -36,3 +36,4 @@ url.workspace = true
 
 [dev-dependencies]
 jsonschema = { version = "0.46.5", default-features = false }
+tiktoken-rs = "0.12.0"

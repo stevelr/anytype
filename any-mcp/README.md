@@ -34,6 +34,7 @@ Operational settings are bounded defensively:
 - `ANY_MCP_PROTOCOL` is absent or exactly `stable` for the production
   initialize-based protocol. Exact value `experimental-2026-07-28` enables the
   stateless preview; every other value fails startup before authentication;
+- `ANY_MCP_PROFILE` accepts exactly `compact` (default) or `standard`;
 - `ANY_MCP_MAX_CONCURRENCY` defaults to 8 and has a maximum of 64;
 - `ANY_MCP_REQUEST_TIMEOUT_SECS` defaults to 30 and has a maximum of 300;
 - `ANY_MCP_STARTUP_TIMEOUT_SECS` defaults to 15 and has a maximum of 120;
@@ -43,6 +44,10 @@ Operational settings are bounded defensively:
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
   MiB, and must be at least the ordinary JSON budget.
+
+Protocol mode, catalog profile, and read-only access are independent startup
+selectors. Each uses an exact fail-closed grammar and cannot be changed by MCP
+input after startup.
 
 The response budgets are enforced while chunks arrive, before workflow
 pagination or projection. A truthful oversized `Content-Length` fails before
@@ -149,16 +154,21 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   metadata filter outside `RUST_LOG`; this whole-prefix filter is required
   defense in depth, not a redundant HTTP-only safeguard.
 
-### Production catalog and read-only mode
+### Production catalog profiles and read-only mode
 
-`tools/list` is a static, cursor-free catalog. Normal mode advertises exactly
-14 tools: `object_archive`, `object_create`, `object_edit`, `object_get`,
+`tools/list` is a static, cursor-free catalog selected once at startup with
+`ANY_MCP_PROFILE`. The default `compact` profile advertises the coherent
+existing-document workflow `server_status`, `object_search`, `object_get`, and
+`object_edit`. Set `ANY_MCP_PROFILE=standard` to advertise exactly 14 tools:
+`object_archive`, `object_create`, `object_edit`, `object_get`,
 `object_search`, `object_update`, `property_list`, `server_status`,
 `space_list`, `tag_list`, `template_list`, `type_list`, `view_list`, and
-`view_object_list`. Read-only mode advertises the same ten read tools while
-omitting the four `object_*` mutations. The catalog is built from the same
-typed contracts used by dispatch, so advertised schemas, annotations, and
-handler routes cannot silently diverge.
+`view_object_list`. `ANY_MCP_READ_ONLY=1` is orthogonal: it omits
+`object_edit` from compact and the four `object_*` mutations from standard.
+The catalog is built once from the same typed contracts used by dispatch and
+then filtered, so a shared tool name has an identical complete description,
+input schema, output schema, annotation, and handler in every profile.
+Unknown or non-Unicode profile values fail startup without echoing their value.
 
 The server also advertises static resource and tool capabilities without
 `listChanged` or resource subscriptions. `resources/templates/list` exposes
@@ -169,8 +179,11 @@ returns one complete bounded Markdown document.
 ### Status and schema discovery handlers
 
 The discovery handlers are exposed as typed production tools. `server_status`
-returns only a parsed, redacted HTTP endpoint, API revision, startup probe
-availability, and enabled toolsets. URL user information, passwords, query
+returns only the selected application profile, read-only state, a parsed and
+redacted HTTP endpoint, API revision, startup probe availability, and enabled
+toolsets. Compact reports `core` and `documents`; standard additionally reports
+`discovery`, `create`, `advanced_mutations`, `properties`, `templates`, and
+`views`. URL user information, passwords, query
 parameters, and fragments are removed before encoding.
 
 `space_list`, `type_list`, `property_list`, `tag_list`, and `template_list`
@@ -495,7 +508,8 @@ runtime and advertises their static capability alongside the tool catalog.
   2026-07-28 adapter.
 - `src/server/headless_integration.rs` — ignored cleanup-safe production-router
   tests against an authenticated headless Anytype server.
-- `tests/snapshots/` — reviewed deterministic normal/read-only tool catalogs,
+- `tests/snapshots/` — reviewed deterministic compact/standard and
+  read-write/read-only tool catalogs,
   including every schema and annotation.
 - `tests/stdio_conformance.rs` — portable production-process protocol
   regression and preview/stable acceptance harness.
@@ -507,7 +521,8 @@ runtime and advertises their static capability alongside the tool catalog.
 ## Testing
 
 The unit suite locks every Phase 1 tool input schema, output schema, and exact
-annotation in deterministic normal and read-only catalog snapshots. A separate
+annotation in all four deterministic profile/read-only catalog snapshots. A
+separate
 fail-closed graph audit resolves only local `#/$defs` references with explicit
 cycle tracking, validates every reachable composition branch, and rejects
 unknown schema forms, strings without `maxLength`, arrays without `maxItems`,
@@ -519,11 +534,26 @@ read-only defense in depth.
 
 Catalog changes are never accepted through an environment variable. Follow
 the explicit regeneration and review procedure in
-[`tests/snapshots/README.md`](tests/snapshots/README.md), then run:
+[`tests/snapshots/README.md`](tests/snapshots/README.md), including its pinned
+`o200k_base` token-count audit. The complete serialized default compact
+`tools/list` result is 9,423 tokens, strictly below 10,000 tokens (5% of the
+documented 200,000-token smallest supported context), with 577 tokens of
+headroom. Its 2% material-growth boundary is 9,612 tokens, retaining 388 tokens
+of headroom. Compact read-only is 8,134 tokens. Exact reviewed baselines also
+measure explicit standard (22,639) and standard read-only (15,408), plus
+schema-valid representative search/get results; any
+count drift fails, and growth of at least 2% requires a recorded material-growth
+rationale. Then run:
 
 ```sh
 cargo test -p any-mcp
 ```
+
+The `.github/workflows/any-mcp.yml` matrix runs the library schema, catalog,
+budget, and unit tests plus the real-process stdio suites on Linux, macOS, and
+Windows. The process harness uses only portable Rust process, TCP, path,
+environment, thread, and channel APIs; it does not depend on Unix signals,
+`/tmp`, executable suffixes, or shell scripts.
 
 ## Headless integration tests
 

@@ -25,7 +25,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::{ProtocolMode, RuntimeConfig},
+    config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
     server::AnyMcpServer,
 };
 
@@ -51,6 +51,7 @@ pub struct RuntimeContext {
     next_correlation_id: Arc<AtomicU64>,
     request_timeout: Duration,
     startup_status: StartupStatus,
+    profile: ApplicationProfile,
     read_only: bool,
 }
 
@@ -60,6 +61,7 @@ impl fmt::Debug for RuntimeContext {
             .debug_struct("RuntimeContext")
             .field("request_timeout", &self.request_timeout)
             .field("startup_status", &self.startup_status)
+            .field("profile", &self.profile)
             .field("read_only", &self.read_only)
             .finish_non_exhaustive()
     }
@@ -93,11 +95,12 @@ impl RuntimeContext {
         )
         .await?;
 
-        Ok(Self::from_parts_with_read_only(
+        Ok(Self::from_parts_with_profile(
             client,
             config.max_concurrency,
             config.request_timeout,
             startup_status,
+            config.profile,
             config.read_only,
         ))
     }
@@ -118,6 +121,12 @@ impl RuntimeContext {
     #[must_use]
     pub const fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Returns the startup-selected application catalog profile.
+    #[must_use]
+    pub const fn profile(&self) -> ApplicationProfile {
+        self.profile
     }
 
     /// Starts process shutdown, rejects new work, and cancels running or
@@ -264,11 +273,30 @@ impl RuntimeContext {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_parts_with_read_only(
         client: AnytypeClient,
         max_concurrency: usize,
         request_timeout: Duration,
         startup_status: StartupStatus,
+        read_only: bool,
+    ) -> Self {
+        Self::from_parts_with_profile(
+            client,
+            max_concurrency,
+            request_timeout,
+            startup_status,
+            ApplicationProfile::Standard,
+            read_only,
+        )
+    }
+
+    pub(crate) fn from_parts_with_profile(
+        client: AnytypeClient,
+        max_concurrency: usize,
+        request_timeout: Duration,
+        startup_status: StartupStatus,
+        profile: ApplicationProfile,
         read_only: bool,
     ) -> Self {
         Self {
@@ -278,6 +306,7 @@ impl RuntimeContext {
             next_correlation_id: Arc::new(AtomicU64::new(1)),
             request_timeout,
             startup_status,
+            profile,
             read_only,
         }
     }

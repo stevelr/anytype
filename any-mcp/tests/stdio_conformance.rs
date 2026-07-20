@@ -49,6 +49,7 @@ const HANG_RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrl
 const RESOURCE_TEMPLATE: &str = "anytype://spaces/{space_id}/objects/{object_id}";
 const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-normal.json");
 const READ_ONLY_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-read-only.json");
+const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-compact.json");
 const MCP_DRAFT_SCHEMA: &str = include_str!("schema/mcp-2026-07-28.json");
 
 static MODERN_REQUEST_SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
@@ -338,14 +339,37 @@ struct ProcessOutput {
 
 impl ProtocolProcess {
     fn start(fixture: &HttpFixture, read_only: bool) -> Self {
-        Self::start_with_protocol(fixture, read_only, None)
+        Self::start_with_options(fixture, Some("standard"), read_only, None)
     }
 
     fn start_preview(fixture: &HttpFixture, read_only: bool) -> Self {
-        Self::start_with_protocol(fixture, read_only, Some("experimental-2026-07-28"))
+        Self::start_with_options(
+            fixture,
+            Some("standard"),
+            read_only,
+            Some("experimental-2026-07-28"),
+        )
     }
 
-    fn start_with_protocol(fixture: &HttpFixture, read_only: bool, protocol: Option<&str>) -> Self {
+    fn start_with_default_profile(fixture: &HttpFixture, read_only: bool) -> Self {
+        Self::start_with_options(fixture, None, read_only, None)
+    }
+
+    fn start_preview_with_profile(fixture: &HttpFixture, profile: &str, read_only: bool) -> Self {
+        Self::start_with_options(
+            fixture,
+            Some(profile),
+            read_only,
+            Some("experimental-2026-07-28"),
+        )
+    }
+
+    fn start_with_options(
+        fixture: &HttpFixture,
+        profile: Option<&str>,
+        read_only: bool,
+        protocol: Option<&str>,
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
         command
             .stdin(Stdio::piped())
@@ -363,6 +387,11 @@ impl ProtocolProcess {
             .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
             .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
             .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
+        if let Some(profile) = profile {
+            command.env("ANY_MCP_PROFILE", profile);
+        } else {
+            command.env_remove("ANY_MCP_PROFILE");
+        }
         if let Some(protocol) = protocol {
             command.env("ANY_MCP_PROTOCOL", protocol);
         } else {
@@ -531,6 +560,18 @@ impl ProtocolProcess {
         self.shutdown(true, true)
             .unwrap_or_else(|error| panic!("bounded protocol process cleanup failed: {error}"))
     }
+}
+
+fn assert_compact_wire_catalog(result: &Value) {
+    let actual = canonical_json(json!({
+        "read_only": false,
+        "tools": result["tools"].clone(),
+    }));
+    let actual = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&actual).expect("serialize compact wire catalog")
+    );
+    assert_eq!(actual, COMPACT_CATALOG_SNAPSHOT);
 }
 
 impl Drop for ProtocolProcess {
@@ -1142,6 +1183,31 @@ fn production_stdio_normal_mode_supports_stateless_2026_revision() {
 #[test]
 fn production_stdio_read_only_mode_supports_stateless_2026_revision() {
     run_modern_stdio_acceptance(true);
+}
+
+#[test]
+fn compact_catalog_is_identical_on_session_and_stateless_transports() {
+    let fixture = HttpFixture::start();
+
+    let mut session = ProtocolProcess::start_with_default_profile(&fixture, false);
+    initialize_legacy_session(&mut session);
+    let session_list = session.request(2, "tools/list", json!({}));
+    assert_compact_wire_catalog(&session_list["result"]);
+    let session_tools = session_list["result"]["tools"].clone();
+    let session_output = session.finish();
+    assert_stdout_purity(&session_output.stdout);
+
+    let mut stateless = ProtocolProcess::start_preview_with_profile(&fixture, "compact", false);
+    let stateless_list = stateless.modern_request(1, "tools/list", json!({"_meta": modern_meta()}));
+    assert_compact_wire_catalog(&stateless_list["result"]);
+    assert_eq!(
+        stateless_list["result"]["tools"], session_tools,
+        "the selected application catalog is independent of protocol transport"
+    );
+    let stateless_output = stateless.finish();
+    assert_stdout_purity(&stateless_output.stdout);
+
+    fixture.finish();
 }
 
 fn assert_exact_decoder_error(response: &Value, code: i64, message: &str) {
