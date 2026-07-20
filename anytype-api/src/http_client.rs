@@ -439,6 +439,18 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// Makes one authenticated JSON DELETE without middleware retries.
+    pub(crate) async fn delete_request_once<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let req = HttpRequest {
+            method: Method::DELETE,
+            path: path.into(),
+            query: Vec::default(),
+            body: None,
+        };
+        self.send_with_limit_and_retries(req, self.response_limits.json_bytes, false)
+            .await
+    }
+
     /// Makes an authenticated DELETE whose successful JSON may contain a
     /// complete document body.
     pub(crate) async fn delete_document_request<T: DeserializeOwned>(

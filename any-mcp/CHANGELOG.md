@@ -41,6 +41,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Collection/view coverage now creates and immediately registers its own
   collection-layout type through the narrow `anytype-api` test fixture instead
   of ambient system schema.
+  Template discovery now creates two cleanup-owned templates through the
+  test-only `anytype-api` fixture and walks `template_list(limit=1)` to a proven
+  terminal page, requiring both exact fixture IDs, stable query-bound cursors,
+  no repeated cursor or item, and a fixed traversal bound.
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
   2.2.0 and protocol revision `2026-07-28`.
 - Add authenticated long-lived Anytype client startup, bounded and cancellable
