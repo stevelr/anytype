@@ -61,7 +61,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   attachment replacement for rich message publishing and full-fidelity reads
 - new `resolve` module: name and id resolution helpers as `AnytypeClient` methods —
   `resolve_space_id`, `resolve_type`, `resolve_type_id`, `resolve_type_ids`,
-  `resolve_type_key`, `resolve_view_id`, `resolve_property_id`, `resolve_chat_target`
+  `resolve_type_key`, `resolve_template`, `resolve_view_id`, `resolve_property_id`, `resolve_chat_target`
   (returns the new `ChatTarget` struct), `resolve_chat_ids`, and `resolve_chat_name`.
   Moved from the anyr cli so all clients share the same "name or id" conventions.
   `ChatTarget` and `DEFAULT_CHAT_NAME` are exported in the prelude.
@@ -73,6 +73,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   possibly false unique/not-found result, preserve direct view-id priority,
   and select candidates independently of upstream row order; safe duplicate
   representatives take precedence over malformed alternatives with the same id
+- bounded template resolution with a direct-id fast path, exact-id precedence,
+  archived exclusion, deterministic stable-id candidate deduplication, checked
+  sparse pagination, and a final GET that verifies space, canonical generic
+  template type id/key, archive, and selected identity while the validated
+  endpoint path establishes the owning object type
 
 ### Changed
 

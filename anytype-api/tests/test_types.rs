@@ -625,6 +625,40 @@ async fn test_types_get_template() -> TestResult<()> {
                     fetched.id, template.id,
                     "template get should match listed template id"
                 );
+                assert_eq!(fetched.space_id, ctx.space_id, "template space identity");
+                assert!(!fetched.archived, "selected template must not be archived");
+                let fetched_type = fetched.r#type.as_ref().expect("template type identity");
+                assert_eq!(
+                    fetched_type.key, "template",
+                    "template objects use the canonical generic template type"
+                );
+                assert!(!fetched_type.id.is_empty(), "template type id identity");
+                assert!(!fetched_type.archived, "template type must not be archived");
+                let resolved = ctx
+                    .client
+                    .resolve_template(&ctx.space_id, &typ.id, &template.id)
+                    .await?;
+                assert_eq!(
+                    resolved.id, template.id,
+                    "direct template resolution should preserve the verified id"
+                );
+                if let Some(name) = template.name.as_deref()
+                    && !name.is_empty()
+                    && templates
+                        .iter()
+                        .filter(|candidate| candidate.name.as_deref() == Some(name))
+                        .count()
+                        == 1
+                {
+                    let resolved = ctx
+                        .client
+                        .resolve_template(&ctx.space_id, &typ.id, name)
+                        .await?;
+                    assert_eq!(
+                        resolved.id, template.id,
+                        "unique template name should resolve to the listed template"
+                    );
+                }
                 return Ok(());
             }
         }

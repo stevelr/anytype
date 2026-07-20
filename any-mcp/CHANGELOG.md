@@ -79,10 +79,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   read-after-write retries, and fixed indeterminate conflict handling for every
   post-dispatch ambiguity.
 - Add typed `object_create` with create annotations, closed and bounded
-  property/icon inputs, non-null omission semantics, bounded space/type/template
-  resolution, explicit read-after-write verification, summary-only output, and
-  a finite process-lifetime idempotency registry that deduplicates concurrent
-  calls and retains post-dispatch uncertainty to prevent duplicate creates.
+  shared property/icon inputs, nonempty names, an exact 100,000-character body
+  ceiling, bounded and revalidated space/type/template resolution, finite
+  semantic read-after-write convergence, summary-only output, fixed first-call
+  indeterminate guidance after possible POST dispatch, and a supervised finite
+  process-lifetime idempotency registry keyed by a versioned canonical
+  fingerprint that cannot strand cohorts or issue a duplicate create; identical
+  retries of terminal indeterminate keys retain the fixed reread guidance,
+  while mismatched fingerprints remain ordinary key conflicts.
 
 ### Changed
 

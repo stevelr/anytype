@@ -10,6 +10,7 @@
 //! - [`resolve_type_id`](AnytypeClient::resolve_type_id) - type key, name, or id → type id
 //! - [`resolve_type_ids`](AnytypeClient::resolve_type_ids) - batch form of [`resolve_type_id`](AnytypeClient::resolve_type_id)
 //! - [`resolve_type_key`](AnytypeClient::resolve_type_key) - type key, name, or id → type key
+//! - [`resolve_template`](AnytypeClient::resolve_template) - template id or unique name → verified template
 //! - [`resolve_view_id`](AnytypeClient::resolve_view_id) - view name or id → view id
 //! - [`resolve_property_id`](AnytypeClient::resolve_property_id) - property key or id → property id
 //! - [`resolve_chat_target`](AnytypeClient::resolve_chat_target) - chat (or space) name or id → [`ChatTarget`]
@@ -48,7 +49,7 @@
 use futures::StreamExt;
 
 use crate::{
-    Result, client::AnytypeClient, error::AnytypeError, types::Type,
+    Result, client::AnytypeClient, error::AnytypeError, objects::Object, types::Type,
     validation::looks_like_object_id,
 };
 
@@ -300,6 +301,101 @@ impl AnytypeClient {
                 Err(ambiguous("type", &key_or_name, candidates))
             }
         }
+    }
+
+    /// Resolves a template id or unique name into a fully verified template.
+    ///
+    /// CID-shaped ids use a direct GET. Other references are scanned with an
+    /// exact 1,000-row budget; an exact id wins even when earlier rows made the
+    /// name ambiguous, exact-case names win over case-insensitive names, and
+    /// duplicate rows with one stable id remain one candidate. The selected
+    /// template is fetched by id and must be non-archived, belong to the
+    /// supplied space, and expose the canonical safe non-archived `template`
+    /// type. The owning type is established by the already validated endpoint
+    /// path; Anytype returns the generic template type on template objects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnytypeError::NotFound`] or [`AnytypeError::Ambiguous`] for a
+    /// complete scan, [`AnytypeError::ResolutionLimitExceeded`] when uniqueness
+    /// cannot be proven inside the scan budget, and a fixed upstream error for
+    /// malformed pagination or mismatched final identity.
+    pub async fn resolve_template(
+        &self,
+        space_id: &str,
+        type_id: &str,
+        template_id_or_name: &str,
+    ) -> Result<Object> {
+        if looks_like_object_id(template_id_or_name) {
+            let template = self
+                .template(space_id, type_id, template_id_or_name)
+                .get()
+                .await?;
+            validate_resolved_template(&template, space_id, template_id_or_name, None)?;
+            return Ok(template);
+        }
+
+        let mut matches = TemplateMatchAccumulator::new(template_id_or_name);
+        let mut scanned = 0usize;
+        let mut offset = 0u32;
+
+        loop {
+            let remaining = MAX_RESOLVE_SCAN_ITEMS.saturating_sub(scanned);
+            if remaining == 0 {
+                return Err(resolution_limit("template", template_id_or_name));
+            }
+            let requested_limit = RESOLVE_PAGE_SIZE.min(remaining as u32);
+            let page = self
+                .templates(space_id, type_id)
+                .limit(requested_limit)
+                .offset(offset)
+                .list()
+                .await?;
+            let returned = page.items.len();
+            let page_limit = page.pagination.limit;
+            if page.pagination.offset != offset
+                || page_limit == 0
+                || page_limit > requested_limit
+                || returned > page_limit as usize
+                || (page.pagination.has_more && returned == 0)
+            {
+                return Err(malformed_template_resolution());
+            }
+
+            for template in page.items.iter().cloned() {
+                scanned += 1;
+                if matches.push(template) {
+                    break;
+                }
+            }
+            if matches.has_exact_id() {
+                break;
+            }
+            if !page.pagination.has_more {
+                break;
+            }
+            if scanned == MAX_RESOLVE_SCAN_ITEMS {
+                return Err(resolution_limit("template", template_id_or_name));
+            }
+            offset = offset
+                .checked_add(page_limit)
+                .filter(|next| *next > offset)
+                .ok_or_else(malformed_template_resolution)?;
+        }
+
+        let selected = match matches.finish() {
+            MatchClassification::None => {
+                return Err(not_found("template", template_id_or_name));
+            }
+            MatchClassification::Unique(template) => template,
+            MatchClassification::Ambiguous(candidates) => {
+                return Err(ambiguous("template", template_id_or_name, candidates));
+            }
+        };
+        let selected_id = selected.id.clone();
+        let template = self.template(space_id, type_id, &selected_id).get().await?;
+        validate_resolved_template(&template, space_id, &selected_id, Some(&selected))?;
+        Ok(template)
     }
 
     /// Resolves a view name or id into a view id, for a list (collection
@@ -742,6 +838,61 @@ struct ViewMatchAccumulator {
     case_insensitive: MatchAccumulator<crate::views::View>,
 }
 
+struct TemplateMatchAccumulator {
+    target: String,
+    exact_id: Option<Object>,
+    exact_names: MatchAccumulator<Object>,
+    case_insensitive_names: MatchAccumulator<Object>,
+}
+
+impl TemplateMatchAccumulator {
+    fn new(target: &str) -> Self {
+        Self {
+            target: target.to_string(),
+            exact_id: None,
+            exact_names: MatchAccumulator::new(),
+            case_insensitive_names: MatchAccumulator::new(),
+        }
+    }
+
+    fn push(&mut self, template: Object) -> bool {
+        if template.archived {
+            return false;
+        }
+        if template.id == self.target {
+            self.exact_id = Some(template);
+            return true;
+        }
+        let Some(name) = template.name.as_deref() else {
+            return false;
+        };
+        let candidate = object_candidate(&template);
+        if !candidate_is_safe(&candidate) {
+            return false;
+        }
+        if name == self.target {
+            self.exact_names.push(template, candidate);
+        } else if name.eq_ignore_ascii_case(&self.target) {
+            self.case_insensitive_names.push(template, candidate);
+        }
+        false
+    }
+
+    const fn has_exact_id(&self) -> bool {
+        self.exact_id.is_some()
+    }
+
+    fn finish(self) -> MatchClassification<Object> {
+        self.exact_id.map_or_else(
+            || match self.exact_names.finish() {
+                MatchClassification::None => self.case_insensitive_names.finish(),
+                exact => exact,
+            },
+            MatchClassification::Unique,
+        )
+    }
+}
+
 impl ViewMatchAccumulator {
     fn new(target: &str) -> Self {
         Self {
@@ -907,6 +1058,48 @@ fn view_candidate(view: &crate::views::View) -> ResolveCandidate {
 
 fn object_candidate(object: &crate::objects::Object) -> ResolveCandidate {
     ResolveCandidate::new(&object.id, object.name.as_deref().unwrap_or(&object.id))
+}
+
+fn validate_resolved_template(
+    template: &Object,
+    space_id: &str,
+    selected_id: &str,
+    listed: Option<&Object>,
+) -> Result<()> {
+    let template_type = validate_template_identity(template, space_id, selected_id)?;
+    if let Some(listed) = listed {
+        let listed_type = validate_template_identity(listed, space_id, selected_id)?;
+        if listed_type.id != template_type.id || listed_type.key != template_type.key {
+            return Err(malformed_template_resolution());
+        }
+    }
+    Ok(())
+}
+
+fn validate_template_identity<'a>(
+    template: &'a Object,
+    space_id: &str,
+    selected_id: &str,
+) -> Result<&'a Type> {
+    let Some(template_type) = template.r#type.as_ref() else {
+        return Err(malformed_template_resolution());
+    };
+    if template.archived
+        || template.id != selected_id
+        || template.space_id != space_id
+        || template_type.archived
+        || template_type.key != "template"
+        || !looks_like_object_id(&template_type.id)
+    {
+        return Err(malformed_template_resolution());
+    }
+    Ok(template_type)
+}
+
+fn malformed_template_resolution() -> AnytypeError {
+    AnytypeError::Other {
+        message: "template resolver received malformed upstream state".to_owned(),
+    }
 }
 
 fn property_candidate(property: &crate::properties::Property) -> ResolveCandidate {
@@ -1151,6 +1344,45 @@ mod tests {
         client
     }
 
+    fn template_value(
+        id: &str,
+        name: Option<&str>,
+        archived: bool,
+        space_id: &str,
+        type_id: &str,
+        type_key: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "archived": archived,
+            "id": id,
+            "name": name,
+            "space_id": space_id,
+            "type": {
+                "archived": false,
+                "id": type_id,
+                "key": type_key
+            }
+        })
+    }
+
+    fn template_page(
+        items: Vec<serde_json::Value>,
+        has_more: bool,
+        limit: u32,
+        offset: u32,
+    ) -> String {
+        serde_json::json!({
+            "items": items,
+            "pagination": {
+                "has_more": has_more,
+                "limit": limit,
+                "offset": offset,
+                "total": 0
+            }
+        })
+        .to_string()
+    }
+
     fn fixture_client_with_grpc(base_url: String, grpc_endpoint: String) -> AnytypeClient {
         let mut config = crate::client::ClientConfig::default()
             .app_name("resolve-grpc-fixture")
@@ -1172,6 +1404,249 @@ mod tests {
     // a valid bare CID object id (59 chars)
     const OBJECT_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y";
     const OTHER_OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+    const TEMPLATE_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+    const OTHER_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4z";
+
+    #[test]
+    fn template_match_later_exact_id_beats_earlier_ambiguous_names() {
+        let object = |id: &str, name: &str| {
+            serde_json::from_value::<Object>(template_value(
+                id,
+                Some(name),
+                false,
+                SPACE_ID,
+                OTHER_ID,
+                "template",
+            ))
+            .expect("valid template object")
+        };
+        let mut matches = TemplateMatchAccumulator::new(OBJECT_ID);
+        assert!(!matches.push(object(TEMPLATE_ID, OBJECT_ID)));
+        assert!(!matches.push(object(OTHER_ID, OBJECT_ID)));
+        assert!(matches.push(object(OBJECT_ID, "Different")));
+
+        let MatchClassification::Unique(selected) = matches.finish() else {
+            panic!("later exact id must override earlier ambiguous names");
+        };
+        assert_eq!(selected.id, OBJECT_ID);
+    }
+
+    #[tokio::test]
+    async fn template_direct_id_uses_one_get_and_revalidates_identity() {
+        let body = serde_json::json!({
+            "template": template_value(TEMPLATE_ID, Some("Starter"), false, SPACE_ID, OTHER_ID, "template")
+        })
+        .to_string();
+        let (base_url, requests) = paged_fixture_server(vec![body]).await;
+
+        let resolved = fixture_client(base_url)
+            .resolve_template(SPACE_ID, OBJECT_ID, TEMPLATE_ID)
+            .await
+            .expect("direct template id");
+        assert_eq!(resolved.id, TEMPLATE_ID);
+        let requests = requests.await.expect("direct template fixture");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/types/{OBJECT_ID}/templates/{TEMPLATE_ID} HTTP/1.1"
+        )));
+    }
+
+    #[tokio::test]
+    async fn template_scan_deduplicates_and_ignores_unsafe_unrelated_rows() {
+        let duplicate = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        let unsafe_row = template_value(
+            "../unsafe",
+            Some("Other"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        let first = template_page(
+            vec![duplicate.clone(), duplicate, unsafe_row],
+            true,
+            RESOLVE_PAGE_SIZE,
+            0,
+        );
+        let unrelated = template_value(
+            OTHER_ID,
+            Some("Different"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        let second = template_page(vec![unrelated], false, RESOLVE_PAGE_SIZE, RESOLVE_PAGE_SIZE);
+        let final_get = serde_json::json!({
+            "template": template_value(TEMPLATE_ID, Some("Starter"), false, SPACE_ID, OTHER_ID, "template")
+        })
+        .to_string();
+        let (base_url, requests) = paged_fixture_server(vec![first, second, final_get]).await;
+
+        let resolved = fixture_client(base_url)
+            .resolve_template(SPACE_ID, OBJECT_ID, "Starter")
+            .await
+            .expect("later exact id");
+        assert_eq!(resolved.id, TEMPLATE_ID);
+        let requests = requests.await.expect("later id fixture");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].contains(&format!("/templates/{TEMPLATE_ID} HTTP/1.1")));
+    }
+
+    #[tokio::test]
+    async fn template_scan_is_exactly_bounded_and_excludes_archived_rows() {
+        let mut bodies = Vec::new();
+        for page_index in 0..10u32 {
+            let offset = page_index * RESOLVE_PAGE_SIZE;
+            let items = (0..RESOLVE_PAGE_SIZE)
+                .map(|_| {
+                    template_value(
+                        OTHER_ID,
+                        Some("Archived match"),
+                        true,
+                        SPACE_ID,
+                        OTHER_ID,
+                        "template",
+                    )
+                })
+                .collect();
+            bodies.push(template_page(items, true, RESOLVE_PAGE_SIZE, offset));
+        }
+        let selected = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        bodies.push(template_page(
+            std::iter::once(selected.clone())
+                .chain((1..10).map(|_| {
+                    template_value(
+                        OTHER_ID,
+                        Some("Other"),
+                        false,
+                        SPACE_ID,
+                        OTHER_ID,
+                        "template",
+                    )
+                }))
+                .collect(),
+            false,
+            10,
+            990,
+        ));
+        bodies.push(serde_json::json!({"template": selected}).to_string());
+        let (base_url, requests) = paged_fixture_server(bodies).await;
+
+        let resolved = fixture_client(base_url)
+            .resolve_template(SPACE_ID, OBJECT_ID, "Starter")
+            .await
+            .expect("match at exact scan boundary");
+        assert_eq!(resolved.id, TEMPLATE_ID);
+        let requests = requests.await.expect("bounded template fixture");
+        assert_eq!(requests.len(), 12);
+        assert!(requests[10].lines().next().unwrap().contains("limit=10"));
+        assert!(requests[10].lines().next().unwrap().contains("offset=990"));
+    }
+
+    #[tokio::test]
+    async fn template_scan_rejects_incomplete_or_mismatched_upstream_state() {
+        let (base_url, requests) =
+            paged_fixture_server(vec![template_page(Vec::new(), true, 10, 0)]).await;
+        let error = fixture_client(base_url)
+            .resolve_template(SPACE_ID, OBJECT_ID, "Missing")
+            .await
+            .expect_err("sparse scan cannot claim completion");
+        assert!(matches!(error, AnytypeError::Other { .. }));
+        assert_eq!(requests.await.expect("sparse fixture").len(), 1);
+
+        let listed = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        let mismatched = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OBJECT_ID,
+            "template",
+        );
+        let bodies = vec![
+            template_page(vec![listed], false, RESOLVE_PAGE_SIZE, 0),
+            serde_json::json!({"template": mismatched}).to_string(),
+        ];
+        let (base_url, requests) = paged_fixture_server(bodies).await;
+        let error = fixture_client(base_url)
+            .resolve_template(SPACE_ID, OBJECT_ID, "Starter")
+            .await
+            .expect_err("final type mismatch");
+        assert!(matches!(error, AnytypeError::Other { .. }));
+        assert_eq!(requests.await.expect("mismatch fixture").len(), 2);
+
+        let mut unsafe_type = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        unsafe_type["type"]["id"] = serde_json::json!("../unsafe");
+        let mut archived_type = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        archived_type["type"]["archived"] = serde_json::json!(true);
+        let wrong_type_key = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "page",
+        );
+        let archived_template = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            true,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        for malformed in [
+            unsafe_type,
+            archived_type,
+            wrong_type_key,
+            archived_template,
+        ] {
+            let body = serde_json::json!({"template": malformed}).to_string();
+            let (base_url, requests) = paged_fixture_server(vec![body]).await;
+            let error = fixture_client(base_url)
+                .resolve_template(SPACE_ID, OBJECT_ID, TEMPLATE_ID)
+                .await
+                .expect_err("unsafe direct template identity");
+            assert!(matches!(error, AnytypeError::Other { .. }));
+            assert_eq!(requests.await.expect("direct mismatch fixture").len(), 1);
+        }
+    }
 
     fn offline_client() -> AnytypeClient {
         // env keystore: no OS keyring or file access, suitable for offline tests
