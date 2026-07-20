@@ -32,7 +32,9 @@ Applications authenticate with Anytype servers using access tokens. One token is
   resolution uses a direct-id GET or an exact 1,000-row scan and re-fetches the
   selected template to verify its space, canonical generic template type
   id/key, and non-archived state; the validated endpoint path establishes the
-  owning object type.
+  owning object type. Malformed rows that match the requested template name
+  fail closed unless a valid row with the same stable id supplies the safe
+  representative.
 - Nested filter expression builder
 - Parameter validation
 - Metrics

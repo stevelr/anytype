@@ -75,9 +75,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   representatives take precedence over malformed alternatives with the same id
 - bounded template resolution with a direct-id fast path, exact-id precedence,
   archived exclusion, deterministic stable-id candidate deduplication, checked
-  sparse pagination, and a final GET that verifies space, canonical generic
-  template type id/key, archive, and selected identity while the validated
-  endpoint path establishes the owning object type
+  sparse pagination, fail-closed accounting for malformed matching rows with
+  safe same-id representative recovery, and a final GET that verifies space,
+  canonical generic template type id/key, archive, and selected identity while
+  the validated endpoint path establishes the owning object type
 
 ### Changed
 
