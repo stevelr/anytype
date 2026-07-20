@@ -235,6 +235,13 @@ responses, exhausted retries, HTTP 408 and unrecognized 4xx/5xx statuses are
 indeterminate after dispatch. The classifier uses only variants and status
 codes and never incorporates upstream text.
 
+The same classifier consumes `anytype-api`'s secret-safe authentication seam:
+explicit nested gRPC authentication rejections return the fixed
+`authentication` result and are definitive after dispatch, while non-auth gRPC
+transport and operation failures remain redacted `upstream` or
+mutation-indeterminate results. `any-mcp` never depends directly on
+`anytype-rpc` or formats its source diagnostics.
+
 ### Object update workflow
 
 The transport-neutral `object_update` handler replaces only fields explicitly

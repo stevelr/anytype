@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Map structurally classified nested Anytype gRPC authentication failures to
+  the fixed secret-safe MCP `authentication` error, including definitive
+  post-dispatch rejection handling, without depending directly on
+  `anytype-rpc` or formatting source diagnostics.
 - Add a bounded dual-era stdio adapter that preserves the rmcp legacy
   initialization lifecycle for current clients and implements stateless MCP
   `2026-07-28` discovery, per-request metadata/version validation, `-32022`
