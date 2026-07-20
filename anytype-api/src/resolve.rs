@@ -46,6 +46,8 @@
 //! # }
 //! ```
 
+use std::collections::HashSet;
+
 use futures::StreamExt;
 
 use crate::{
@@ -335,7 +337,7 @@ impl AnytypeClient {
             return Ok(template);
         }
 
-        let mut matches = TemplateMatchAccumulator::new(template_id_or_name);
+        let mut matches = TemplateMatchAccumulator::new(template_id_or_name, space_id);
         let mut scanned = 0usize;
         let mut offset = 0u32;
 
@@ -383,7 +385,7 @@ impl AnytypeClient {
                 .ok_or_else(malformed_template_resolution)?;
         }
 
-        let selected = match matches.finish() {
+        let selected = match matches.finish()? {
             MatchClassification::None => {
                 return Err(not_found("template", template_id_or_name));
             }
@@ -840,18 +842,20 @@ struct ViewMatchAccumulator {
 
 struct TemplateMatchAccumulator {
     target: String,
+    space_id: String,
     exact_id: Option<Object>,
-    exact_names: MatchAccumulator<Object>,
-    case_insensitive_names: MatchAccumulator<Object>,
+    exact_names: TemplateNameAccumulator,
+    case_insensitive_names: TemplateNameAccumulator,
 }
 
 impl TemplateMatchAccumulator {
-    fn new(target: &str) -> Self {
+    fn new(target: &str, space_id: &str) -> Self {
         Self {
             target: target.to_string(),
+            space_id: space_id.to_string(),
             exact_id: None,
-            exact_names: MatchAccumulator::new(),
-            case_insensitive_names: MatchAccumulator::new(),
+            exact_names: TemplateNameAccumulator::new(),
+            case_insensitive_names: TemplateNameAccumulator::new(),
         }
     }
 
@@ -867,13 +871,12 @@ impl TemplateMatchAccumulator {
             return false;
         };
         let candidate = object_candidate(&template);
-        if !candidate_is_safe(&candidate) {
-            return false;
-        }
+        let safe = candidate_is_safe(&candidate)
+            && validate_template_identity(&template, &self.space_id, &template.id).is_ok();
         if name == self.target {
-            self.exact_names.push(template, candidate);
+            self.exact_names.push(template, candidate, safe);
         } else if name.eq_ignore_ascii_case(&self.target) {
-            self.case_insensitive_names.push(template, candidate);
+            self.case_insensitive_names.push(template, candidate, safe);
         }
         false
     }
@@ -882,15 +885,63 @@ impl TemplateMatchAccumulator {
         self.exact_id.is_some()
     }
 
-    fn finish(self) -> MatchClassification<Object> {
-        self.exact_id.map_or_else(
-            || match self.exact_names.finish() {
-                MatchClassification::None => self.case_insensitive_names.finish(),
-                exact => exact,
-            },
-            MatchClassification::Unique,
-        )
+    fn finish(self) -> Result<MatchClassification<Object>> {
+        if let Some(exact_id) = self.exact_id {
+            return Ok(MatchClassification::Unique(exact_id));
+        }
+        match self.exact_names.finish()? {
+            MatchClassification::None => self.case_insensitive_names.finish(),
+            exact => Ok(exact),
+        }
     }
+}
+
+struct TemplateNameAccumulator {
+    safe_matches: MatchAccumulator<Object>,
+    safe_ids: HashSet<String>,
+    unsafe_ids: HashSet<String>,
+    has_unrepresentable_identity: bool,
+}
+
+impl TemplateNameAccumulator {
+    fn new() -> Self {
+        Self {
+            safe_matches: MatchAccumulator::new(),
+            safe_ids: HashSet::new(),
+            unsafe_ids: HashSet::new(),
+            has_unrepresentable_identity: false,
+        }
+    }
+
+    fn push(&mut self, template: Object, candidate: ResolveCandidate, safe: bool) {
+        if safe {
+            self.unsafe_ids.remove(candidate.id());
+            self.safe_ids.insert(candidate.id().to_owned());
+            self.safe_matches.push(template, candidate);
+            return;
+        }
+
+        let id = candidate.id();
+        if self.safe_ids.contains(id) {
+            return;
+        }
+        if stable_template_identity_is_bounded(id) {
+            self.unsafe_ids.insert(id.to_owned());
+        } else {
+            self.has_unrepresentable_identity = true;
+        }
+    }
+
+    fn finish(self) -> Result<MatchClassification<Object>> {
+        if self.has_unrepresentable_identity || !self.unsafe_ids.is_empty() {
+            return Err(malformed_template_resolution());
+        }
+        Ok(self.safe_matches.finish())
+    }
+}
+
+fn stable_template_identity_is_bounded(id: &str) -> bool {
+    !id.is_empty() && id.chars().count() <= MAX_RESOLVE_CANDIDATE_ID_CHARS
 }
 
 impl ViewMatchAccumulator {
@@ -1420,12 +1471,12 @@ mod tests {
             ))
             .expect("valid template object")
         };
-        let mut matches = TemplateMatchAccumulator::new(OBJECT_ID);
+        let mut matches = TemplateMatchAccumulator::new(OBJECT_ID, SPACE_ID);
         assert!(!matches.push(object(TEMPLATE_ID, OBJECT_ID)));
         assert!(!matches.push(object(OTHER_ID, OBJECT_ID)));
         assert!(matches.push(object(OBJECT_ID, "Different")));
 
-        let MatchClassification::Unique(selected) = matches.finish() else {
+        let MatchClassification::Unique(selected) = matches.finish().expect("safe matches") else {
             panic!("later exact id must override earlier ambiguous names");
         };
         assert_eq!(selected.id, OBJECT_ID);
@@ -1498,6 +1549,92 @@ mod tests {
         let requests = requests.await.expect("later id fixture");
         assert_eq!(requests.len(), 3);
         assert!(requests[2].contains(&format!("/templates/{TEMPLATE_ID} HTTP/1.1")));
+    }
+
+    #[tokio::test]
+    async fn template_scan_fails_closed_for_distinct_unsafe_name_match_in_either_order() {
+        let safe = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        let unsafe_match = template_value(
+            "../SECRET_UNSAFE_ID",
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        let malformed_match = template_value(
+            OTHER_ID,
+            Some("Starter"),
+            false,
+            "../SECRET_BAD_SPACE",
+            OTHER_ID,
+            "template",
+        );
+
+        for conflicting in [unsafe_match, malformed_match] {
+            for items in [
+                vec![conflicting.clone(), safe.clone()],
+                vec![safe.clone(), conflicting.clone()],
+            ] {
+                let (base_url, requests) =
+                    paged_fixture_server(vec![template_page(items, false, RESOLVE_PAGE_SIZE, 0)])
+                        .await;
+                let error = fixture_client(base_url)
+                    .resolve_template(SPACE_ID, OBJECT_ID, "Starter")
+                    .await
+                    .expect_err("malformed distinct match must prevent unique resolution");
+                assert!(matches!(error, AnytypeError::Other { .. }));
+                assert!(!format!("{error:?}").contains("SECRET"));
+                assert_eq!(requests.await.expect("unsafe match fixture").len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn template_scan_uses_safe_same_id_representative_in_either_order() {
+        let safe = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            SPACE_ID,
+            OTHER_ID,
+            "template",
+        );
+        let malformed_duplicate = template_value(
+            TEMPLATE_ID,
+            Some("Starter"),
+            false,
+            "../SECRET_BAD_SPACE",
+            OTHER_ID,
+            "template",
+        );
+        let final_get = serde_json::json!({"template": safe.clone()}).to_string();
+
+        for items in [
+            vec![malformed_duplicate.clone(), safe.clone()],
+            vec![safe.clone(), malformed_duplicate.clone()],
+        ] {
+            let (base_url, requests) = paged_fixture_server(vec![
+                template_page(items, false, RESOLVE_PAGE_SIZE, 0),
+                final_get.clone(),
+            ])
+            .await;
+            let resolved = fixture_client(base_url)
+                .resolve_template(SPACE_ID, OBJECT_ID, "Starter")
+                .await
+                .expect("safe duplicate representative");
+            assert_eq!(resolved.id, TEMPLATE_ID);
+            let requests = requests.await.expect("safe duplicate fixture");
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].contains(&format!("/templates/{TEMPLATE_ID} HTTP/1.1")));
+        }
     }
 
     #[tokio::test]
