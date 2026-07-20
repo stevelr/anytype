@@ -2344,6 +2344,7 @@ mod tests {
                 document_bytes: 128,
                 error_bytes: 1024,
                 file_bytes: 1024,
+                chat_sse_event_bytes: 1024,
             },
         ))
         .unwrap();
@@ -2564,6 +2565,7 @@ mod tests {
                 document_bytes: 64,
                 error_bytes: 64,
                 file_bytes: 64,
+                chat_sse_event_bytes: 64,
             },
         ))
         .unwrap();

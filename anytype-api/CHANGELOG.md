@@ -13,6 +13,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   URLs remain unavailable at every trace level. Malformed and unsupported
   request targets fail closed to a fixed marker. Standard error/config debug
   output and transport error source chains apply the same redaction policy.
+- REST chat SSE streams now enforce a configurable finite per-event buffer
+  ceiling incrementally with checked arithmetic before growth. Transport chunks
+  are not copied into that buffer and may carry multiple bounded events. Exact
+  limits and split delimiters remain valid; delimiter-free or one-over streams
+  terminate with a typed secret-safe error. Stream transport failures retain
+  only the response path and discard raw reqwest errors so Display, Debug, and
+  source chains cannot expose URL userinfo, queries, fragments, tokens, or
+  upstream bodies.
 - direct property-ID reads now offer a metadata-only, cache-independent,
   exact-identity scoped GET that never expands tags; explicit-ID tag lookup
   follows it with a separately paginated 1,000-row scan, validates a stable

@@ -225,8 +225,9 @@ pub mod prelude {
         // HTTP metrics
         cache::AnytypeCache,
         client::{
-            AnytypeClient, ClientConfig, MAX_DOCUMENT_RESPONSE_BYTES, MAX_ERROR_RESPONSE_BYTES,
-            MAX_FILE_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseLimits,
+            AnytypeClient, ClientConfig, MAX_CHAT_SSE_EVENT_BYTES, MAX_DOCUMENT_RESPONSE_BYTES,
+            MAX_ERROR_RESPONSE_BYTES, MAX_FILE_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES,
+            ResponseLimits,
         },
         // Filters, Query parameters, and sorting
         filters::{Condition, Filter, FilterExpression, FilterOperator, Sort, SortDirection},

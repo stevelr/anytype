@@ -1234,6 +1234,7 @@ mod tests {
             document_bytes: 512,
             error_bytes: 512,
             file_bytes: 512,
+            chat_sse_event_bytes: 512,
         };
         let result = object_edit(
             &runtime_with_options(
@@ -1367,6 +1368,7 @@ mod tests {
             document_bytes: 64,
             error_bytes: 64,
             file_bytes: 64,
+            chat_sse_event_bytes: 64,
         };
         let result = object_edit(
             &runtime_with_options(base_url, Duration::from_secs(1), limits, None),

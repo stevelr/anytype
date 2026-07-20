@@ -427,6 +427,11 @@ impl HttpClient {
                 response_limits.file_bytes,
                 MAX_FILE_RESPONSE_BYTES,
             ),
+            (
+                "chat_sse_event_bytes",
+                response_limits.chat_sse_event_bytes,
+                crate::client::MAX_CHAT_SSE_EVENT_BYTES,
+            ),
         ] {
             if limit == 0 || limit > maximum || usize::try_from(limit).is_err() {
                 return Err(AnytypeError::Validation {
@@ -669,11 +674,8 @@ impl HttpClient {
             .headers(headers)
             .send()
             .await
-            .map_err(reqwest::Error::without_url)
-            .map_err(|source| AnytypeError::Http {
-                method: "get".to_owned(),
-                url: path.to_owned(),
-                source,
+            .map_err(|_source| AnytypeError::ChatSseTransport {
+                path: diagnostic_path(path),
             })?;
 
         if !response.status().is_success() {
@@ -1546,6 +1548,7 @@ mod tests {
             document_bytes,
             error_bytes,
             file_bytes: 1024,
+            chat_sse_event_bytes: 1024,
         }
     }
 
@@ -1964,6 +1967,25 @@ mod tests {
                 HttpCredentials::new("test-token"),
             )
             .expect_err("invalid response limit");
+            assert!(matches!(
+                error,
+                crate::error::AnytypeError::Validation { .. }
+            ));
+        }
+
+        for chat_sse_event_bytes in [0, crate::client::MAX_CHAT_SSE_EVENT_BYTES + 1] {
+            let error = HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                "http://127.0.0.1:1".to_string(),
+                ValidationLimits::default(),
+                ResponseLimits {
+                    chat_sse_event_bytes,
+                    ..ResponseLimits::default()
+                },
+                1,
+                HttpCredentials::new("test-token"),
+            )
+            .expect_err("invalid chat SSE event limit");
             assert!(matches!(
                 error,
                 crate::error::AnytypeError::Validation { .. }

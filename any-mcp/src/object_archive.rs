@@ -1146,6 +1146,7 @@ mod tests {
                     document_bytes: 512,
                     error_bytes: 64,
                     file_bytes: 64,
+                    chat_sse_event_bytes: 64,
                 },
             );
             let result = object_archive(
