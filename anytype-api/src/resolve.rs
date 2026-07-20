@@ -19,7 +19,9 @@
 //! Shared conventions:
 //!
 //! - A value that already looks like an object id ([`looks_like_object_id`]) is
-//!   passed through without a server round trip.
+//!   usually passed through without a server round trip. Resolvers that must
+//!   return type metadata perform one cache-independent scoped type GET and
+//!   require the returned type ID to match exactly.
 //! - For types, a leading `@` forces key interpretation (`@page` means the
 //!   type with key `page`), and a value starting with an uppercase ascii
 //!   letter is matched case-insensitively against type *names*.
@@ -165,6 +167,8 @@ impl AnytypeClient {
     ///
     /// Accepts `@key` (explicit key), a type id, a Name (uppercase first
     /// letter, matched case-insensitively against type names), or a key.
+    /// An explicit type id performs exactly one cache-independent scoped GET;
+    /// it never primes the all-types cache and rejects a mismatched response.
     ///
     /// # Errors
     /// - [`AnytypeError::NotFound`] if nothing matches
@@ -183,7 +187,7 @@ impl AnytypeClient {
             };
         }
         if looks_like_object_id(type_key_or_id) {
-            return self.get_type(space_id, type_key_or_id).get().await;
+            return self.get_type(space_id, type_key_or_id).get_direct().await;
         }
         if starts_with_uppercase(type_key_or_id) {
             return self.resolve_type_by_name(space_id, type_key_or_id).await;
@@ -263,7 +267,9 @@ impl AnytypeClient {
     /// Resolves a type key, name, or id into a type key.
     ///
     /// Same matching rules as [`resolve_type`](AnytypeClient::resolve_type);
-    /// a `@key` value is unwrapped without a server round trip.
+    /// a `@key` value is unwrapped without a server round trip. An explicit
+    /// type id performs the same single cache-independent, identity-checked
+    /// GET as `resolve_type`.
     ///
     /// # Errors
     /// - [`AnytypeError::NotFound`] if nothing matches
@@ -278,7 +284,7 @@ impl AnytypeClient {
             return Ok(stripped.to_string());
         }
         if looks_like_object_id(&key_or_name) {
-            let typ = self.get_type(space_id, &key_or_name).get().await?;
+            let typ = self.get_type(space_id, &key_or_name).get_direct().await?;
             return Ok(typ.key);
         }
         if starts_with_uppercase(&key_or_name) {
@@ -1051,6 +1057,7 @@ mod tests {
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
     // a valid bare CID object id (59 chars)
     const OBJECT_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y";
+    const OTHER_OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
 
     fn offline_client() -> AnytypeClient {
         // env keystore: no OS keyring or file access, suitable for offline tests
@@ -1231,6 +1238,93 @@ mod tests {
             "unexpected property request: {request_line}"
         );
         assert!(request_line.contains("limit=99"), "{request_line}");
+    }
+
+    #[tokio::test]
+    async fn explicit_type_id_resolution_uses_one_direct_get_with_cache_enabled() {
+        for resolve_key in [false, true] {
+            let body = serde_json::json!({
+                "type": {
+                    "archived": false,
+                    "id": OBJECT_ID,
+                    "key": "page",
+                    "name": "Page"
+                }
+            })
+            .to_string();
+            let (base_url, requests) = paged_fixture_server(vec![body]).await;
+            let client = fixture_client(base_url);
+            assert!(
+                client.cache().is_enabled(),
+                "fixture must exercise cache-on behavior"
+            );
+
+            if resolve_key {
+                assert_eq!(
+                    client
+                        .resolve_type_key(SPACE_ID, OBJECT_ID)
+                        .await
+                        .expect("direct type key"),
+                    "page"
+                );
+            } else {
+                assert_eq!(
+                    client
+                        .resolve_type(SPACE_ID, OBJECT_ID)
+                        .await
+                        .expect("direct type")
+                        .id,
+                    OBJECT_ID
+                );
+            }
+
+            let requests = requests.await.expect("direct type fixture task");
+            assert_eq!(requests.len(), 1);
+            let request_line = requests[0].lines().next().expect("type request line");
+            assert_eq!(
+                request_line,
+                format!("GET /v1/spaces/{SPACE_ID}/types/{OBJECT_ID} HTTP/1.1")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_type_id_resolution_rejects_safe_mismatched_identity() {
+        let body = serde_json::json!({
+            "type": {
+                "archived": false,
+                "id": OTHER_OBJECT_ID,
+                "key": "page",
+                "name": "Page"
+            }
+        })
+        .to_string();
+        let (base_url, requests) = paged_fixture_server(vec![body]).await;
+        let client = fixture_client(base_url);
+        assert!(
+            client.cache().is_enabled(),
+            "fixture must exercise cache-on behavior"
+        );
+
+        let error = client
+            .resolve_type(SPACE_ID, OBJECT_ID)
+            .await
+            .expect_err("a mismatched direct response must fail closed");
+        let AnytypeError::Other { message } = &error else {
+            panic!("identity mismatch must be an upstream error: {error}");
+        };
+        assert_eq!(message, "Anytype returned a mismatched type identity");
+        let display = error.to_string();
+        assert!(!display.contains(OBJECT_ID));
+        assert!(!display.contains(OTHER_OBJECT_ID));
+
+        let requests = requests.await.expect("mismatched type fixture task");
+        assert_eq!(requests.len(), 1);
+        let request_line = requests[0].lines().next().expect("type request line");
+        assert_eq!(
+            request_line,
+            format!("GET /v1/spaces/{SPACE_ID}/types/{OBJECT_ID} HTTP/1.1")
+        );
     }
 
     #[tokio::test]

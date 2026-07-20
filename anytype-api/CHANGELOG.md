@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- explicit type-ID metadata resolution now performs one cache-independent
+  scoped GET and rejects mismatched returned type identities, avoiding an
+  unbounded all-types cache prime in bounded protocol consumers
 - automatic HTTP retries now apply only to methods already classified as
   replay-safe; `POST` and `PATCH` mutations return 429, timeout-status, server,
   and transport failures after exactly one send instead of replaying a write;

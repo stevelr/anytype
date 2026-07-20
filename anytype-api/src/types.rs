@@ -64,7 +64,7 @@ use crate::{
     Result,
     cache::AnytypeCache,
     client::AnytypeClient,
-    error::{CacheDisabledSnafu, NotFoundSnafu, ValidationSnafu},
+    error::{CacheDisabledSnafu, NotFoundSnafu, OtherSnafu, ValidationSnafu},
     filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
@@ -288,6 +288,32 @@ impl TypeRequest {
             }
             .fail();
         }
+        self.fetch_direct().await
+    }
+
+    /// Retrieves the type with one cache-independent HTTP request.
+    ///
+    /// Unlike [`get`](Self::get), this method neither reads nor primes the
+    /// in-memory type cache. It validates the scoped space and type IDs before
+    /// dispatch, then rejects a successful response whose type ID differs from
+    /// the requested ID. This is useful for bounded resolver and protocol
+    /// paths that must not turn a single-ID lookup into an all-types scan.
+    ///
+    /// # Returns
+    /// The type returned for the exact scoped type endpoint.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::NotFound`] if the type doesn't exist
+    /// - [`AnytypeError::Validation`] if either ID is invalid
+    /// - [`AnytypeError::Other`] if the upstream response identity does not
+    ///   match the scoped request
+    pub async fn get_direct(self) -> Result<Type> {
+        self.limits.validate_id(&self.space_id, "space_id")?;
+        self.limits.validate_id(&self.type_id, "type_id")?;
+        self.fetch_direct().await
+    }
+
+    async fn fetch_direct(&self) -> Result<Type> {
         let response: TypeResponse = self
             .client
             .get_request(
@@ -295,6 +321,12 @@ impl TypeRequest {
                 QueryWithFilters::default(),
             )
             .await?;
+        if response.type_.id != self.type_id {
+            return OtherSnafu {
+                message: "Anytype returned a mismatched type identity".to_string(),
+            }
+            .fail();
+        }
         Ok(response.type_)
     }
 
