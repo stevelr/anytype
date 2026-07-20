@@ -147,6 +147,15 @@ impl ToolError {
         Self::from_code(ToolErrorCode::Validation)
     }
 
+    /// Creates the fixed error returned when a mutation reaches a read-only
+    /// handler seam.
+    #[must_use]
+    pub const fn read_only() -> Self {
+        Self::validation_message(
+            "This Anytype server is read-only. Mutating workflows are disabled.",
+        )
+    }
+
     /// Creates a validation error from fixed, secret-free server text.
     pub(crate) const fn validation_message(message: &'static str) -> Self {
         Self {

@@ -37,6 +37,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   date-times at construction, deserialization, and schema boundaries.
 - Classify handler conversion and result-encoding failures inside the runtime
   operation boundary so diagnostics cannot report false success outcomes.
+- Add the typed `object_archive` soft-delete workflow with destructive
+  annotations, pre-I/O read-only enforcement, safe resolver/response identity
+  validation, and a minimal verified archived-state result.
 
 ### Changed
 
