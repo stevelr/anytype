@@ -121,6 +121,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   stdout/stderr purity checks. Freeze modern MCP 2026-07-28 discovery and
   malformed-JSON parse handling as ignored acceptance tests until their
   tracked blockers are implemented, without claiming conformance prematurely.
+- Bound each captured protocol frame, diagnostic line, aggregate stream, and
+  in-process frame queue; make process and fixture teardown close, kill, wait,
+  and join every owned worker on success and failure. Assert exact response
+  counts separately from byte purity and require JSON-RPC 2.0 on every stdout
+  object.
 - Add reviewed deterministic normal/read-only catalog snapshots, an independent
   fail-closed local-reference graph audit for recursive schema bounds and exact
   annotation audits, exact character/byte boundary coverage, exhaustive Anytype

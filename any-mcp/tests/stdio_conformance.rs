@@ -15,6 +15,7 @@
 //! yet satisfy.
 
 use std::{
+    any::Any,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     process::{Child, ChildStdin, Command, Stdio},
@@ -31,6 +32,12 @@ use serde_json::{Value, json};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const FRAME_QUEUE_CAPACITY: usize = 32;
+const MAX_STDOUT_LINE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+const MAX_STDERR_BYTES: usize = 1024 * 1024;
+const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const HTTP_TOKEN: &str = "conformance-http-token-must-never-be-logged";
 const INPUT_SECRET: &str = "conformance-input-secret-must-never-be-logged";
 const DOCUMENT_BODY: &str = "# conformance document body must stay off stderr";
@@ -96,6 +103,8 @@ impl HttpFixture {
         let thread_arm = arm_hang.clone();
         let thread_release = release_hangs.clone();
         let accept_thread = thread::spawn(move || {
+            let mut workers = Vec::new();
+            let mut accept_error = None;
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
@@ -104,17 +113,34 @@ impl HttpFixture {
                         let release = thread_release.clone();
                         let claimed = hang_claimed.clone();
                         let started = hang_tx.clone();
-                        thread::spawn(move || {
+                        workers.push(thread::spawn(move || {
                             handle_http_connection(
                                 stream, &stop, &arm, &release, &claimed, &started,
                             );
-                        });
+                        }));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(POLL_INTERVAL);
                     }
-                    Err(error) => panic!("HTTP fixture accept failed: {error}"),
+                    Err(error) => {
+                        accept_error = Some(error);
+                        break;
+                    }
                 }
+            }
+            let mut first_panic = None;
+            for worker in workers {
+                if let Err(payload) = worker.join()
+                    && first_panic.is_none()
+                {
+                    first_panic = Some(payload);
+                }
+            }
+            if let Some(payload) = first_panic {
+                std::panic::resume_unwind(payload);
+            }
+            if let Some(error) = accept_error {
+                panic!("HTTP fixture accept failed: {error}");
             }
         });
         Self {
@@ -140,14 +166,28 @@ impl HttpFixture {
     fn release_hanging_requests(&self) {
         self.release_hangs.store(true, Ordering::SeqCst);
     }
+
+    fn shutdown(&mut self) -> std::thread::Result<()> {
+        self.release_hangs.store(true, Ordering::SeqCst);
+        self.stop.store(true, Ordering::SeqCst);
+        self.accept_thread
+            .take()
+            .map_or(Ok(()), |handle| handle.join())
+    }
+
+    fn finish(mut self) {
+        if let Err(payload) = self.shutdown() {
+            std::panic::resume_unwind(payload);
+        }
+    }
 }
 
 impl Drop for HttpFixture {
     fn drop(&mut self) {
-        self.release_hangs.store(true, Ordering::SeqCst);
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.accept_thread.take() {
-            handle.join().expect("join HTTP fixture accept thread");
+        if let Err(payload) = self.shutdown()
+            && !thread::panicking()
+        {
+            std::panic::resume_unwind(payload);
         }
     }
 }
@@ -168,17 +208,20 @@ fn handle_http_connection(
         .expect("HTTP fixture write timeout");
     let mut request = Vec::new();
     let mut buffer = [0_u8; 2048];
-    while request.len() <= 64 * 1024 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
-        let read = stream.read(&mut buffer).expect("read HTTP fixture request");
+    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+        let remaining = MAX_HTTP_REQUEST_BYTES
+            .checked_sub(request.len())
+            .expect("HTTP fixture request is bounded");
+        assert!(remaining > 0, "HTTP fixture request is bounded");
+        let read_limit = remaining.min(buffer.len());
+        let read = stream
+            .read(&mut buffer[..read_limit])
+            .expect("read HTTP fixture request");
         if read == 0 {
             return;
         }
         request.extend_from_slice(&buffer[..read]);
     }
-    assert!(
-        request.len() <= 64 * 1024,
-        "HTTP fixture request is bounded"
-    );
     let request = String::from_utf8(request).expect("HTTP fixture request UTF-8");
     let expected_authorization = format!("authorization: Bearer {HTTP_TOKEN}");
     assert!(
@@ -249,7 +292,7 @@ fn respond_json(stream: &mut TcpStream, status: &str, body: Value) {
 }
 
 struct ProtocolProcess {
-    child: Child,
+    child: Option<Child>,
     stdin: Option<ChildStdin>,
     frames: mpsc::Receiver<Vec<u8>>,
     stdout_thread: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
@@ -284,29 +327,13 @@ impl ProtocolProcess {
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = child.stdout.take().expect("child stdout");
         let stderr = child.stderr.take().expect("child stderr");
-        let (frame_tx, frames) = mpsc::channel();
-        let stdout_thread = thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut all = Vec::new();
-            loop {
-                let mut line = Vec::new();
-                let read = reader.read_until(b'\n', &mut line)?;
-                if read == 0 {
-                    break;
-                }
-                all.extend_from_slice(&line);
-                let _ = frame_tx.send(line);
-            }
-            Ok(all)
-        });
+        let (frame_tx, frames) = mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
+        let stdout_thread = thread::spawn(move || read_stdout(stdout, &frame_tx));
         let stderr_thread = thread::spawn(move || {
-            let mut stderr = stderr;
-            let mut all = Vec::new();
-            stderr.read_to_end(&mut all)?;
-            Ok(all)
+            read_bounded_stream(stderr, MAX_STDERR_LINE_BYTES, MAX_STDERR_BYTES)
         });
         Self {
-            child,
+            child: Some(child),
             stdin: Some(stdin),
             frames,
             stdout_thread: Some(stdout_thread),
@@ -351,39 +378,242 @@ impl ProtocolProcess {
         serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("stdout line is one JSON frame")
     }
 
-    fn finish(mut self) -> ProcessOutput {
+    fn shutdown(&mut self, graceful: bool, require_success: bool) -> Result<ProcessOutput, String> {
         drop(self.stdin.take());
-        let deadline = Instant::now() + DEADLINE;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().expect("poll child status") {
-                break status;
+        let mut errors = Vec::new();
+        let status = self.child.take().and_then(|mut child| {
+            if graceful {
+                let deadline = Instant::now() + DEADLINE;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break Some(status),
+                        Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+                        Ok(None) => {
+                            errors.push("any-mcp did not exit after clean stdin EOF".to_owned());
+                            if let Err(error) = child.kill() {
+                                errors.push(format!("kill hung any-mcp child: {error}"));
+                            }
+                            break match child.wait() {
+                                Ok(status) => Some(status),
+                                Err(error) => {
+                                    errors.push(format!("wait for killed any-mcp child: {error}"));
+                                    None
+                                }
+                            };
+                        }
+                        Err(error) => {
+                            errors.push(format!("poll any-mcp child status: {error}"));
+                            if let Err(kill_error) = child.kill() {
+                                errors.push(format!(
+                                    "kill any-mcp child after poll error: {kill_error}"
+                                ));
+                            }
+                            break match child.wait() {
+                                Ok(status) => Some(status),
+                                Err(wait_error) => {
+                                    errors.push(format!("wait for any-mcp child: {wait_error}"));
+                                    None
+                                }
+                            };
+                        }
+                    }
+                }
+            } else {
+                if let Err(error) = child.kill() {
+                    errors.push(format!("kill dropped any-mcp child: {error}"));
+                }
+                match child.wait() {
+                    Ok(status) => Some(status),
+                    Err(error) => {
+                        errors.push(format!("wait for dropped any-mcp child: {error}"));
+                        None
+                    }
+                }
             }
-            if Instant::now() >= deadline {
-                self.child.kill().expect("kill hung conformance child");
-                panic!("any-mcp did not exit after clean stdin EOF");
-            }
-            thread::sleep(POLL_INTERVAL);
-        };
-        assert!(
-            status.success(),
-            "any-mcp exits successfully after stdin EOF"
-        );
-        let stdout = self
-            .stdout_thread
-            .take()
-            .expect("stdout reader thread")
-            .join()
-            .expect("join stdout reader")
-            .expect("read stdout");
-        let stderr = self
-            .stderr_thread
-            .take()
-            .expect("stderr reader thread")
-            .join()
-            .expect("join stderr reader")
-            .expect("read stderr");
-        ProcessOutput { stdout, stderr }
+        });
+        if require_success
+            && let Some(status) = status
+            && !status.success()
+        {
+            errors.push(format!(
+                "any-mcp exited unsuccessfully after stdin EOF: {status}"
+            ));
+        }
+
+        let stdout = join_reader(self.stdout_thread.take(), "stdout", &mut errors);
+        let stderr = join_reader(self.stderr_thread.take(), "stderr", &mut errors);
+        if errors.is_empty() {
+            Ok(ProcessOutput { stdout, stderr })
+        } else {
+            Err(errors.join("; "))
+        }
     }
+
+    fn finish(mut self) -> ProcessOutput {
+        self.shutdown(true, true)
+            .unwrap_or_else(|error| panic!("bounded protocol process cleanup failed: {error}"))
+    }
+}
+
+impl Drop for ProtocolProcess {
+    fn drop(&mut self) {
+        if (self.child.is_some()
+            || self.stdin.is_some()
+            || self.stdout_thread.is_some()
+            || self.stderr_thread.is_some())
+            && let Err(error) = self.shutdown(false, false)
+            && !thread::panicking()
+        {
+            panic!("bounded dropped protocol process cleanup failed: {error}");
+        }
+    }
+}
+
+fn read_stdout(stdout: impl Read, frames: &mpsc::SyncSender<Vec<u8>>) -> std::io::Result<Vec<u8>> {
+    let mut reader = BufReader::with_capacity(8 * 1024, stdout);
+    let mut all = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if !line.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stdout ended with an unterminated protocol frame",
+                ));
+            }
+            return Ok(all);
+        }
+        let chunk_len = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        let next_line_len = line
+            .len()
+            .checked_add(chunk_len)
+            .ok_or_else(|| std::io::Error::other("stdout line length overflow"))?;
+        if next_line_len > MAX_STDOUT_LINE_BYTES {
+            return Err(std::io::Error::other(
+                "stdout protocol frame exceeds byte cap",
+            ));
+        }
+        let next_total = all
+            .len()
+            .checked_add(chunk_len)
+            .ok_or_else(|| std::io::Error::other("stdout aggregate length overflow"))?;
+        if next_total > MAX_STDOUT_BYTES {
+            return Err(std::io::Error::other("stdout exceeds aggregate byte cap"));
+        }
+        let complete = available[chunk_len - 1] == b'\n';
+        line.extend_from_slice(&available[..chunk_len]);
+        all.extend_from_slice(&available[..chunk_len]);
+        reader.consume(chunk_len);
+        if complete {
+            frames
+                .try_send(std::mem::take(&mut line))
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "bounded stdout frame queue unavailable: {error}"
+                    ))
+                })?;
+        }
+    }
+}
+
+fn read_bounded_stream(
+    mut stream: impl Read,
+    max_line_bytes: usize,
+    max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut all = Vec::new();
+    let mut line_bytes = 0_usize;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(all);
+        }
+        let next_total = all
+            .len()
+            .checked_add(read)
+            .ok_or_else(|| std::io::Error::other("diagnostic aggregate length overflow"))?;
+        if next_total > max_bytes {
+            return Err(std::io::Error::other(
+                "diagnostic stream exceeds aggregate byte cap",
+            ));
+        }
+        for byte in &buffer[..read] {
+            line_bytes = line_bytes
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("diagnostic line length overflow"))?;
+            if line_bytes > max_line_bytes {
+                return Err(std::io::Error::other("diagnostic line exceeds byte cap"));
+            }
+            if *byte == b'\n' {
+                line_bytes = 0;
+            }
+        }
+        all.extend_from_slice(&buffer[..read]);
+    }
+}
+
+fn join_reader(
+    handle: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    name: &str,
+    errors: &mut Vec<String>,
+) -> Vec<u8> {
+    let Some(handle) = handle else {
+        return Vec::new();
+    };
+    match handle.join() {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            errors.push(format!("read bounded {name}: {error}"));
+            Vec::new()
+        }
+        Err(payload) => {
+            errors.push(format!(
+                "{name} reader panicked: {}",
+                panic_payload(&payload)
+            ));
+            Vec::new()
+        }
+    }
+}
+
+fn panic_payload(payload: &Box<dyn Any + Send>) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+}
+
+#[test]
+fn capture_helpers_enforce_line_and_aggregate_limits() {
+    let line = vec![b'x'; MAX_STDERR_LINE_BYTES + 1];
+    let line_error = read_bounded_stream(
+        std::io::Cursor::new(line),
+        MAX_STDERR_LINE_BYTES,
+        MAX_STDERR_BYTES,
+    )
+    .expect_err("oversized diagnostic line is rejected");
+    assert!(line_error.to_string().contains("line exceeds byte cap"));
+
+    let aggregate = vec![b'\n'; MAX_STDERR_BYTES + 1];
+    let aggregate_error = read_bounded_stream(
+        std::io::Cursor::new(aggregate),
+        MAX_STDERR_LINE_BYTES,
+        MAX_STDERR_BYTES,
+    )
+    .expect_err("oversized diagnostic aggregate is rejected");
+    assert!(aggregate_error.to_string().contains("aggregate byte cap"));
+
+    let (frame_tx, _frames) = mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
+    let oversized_frame = vec![b'x'; MAX_STDOUT_LINE_BYTES + 1];
+    let frame_error = read_stdout(std::io::Cursor::new(oversized_frame), &frame_tx)
+        .expect_err("oversized stdout frame is rejected before allocation past its cap");
+    assert!(frame_error.to_string().contains("frame exceeds byte cap"));
 }
 
 fn assert_structured_result(result: &Value, is_error: bool) {
@@ -400,17 +630,30 @@ fn assert_structured_result(result: &Value, is_error: bool) {
 }
 
 fn assert_stdout_purity(stdout: &[u8]) {
-    assert!(!stdout.is_empty(), "protocol run emitted responses");
-    let mut frame_count = 0;
     for line in stdout.split_inclusive(|byte| *byte == b'\n') {
-        frame_count += 1;
         assert_eq!(line.last(), Some(&b'\n'), "final frame is LF terminated");
         assert_eq!(line.first(), Some(&b'{'), "stdout has no diagnostic prefix");
         assert_ne!(line.get(line.len().saturating_sub(2)), Some(&b'\r'));
-        serde_json::from_slice::<Value>(&line[..line.len() - 1])
+        let frame = serde_json::from_slice::<Value>(&line[..line.len() - 1])
             .expect("every stdout byte belongs to a JSON-RPC frame");
+        assert!(frame.is_object(), "every stdout frame is a JSON object");
+        assert_eq!(
+            frame.get("jsonrpc"),
+            Some(&json!("2.0")),
+            "every stdout object declares JSON-RPC 2.0"
+        );
     }
-    assert!(frame_count >= 10, "substantial protocol exchange completed");
+}
+
+fn assert_exchange_depth(stdout: &[u8], expected_frames: usize) {
+    assert_eq!(
+        stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count(),
+        expected_frames,
+        "protocol exchange emitted the exact expected response count"
+    );
 }
 
 fn initialize_legacy_session(process: &mut ProtocolProcess) {
@@ -450,6 +693,8 @@ fn run_legacy_stdio_regression(read_only: bool) {
     initialize_legacy_session(&mut process);
 
     let listed = process.request(2, "tools/list", json!({}));
+    // After any-c34 integrates, compare this complete wire catalog with its
+    // reviewed canonical fixtures instead of duplicating those fixtures here.
     let names = listed["result"]["tools"]
         .as_array()
         .expect("tools array")
@@ -567,7 +812,9 @@ fn run_legacy_stdio_regression(read_only: bool) {
     assert_eq!(invalid_request["error"]["code"], -32600);
 
     let output = process.finish();
+    fixture.finish();
     assert_stdout_purity(&output.stdout);
+    assert_exchange_depth(&output.stdout, if read_only { 19 } else { 23 });
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("\"id\":80"),
         "rmcp cancellation suppresses the cancelled request response"
@@ -618,7 +865,9 @@ fn advertised_2026_revision_supports_stateless_server_discovery() {
         READ_ONLY_TOOLS.len()
     );
     let output = process.finish();
+    fixture.finish();
     assert_stdout_purity(&output.stdout);
+    assert_exchange_depth(&output.stdout, 2);
 }
 
 #[test]
@@ -636,5 +885,7 @@ fn malformed_json_returns_parse_error_and_preserves_the_stream() {
     let ping = process.request(2, "ping", json!({}));
     assert_eq!(ping["result"], json!({}));
     let output = process.finish();
+    fixture.finish();
     assert_stdout_purity(&output.stdout);
+    assert_exchange_depth(&output.stdout, 3);
 }
