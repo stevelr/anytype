@@ -162,6 +162,17 @@ also rejects stale direct calls before resolver or upstream I/O when a future
 production catalog selects read-only operation; environment parsing and
 catalog filtering are intentionally owned by the catalog integration phase.
 
+### Shared mutation values
+
+Object create and update use one closed property and icon contract. Property
+keys and relation identifiers are path-safe and bounded, scalar values are
+finite, numbers and RFC 3339 timestamps have canonical semantic forms, and
+multi-select, file, and object identifiers are sorted and deduplicated after a
+raw-input cap. Empty string and list clears can match an omitted returned
+property only after the handler validates that key and format against the
+effective object type; select, number, date, icon, and name clears are not
+invented where the upstream API has no distinct supported form.
+
 ### View discovery workflows
 
 The transport-neutral `view_list` and `view_object_list` handlers provide one

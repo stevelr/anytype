@@ -17,6 +17,7 @@ pub mod domain;
 pub mod error;
 pub mod handler_support;
 pub mod logging;
+pub mod mutation_value;
 pub mod object_archive;
 pub mod object_output;
 pub mod object_read;

@@ -53,6 +53,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Reject explicit null for every omittable object-read input, validate file
   and object filter operands as safe ids before I/O, and revalidate resolved
   type keys before cursor binding or search dispatch.
+- Add one shared, strictly bounded mutation-value contract with deterministic
+  number, date, property, icon, and set-ID normalization plus semantic
+  read-after-write comparison for future object create and update handlers.
 - Add the typed `object_archive` soft-delete workflow with destructive
   annotations, pre-I/O read-only enforcement, safe resolver/response identity
   validation, and a minimal verified archived-state result.
