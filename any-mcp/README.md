@@ -115,7 +115,52 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   `anytype` and `rmcp` target prefixes that can expose protocol or upstream
   payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.
 
-Workflow tools and resources are added in subsequent Phase 1 work.
+The remaining workflow tools and resources are added in subsequent Phase 1
+work.
+
+### Status and schema discovery handlers
+
+The first read handlers are available as transport-neutral, typed operations;
+production catalog/router registration is kept separate. `server_status`
+returns only a parsed, redacted HTTP endpoint, API revision, startup probe
+availability, and enabled toolsets. URL user information, passwords, query
+parameters, and fragments are removed before encoding.
+
+`space_list`, `type_list`, `property_list`, `tag_list`, and `template_list`
+each request exactly one explicit upstream page and use the shared opaque
+cursor integrity checks. Space, type, and property references use the bounded
+`anytype-api` resolvers, so ambiguity returns actionable candidate IDs instead
+of selecting an arbitrary match. Type-scoped property discovery filters one
+upstream property window against the resolved type's linked property IDs;
+sparse pages still advance by the checked upstream window.
+
+Property summaries never contain tag options. Select and multi-select counts
+come from a separate `tags(...).limit(1).offset(0)` page's bounded `total`;
+the handler also verifies that zero, one, and larger totals agree with the
+first-page item count and continuation flag. Callers use `tag_list` to retrieve
+options explicitly. Template results reuse the summary-only object adapter and
+therefore contain no body or implicit property projection.
+
+Local TCP fixture tests exercise the real `anytype-api` fluent builders and
+verify exact paths and decoded queries for every paginated discovery handler,
+including page continuation, sparse pages, cursor mismatch without I/O,
+resolver errors, response ceilings, and secret-safe upstream failures.
+### Object archive workflow
+
+The transport-neutral `object_archive` handler soft-archives exactly one
+object through the ordinary Anytype object DELETE endpoint. It never invokes
+archived-object purge, bulk deletion, delete-all, or space mutation APIs. The
+handler resolves and validates the space before constructing the request,
+uses the shared runtime controls and document-response ceiling, and accepts a
+success only when Anytype returns the same safe object and space identifiers
+with `archived=true`.
+
+Its typed result contains the archived object id, the confirmed boolean state,
+and the canonical Anytype resource URI. The tool contract is destructive,
+non-idempotent, read-write, and closed-world. A reusable mutation-access gate
+also rejects stale direct calls before resolver or upstream I/O when a future
+production catalog selects read-only operation; environment parsing and
+catalog filtering are intentionally owned by the catalog integration phase.
 
 ### View discovery workflows
 
@@ -132,6 +177,44 @@ included. Continuation cursors bind the space, list, view, normalized
 projection, and limit, and are issued only after the upstream offset, limit,
 and returned item count have been checked.
 
+### Object discovery and reads
+
+The transport-neutral `object_search` and `object_get` handlers implement the
+bounded Phase 1 read path without adding the production tool router owned by a
+later catalog ticket.
+
+- `object_search` resolves an optional space and space-local type references,
+  executes exactly one upstream page, and validates returned offset, limit,
+  item count, and continuation metadata before issuing a cursor. Global search
+  type values are treated as keys because a name or id cannot be resolved
+  without a space. Results contain stable summaries plus only the explicitly
+  requested property keys; document bodies, snippets, and implicit full
+  property sets are never returned.
+  Archived objects are omitted from this core discovery workflow while the
+  cursor still advances by the checked upstream page window.
+- Search filters use a closed tagged model for text, number, select,
+  multi-select, date, checkbox, file, URL, email, phone, object-reference,
+  empty, and nonempty conditions. Filter count, value count, nesting depth,
+  scalar lengths, arrays, and numeric magnitude are bounded. Boolean and
+  numeric filters are passed through unchanged; they remain subject to the
+  known upstream [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
+  limitation instead of being silently rewritten with different semantics.
+  File and object filter operands are validated as safe bounded identifiers
+  before any upstream request.
+- `object_get` resolves the space but requires a stable object id. It returns
+  all properties only when the bounded set fits, or exactly an explicit
+  projection. An optional body request is indexed in Unicode characters,
+  defaults to 20,000 characters, caps at 100,000, reports continuation and
+  total character counts, and hashes the complete current body even when only
+  a chunk is returned. The unreturned body remainder never enters the MCP
+  result.
+
+All omittable read-input fields distinguish omission from explicit JSON
+`null`. Omission selects the documented default; `null` is malformed and can
+never broaden a scoped search to global search or a selected projection to all
+properties. Space-scoped type resolver results are revalidated as bounded,
+nonempty type keys before they enter a cursor binding or upstream search.
+
 ## Source layout
 
 - `src/config.rs` — validated environment and operational limits.
@@ -140,6 +223,8 @@ and returned item count have been checked.
 - `src/main.rs` — non-interactive startup and binary exit behavior.
 - `src/lib.rs` — shared crate surface for the binary and tests.
 - `src/domain.rs` — bounded values, object summaries, and resource URIs.
+- `src/discovery.rs` — typed status and schema-discovery contracts and
+  transport-neutral handlers.
 - `src/schema.rs` — strict input/output schema generation.
 - `src/protocol.rs` — tool contracts and annotation profiles.
 - `src/result.rs` — structured results with compact JSON text fallbacks.
@@ -147,6 +232,9 @@ and returned item count have been checked.
 - `src/handler_support.rs` — controlled handler execution and checked page
   continuation helpers.
 - `src/object_output.rs` — validated summaries and bounded property projection.
+- `src/object_read.rs` — typed one-page object search and chunked object-get
+  handlers.
+- `src/object_archive.rs` — single-object soft archive contract and handler.
 - `src/validation.rs` — reusable collection, filter, and body chunk bounds.
 - `src/pagination.rs` — bounded pagination inputs and result pages.
 - `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.
