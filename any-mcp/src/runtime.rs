@@ -142,6 +142,32 @@ impl RuntimeContext {
     where
         F: Future<Output = Result<T, AnytypeError>>,
     {
+        self.execute_classified(
+            context,
+            cancellation,
+            operation,
+            OperationFailureDiagnostic::from_anytype,
+        )
+        .await
+        .map_err(|error| match error {
+            ControlledOperationError::Cancelled => RuntimeError::Cancelled,
+            ControlledOperationError::TimedOut => RuntimeError::TimedOut,
+            ControlledOperationError::ShuttingDown => RuntimeError::ShuttingDown,
+            ControlledOperationError::Operation(error) => RuntimeError::Upstream(error),
+        })
+    }
+
+    pub(crate) async fn execute_classified<F, T, E, C>(
+        &self,
+        context: OperationContext,
+        cancellation: &CancellationToken,
+        operation: F,
+        classify: C,
+    ) -> Result<T, ControlledOperationError<E>>
+    where
+        F: Future<Output = Result<T, E>>,
+        C: Fn(&E) -> OperationFailureDiagnostic,
+    {
         let started = Instant::now();
         let correlation_id = self
             .next_correlation_id
@@ -152,18 +178,22 @@ impl RuntimeContext {
         let controlled = async {
             let permit = tokio::select! {
                 biased;
-                () = self.shutdown.cancelled() => return Err(RuntimeError::ShuttingDown),
-                () = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                () = self.shutdown.cancelled() => {
+                    return Err(ControlledOperationError::ShuttingDown);
+                },
+                () = cancellation.cancelled() => {
+                    return Err(ControlledOperationError::Cancelled);
+                },
                 permit = self.permits.acquire() => {
-                    permit.map_err(|_| RuntimeError::ShuttingDown)?
+                    permit.map_err(|_| ControlledOperationError::ShuttingDown)?
                 }
             };
 
             let result = tokio::select! {
                 biased;
-                () = self.shutdown.cancelled() => Err(RuntimeError::ShuttingDown),
-                () = cancellation.cancelled() => Err(RuntimeError::Cancelled),
-                result = operation => result.map_err(RuntimeError::Upstream),
+                () = self.shutdown.cancelled() => Err(ControlledOperationError::ShuttingDown),
+                () = cancellation.cancelled() => Err(ControlledOperationError::Cancelled),
+                result = operation => result.map_err(ControlledOperationError::Operation),
             };
             drop(permit);
             result
@@ -171,8 +201,14 @@ impl RuntimeContext {
 
         let result = tokio::time::timeout(self.request_timeout, controlled)
             .await
-            .unwrap_or(Err(RuntimeError::TimedOut));
-        log_operation(context, correlation_id, started.elapsed(), &result);
+            .unwrap_or(Err(ControlledOperationError::TimedOut));
+        log_classified_operation(
+            context,
+            correlation_id,
+            started.elapsed(),
+            &result,
+            &classify,
+        );
         result
     }
 
@@ -286,20 +322,56 @@ impl OperationContext {
     }
 }
 
-fn log_operation<T>(
+pub(crate) enum ControlledOperationError<E> {
+    Cancelled,
+    TimedOut,
+    ShuttingDown,
+    Operation(E),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OperationFailureDiagnostic {
+    outcome: &'static str,
+    status: UpstreamDiagnostic,
+}
+
+impl OperationFailureDiagnostic {
+    pub(crate) const fn classified(outcome: &'static str, category: &'static str) -> Self {
+        Self {
+            outcome,
+            status: UpstreamDiagnostic::new(category),
+        }
+    }
+
+    pub(crate) fn from_anytype(error: &AnytypeError) -> Self {
+        Self {
+            outcome: "upstream_error",
+            status: UpstreamDiagnostic::from_error(error),
+        }
+    }
+}
+
+fn log_classified_operation<T, E, C>(
     context: OperationContext,
     correlation_id: u64,
     duration: Duration,
-    result: &Result<T, RuntimeError>,
-) {
-    let (outcome, upstream) = match result {
-        Ok(_) => ("success", UpstreamDiagnostic::new("success")),
-        Err(RuntimeError::Cancelled) => ("cancelled", UpstreamDiagnostic::new("not_observed")),
-        Err(RuntimeError::TimedOut) => ("timeout", UpstreamDiagnostic::new("not_observed")),
-        Err(RuntimeError::ShuttingDown) => ("shutdown", UpstreamDiagnostic::new("not_observed")),
-        Err(RuntimeError::Upstream(error)) => {
-            ("upstream_error", UpstreamDiagnostic::from_error(error))
+    result: &Result<T, ControlledOperationError<E>>,
+    classify: &C,
+) where
+    C: Fn(&E) -> OperationFailureDiagnostic,
+{
+    let diagnostic = match result {
+        Ok(_) => OperationFailureDiagnostic::classified("success", "success"),
+        Err(ControlledOperationError::Cancelled) => {
+            OperationFailureDiagnostic::classified("cancelled", "not_observed")
         }
+        Err(ControlledOperationError::TimedOut) => {
+            OperationFailureDiagnostic::classified("timeout", "not_observed")
+        }
+        Err(ControlledOperationError::ShuttingDown) => {
+            OperationFailureDiagnostic::classified("shutdown", "not_observed")
+        }
+        Err(ControlledOperationError::Operation(error)) => classify(error),
     };
     let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
@@ -307,10 +379,10 @@ fn log_operation<T>(
         operation = context.safe_operation(),
         correlation_id,
         duration_ms,
-        outcome,
-        upstream_status = upstream.category,
-        upstream_http_status = upstream.http_status.unwrap_or_default(),
-        upstream_http_status_present = upstream.http_status.is_some(),
+        outcome = diagnostic.outcome,
+        upstream_status = diagnostic.status.category,
+        upstream_http_status = diagnostic.status.http_status.unwrap_or_default(),
+        upstream_http_status_present = diagnostic.status.http_status.is_some(),
         "Anytype operation completed"
     );
 }
