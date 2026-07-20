@@ -73,8 +73,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   cancellation/timeout controls, and secret-safe bounded errors directing
   larger reads to `object_get` chunking.
 - Add typed `object_update` whole-field replacement with non-null omittable
-  inputs, closed bounded property/icon values, optional complete-body SHA-256
-  conflict checks, one update, and explicit read-after-write verification.
+  inputs, the shared bounded property/icon values, exact effective-type schema
+  checks, documented empty clear forms, optional complete-body SHA-256 stale
+  conflict checks before writing, one no-verify update, bounded semantic
+  read-after-write retries, and fixed indeterminate conflict handling for every
+  post-dispatch ambiguity.
 
 ### Changed
 
