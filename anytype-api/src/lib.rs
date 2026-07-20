@@ -228,7 +228,7 @@ pub mod prelude {
         // Validation
         validation::ValidationLimits,
         // Verify
-        verify::VerifyConfig,
+        verify::{MAX_VERIFY_ATTEMPTS, VerifyConfig, verify_semantic},
         // Views (Lists, Collections, Queries)
         views::{View, ViewLayout},
     };

@@ -56,6 +56,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add one shared, strictly bounded mutation-value contract with deterministic
   number, date, property, icon, and set-ID normalization plus semantic
   read-after-write comparison for future object create and update handlers.
+- Add a one-way mutation-dispatch marker and opt-in controlled execution seam
+  that distinguishes safe pre-dispatch cancellation, timeout, and shutdown
+  from fixed conflict-class indeterminate outcomes that require rereading
+  before retry.
 - Add the typed `object_archive` soft-delete workflow with destructive
   annotations, pre-I/O read-only enforcement, safe resolver/response identity
   validation, and a minimal verified archived-state result.

@@ -332,6 +332,15 @@ The amount of time needed for "settling" seems to be 1 second or less.
 let obj = client.new_object("space_id", "page").name("Quick note").ensure_available().create().await?;
 ```
 
+For mutation workflows that must confirm more than availability, use
+`verify_semantic` with a predicate over a freshly fetched value. It retries
+successful-but-stale values as well as transient not-found, transport, retry,
+and server failures. Verification always has both a wall-clock deadline and a
+validated nonzero attempt cap no larger than `MAX_VERIFY_ATTEMPTS`; legacy zero
+and oversized values safely clamp to that hard ceiling, and zero-delay
+configurations remain finite and cancellation-safe. Fetched values and upstream
+error text are never retained in the terminal verification timeout.
+
 To enable verification for *all* new objects, types, and properties, add `.ensure_available(VerifyConfig::default())` to the config when creating the client. Setting this in the client configuration is not recommended except for an environment like unit tests where you're hammering the server and need to get results immediately. If verification is enabled in the client config, it will be applied to all `create` calls, unless disabled on a per-call basis by using `.no_verify()`:
 
 ```rust,no_run

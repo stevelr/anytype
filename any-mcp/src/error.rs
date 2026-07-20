@@ -177,6 +177,21 @@ impl ToolError {
         Self::from_code(ToolErrorCode::Conflict)
     }
 
+    /// Creates the fixed conflict returned when a controlled failure occurs
+    /// after a write may have reached Anytype.
+    ///
+    /// This deliberately does not give generic retry advice: callers must
+    /// reread state first so a successful but unobserved mutation is not
+    /// applied twice.
+    #[must_use]
+    pub const fn mutation_indeterminate() -> Self {
+        Self {
+            code: ToolErrorCode::Conflict,
+            message: "The mutation may have applied. Reread the object before retrying to avoid applying it twice.",
+            candidates: None,
+        }
+    }
+
     /// Creates a bounded-result error with fixed corrective text.
     #[must_use]
     pub const fn bounded_result() -> Self {
@@ -301,6 +316,20 @@ mod tests {
             json!({
                 "code": "upstream",
                 "message": "Anytype could not complete the request. Retry later or inspect redacted server diagnostics."
+            })
+        );
+    }
+
+    #[test]
+    fn mutation_indeterminate_is_exact_conflict_guidance() {
+        let error = ToolError::mutation_indeterminate();
+
+        assert_eq!(error.code(), ToolErrorCode::Conflict);
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "conflict",
+                "message": "The mutation may have applied. Reread the object before retrying to avoid applying it twice."
             })
         );
     }

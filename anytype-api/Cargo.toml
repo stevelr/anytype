@@ -60,3 +60,4 @@ clap.workspace = true
 png = "0.18"
 serial_test = "3.5.0"
 test-log.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

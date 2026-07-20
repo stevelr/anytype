@@ -5,7 +5,14 @@
 
 //! Transport-neutral execution, encoding, and checked continuation helpers.
 
-use std::{fmt, future::Future};
+use std::{
+    fmt,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use anytype::error::AnytypeError;
 use rmcp::{model::CallToolResult, schemars::JsonSchema};
@@ -20,7 +27,8 @@ use crate::{
     protocol::WorkflowTool,
     result::tool_error,
     runtime::{
-        ControlledOperationError, OperationContext, OperationFailureDiagnostic, RuntimeContext,
+        ControlledFailureKind, ControlledOperationError, OperationContext,
+        OperationFailureDiagnostic, RuntimeContext,
     },
     validation::ValidationError,
 };
@@ -127,6 +135,54 @@ pub enum MutationAccess {
     ReadOnly,
 }
 
+/// One-way stage of a controlled mutation operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationStage {
+    /// No write future has been polled yet.
+    PreDispatch,
+    /// A write may have reached Anytype.
+    Dispatched,
+}
+
+/// Cloneable one-way marker for whether a write may have been dispatched.
+///
+/// Create a fresh marker for each mutation invocation. Move a clone into the
+/// controlled operation and call [`mark_dispatched`](Self::mark_dispatched)
+/// immediately before the first poll of the first write future. Once marked,
+/// all clones remain `Dispatched`; reusing a marker therefore fails safe by
+/// treating later controlled failures as indeterminate.
+#[derive(Debug, Clone, Default)]
+pub struct MutationProgress {
+    stage: Arc<AtomicU8>,
+}
+
+impl MutationProgress {
+    const PRE_DISPATCH: u8 = 0;
+    const DISPATCHED: u8 = 1;
+
+    /// Creates a fresh pre-dispatch marker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks that the first write future is about to be polled.
+    ///
+    /// This transition is idempotent and cannot be reset.
+    pub fn mark_dispatched(&self) {
+        self.stage.store(Self::DISPATCHED, Ordering::SeqCst);
+    }
+
+    /// Returns the current one-way mutation stage.
+    #[must_use]
+    pub fn stage(&self) -> MutationStage {
+        match self.stage.load(Ordering::SeqCst) {
+            Self::PRE_DISPATCH => MutationStage::PreDispatch,
+            _ => MutationStage::Dispatched,
+        }
+    }
+}
+
 /// Rejects a mutation when the current handler invocation is read-only.
 ///
 /// Call this before resolving names or constructing an upstream future.
@@ -189,8 +245,77 @@ where
     C: FnOnce(U) -> CF,
     CF: Future<Output = Result<O, HandlerError>>,
 {
+    execute_prepared_with_policy(
+        runtime,
+        contract,
+        context,
+        cancellation,
+        operation,
+        convert,
+        ControlledFailurePolicy::Ordinary,
+    )
+    .await
+}
+
+/// Executes a mutation with stage-aware cancellation, timeout, and shutdown
+/// handling.
+///
+/// Controlled failures before `progress` is marked retain the ordinary fixed
+/// `upstream` result. At or after dispatch they return the fixed `conflict`
+/// result from [`ToolError::mutation_indeterminate`], directing the caller to
+/// reread before any retry. Errors returned normally by `operation` are not
+/// guessed from stage: the handler must classify them explicitly as an
+/// [`AnytypeError`] or [`HandlerError`] through [`HandlerOperationError`].
+/// Existing execution helpers do not opt into this policy and are unchanged.
+///
+/// A handler should use a fresh marker and place
+/// `progress.mark_dispatched()` directly before awaiting its write builder.
+pub async fn execute_mutation_handler<U, O, F, C, CF, E>(
+    runtime: &RuntimeContext,
+    contract: &WorkflowTool<O>,
+    context: OperationContext,
+    cancellation: &CancellationToken,
+    progress: &MutationProgress,
+    operation: F,
+    convert: C,
+) -> CallToolResult
+where
+    O: Serialize,
+    F: Future<Output = Result<U, E>>,
+    E: Into<HandlerOperationError>,
+    C: FnOnce(U) -> CF,
+    CF: Future<Output = Result<O, HandlerError>>,
+{
+    execute_prepared_with_policy(
+        runtime,
+        contract,
+        context,
+        cancellation,
+        operation,
+        convert,
+        ControlledFailurePolicy::Mutation(progress),
+    )
+    .await
+}
+
+async fn execute_prepared_with_policy<U, O, F, C, CF, E>(
+    runtime: &RuntimeContext,
+    contract: &WorkflowTool<O>,
+    context: OperationContext,
+    cancellation: &CancellationToken,
+    operation: F,
+    convert: C,
+    control_policy: ControlledFailurePolicy<'_>,
+) -> CallToolResult
+where
+    O: Serialize,
+    F: Future<Output = Result<U, E>>,
+    E: Into<HandlerOperationError>,
+    C: FnOnce(U) -> CF,
+    CF: Future<Output = Result<O, HandlerError>>,
+{
     let result = runtime
-        .execute_classified(
+        .execute_classified_with_control(
             context,
             cancellation,
             async {
@@ -205,21 +330,63 @@ where
                     .map_err(|_| HandlerExecutionError::Encoding)
             },
             HandlerExecutionError::diagnostic,
+            |failure| control_policy.diagnostic(failure),
         )
         .await;
 
     match result {
         Ok(output) => output,
-        Err(error) => tool_error(&execution_tool_error(error)),
+        Err(error) => tool_error(&execution_tool_error(error, control_policy)),
     }
 }
 
-fn execution_tool_error(error: ControlledOperationError<HandlerExecutionError>) -> ToolError {
+#[derive(Clone, Copy)]
+enum ControlledFailurePolicy<'a> {
+    Ordinary,
+    Mutation(&'a MutationProgress),
+}
+
+impl ControlledFailurePolicy<'_> {
+    fn mutation_indeterminate(self) -> bool {
+        matches!(self, Self::Mutation(progress) if progress.stage() == MutationStage::Dispatched)
+    }
+
+    fn diagnostic(self, failure: ControlledFailureKind) -> OperationFailureDiagnostic {
+        if self.mutation_indeterminate() {
+            return OperationFailureDiagnostic::classified(
+                "mutation_indeterminate",
+                "mutation_indeterminate",
+            );
+        }
+        match failure {
+            ControlledFailureKind::Cancelled => {
+                OperationFailureDiagnostic::classified("cancelled", "not_observed")
+            }
+            ControlledFailureKind::TimedOut => {
+                OperationFailureDiagnostic::classified("timeout", "not_observed")
+            }
+            ControlledFailureKind::ShuttingDown => {
+                OperationFailureDiagnostic::classified("shutdown", "not_observed")
+            }
+        }
+    }
+}
+
+fn execution_tool_error(
+    error: ControlledOperationError<HandlerExecutionError>,
+    control_policy: ControlledFailurePolicy<'_>,
+) -> ToolError {
     match error {
         ControlledOperationError::Operation(error) => error.into_tool_error(),
         ControlledOperationError::Cancelled
         | ControlledOperationError::TimedOut
-        | ControlledOperationError::ShuttingDown => ToolError::upstream(),
+        | ControlledOperationError::ShuttingDown => {
+            if control_policy.mutation_indeterminate() {
+                ToolError::mutation_indeterminate()
+            } else {
+                ToolError::upstream()
+            }
+        }
     }
 }
 
@@ -496,6 +663,10 @@ mod tests {
     }
 
     fn runtime() -> RuntimeContext {
+        runtime_with_timeout(Duration::from_secs(1))
+    }
+
+    fn runtime_with_timeout(timeout: Duration) -> RuntimeContext {
         let client = AnytypeClient::with_config(ClientConfig {
             base_url: Some("http://127.0.0.1:1".to_owned()),
             keystore: Some("env".to_owned()),
@@ -507,7 +678,7 @@ mod tests {
         RuntimeContext::from_parts(
             client,
             1,
-            Duration::from_secs(1),
+            timeout,
             StartupStatus {
                 http_available: true,
                 grpc_available: false,
@@ -800,7 +971,7 @@ mod tests {
             ControlledOperationError::ShuttingDown,
         ] {
             assert_eq!(
-                execution_tool_error(controlled_error).code(),
+                execution_tool_error(controlled_error, ControlledFailurePolicy::Ordinary).code(),
                 ToolErrorCode::Upstream
             );
         }
@@ -808,11 +979,11 @@ mod tests {
 
     #[tokio::test]
     async fn execution_encodes_exact_success_and_stable_errors() {
-        let runtime = runtime();
+        let runtime_context = runtime();
         let cancellation = CancellationToken::new();
         let output_contract = contract::<Output>();
         let success = execute_handler(
-            &runtime,
+            &runtime_context,
             &output_contract,
             OperationContext::new("object_get"),
             &cancellation,
@@ -839,7 +1010,7 @@ mod tests {
             message: "private body".to_owned(),
         };
         let failed = execute_handler(
-            &runtime,
+            &runtime_context,
             &output_contract,
             OperationContext::new("object_get"),
             &cancellation,
@@ -859,6 +1030,272 @@ mod tests {
             failed.structured_content.as_ref().unwrap()["code"],
             "upstream"
         );
+    }
+
+    fn assert_error(result: &CallToolResult, code: &str, message: &str) {
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"code": code, "message": message}))
+        );
+        assert_eq!(
+            result.content[0].as_text().unwrap().text,
+            json!({"code": code, "message": message}).to_string()
+        );
+    }
+
+    const UPSTREAM_MESSAGE: &str = "Anytype could not complete the request. Retry later or inspect redacted server diagnostics.";
+    const INDETERMINATE_MESSAGE: &str = "The mutation may have applied. Reread the object before retrying to avoid applying it twice.";
+
+    #[tokio::test]
+    async fn mutation_cancellation_is_stage_aware_at_the_dispatch_marker() {
+        let output_contract = contract::<Output>();
+
+        let pre_runtime = runtime();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let pre_dispatch = MutationProgress::new();
+        let operation_marker = pre_dispatch.clone();
+        let result = execute_mutation_handler(
+            &pre_runtime,
+            &output_contract,
+            OperationContext::new("mutation_cancel_pre"),
+            &cancellation,
+            &pre_dispatch,
+            async move {
+                operation_marker.mark_dispatched();
+                std::future::pending::<Result<(), HandlerOperationError>>().await
+            },
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_eq!(pre_dispatch.stage(), MutationStage::PreDispatch);
+        assert_error(&result, "upstream", UPSTREAM_MESSAGE);
+
+        let post_runtime = runtime();
+        let cancellation = CancellationToken::new();
+        let progress = MutationProgress::new();
+        let operation_progress = progress.clone();
+        let operation_cancellation = cancellation.clone();
+        let result = execute_mutation_handler(
+            &post_runtime,
+            &output_contract,
+            OperationContext::new("mutation_cancel_post"),
+            &cancellation,
+            &progress,
+            async move {
+                operation_progress.mark_dispatched();
+                operation_cancellation.cancel();
+                std::future::pending::<Result<(), HandlerOperationError>>().await
+            },
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_eq!(progress.stage(), MutationStage::Dispatched);
+        assert_error(&result, "conflict", INDETERMINATE_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn mutation_timeout_is_stage_aware() {
+        let output_contract = contract::<Output>();
+
+        let runtime = runtime_with_timeout(Duration::from_millis(5));
+        let progress = MutationProgress::new();
+        let result = execute_mutation_handler(
+            &runtime,
+            &output_contract,
+            OperationContext::new("mutation_timeout_pre"),
+            &CancellationToken::new(),
+            &progress,
+            std::future::pending::<Result<(), HandlerOperationError>>(),
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_error(&result, "upstream", UPSTREAM_MESSAGE);
+
+        let runtime = runtime_with_timeout(Duration::from_millis(5));
+        let progress = MutationProgress::new();
+        let operation_progress = progress.clone();
+        let result = execute_mutation_handler(
+            &runtime,
+            &output_contract,
+            OperationContext::new("mutation_timeout_post"),
+            &CancellationToken::new(),
+            &progress,
+            async move {
+                operation_progress.mark_dispatched();
+                std::future::pending::<Result<(), HandlerOperationError>>().await
+            },
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_error(&result, "conflict", INDETERMINATE_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn mutation_shutdown_is_stage_aware() {
+        let output_contract = contract::<Output>();
+
+        let pre_runtime = runtime();
+        pre_runtime.begin_shutdown();
+        let progress = MutationProgress::new();
+        let result = execute_mutation_handler(
+            &pre_runtime,
+            &output_contract,
+            OperationContext::new("mutation_shutdown_pre"),
+            &CancellationToken::new(),
+            &progress,
+            std::future::pending::<Result<(), HandlerOperationError>>(),
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_error(&result, "upstream", UPSTREAM_MESSAGE);
+
+        let post_runtime = runtime();
+        let progress = MutationProgress::new();
+        let operation_progress = progress.clone();
+        let operation_runtime = post_runtime.clone();
+        let result = execute_mutation_handler(
+            &post_runtime,
+            &output_contract,
+            OperationContext::new("mutation_shutdown_post"),
+            &CancellationToken::new(),
+            &progress,
+            async move {
+                operation_progress.mark_dispatched();
+                operation_runtime.begin_shutdown();
+                std::future::pending::<Result<(), HandlerOperationError>>().await
+            },
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_error(&result, "conflict", INDETERMINATE_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn ordinary_operation_errors_remain_handler_classified_after_dispatch() {
+        let runtime = runtime();
+        let cancellation = CancellationToken::new();
+        let output_contract = contract::<Output>();
+        let progress = MutationProgress::new();
+        let operation_progress = progress.clone();
+        let result = execute_mutation_handler(
+            &runtime,
+            &output_contract,
+            OperationContext::new("mutation_operation_error"),
+            &cancellation,
+            &progress,
+            async move {
+                operation_progress.mark_dispatched();
+                Err::<(), _>(HandlerOperationError::from(HandlerError::new(
+                    ToolError::validation(),
+                )))
+            },
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_error(
+            &result,
+            "validation",
+            "Input validation failed. Correct the supplied fields and retry.",
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_progress_is_clone_shared_sticky_and_reuse_fails_safe() {
+        let progress = MutationProgress::new();
+        let clone = progress.clone();
+        assert_eq!(progress.stage(), MutationStage::PreDispatch);
+        clone.mark_dispatched();
+        clone.mark_dispatched();
+        assert_eq!(progress.stage(), MutationStage::Dispatched);
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = execute_mutation_handler(
+            &runtime(),
+            &contract::<Output>(),
+            OperationContext::new("mutation_reused_marker"),
+            &cancellation,
+            &progress,
+            std::future::pending::<Result<(), HandlerOperationError>>(),
+            |_| async {
+                Ok(Output {
+                    value: BoundedResult("unused".to_owned()),
+                })
+            },
+        )
+        .await;
+        assert_error(&result, "conflict", INDETERMINATE_MESSAGE);
+    }
+
+    #[test]
+    fn mutation_indeterminate_diagnostic_is_static_and_has_no_false_success() {
+        run_trace_test(async {
+            let runtime = runtime();
+            let cancellation = CancellationToken::new();
+            let progress = MutationProgress::new();
+            let operation_progress = progress.clone();
+            let operation_cancellation = cancellation.clone();
+            let secret = "SECRET_MUTATION_VALUE";
+            let (dispatch, captured) =
+                crate::logging::test_support::capture("any_mcp::operation=trace");
+            let result = execute_mutation_handler(
+                &runtime,
+                &contract::<Output>(),
+                OperationContext::new("mutation_diagnostic"),
+                &cancellation,
+                &progress,
+                async move {
+                    let _payload = secret;
+                    operation_progress.mark_dispatched();
+                    operation_cancellation.cancel();
+                    std::future::pending::<Result<(), HandlerOperationError>>().await
+                },
+                |_| async {
+                    Ok(Output {
+                        value: BoundedResult("unused".to_owned()),
+                    })
+                },
+            )
+            .with_subscriber(dispatch)
+            .await;
+            assert_error(&result, "conflict", INDETERMINATE_MESSAGE);
+            let output = captured.contents();
+            assert_eq!(output.matches("Anytype operation completed").count(), 1);
+            assert!(output.contains("outcome=\"mutation_indeterminate\""));
+            assert!(output.contains("upstream_status=\"mutation_indeterminate\""));
+            assert!(!output.contains("outcome=\"success\""));
+            assert!(!output.contains(secret));
+        });
     }
 
     #[tokio::test]
