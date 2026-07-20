@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- HTTP diagnostics now emit only structured variant/status/method/path metadata:
+  request and response payloads, query values, headers, credentials, and full
+  URLs remain unavailable at every trace level. Malformed and unsupported
+  request targets fail closed to a fixed marker. Standard error/config debug
+  output and transport error source chains apply the same redaction policy.
 - direct property-ID reads now offer a metadata-only, cache-independent,
   exact-identity scoped GET that never expands tags; explicit-ID tag lookup
   follows it with a separately paginated 1,000-row scan, validates a stable
@@ -125,6 +130,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Behaviorally observable error formatting change: `AnytypeError` `Display`,
+  `Debug`, and its standard error source chain now omit all free-form
+  identities, messages, last errors, and typed upstream sources that could
+  contain request or document content. Raw public fields remain available
+  through explicit variant matching; callers that parsed human-readable error
+  strings or traversed sources must switch to variants, fields, or
+  `AnytypeError::diagnostic()`.
 - Normalized troubleshooting examples and repository configuration formatting.
 - `list_chats_in` now uses REST; cross-space chat discovery, structured message
   publishing/full-fidelity reads, and reconnecting multi-chat subscriptions

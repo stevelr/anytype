@@ -319,6 +319,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tracing",
+ "tracing-subscriber",
  "url",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",

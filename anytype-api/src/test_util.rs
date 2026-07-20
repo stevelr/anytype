@@ -2364,7 +2364,7 @@ mod tests {
         const SECRET: &str = "collection-fixture-secret-sentinel";
         let error = collection_fixture_transport_error(tonic::Status::internal(SECRET));
         let rendered = error.to_string();
-        assert_eq!(rendered, "collection type fixture gRPC request failed");
+        assert_eq!(rendered, "Anytype error (details redacted)");
         assert!(!rendered.contains(SECRET));
     }
 

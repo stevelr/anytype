@@ -131,9 +131,12 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   resolver-provided candidate ids and names, discard malformed alternatives,
   refuse empty ambiguity output, and classify resolver scan limits as bounded
   results; and
-- diagnostics use a tracing subscriber whose writer is always stderr; verbose
-  `anytype` and `rmcp` target prefixes that can expose protocol or upstream
-  payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.
+- diagnostics use a tracing subscriber whose writer is always stderr; the
+  `anytype-api` HTTP targets are metadata-only at every trace level. That
+  guarantee does not cover other dependency targets, so the server still
+  denies all `anytype` and `rmcp` target prefixes through a non-overridable
+  metadata filter outside `RUST_LOG`; this whole-prefix filter is required
+  defense in depth, not a redundant HTTP-only safeguard.
 
 ### Production catalog and read-only mode
 

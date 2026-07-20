@@ -27,7 +27,7 @@ use crate::{
         ANYTYPE_URL_ENV, DEFAULT_SERVICE_NAME, RATE_LIMIT_MAX_RETRIES_DEFAULT,
         RATE_LIMIT_MAX_RETRIES_ENV,
     },
-    http_client::HttpClient,
+    http_client::{HttpClient, diagnostic_path},
     prelude::*,
 };
 
@@ -83,7 +83,7 @@ impl Default for ResponseLimits {
 /// # Ok(client)
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientConfig {
     /// Base url for all anytype HTTP/REST api requests.
     /// If not provided in config, url is determined by:
@@ -142,6 +142,29 @@ pub struct ClientConfig {
 
     /// Optional gRPC endpoint (overrides default).
     pub grpc_endpoint: Option<String>,
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientConfig")
+            .field("base_path", &self.base_url.as_deref().map(diagnostic_path))
+            .field("keystore_configured", &self.keystore.is_some())
+            .field(
+                "keystore_service_configured",
+                &self.keystore_service.is_some(),
+            )
+            .field("limits", &self.limits)
+            .field("response_limits", &self.response_limits)
+            .field("rate_limit_max_retries", &self.rate_limit_max_retries)
+            .field("disable_cache", &self.disable_cache)
+            .field("verify_configured", &self.verify.is_some())
+            .field(
+                "grpc_path",
+                &self.grpc_endpoint.as_deref().map(diagnostic_path),
+            )
+            .finish()
+    }
 }
 
 impl Default for ClientConfig {
@@ -234,7 +257,7 @@ impl std::fmt::Debug for AnytypeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnytypeClient")
             .field("config", &self.config)
-            .field("keystore:service", &self.keystore.service().to_string())
+            .field("keystore_configured", &true)
             .field("cache", &self.cache)
             .finish_non_exhaustive()
     }
@@ -319,10 +342,9 @@ impl AnytypeClient {
         };
 
         debug!(
-            base_url,
-            keystore = &keystore.id(),
-            keystore_service,
-            grpc_endpoint,
+            http_path = %diagnostic_path(&base_url),
+            keystore_configured = true,
+            grpc_configured = true,
             "new http client"
         );
 
@@ -426,11 +448,11 @@ impl AnytypeClient {
         let client = if let Some(token) = creds.session_token() {
             AnytypeGrpcClient::from_token(config, token.to_string())
                 .await
-                .context(GrpcSnafu)?
+                .map_err(|source| AnytypeError::Grpc { source })?
         } else if let Some(account_key) = creds.account_key() {
             AnytypeGrpcClient::from_account_key(config, account_key.to_string())
                 .await
-                .context(GrpcSnafu)?
+                .map_err(|source| AnytypeError::Grpc { source })?
         } else {
             return GrpcUnavailableSnafu {
                 message: "no grpc token or account key in keystore".to_string(),
