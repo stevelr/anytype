@@ -225,6 +225,35 @@ response remains an ordinary classified error. Results contain only the
 bounded updated summary, canonical resource link, and body hash when a body or
 hash precondition was supplied; they never echo the document body.
 
+### Exact-match object edit workflow
+
+The transport-neutral `object_edit` handler applies at most 100 ordered
+literal replacements to one complete Markdown body. `old_text` is nonempty,
+`new_text` may be empty to delete matches, and `expected_matches` defaults to
+one and is capped at 1,000. Matching and replacement are left-to-right and
+non-overlapping. Each edit sees the result of every preceding edit, so order is
+part of the request semantics. Each fragment and every intermediate body stay
+within the 100,000-Unicode-character body limit and shared document-byte
+ceiling; expansion is checked before allocating the replacement body.
+
+`expected_body_sha256` is required and hashes the exact complete current body.
+The handler resolves and validates the space and stable object identity, reads
+the complete bounded body, then checks the hash and every sequential match
+count before polling a write. A stale hash or count mismatch returns the fixed
+`conflict` result after the read and sends no PATCH. If all preconditions hold,
+the handler sends exactly one whole-body PATCH and performs finite semantic
+GET verification of the new complete-body hash. Anytype has no atomic compare-
+and-swap primitive, so another writer can still race between the precondition
+read and that PATCH.
+
+Definitive rejection, including HTTP 429, remains an ordinary classified
+error. HTTP 408, redirects, transport or server uncertainty, malformed or
+oversized responses, verification exhaustion, and cancellation, timeout, or
+shutdown after dispatch return the fixed mutation-indeterminate `conflict`
+guidance even when a recovery read happens to match. Results contain only the
+bounded object summary, canonical resource link, and verified new SHA-256;
+they never return the body.
+
 ### Object create workflow
 
 The transport-neutral `object_create` handler sends exactly one POST and uses
@@ -370,6 +399,8 @@ the final catalog integration phase.
 - `src/object_archive.rs` — single-object soft archive contract and handler.
 - `src/object_update.rs` — conflict-aware whole-field update contract and
   read-after-write verifier.
+- `src/object_edit.rs` — conflict-safe ordered exact-match edit contract and
+  verified single-PATCH handler.
 - `src/object_create.rs` — verified create contract, closed write inputs, and
   bounded process-lifetime idempotency coordination.
 - `src/validation.rs` — reusable collection, filter, and body chunk bounds.
