@@ -21,6 +21,7 @@ name = "any-mcp"
 
 [dependencies]
 anytype.workspace = true
+chrono.workspace = true
 getrandom.workspace = true
 rmcp.workspace = true
 schemars.workspace = true

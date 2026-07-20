@@ -26,6 +26,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Convert candidate-rich `anytype-api` resolver ambiguities directly into
   bounded MCP errors, retaining valid alternatives alongside malformed ones;
   resolver scan-limit failures map to the stable `bounded_result` code.
+- Add transport-neutral handler execution/encoding, checked cursor advancement
+  from upstream page metadata, and deterministic object summary/property
+  adapters with explicit finite projection modes and closed value schemas.
 
 ### Changed
 

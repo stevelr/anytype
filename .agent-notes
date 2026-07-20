@@ -9,3 +9,5 @@
 [gotcha] Cursor token parsing must validate ASCII grammar before decoding; byte-index slicing an arbitrary UTF-8 token creates a remotely triggerable panic even when total byte length is bounded.
 [pattern] Resolver scans use an explicit 1,000-row policy: unique/not-found requires complete bounded evidence, ambiguity retains a deterministic safe top ten, and view resolution scans for a later exact ID before classifying names.
 [gotcha] Handler-side pagination/projection does not bound upstream allocation when the HTTP client first calls `response.bytes().await`; enforce response-byte ceilings while reading the Anytype JSON body.
+[pattern] MCP continuation offsets must advance from validated upstream pagination offset+limit, not returned item count; sparse pages otherwise repeat data.
+[pattern] Object discovery uses explicit SummaryOnly/Selected/AllBounded projection modes; AllBounded fails rather than truncating, while cursor projection fingerprints sort/dedup keys even though selected output preserves first-request order.
