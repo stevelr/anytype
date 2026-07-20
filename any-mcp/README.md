@@ -525,6 +525,8 @@ The exact passing representatives are
 `headless_create_body_canonicalization_is_verified_once`, and
 `headless_archive_applies_and_returns_verified_success`. These five exercise
 the production router, complete document resource,
+fixture-backed type/property/tag/object/view/view-object continuations,
+cursor/query binding, body continuation, explicit view selection, ambiguity evidence,
 fixture-backed type/property/tag/object/view-object continuations, cursor/query
 binding, a two-template `limit=1` continuation with exact fixture identities
 and terminal proof, body continuation, explicit view selection, ambiguity evidence,
@@ -542,6 +544,17 @@ REST visibility proves that `limit=1` must continue before the production MCP
 router walks the hard-bounded cursor chain to terminality, rejects a cursor
 rebound to a different limit, detects repeated items/cursors, and observes both
 exact fixture IDs; teardown irreversibly deletes only those self-created IDs
+and requires bounded absence evidence. `template_list` covers
+its cleanup-safe terminal route. Collection coverage creates and immediately
+registers a custom collection-layout type through the narrow test helper owned
+by `anytype-api`, then uses its registered-collection helper to clone the exact
+default dataview into a cleanup-owned second view. `view_list(limit=1)` walks
+both exact ordinary-API IDs/names to a terminal page under a hard bound, rejects
+the same cursor with either a changed limit or list ID, and detects repeated
+items or cursors. The added view ID is also passed explicitly through
+`view_object_list`, preserving the required selected-view path. Both narrow
+heart RPCs stay inside `anytype-api`, so `any-mcp` retains its
+`anytype-api`-only dependency boundary.
 and requires bounded absence evidence. `template_list` uses a private custom
 type and two cleanup-owned templates from the narrow test helper owned by
 `anytype-api`; it walks `limit=1` cursors until both exact fixture IDs are seen
