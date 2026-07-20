@@ -202,10 +202,12 @@ name = "any-mcp"
 version = "0.5.0-pre.1"
 dependencies = [
  "anytype",
+ "getrandom 0.3.4",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tokio-util",
  "tracing",

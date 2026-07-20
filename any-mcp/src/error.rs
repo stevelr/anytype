@@ -135,6 +135,15 @@ impl ToolError {
         Self::from_code(ToolErrorCode::Validation)
     }
 
+    /// Creates a validation error from fixed, secret-free server text.
+    pub(crate) const fn validation_message(message: &'static str) -> Self {
+        Self {
+            code: ToolErrorCode::Validation,
+            message,
+            candidates: None,
+        }
+    }
+
     /// Creates a not-found error with fixed corrective text.
     #[must_use]
     pub const fn not_found() -> Self {

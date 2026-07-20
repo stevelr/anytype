@@ -21,6 +21,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add strict JSON Schema 2020-12 input/output contracts, bounded object
   summaries and resource URIs, standard tool annotations, structured results
   with compact JSON text fallbacks, and stable secret-safe execution errors.
+- Add reusable bounded pagination, versioned process-lifetime cursors bound to
+  normalized queries, Unicode-safe body chunking, and collection/filter caps.
 
 ### Changed
 

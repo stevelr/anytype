@@ -61,6 +61,12 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   `additionalProperties: false`, bounded domain strings, stable object
   summaries, and canonical
   `anytype://spaces/<space_id>/objects/<object_id>` resource URIs;
+- reusable pagination defaults of 20 and a hard maximum of 100, with opaque,
+  versioned continuation cursors bound to normalized query parameters and the
+  issuing server process;
+- Unicode-safe document body chunks defaulting to 20,000 characters and capped
+  at 100,000, plus reusable caps for identifiers, projections, filters, filter
+  values, and filter nesting;
 - fail-closed rejection of free-form JSON/maps, unbounded arrays and strings,
   impractically bounded numbers, undiscriminated unions, and unsupported
   patterned-object or tuple-array schema applicators;
@@ -88,6 +94,9 @@ Workflow tools and resources are added in subsequent Phase 1 work.
 - `src/protocol.rs` — tool contracts and annotation profiles.
 - `src/result.rs` — structured results with compact JSON text fallbacks.
 - `src/error.rs` — stable, redacted tool execution errors.
+- `src/validation.rs` — reusable collection, filter, and body chunk bounds.
+- `src/pagination.rs` — bounded pagination inputs and result pages.
+- `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
 
