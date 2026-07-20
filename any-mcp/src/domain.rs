@@ -42,9 +42,9 @@ impl fmt::Display for DomainValueError {
                     "value must contain at most {max_chars} characters"
                 )
             }
-            Self::InvalidIdentifierCharacter => formatter.write_str(
-                "identifier may contain only ASCII letters, digits, '.', '_', '~', and '-'",
-            ),
+            Self::InvalidIdentifierCharacter => {
+                formatter.write_str("identifier contains an unsafe character or path segment")
+            }
         }
     }
 }
@@ -169,7 +169,7 @@ macro_rules! entity_id {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MAX_ENTITY_ID_CHARS,
-                    "pattern": "^[A-Za-z0-9._~-]+$",
+                    "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
                 })
             }
         }
@@ -183,6 +183,9 @@ entity_id!(SpaceId, "A validated Anytype space identifier.");
 fn validate_identifier(value: &str) -> Result<(), DomainValueError> {
     if value.is_empty() {
         return Err(DomainValueError::Empty);
+    }
+    if matches!(value, "." | "..") {
+        return Err(DomainValueError::InvalidIdentifierCharacter);
     }
     if value.chars().count() > MAX_ENTITY_ID_CHARS {
         return Err(DomainValueError::TooLong {
@@ -200,10 +203,71 @@ fn validate_identifier(value: &str) -> Result<(), DomainValueError> {
 
 /// A bounded object display name.
 pub type DisplayName = BoundedText<MAX_DISPLAY_NAME_CHARS>;
-/// A bounded Anytype type key.
-pub type TypeKey = BoundedText<MAX_TYPE_KEY_CHARS>;
 /// A bounded RFC 3339 timestamp string.
 pub type LastModified = BoundedText<MAX_TIMESTAMP_CHARS>;
+
+/// A nonempty, bounded Anytype type key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct TypeKey(String);
+
+impl TypeKey {
+    /// Validates and constructs a type key.
+    pub fn new(value: impl Into<String>) -> Result<Self, DomainValueError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(DomainValueError::Empty);
+        }
+        if value.chars().count() > MAX_TYPE_KEY_CHARS {
+            return Err(DomainValueError::TooLong {
+                max_chars: MAX_TYPE_KEY_CHARS,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the validated type key.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for TypeKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for TypeKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TypeKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for TypeKey {
+    fn schema_name() -> Cow<'static, str> {
+        "TypeKey".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_TYPE_KEY_CHARS,
+        })
+    }
+}
 
 /// Canonical MCP resource URI for one Anytype object.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -262,28 +326,50 @@ impl JsonSchema for ObjectResourceUri {
             "type": "string",
             "minLength": 28,
             "maxLength": MAX_RESOURCE_URI_CHARS,
-            "pattern": "^anytype://spaces/[A-Za-z0-9._~-]+/objects/[A-Za-z0-9._~-]+$",
+            "pattern": "^anytype://spaces/(?!\\.{1,2}/objects/)[A-Za-z0-9._~-]+/objects/(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
         })
     }
 }
 
 /// Compact metadata returned by object discovery and write workflows.
+///
+/// Fields are private so callers cannot mutate identifiers independently of
+/// the canonical resource URI. Construct summaries with [`ObjectSummary::new`]
+/// and inspect them through their getters.
+///
+/// ```compile_fail
+/// use any_mcp::domain::{DisplayName, ObjectId, ObjectResourceUri, ObjectSummary, SpaceId, TypeKey};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let object_id = ObjectId::new("object-1")?;
+/// let space_id = SpaceId::new("space-1")?;
+/// let summary = ObjectSummary {
+///     id: object_id.clone(),
+///     name: DisplayName::new("Roadmap")?,
+///     type_key: TypeKey::new("page")?,
+///     space_id: space_id.clone(),
+///     last_modified: None,
+///     resource_uri: ObjectResourceUri::new(&space_id, &object_id),
+/// };
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectSummary {
     /// Stable Anytype object identifier.
-    pub id: ObjectId,
+    id: ObjectId,
     /// Display name, which may be empty for unnamed notes.
-    pub name: DisplayName,
+    name: DisplayName,
     /// Stable key of the object's Anytype type.
-    pub type_key: TypeKey,
+    type_key: TypeKey,
     /// Stable identifier of the containing Anytype space.
-    pub space_id: SpaceId,
+    space_id: SpaceId,
     /// RFC 3339 last-modified value when Anytype supplies it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_modified: Option<LastModified>,
+    last_modified: Option<LastModified>,
     /// Canonical MCP resource URI for reading this object's body.
-    pub resource_uri: ObjectResourceUri,
+    resource_uri: ObjectResourceUri,
 }
 
 impl ObjectSummary {
@@ -305,6 +391,42 @@ impl ObjectSummary {
             last_modified,
             resource_uri,
         }
+    }
+
+    /// Returns the stable Anytype object identifier.
+    #[must_use]
+    pub const fn id(&self) -> &ObjectId {
+        &self.id
+    }
+
+    /// Returns the bounded display name.
+    #[must_use]
+    pub const fn name(&self) -> &DisplayName {
+        &self.name
+    }
+
+    /// Returns the stable Anytype type key.
+    #[must_use]
+    pub const fn type_key(&self) -> &TypeKey {
+        &self.type_key
+    }
+
+    /// Returns the identifier of the containing Anytype space.
+    #[must_use]
+    pub const fn space_id(&self) -> &SpaceId {
+        &self.space_id
+    }
+
+    /// Returns the last-modified value when Anytype supplied one.
+    #[must_use]
+    pub const fn last_modified(&self) -> Option<&LastModified> {
+        self.last_modified.as_ref()
+    }
+
+    /// Returns the canonical MCP resource URI derived at construction.
+    #[must_use]
+    pub const fn resource_uri(&self) -> &ObjectResourceUri {
+        &self.resource_uri
     }
 }
 
@@ -363,6 +485,25 @@ mod tests {
             Err(DomainValueError::InvalidIdentifierCharacter)
         );
         assert_eq!(SpaceId::new(""), Err(DomainValueError::Empty));
+        assert_eq!(
+            SpaceId::new("."),
+            Err(DomainValueError::InvalidIdentifierCharacter)
+        );
+        assert_eq!(
+            ObjectId::new(".."),
+            Err(DomainValueError::InvalidIdentifierCharacter)
+        );
+    }
+
+    #[test]
+    fn type_key_is_nonempty_and_bounded_at_runtime() {
+        assert_eq!(TypeKey::new(""), Err(DomainValueError::Empty));
+        assert!(serde_json::from_value::<TypeKey>(json!("")).is_err());
+        assert_eq!(TypeKey::new("page").unwrap().as_str(), "page");
+
+        let schema = rmcp::handler::server::tool::schema_for_type::<TypeKey>();
+        assert_eq!(schema["minLength"], json!(1));
+        assert_eq!(schema["maxLength"], json!(MAX_TYPE_KEY_CHARS));
     }
 
     #[test]
@@ -376,7 +517,7 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(summary).unwrap(),
+            serde_json::to_value(&summary).unwrap(),
             json!({
                 "id": "obj-1",
                 "name": "Roadmap",
@@ -385,6 +526,12 @@ mod tests {
                 "last_modified": "2026-07-20T06:00:00Z",
                 "resource_uri": "anytype://spaces/space-1/objects/obj-1"
             })
+        );
+        assert_eq!(summary.id().as_str(), "obj-1");
+        assert_eq!(summary.type_key().as_str(), "page");
+        assert_eq!(
+            summary.resource_uri().as_str(),
+            "anytype://spaces/space-1/objects/obj-1"
         );
     }
 
@@ -398,6 +545,10 @@ mod tests {
                 "anytype://spaces/space-1/objects/obj-1/extra"
             ))
             .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObjectResourceUri>(json!("anytype://spaces/../objects/obj-1"))
+                .is_err()
         );
     }
 

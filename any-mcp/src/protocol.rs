@@ -5,40 +5,122 @@
 
 //! Reusable MCP tool contracts and annotation profiles.
 
+use std::marker::PhantomData;
+
 use rmcp::{
-    model::{Tool, ToolAnnotations},
+    model::{CallToolResult, Tool, ToolAnnotations},
     schemars::JsonSchema,
 };
+use serde::Serialize;
 
-use crate::schema::{SchemaContractError, input_schema, output_schema};
+use crate::{
+    result::ResultEncodingError,
+    schema::{SchemaContractError, input_schema, output_schema},
+};
 
-/// Returns the annotation profile for a read-only, closed-world workflow.
-#[must_use]
-pub fn read_annotations() -> ToolAnnotations {
-    ToolAnnotations::new()
-        .read_only(true)
-        .destructive(false)
-        .open_world(false)
+/// Fixed annotation profiles permitted for bounded Anytype workflows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProfile {
+    /// Read-only workflow within the closed Anytype world.
+    Read,
+    /// Non-idempotent additive creation workflow.
+    Create,
+    /// Destructive update, edit, or archive workflow.
+    Update,
 }
 
-/// Returns the annotation profile for a non-idempotent create workflow.
-#[must_use]
-pub fn create_annotations() -> ToolAnnotations {
-    ToolAnnotations::new()
-        .read_only(false)
-        .destructive(false)
-        .idempotent(false)
-        .open_world(false)
+impl ToolProfile {
+    fn annotations(self) -> ToolAnnotations {
+        match self {
+            Self::Read => ToolAnnotations::new()
+                .read_only(true)
+                .destructive(false)
+                .open_world(false),
+            Self::Create => ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+            Self::Update => ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(false),
+        }
+    }
 }
 
-/// Returns the annotation profile for an update, edit, or archive workflow.
-#[must_use]
-pub fn update_annotations() -> ToolAnnotations {
-    ToolAnnotations::new()
-        .read_only(false)
-        .destructive(true)
-        .idempotent(false)
-        .open_world(false)
+/// Typed MCP tool contract linking one strict output schema to success values.
+///
+/// The inner `rmcp` metadata is created only by [`workflow_tool`], so every
+/// public success response has first passed the same strict output-schema
+/// checks advertised to the client.
+#[derive(Debug, Clone)]
+pub struct WorkflowTool<O> {
+    tool: Tool,
+    output: PhantomData<fn() -> O>,
+}
+
+impl<O> WorkflowTool<O> {
+    /// Borrows the `rmcp` tool metadata for registration or inspection.
+    #[must_use]
+    pub const fn as_tool(&self) -> &Tool {
+        &self.tool
+    }
+
+    /// Consumes the typed contract and returns its `rmcp` metadata.
+    #[must_use]
+    pub fn into_tool(self) -> Tool {
+        self.tool
+    }
+}
+
+impl<O> WorkflowTool<O>
+where
+    O: Serialize,
+{
+    /// Encodes a success value whose Rust type exactly matches the contract's
+    /// validated output schema.
+    ///
+    /// ```compile_fail
+    /// use any_mcp::protocol::{ToolProfile, workflow_tool};
+    /// use schemars::JsonSchema;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// #[derive(Deserialize, JsonSchema)]
+    /// #[serde(deny_unknown_fields)]
+    /// struct Input {
+    ///     /// Whether to retrieve the object.
+    ///     enabled: bool,
+    /// }
+    /// #[derive(Serialize, JsonSchema)]
+    /// #[serde(deny_unknown_fields)]
+    /// struct Output {
+    ///     /// Whether retrieval completed.
+    ///     complete: bool,
+    /// }
+    /// #[derive(Serialize, JsonSchema)]
+    /// #[serde(deny_unknown_fields)]
+    /// struct DifferentOutput {
+    ///     /// Whether a different operation completed.
+    ///     different: bool,
+    /// }
+    ///
+    /// let contract = workflow_tool::<Input, Output>(
+    ///     "object_get",
+    ///     "Retrieve bounded object metadata.",
+    ///     ToolProfile::Read,
+    /// )?;
+    /// contract.success(&DifferentOutput { different: true })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn success(&self, value: &O) -> Result<CallToolResult, ResultEncodingError> {
+        serde_json::to_value(value)
+            .map(CallToolResult::structured)
+            .map_err(|_| ResultEncodingError)
+    }
 }
 
 /// Creates an `rmcp` tool contract with strict input and output schemas.
@@ -49,15 +131,19 @@ pub fn update_annotations() -> ToolAnnotations {
 pub fn workflow_tool<I, O>(
     name: &'static str,
     description: &'static str,
-    annotations: ToolAnnotations,
-) -> Result<Tool, SchemaContractError>
+    profile: ToolProfile,
+) -> Result<WorkflowTool<O>, SchemaContractError>
 where
     I: JsonSchema + 'static,
-    O: JsonSchema + 'static,
+    O: JsonSchema + Serialize + 'static,
 {
-    Ok(Tool::new(name, description, input_schema::<I>()?)
+    let tool = Tool::new(name, description, input_schema::<I>()?)
         .with_raw_output_schema(output_schema::<O>()?)
-        .with_annotations(annotations))
+        .with_annotations(profile.annotations());
+    Ok(WorkflowTool {
+        tool,
+        output: PhantomData,
+    })
 }
 
 #[cfg(test)]
@@ -84,10 +170,17 @@ mod tests {
         object_id: ObjectId,
     }
 
+    #[derive(Serialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    struct UnboundedOutput {
+        /// Intentionally unbounded output text.
+        value: String,
+    }
+
     #[test]
     fn annotation_profiles_serialize_exactly() {
         assert_eq!(
-            serde_json::to_value(read_annotations()).unwrap(),
+            serde_json::to_value(ToolProfile::Read.annotations()).unwrap(),
             json!({
                 "readOnlyHint": true,
                 "destructiveHint": false,
@@ -95,7 +188,7 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::to_value(create_annotations()).unwrap(),
+            serde_json::to_value(ToolProfile::Create.annotations()).unwrap(),
             json!({
                 "readOnlyHint": false,
                 "destructiveHint": false,
@@ -104,7 +197,7 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::to_value(update_annotations()).unwrap(),
+            serde_json::to_value(ToolProfile::Update.annotations()).unwrap(),
             json!({
                 "readOnlyHint": false,
                 "destructiveHint": true,
@@ -116,12 +209,13 @@ mod tests {
 
     #[test]
     fn workflow_tool_attaches_strict_input_output_and_annotations() {
-        let tool = workflow_tool::<Input, Output>(
+        let contract = workflow_tool::<Input, Output>(
             "object_get",
             "Retrieve bounded object metadata.",
-            read_annotations(),
+            ToolProfile::Read,
         )
         .unwrap();
+        let tool = contract.as_tool();
 
         assert_eq!(tool.name, "object_get");
         assert_eq!(tool.input_schema["additionalProperties"], json!(false));
@@ -129,6 +223,26 @@ mod tests {
             tool.output_schema.as_ref().unwrap()["additionalProperties"],
             json!(false)
         );
-        assert_eq!(tool.annotations, Some(read_annotations()));
+        assert_eq!(tool.annotations, Some(ToolProfile::Read.annotations()));
+
+        let result = contract
+            .success(&Output {
+                object_id: ObjectId::new("obj-1").unwrap(),
+            })
+            .unwrap();
+        assert_eq!(result.structured_content.unwrap()["object_id"], "obj-1");
+    }
+
+    #[test]
+    fn unbounded_output_cannot_form_a_typed_contract() {
+        assert_eq!(
+            workflow_tool::<Input, UnboundedOutput>(
+                "object_get",
+                "Retrieve bounded object metadata.",
+                ToolProfile::Read,
+            )
+            .map(|_| ()),
+            Err(SchemaContractError)
+        );
     }
 }

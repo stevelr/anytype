@@ -21,9 +21,14 @@ wire-contract boundaries for later runtime and handler work:
   `additionalProperties: false`, bounded domain strings, stable object
   summaries, and canonical
   `anytype://spaces/<space_id>/objects/<object_id>` resource URIs;
-- exact annotation profiles for read, create, and destructive update tools;
+- fail-closed rejection of free-form JSON/maps, unbounded arrays and strings,
+  impractically bounded numbers, and undiscriminated unions;
+- typed tool contracts that link each validated output schema to its success
+  encoder and select only the exact read, create, or destructive-update
+  annotation profile;
 - compact JSON text fallbacks matching each typed `structuredContent` result;
-  and stable, bounded, secret-safe execution error bodies; and
+  and stable, bounded, secret-safe execution error bodies that require
+  candidate enrichment before an ambiguity can be returned; and
 - a minimal binary that constructs the server scaffold without writing to
   stdout.
 

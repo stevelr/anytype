@@ -1,3 +1,4 @@
 # Agent Notes
 
 [pattern] rmcp 2.2.0 `schema_for_input`/`schema_for_output` emits JSON Schema 2020-12 and strips only root title/description; `serde(deny_unknown_fields)` produces `additionalProperties: false`.
+[gotcha] Schemars 1.2 emits documented string enums as `oneOf` constant branches and bounded `Option<Vec<T>>` as `type: ["array", "null"]`; strict validation must distinguish those finite/nullable shapes from open untagged unions.
