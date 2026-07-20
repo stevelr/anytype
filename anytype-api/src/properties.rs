@@ -1707,9 +1707,11 @@ impl AnytypeClient {
     /// 99-row pages. The scan examines at most
     /// [`MAX_RESOLVE_SCAN_ITEMS`] options and returns
     /// [`AnytypeError::ResolutionLimitExceeded`] rather than guessing when
-    /// completeness exceeds that bound. A property key retains the cached key
-    /// lookup behavior and therefore requires cache to be enabled (the
-    /// default).
+    /// completeness exceeds that bound. The advertised total must stay stable,
+    /// continuation pages must be complete, and a terminal page must account
+    /// for the total before either a matching tag or `NotFound` is returned. A
+    /// property key retains the cached key lookup behavior and therefore
+    /// requires cache to be enabled (the default).
     ///
     /// # Example
     ///
@@ -1771,6 +1773,7 @@ impl AnytypeClient {
         let needle = tag_key_or_id.to_lowercase();
         let mut offset = 0_u32;
         let mut scanned = 0_usize;
+        let mut advertised_total = None;
         for _ in 0..MAX_PAGES {
             let remaining = MAX_RESOLVE_SCAN_ITEMS.saturating_sub(scanned);
             if remaining == 0 {
@@ -1784,15 +1787,35 @@ impl AnytypeClient {
                 .list()
                 .await?
                 .into_response();
+            let total = page.pagination.total;
+            if let Some(expected_total) = advertised_total {
+                if total != expected_total {
+                    return Err(malformed_tag_pagination());
+                }
+            } else {
+                advertised_total = Some(total);
+            }
+            if total > MAX_RESOLVE_SCAN_ITEMS {
+                return Err(resolution_limit("tag", tag_key_or_id));
+            }
+
+            let Ok(page_offset) = usize::try_from(page.pagination.offset) else {
+                return Err(malformed_tag_pagination());
+            };
+            let Some(page_end) = page_offset.checked_add(page.items.len()) else {
+                return Err(malformed_tag_pagination());
+            };
+            let has_remaining = page_end < total;
             if page.pagination.offset != offset
+                || page_offset != scanned
                 || page.pagination.limit != requested_limit
                 || page.items.len() > remaining
                 || page.items.len() > requested_limit as usize
+                || page_end > total
+                || page.pagination.has_more != has_remaining
+                || (page.pagination.has_more && page.items.len() != requested_limit as usize)
             {
-                return OtherSnafu {
-                    message: "Anytype returned malformed tag pagination".to_owned(),
-                }
-                .fail();
+                return Err(malformed_tag_pagination());
             }
 
             for tag in &page.items {
@@ -1800,11 +1823,9 @@ impl AnytypeClient {
                     return Ok(tag.clone());
                 }
             }
-            scanned += page.items.len();
+            scanned = page_end;
 
-            if page.pagination.total > MAX_RESOLVE_SCAN_ITEMS
-                || (scanned == MAX_RESOLVE_SCAN_ITEMS && page.pagination.has_more)
-            {
+            if scanned == MAX_RESOLVE_SCAN_ITEMS && page.pagination.has_more {
                 return Err(resolution_limit("tag", tag_key_or_id));
             }
             if !page.pagination.has_more {
@@ -1819,6 +1840,12 @@ impl AnytypeClient {
                 .ok_or_else(|| resolution_limit("tag", tag_key_or_id))?;
         }
         Err(resolution_limit("tag", tag_key_or_id))
+    }
+}
+
+fn malformed_tag_pagination() -> AnytypeError {
+    AnytypeError::Other {
+        message: "Anytype returned malformed tag pagination".to_owned(),
     }
 }
 
@@ -1850,7 +1877,23 @@ mod tests {
     enum TagRoute {
         Single,
         TargetSecondPage,
-        BeyondLimit,
+        OverLimitTarget,
+        FalseTerminal,
+        ChangingTotal,
+        ValidAbsentSecondPage,
+    }
+
+    fn full_unrelated_tag_page() -> Vec<serde_json::Value> {
+        (0..99)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("other-tag-{index}"),
+                    "key": format!("other_{index}"),
+                    "name": format!("Other {index}"),
+                    "color": "grey"
+                })
+            })
+            .collect()
     }
 
     async fn route_aware_property_server(
@@ -2007,17 +2050,13 @@ mod tests {
                             }
                         })
                         .to_string(),
-                        (TagRoute::TargetSecondPage, 0) => {
-                            let tags = (0..99)
-                                .map(|index| {
-                                    serde_json::json!({
-                                        "id": format!("other-tag-{index}"),
-                                        "key": format!("other_{index}"),
-                                        "name": format!("Other {index}"),
-                                        "color": "grey"
-                                    })
-                                })
-                                .collect::<Vec<_>>();
+                        (
+                            TagRoute::TargetSecondPage
+                            | TagRoute::ChangingTotal
+                            | TagRoute::ValidAbsentSecondPage,
+                            0,
+                        ) => {
+                            let tags = full_unrelated_tag_page();
                             serde_json::json!({
                                 "data": tags,
                                 "pagination": {
@@ -2044,7 +2083,22 @@ mod tests {
                             }
                         })
                         .to_string(),
-                        (TagRoute::BeyondLimit, 0) => serde_json::json!({
+                        (TagRoute::OverLimitTarget, 0) => serde_json::json!({
+                            "data": [{
+                                "id": TEST_TAG_ID,
+                                "key": "open",
+                                "name": "Open",
+                                "color": "blue"
+                            }],
+                            "pagination": {
+                                "has_more": true,
+                                "limit": 99,
+                                "offset": 0,
+                                "total": 1001
+                            }
+                        })
+                        .to_string(),
+                        (TagRoute::FalseTerminal, 0) => serde_json::json!({
                             "data": [{
                                 "id": "other-tag",
                                 "key": "other",
@@ -2052,10 +2106,40 @@ mod tests {
                                 "color": "grey"
                             }],
                             "pagination": {
-                                "has_more": true,
+                                "has_more": false,
                                 "limit": 99,
                                 "offset": 0,
-                                "total": 1001
+                                "total": 1000
+                            }
+                        })
+                        .to_string(),
+                        (TagRoute::ChangingTotal, 1) => serde_json::json!({
+                            "data": [{
+                                "id": TEST_TAG_ID,
+                                "key": "open",
+                                "name": "Open",
+                                "color": "blue"
+                            }],
+                            "pagination": {
+                                "has_more": true,
+                                "limit": 99,
+                                "offset": 99,
+                                "total": 101
+                            }
+                        })
+                        .to_string(),
+                        (TagRoute::ValidAbsentSecondPage, 1) => serde_json::json!({
+                            "data": [{
+                                "id": "last-other-tag",
+                                "key": "last_other",
+                                "name": "Last Other",
+                                "color": "grey"
+                            }],
+                            "pagination": {
+                                "has_more": false,
+                                "limit": 99,
+                                "offset": 99,
+                                "total": 100
                             }
                         })
                         .to_string(),
@@ -2177,15 +2261,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_id_tag_lookup_reports_incomplete_scan_beyond_budget() {
+    async fn explicit_id_tag_lookup_rejects_over_budget_total_before_target() {
         let (base_url, shutdown, traffic) =
-            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::BeyondLimit).await;
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::OverLimitTarget).await;
         let client = route_fixture_client(base_url);
 
         let error = client
-            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "absent")
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "open")
             .await
-            .expect_err("incomplete tag scan must not report not-found");
+            .expect_err("over-budget total must precede a matching target");
         assert!(matches!(
             error,
             AnytypeError::ResolutionLimitExceeded {
@@ -2204,6 +2288,81 @@ mod tests {
             "known over-budget total stops immediately"
         );
         assert_eq!(traffic.requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_id_tag_lookup_rejects_false_terminal_page() {
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::FalseTerminal).await;
+        let client = route_fixture_client(base_url);
+
+        let error = client
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "absent")
+            .await
+            .expect_err("incomplete terminal page must not report not-found");
+        assert_malformed_tag_pagination(error);
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(traffic.property_list_pages, 0);
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(traffic.tag_list_pages, 1);
+        assert_eq!(traffic.requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_id_tag_lookup_rejects_changing_total_before_target() {
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::ChangingTotal).await;
+        let client = route_fixture_client(base_url);
+
+        let error = client
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "open")
+            .await
+            .expect_err("changing total must precede a matching target");
+        assert_malformed_tag_pagination(error);
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(traffic.property_list_pages, 0);
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(traffic.tag_list_pages, 2);
+        assert_eq!(traffic.requests.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn explicit_id_tag_lookup_returns_not_found_only_after_complete_last_page() {
+        let (base_url, shutdown, traffic) =
+            route_aware_property_server(TEST_PROPERTY_ID, TagRoute::ValidAbsentSecondPage).await;
+        let client = route_fixture_client(base_url);
+
+        let error = client
+            .lookup_property_tag(TEST_SPACE_ID, TEST_PROPERTY_ID, "absent")
+            .await
+            .expect_err("complete absent lookup must return not-found");
+        assert!(matches!(
+            error,
+            AnytypeError::NotFound { obj_type, key }
+                if obj_type == "Tag" && key == "absent"
+        ));
+
+        shutdown.send(()).expect("stop property fixture");
+        let traffic = traffic.await.expect("property fixture task");
+        assert_eq!(traffic.property_list_pages, 0);
+        assert_eq!(traffic.direct_property_gets, 1);
+        assert_eq!(traffic.tag_list_pages, 2);
+        assert_eq!(traffic.requests.len(), 3);
+    }
+
+    fn assert_malformed_tag_pagination(error: AnytypeError) {
+        let AnytypeError::Other { message } = &error else {
+            panic!("malformed pagination must be an upstream error: {error}");
+        };
+        assert_eq!(message, "Anytype returned malformed tag pagination");
+        let display = error.to_string();
+        for private in [TEST_SPACE_ID, TEST_PROPERTY_ID, TEST_TAG_ID] {
+            assert!(!display.contains(private), "pagination error leaked an id");
+        }
     }
 
     #[tokio::test]

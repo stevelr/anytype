@@ -31,8 +31,9 @@ Applications authenticate with Anytype servers using access tokens. One token is
   mismatched returned identity instead of priming the all-types cache. Direct
   property reads provide the same metadata-only exact-identity path and never
   expand tags. Explicit-ID tag lookup follows that GET with a separately
-  paginated 1,000-row scan, without priming all space properties or guessing
-  from incomplete results. Template
+  paginated 1,000-row scan whose total and page windows must remain coherent
+  before a match or not-found result is accepted, without priming all space
+  properties or guessing from incomplete results. Template
   resolution uses a direct-id GET or an exact 1,000-row scan and re-fetches the
   selected template to verify its space, canonical generic template type
   id/key, and non-archived state; the validated endpoint path establishes the
