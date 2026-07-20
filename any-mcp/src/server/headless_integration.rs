@@ -393,10 +393,9 @@ async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
         Box::pin(async move {
             let server = live_server(ctx.as_ref()).await;
             let collection_type = ctx
-                .client
-                .resolve_type(&ctx.space_id, "collection")
+                .create_collection_type_fixture(format!("MCP collection type {}", unique_suffix()))
                 .await
-                .expect("discover and validate collection-layout type");
+                .expect("create and register collection-layout type fixture");
             assert_eq!(collection_type.layout, ObjectLayout::Collection);
             let collection = create_object(
                 ctx.as_ref(),

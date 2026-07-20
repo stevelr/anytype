@@ -75,7 +75,10 @@ use crate::{
 ///
 /// Determines the default appearance and behavior of objects of this type.
 /// Note: This differs from [`ObjectLayout`] which has additional variants
-/// (Bookmark, Set, Collection, Participant).
+/// (Bookmark, Set, Collection, Participant). Anytype's public REST create and
+/// update contract accepts only the four variants below; collection-layout
+/// types used by integration tests are created through the cleanup-safe helper
+/// in [`crate::test_util::TestContext`].
 #[derive(
     Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, strum::Display, strum::EnumString,
 )]

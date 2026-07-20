@@ -29,7 +29,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `headless_archive_applies_and_returns_verified_success`, with exact
   applied-state and cleanup evidence before teardown.
   Exercise one bounded ambient `space_list` page with current-space evidence
-  and optional cursor validation without assuming terminality.
+  and optional cursor validation without assuming terminality. Collection/view
+  coverage now creates and immediately registers its own collection-layout type
+  through the narrow `anytype-api` test fixture instead of ambient system schema.
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
   2.2.0 and protocol revision `2026-07-28`.
 - Add authenticated long-lived Anytype client startup, bounded and cancellable
