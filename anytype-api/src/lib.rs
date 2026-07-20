@@ -212,7 +212,7 @@ pub mod prelude {
         // Properties
         properties::{Property, PropertyFormat, PropertyValue, PropertyWithValue, SetProperty},
         // Name and id resolution
-        resolve::{ChatTarget, DEFAULT_CHAT_NAME},
+        resolve::{ChatTarget, DEFAULT_CHAT_NAME, MAX_RESOLVE_CANDIDATES, ResolveCandidate},
         // Spaces
         spaces::{Space, SpaceModel},
         // Property tags
