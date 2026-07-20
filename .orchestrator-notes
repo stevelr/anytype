@@ -3,6 +3,8 @@
 - Filter: `mcp`, actionable types bug/chore/task, priorities 0-2.
 - Closed this session: `any-cut`, `any-g8g` after local acceptance checks.
 - Audited: all 18 remaining Phase 1 tickets (`any-kus` through `any-zk6`). Their phase ordering and transitive dependencies match the canonical design; no missing dependency or scope split is currently required.
-- Ready: `any-kus` (shared protocol/schema foundation) and `any-mtc` (authenticated stdio runtime). They are intentionally parallel and own different primary modules.
-- Blockers: the other 16 Phase 1 tickets are dependency-blocked; later phases are deferred P4 design/review work and out of this active P0-P2 implementation filter.
-- Next: dispatch `any-kus` and `any-mtc` in isolated jj workspaces, integrate fixed revisions, run any-mcp gates, close verified tickets, and re-query readiness.
+- Reviewed clean: `any-kus` stack through R3 `vzskwsnw`; `any-mtc` stack through R3 `orvkouny`.
+- Dependency correction: promoted `any-nzd` to P2 task, depending on `any-kus` and blocking `any-inq`, because candidate-free resolver ambiguity cannot meet the design.
+- OFIs retained P3: `any-ipy` (safe nested gRPC classification) and `any-8nl` (anytype-api diagnostic redaction); neither blocks REST-backed Phase 1.
+- Blockers: remaining handler/test/docs tickets are dependency-blocked until reviewed roots close; later phases are deferred P4 design/review work.
+- Next: integrate both R3 stacks, resolve shared-file conflicts, run combined gates/live smoke, close verified tickets, and re-query readiness.
