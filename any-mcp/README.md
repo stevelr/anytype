@@ -426,6 +426,8 @@ runtime and advertises their static capability alongside the tool catalog.
   listing workflows.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
+- `src/server/headless_integration.rs` — ignored cleanup-safe production-router
+  tests against an authenticated headless Anytype server.
 - `tests/snapshots/` — reviewed deterministic normal/read-only tool catalogs,
   including every schema and annotation.
 
@@ -449,6 +451,28 @@ the explicit regeneration and review procedure in
 ```sh
 cargo test -p any-mcp
 ```
+
+## Headless integration tests
+
+The ignored live suite uses `with_test_context`, checks authenticated HTTP and
+gRPC before work, and runs serially so mutation verification does not compete
+with itself for the server's rate limit. Every created object, type, and
+property is registered immediately for cleanup. Run all live groups from the
+repository root with one command:
+
+```sh
+source .test-env
+cargo test -p any-mcp headless_ -- --ignored --test-threads=1
+```
+
+The exact tests are
+`headless_default_discovery_routes_paginate_and_report_ambiguity`,
+`headless_view_body_and_resource_routes_are_complete_and_bound`, and
+`headless_mutations_are_visible_idempotent_and_conflict_safe`. Together they
+exercise the production router for all 14 default tools plus the complete
+document resource, cursor/query binding, body continuation, explicit view
+selection, ambiguity evidence, idempotent create, read-after-write visibility,
+and stale/count-conflict edits that prove the body was not changed.
 
 ## Build
 
