@@ -9,9 +9,14 @@
 //! which archives one object. It does not call the archived-object listing,
 //! permanent batch deletion, delete-all, or space mutation APIs.
 
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, fmt, future::Future, time::Duration};
 
-use anytype::{error::AnytypeError, objects::Object};
+use anytype::{
+    error::AnytypeError,
+    objects::Object,
+    paged::PagedResult,
+    prelude::{AnytypeClient, VerifyConfig, verify_semantic},
+};
 use rmcp::{
     model::CallToolResult,
     schemars::{JsonSchema, Schema, SchemaGenerator, json_schema},
@@ -20,9 +25,12 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    domain::{DomainValueError, ObjectId, ObjectResourceUri, SpaceId},
-    error::ToolError,
-    handler_support::{HandlerError, MutationAccess, execute_handler, require_mutation_access},
+    domain::{DomainValueError, EntityId, ObjectId, ObjectResourceUri, SpaceId, TypeKey},
+    error::{ToolError, mutation_rejection_is_definitive},
+    handler_support::{
+        HandlerError, HandlerOperationError, MutationAccess, MutationProgress,
+        execute_mutation_handler, require_mutation_access,
+    },
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
@@ -31,6 +39,14 @@ use crate::{
 
 /// Maximum Unicode scalar values accepted in a space id or display name.
 pub const MAX_SPACE_REFERENCE_CHARS: usize = 512;
+
+const ACTIVE_PAGE_SIZE: u32 = 100;
+const MAX_ACTIVE_ITEMS: u32 = 1_000;
+const ARCHIVED_PAGE_SIZE: u32 = 1_000;
+const MAX_ARCHIVED_ITEMS: u32 = 10_000;
+const MAX_ARCHIVE_VERIFY_ATTEMPTS: usize = 10;
+const MAX_ARCHIVE_VERIFY_TIME: Duration = Duration::from_secs(3);
+const MAX_ARCHIVE_VERIFY_DELAY: Duration = Duration::from_millis(300);
 
 /// A nonempty, bounded space id or unique display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -206,11 +222,14 @@ pub fn object_archive_tool() -> Result<WorkflowTool<ObjectArchiveOutput>, Schema
 
 /// Soft-archives exactly one Anytype object under shared runtime controls.
 ///
-/// The mutation gate runs before resolution or upstream I/O. The space is
-/// resolved through `anytype-api`, then revalidated before it can enter an HTTP
-/// path. The successful DELETE response must contain safe ids matching the
-/// requested object and resolved space and must explicitly report
-/// `archived=true`; malformed or mismatched upstream data fails closed.
+/// The mutation gate runs before resolution or upstream I/O. The handler reads
+/// and validates the exact active object's space, object, and type identities,
+/// then marks and sends one non-replayed DELETE. An exact immediate
+/// `archived=true` response succeeds directly. Every uncertain post-dispatch
+/// outcome instead uses finite read-after-write confirmation: the exact object
+/// must be absent from the bounded active surface and present in the bounded,
+/// original-type-scoped archived surface. Failure to prove both facts returns
+/// fixed mutation-indeterminate guidance and never replays DELETE.
 pub async fn object_archive(
     runtime: &RuntimeContext,
     contract: &WorkflowTool<ObjectArchiveOutput>,
@@ -223,63 +242,351 @@ pub async fn object_archive(
     }
 
     let client = runtime.client();
-    let space = input.space.as_str();
-    let requested_object_id = input.object_id.clone();
-    execute_handler(
+    let verification = archive_verification_config(
+        client
+            .get_config()
+            .get_verify_config()
+            .cloned()
+            .unwrap_or_else(VerifyConfig::default),
+    );
+    let input = input.clone();
+    let progress = MutationProgress::new();
+    let operation_progress = progress.clone();
+    let operation = Box::pin(async move {
+        let resolved = client.resolve_space_id(input.space.as_str()).await?;
+        let space_id = SpaceId::new(resolved).map_err(upstream_domain)?;
+        let object_id = input.object_id;
+        let current = client
+            .object(space_id.as_str(), object_id.as_str())
+            .get()
+            .await?;
+        let identity = checked_preflight_identity(current, space_id, object_id)?;
+
+        operation_progress.mark_dispatched();
+        match client
+            .object(identity.space_id.as_str(), identity.object_id.as_str())
+            .delete_once()
+            .await
+        {
+            Ok(returned) if immediate_archive_matches(&returned, &identity) => {
+                return Ok::<_, HandlerOperationError>(archive_output(&identity));
+            }
+            Err(error) if mutation_rejection_is_definitive(&error) => {
+                return Err(error.into());
+            }
+            Ok(_) | Err(_) => {}
+        }
+
+        verify_archive_state(&client, &verification, &identity)
+            .await
+            .map_err(|_| HandlerError::new(ToolError::mutation_indeterminate()))?;
+        Ok::<_, HandlerOperationError>(archive_output(&identity))
+    });
+    execute_mutation_handler(
         runtime,
         contract,
         OperationContext::new("object_archive"),
         cancellation,
-        async {
-            let resolved = client.resolve_space_id(space).await?;
-            let resolved_space_id = SpaceId::new(resolved).map_err(unsafe_upstream_id)?;
-            let object = client
-                .object(resolved_space_id.as_str(), requested_object_id.as_str())
-                .delete()
-                .await?;
-            Ok((resolved_space_id, requested_object_id, object))
-        },
-        |(resolved_space_id, requested_object_id, object)| async move {
-            verified_archive_output(resolved_space_id, requested_object_id, object)
-        },
+        &progress,
+        operation,
+        |output| async move { Ok(output) },
     )
     .await
 }
 
-fn unsafe_upstream_id(_: DomainValueError) -> AnytypeError {
-    AnytypeError::Other {
-        message: "Anytype returned an unsafe identifier".to_owned(),
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveIdentity {
+    space_id: SpaceId,
+    object_id: ObjectId,
+    type_id: EntityId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArchiveEvidence {
+    active_absent: bool,
+    archived_present: bool,
+}
+
+impl ArchiveEvidence {
+    const fn proven(self) -> bool {
+        self.active_absent && self.archived_present
     }
 }
 
-fn verified_archive_output(
-    resolved_space_id: SpaceId,
-    requested_object_id: ObjectId,
-    object: Object,
-) -> Result<ObjectArchiveOutput, HandlerError> {
-    let returned_object_id =
-        ObjectId::new(object.id).map_err(|_| HandlerError::new(ToolError::upstream()))?;
-    let returned_space_id =
-        SpaceId::new(object.space_id).map_err(|_| HandlerError::new(ToolError::upstream()))?;
+#[derive(Debug)]
+struct EvidencePage {
+    items: Vec<Object>,
+    offset: u32,
+    limit: u32,
+    has_more: bool,
+}
 
-    if returned_object_id != requested_object_id
-        || returned_space_id != resolved_space_id
-        || !object.archived
-    {
+impl EvidencePage {
+    fn from_paged(page: PagedResult<Object>) -> Self {
+        let page = page.into_response();
+        Self {
+            items: page.items,
+            offset: page.pagination.offset,
+            limit: page.pagination.limit,
+            has_more: page.pagination.has_more,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanResult {
+    Present,
+    Absent,
+    Incomplete,
+}
+
+fn archive_verification_config(configured: VerifyConfig) -> VerifyConfig {
+    VerifyConfig {
+        timeout: configured.timeout.min(MAX_ARCHIVE_VERIFY_TIME),
+        initial_delay: configured.initial_delay.min(MAX_ARCHIVE_VERIFY_DELAY),
+        max_delay: configured.max_delay.min(MAX_ARCHIVE_VERIFY_DELAY),
+        max_attempts: configured
+            .effective_max_attempts()
+            .min(MAX_ARCHIVE_VERIFY_ATTEMPTS),
+    }
+}
+
+fn checked_preflight_identity(
+    object: Object,
+    space_id: SpaceId,
+    object_id: ObjectId,
+) -> Result<ArchiveIdentity, HandlerError> {
+    validate_object_identity(&object, &space_id, &object_id, None, true)?;
+    if object.archived {
+        return Err(HandlerError::new(ToolError::not_found()));
+    }
+    let object_type = object
+        .r#type
+        .ok_or_else(|| HandlerError::new(ToolError::upstream()))?;
+    if object_type.archived {
         return Err(HandlerError::new(ToolError::upstream()));
     }
+    let type_id = EntityId::new(object_type.id).map_err(upstream_domain)?;
+    TypeKey::new(object_type.key).map_err(upstream_domain)?;
+    Ok(ArchiveIdentity {
+        space_id,
+        object_id,
+        type_id,
+    })
+}
 
-    let resource_uri = ObjectResourceUri::new(&returned_space_id, &returned_object_id);
-    Ok(ObjectArchiveOutput {
-        id: returned_object_id,
+fn immediate_archive_matches(object: &Object, identity: &ArchiveIdentity) -> bool {
+    object.archived
+        && validate_object_identity(
+            object,
+            &identity.space_id,
+            &identity.object_id,
+            Some(&identity.type_id),
+            false,
+        )
+        .is_ok()
+}
+
+fn archive_output(identity: &ArchiveIdentity) -> ObjectArchiveOutput {
+    let resource_uri = ObjectResourceUri::new(&identity.space_id, &identity.object_id);
+    ObjectArchiveOutput {
+        id: identity.object_id.clone(),
         archived: ArchivedState,
         resource_uri,
+    }
+}
+
+fn validate_object_identity(
+    object: &Object,
+    space_id: &SpaceId,
+    object_id: &ObjectId,
+    type_id: Option<&EntityId>,
+    require_type: bool,
+) -> Result<(), HandlerError> {
+    let returned_object_id = ObjectId::new(object.id.clone()).map_err(upstream_domain)?;
+    let returned_space_id = SpaceId::new(object.space_id.clone()).map_err(upstream_domain)?;
+    if &returned_object_id != object_id || &returned_space_id != space_id {
+        return Err(HandlerError::new(ToolError::upstream()));
+    }
+    match (&object.r#type, type_id) {
+        (Some(returned_type), Some(type_id)) => {
+            let returned_type_id =
+                EntityId::new(returned_type.id.clone()).map_err(upstream_domain)?;
+            TypeKey::new(returned_type.key.clone()).map_err(upstream_domain)?;
+            if &returned_type_id != type_id || returned_type.archived {
+                return Err(HandlerError::new(ToolError::upstream()));
+            }
+        }
+        (None, _) if require_type => return Err(HandlerError::new(ToolError::upstream())),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn upstream_domain(error: DomainValueError) -> HandlerError {
+    match error {
+        DomainValueError::TooLong { .. } => HandlerError::new(ToolError::bounded_result()),
+        DomainValueError::Empty | DomainValueError::InvalidIdentifierCharacter => {
+            HandlerError::new(ToolError::upstream())
+        }
+    }
+}
+
+async fn verify_archive_state(
+    client: &AnytypeClient,
+    config: &VerifyConfig,
+    identity: &ArchiveIdentity,
+) -> Result<(), AnytypeError> {
+    verify_archive_state_with(config, identity, || archive_evidence(client, identity)).await
+}
+
+async fn verify_archive_state_with<Fetch, Fut>(
+    config: &VerifyConfig,
+    identity: &ArchiveIdentity,
+    fetch: Fetch,
+) -> Result<(), AnytypeError>
+where
+    Fetch: FnMut() -> Fut,
+    Fut: Future<Output = Result<ArchiveEvidence, AnytypeError>>,
+{
+    verify_semantic(
+        config,
+        "archived object",
+        identity.object_id.as_str(),
+        fetch,
+        |evidence| evidence.proven(),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn archive_evidence(
+    client: &AnytypeClient,
+    identity: &ArchiveIdentity,
+) -> Result<ArchiveEvidence, AnytypeError> {
+    let active = scan_active_with(identity, |limit, offset| async move {
+        client
+            .objects(identity.space_id.as_str())
+            .limit(limit)
+            .offset(offset)
+            .list()
+            .await
+            .map(EvidencePage::from_paged)
     })
+    .await?;
+    let archived = scan_archived_with(identity, |limit, offset| async move {
+        client
+            .list_archived(identity.space_id.as_str())
+            .types([identity.type_id.as_str()])
+            .limit(limit)
+            .offset(offset)
+            .list()
+            .await
+            .map(EvidencePage::from_paged)
+    })
+    .await?;
+    Ok(ArchiveEvidence {
+        active_absent: active == ScanResult::Absent,
+        archived_present: archived == ScanResult::Present,
+    })
+}
+
+async fn scan_active_with<Fetch, Fut>(
+    identity: &ArchiveIdentity,
+    mut fetch: Fetch,
+) -> Result<ScanResult, AnytypeError>
+where
+    Fetch: FnMut(u32, u32) -> Fut,
+    Fut: Future<Output = Result<EvidencePage, AnytypeError>>,
+{
+    for offset in (0..MAX_ACTIVE_ITEMS).step_by(ACTIVE_PAGE_SIZE as usize) {
+        let page = fetch(ACTIVE_PAGE_SIZE, offset).await?;
+        validate_page(&page, offset, ACTIVE_PAGE_SIZE)?;
+        for object in page
+            .items
+            .iter()
+            .filter(|object| object.id == identity.object_id.as_str())
+        {
+            validate_object_identity(
+                object,
+                &identity.space_id,
+                &identity.object_id,
+                Some(&identity.type_id),
+                true,
+            )
+            .map_err(recovery_validation)?;
+            if !object.archived {
+                return Ok(ScanResult::Present);
+            }
+        }
+        if !page.has_more {
+            return Ok(ScanResult::Absent);
+        }
+    }
+    Ok(ScanResult::Incomplete)
+}
+
+async fn scan_archived_with<Fetch, Fut>(
+    identity: &ArchiveIdentity,
+    mut fetch: Fetch,
+) -> Result<ScanResult, AnytypeError>
+where
+    Fetch: FnMut(u32, u32) -> Fut,
+    Fut: Future<Output = Result<EvidencePage, AnytypeError>>,
+{
+    for offset in (0..MAX_ARCHIVED_ITEMS).step_by(ARCHIVED_PAGE_SIZE as usize) {
+        let page = fetch(ARCHIVED_PAGE_SIZE, offset).await?;
+        validate_page(&page, offset, ARCHIVED_PAGE_SIZE)?;
+        for object in page
+            .items
+            .iter()
+            .filter(|object| object.id == identity.object_id.as_str())
+        {
+            validate_object_identity(
+                object,
+                &identity.space_id,
+                &identity.object_id,
+                Some(&identity.type_id),
+                false,
+            )
+            .map_err(recovery_validation)?;
+            if object.archived {
+                return Ok(ScanResult::Present);
+            }
+        }
+        if !page.has_more {
+            return Ok(ScanResult::Absent);
+        }
+    }
+    Ok(ScanResult::Incomplete)
+}
+
+fn validate_page(page: &EvidencePage, offset: u32, limit: u32) -> Result<(), AnytypeError> {
+    if page.offset != offset || page.limit != limit || page.items.len() > limit as usize {
+        return Err(recovery_error());
+    }
+    Ok(())
+}
+
+fn recovery_validation(_: HandlerError) -> AnytypeError {
+    recovery_error()
+}
+
+fn recovery_error() -> AnytypeError {
+    AnytypeError::Other {
+        message: "archive confirmation returned malformed bounded evidence".to_owned(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials, ResponseLimits};
     use serde_json::{Value, json};
@@ -298,11 +605,14 @@ mod tests {
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.abc123";
     const OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
     const OTHER_OBJECT_ID: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TYPE_ID: &str = "bafyreityyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
+    const OTHER_TYPE_ID: &str = "bafyreizzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
 
     struct FixtureReply {
         status: &'static str,
         body: String,
         delay: Duration,
+        disconnect: bool,
     }
 
     impl FixtureReply {
@@ -311,6 +621,7 @@ mod tests {
                 status: "200 OK",
                 body: body.to_string(),
                 delay: Duration::ZERO,
+                disconnect: false,
             }
         }
 
@@ -319,6 +630,25 @@ mod tests {
                 status,
                 body: body.to_owned(),
                 delay: Duration::ZERO,
+                disconnect: false,
+            }
+        }
+
+        fn malformed(body: &str) -> Self {
+            Self {
+                status: "200 OK",
+                body: body.to_owned(),
+                delay: Duration::ZERO,
+                disconnect: false,
+            }
+        }
+
+        fn disconnect() -> Self {
+            Self {
+                status: "200 OK",
+                body: String::new(),
+                delay: Duration::ZERO,
+                disconnect: true,
             }
         }
 
@@ -354,6 +684,9 @@ mod tests {
                 }
                 requests.push(String::from_utf8(request).expect("request headers are utf-8"));
                 tokio::time::sleep(reply.delay).await;
+                if reply.disconnect {
+                    continue;
+                }
                 let response = format!(
                     "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     reply.status,
@@ -417,15 +750,68 @@ mod tests {
         )
     }
 
-    fn archived_object(space_id: &str, object_id: &str, archived: bool) -> Value {
+    fn object_value(
+        space_id: &str,
+        object_id: &str,
+        archived: bool,
+        type_id: Option<&str>,
+    ) -> Value {
         json!({
-            "object": {
-                "archived": archived,
-                "id": object_id,
-                "space_id": space_id,
-                "type": null
-            }
+            "archived": archived,
+            "id": object_id,
+            "space_id": space_id,
+            "type": type_id.map(|type_id| json!({
+                "archived": false,
+                "id": type_id,
+                "key": "page"
+            }))
         })
+    }
+
+    fn object_response(
+        space_id: &str,
+        object_id: &str,
+        archived: bool,
+        type_id: Option<&str>,
+    ) -> Value {
+        json!({"object": object_value(space_id, object_id, archived, type_id)})
+    }
+
+    fn object(space_id: &str, object_id: &str, archived: bool, type_id: Option<&str>) -> Object {
+        serde_json::from_value(object_value(space_id, object_id, archived, type_id))
+            .expect("valid fixture object")
+    }
+
+    fn identity() -> ArchiveIdentity {
+        ArchiveIdentity {
+            space_id: SpaceId::new(SPACE_ID).unwrap(),
+            object_id: ObjectId::new(OBJECT_ID).unwrap(),
+            type_id: EntityId::new(TYPE_ID).unwrap(),
+        }
+    }
+
+    fn page(items: Vec<Object>, offset: u32, limit: u32, has_more: bool) -> EvidencePage {
+        EvidencePage {
+            items,
+            offset,
+            limit,
+            has_more,
+        }
+    }
+
+    fn preflight_reply() -> FixtureReply {
+        FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, false, Some(TYPE_ID)))
+    }
+
+    fn assert_one_delete(requests: &[String]) {
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("DELETE "))
+                .count(),
+            1,
+            "archive mutation must dispatch DELETE exactly once"
+        );
     }
 
     fn result_code(result: &CallToolResult) -> &str {
@@ -484,9 +870,10 @@ mod tests {
 
     #[tokio::test]
     async fn archives_exactly_one_object_at_the_intended_soft_delete_path() {
-        let (base_url, server) = fixture(vec![FixtureReply::json(archived_object(
-            SPACE_ID, OBJECT_ID, true,
-        ))])
+        let (base_url, server) = fixture(vec![
+            preflight_reply(),
+            FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID))),
+        ])
         .await;
         let runtime = runtime(base_url, Duration::from_secs(1));
         let result = object_archive(
@@ -508,13 +895,17 @@ mod tests {
             }))
         );
         let requests = server.await.expect("archive fixture task");
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
         assert!(requests[0].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/objects/{OBJECT_ID} HTTP/1.1\r\n"
+        )));
+        assert!(requests[1].starts_with(&format!(
             "DELETE /v1/spaces/{SPACE_ID}/objects/{OBJECT_ID} HTTP/1.1\r\n"
         )));
-        assert!(!requests[0].contains("archived"));
-        assert!(!requests[0].contains("delete_all"));
-        assert!(!requests[0].contains("object_list_delete"));
+        assert_one_delete(&requests);
+        assert!(!requests[1].contains("archived"));
+        assert!(!requests[1].contains("delete_all"));
+        assert!(!requests[1].contains("object_list_delete"));
     }
 
     #[tokio::test]
@@ -577,17 +968,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_or_mismatched_success_responses_fail_closed() {
+    async fn ambiguous_success_responses_recover_or_return_indeterminate_without_redelete() {
         let cases = [
-            archived_object(SPACE_ID, OTHER_OBJECT_ID, true),
-            archived_object(OTHER_SPACE_ID, OBJECT_ID, true),
-            archived_object(SPACE_ID, OBJECT_ID, false),
-            archived_object(SPACE_ID, "../unsafe", true),
-            archived_object("../unsafe", OBJECT_ID, true),
+            object_response(SPACE_ID, OTHER_OBJECT_ID, true, Some(TYPE_ID)),
+            object_response(OTHER_SPACE_ID, OBJECT_ID, true, Some(TYPE_ID)),
+            object_response(SPACE_ID, OBJECT_ID, false, Some(TYPE_ID)),
+            object_response(SPACE_ID, "../unsafe", true, Some(TYPE_ID)),
+            object_response("../unsafe", OBJECT_ID, true, Some(TYPE_ID)),
+            object_response(SPACE_ID, OBJECT_ID, true, Some(OTHER_TYPE_ID)),
         ];
         for response in cases {
-            let (base_url, server) = fixture(vec![FixtureReply::json(response)]).await;
-            let runtime = runtime(base_url, Duration::from_secs(1));
+            let (base_url, server) =
+                fixture(vec![preflight_reply(), FixtureReply::json(response)]).await;
+            let runtime = runtime(base_url, Duration::from_millis(100));
             let result = object_archive(
                 &runtime,
                 &object_archive_tool().unwrap(),
@@ -597,24 +990,87 @@ mod tests {
             )
             .await;
             assert_eq!(result.is_error, Some(true));
-            assert_eq!(result_code(&result), "upstream");
+            assert_eq!(result_code(&result), "conflict");
             let requests = server.await.expect("malformed fixture task");
-            assert_eq!(requests.len(), 1);
-            assert!(requests[0].starts_with("DELETE "));
+            assert_eq!(requests.len(), 2);
+            assert_one_delete(&requests);
         }
     }
 
     #[tokio::test]
-    async fn permissions_not_found_and_auth_failures_use_fixed_errors() {
+    async fn preflight_already_missing_and_wrong_identity_never_dispatch_delete() {
+        let cases = [
+            (
+                FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID))),
+                "not_found",
+            ),
+            (
+                FixtureReply::error("404 Not Found", "missing before mutation"),
+                "not_found",
+            ),
+            (
+                FixtureReply::json(object_response(
+                    SPACE_ID,
+                    OTHER_OBJECT_ID,
+                    false,
+                    Some(TYPE_ID),
+                )),
+                "upstream",
+            ),
+            (
+                FixtureReply::json(object_response(
+                    OTHER_SPACE_ID,
+                    OBJECT_ID,
+                    false,
+                    Some(TYPE_ID),
+                )),
+                "upstream",
+            ),
+            (
+                FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, false, None)),
+                "upstream",
+            ),
+            (
+                FixtureReply::json(object_response(
+                    SPACE_ID,
+                    OBJECT_ID,
+                    false,
+                    Some("../unsafe"),
+                )),
+                "upstream",
+            ),
+        ];
+        for (reply, expected_code) in cases {
+            let (base_url, server) = fixture(vec![reply]).await;
+            let result = object_archive(
+                &runtime(base_url, Duration::from_secs(1)),
+                &object_archive_tool().unwrap(),
+                MutationAccess::Allowed,
+                &input(SPACE_ID, OBJECT_ID),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result_code(&result), expected_code);
+            let requests = server.await.expect("preflight fixture task");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("GET "));
+            assert!(!requests[0].contains("DELETE"));
+        }
+    }
+
+    #[tokio::test]
+    async fn definitive_delete_rejections_use_fixed_errors_without_replay() {
         for (status, expected_code) in [
             ("403 Forbidden", "authentication"),
             ("404 Not Found", "not_found"),
             ("401 Unauthorized", "authentication"),
+            ("429 Too Many Requests", "upstream"),
         ] {
-            let (base_url, server) = fixture(vec![FixtureReply::error(
-                status,
-                "Bearer secret-token private upstream body",
-            )])
+            let (base_url, server) = fixture(vec![
+                preflight_reply(),
+                FixtureReply::error(status, "Bearer secret-token private upstream body"),
+            ])
             .await;
             let runtime = runtime(base_url, Duration::from_secs(1));
             let result = object_archive(
@@ -630,63 +1086,245 @@ mod tests {
             let encoded = serde_json::to_string(&result).expect("serialize fixed error");
             assert!(!encoded.contains("secret-token"));
             assert!(!encoded.contains("private upstream"));
-            assert_eq!(server.await.expect("error fixture task").len(), 1);
+            let requests = server.await.expect("error fixture task");
+            assert_eq!(requests.len(), 2);
+            assert_one_delete(&requests);
         }
     }
 
     #[tokio::test]
-    async fn runtime_timeout_cancels_the_archive_response_wait() {
+    async fn cancellation_after_delete_dispatch_is_indeterminate_and_never_replays() {
         let (base_url, server) = fixture(vec![
-            FixtureReply::json(archived_object(SPACE_ID, OBJECT_ID, true))
+            preflight_reply(),
+            FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID)))
                 .delayed(Duration::from_millis(100)),
         ])
         .await;
-        let runtime = runtime(base_url, Duration::from_millis(20));
+        let runtime = runtime(base_url, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let trigger = cancellation.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            trigger.cancel();
+        });
         let result = object_archive(
             &runtime,
             &object_archive_tool().unwrap(),
             MutationAccess::Allowed,
             &input(SPACE_ID, OBJECT_ID),
-            &CancellationToken::new(),
+            &cancellation,
         )
         .await;
+        cancel_task.await.expect("cancellation task");
 
         assert_eq!(result.is_error, Some(true));
-        assert_eq!(result_code(&result), "upstream");
+        assert_eq!(result_code(&result), "conflict");
         let requests = server.await.expect("timeout fixture task");
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].starts_with("DELETE "));
+        assert_eq!(requests.len(), 2);
+        assert_one_delete(&requests);
     }
 
     #[tokio::test]
-    async fn oversized_archive_response_uses_the_document_ceiling() {
-        let (base_url, server) = fixture(vec![FixtureReply::json(archived_object(
-            SPACE_ID, OBJECT_ID, true,
-        ))])
-        .await;
-        let runtime = runtime_with_limits(
-            base_url,
-            Duration::from_secs(1),
-            ResponseLimits {
-                json_bytes: 64,
-                document_bytes: 64,
-                error_bytes: 64,
-                file_bytes: 64,
-            },
-        );
-        let result = object_archive(
-            &runtime,
-            &object_archive_tool().unwrap(),
-            MutationAccess::Allowed,
-            &input(SPACE_ID, OBJECT_ID),
-            &CancellationToken::new(),
-        )
-        .await;
+    async fn ambiguous_delete_failures_are_indeterminate_after_one_dispatch() {
+        let mut oversized = object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID));
+        oversized["object"]["name"] = json!("x".repeat(2_000));
+        let cases = [
+            FixtureReply::error("408 Request Timeout", "request timeout"),
+            FixtureReply::error("307 Temporary Redirect", "redirect target"),
+            FixtureReply::malformed("{"),
+            FixtureReply::json(oversized),
+            FixtureReply::disconnect(),
+        ];
+        for reply in cases {
+            let (base_url, server) = fixture(vec![preflight_reply(), reply]).await;
+            let runtime = runtime_with_limits(
+                base_url,
+                Duration::from_millis(100),
+                ResponseLimits {
+                    json_bytes: 512,
+                    document_bytes: 512,
+                    error_bytes: 64,
+                    file_bytes: 64,
+                },
+            );
+            let result = object_archive(
+                &runtime,
+                &object_archive_tool().unwrap(),
+                MutationAccess::Allowed,
+                &input(SPACE_ID, OBJECT_ID),
+                &CancellationToken::new(),
+            )
+            .await;
 
-        assert_eq!(result.is_error, Some(true));
-        assert_eq!(result_code(&result), "bounded_result");
-        let requests = server.await.expect("response-cap fixture task");
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].starts_with("DELETE "));
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result_code(&result), "conflict");
+            let requests = server.await.expect("ambiguous failure fixture task");
+            assert_eq!(requests.len(), 2);
+            assert_one_delete(&requests);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_archive_evidence_converges_within_finite_attempts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fetch_attempts = attempts.clone();
+        let config = VerifyConfig {
+            timeout: Duration::from_secs(1),
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            max_attempts: 3,
+        };
+        verify_archive_state_with(&config, &identity(), move || {
+            let attempt = fetch_attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(ArchiveEvidence {
+                    active_absent: true,
+                    archived_present: attempt > 0,
+                })
+            }
+        })
+        .await
+        .expect("stale archive evidence converges");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn archive_verification_honors_hard_attempt_and_time_caps() {
+        let configured = VerifyConfig {
+            timeout: Duration::from_secs(60),
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::from_secs(60),
+            max_attempts: 10_000,
+        };
+        let bounded = archive_verification_config(configured);
+        assert_eq!(bounded.timeout, MAX_ARCHIVE_VERIFY_TIME);
+        assert_eq!(bounded.max_delay, MAX_ARCHIVE_VERIFY_DELAY);
+        assert_eq!(bounded.max_attempts, MAX_ARCHIVE_VERIFY_ATTEMPTS);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fetch_attempts = attempts.clone();
+        let fast = VerifyConfig {
+            timeout: Duration::from_secs(1),
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            max_attempts: 3,
+        };
+        let error = verify_archive_state_with(&fast, &identity(), move || {
+            fetch_attempts.fetch_add(1, Ordering::SeqCst);
+            async {
+                Ok(ArchiveEvidence {
+                    active_absent: false,
+                    archived_present: true,
+                })
+            }
+        })
+        .await
+        .expect_err("unproven evidence must exhaust the finite verifier");
+        assert!(matches!(
+            error,
+            AnytypeError::VerifyTimeout { attempts: 3, .. }
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn active_and_archived_scans_stop_at_explicit_page_and_item_bounds() {
+        let active_calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded_active = active_calls.clone();
+        let active = scan_active_with(&identity(), move |limit, offset| {
+            recorded_active.lock().unwrap().push((limit, offset));
+            async move {
+                Ok(page(
+                    vec![object(SPACE_ID, OTHER_OBJECT_ID, false, Some(TYPE_ID))],
+                    offset,
+                    limit,
+                    true,
+                ))
+            }
+        })
+        .await
+        .expect("bounded active scan");
+        assert_eq!(active, ScanResult::Incomplete);
+        let active_calls = active_calls.lock().unwrap();
+        assert_eq!(active_calls.len(), 10);
+        assert_eq!(active_calls.first(), Some(&(ACTIVE_PAGE_SIZE, 0)));
+        assert_eq!(active_calls.last(), Some(&(ACTIVE_PAGE_SIZE, 900)));
+
+        let archived_calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded_archived = archived_calls.clone();
+        let archived = scan_archived_with(&identity(), move |limit, offset| {
+            recorded_archived.lock().unwrap().push((limit, offset));
+            async move {
+                Ok(page(
+                    vec![object(SPACE_ID, OTHER_OBJECT_ID, true, None)],
+                    offset,
+                    limit,
+                    true,
+                ))
+            }
+        })
+        .await
+        .expect("bounded archived scan");
+        assert_eq!(archived, ScanResult::Incomplete);
+        let archived_calls = archived_calls.lock().unwrap();
+        assert_eq!(archived_calls.len(), 10);
+        assert_eq!(archived_calls.first(), Some(&(ARCHIVED_PAGE_SIZE, 0)));
+        assert_eq!(archived_calls.last(), Some(&(ARCHIVED_PAGE_SIZE, 9_000)));
+    }
+
+    #[tokio::test]
+    async fn scans_require_exact_safe_identity_and_coherent_pagination() {
+        let active = scan_active_with(&identity(), |limit, offset| async move {
+            Ok(page(
+                vec![object(SPACE_ID, OBJECT_ID, false, Some(TYPE_ID))],
+                offset,
+                limit,
+                false,
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(active, ScanResult::Present);
+
+        let inactive = scan_active_with(&identity(), |limit, offset| async move {
+            Ok(page(
+                vec![object(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID))],
+                offset,
+                limit,
+                false,
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(inactive, ScanResult::Absent);
+
+        let archived = scan_archived_with(&identity(), |limit, offset| async move {
+            Ok(page(
+                vec![object(SPACE_ID, OBJECT_ID, true, None)],
+                offset,
+                limit,
+                false,
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(archived, ScanResult::Present);
+
+        let wrong_space = scan_archived_with(&identity(), |limit, offset| async move {
+            Ok(page(
+                vec![object(OTHER_SPACE_ID, OBJECT_ID, true, None)],
+                offset,
+                limit,
+                false,
+            ))
+        })
+        .await;
+        assert!(wrong_space.is_err());
+
+        let malformed_page = scan_active_with(&identity(), |limit, offset| async move {
+            Ok(page(Vec::new(), offset + limit, limit, false))
+        })
+        .await;
+        assert!(malformed_page.is_err());
     }
 }

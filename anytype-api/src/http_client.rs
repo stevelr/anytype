@@ -445,13 +445,30 @@ impl HttpClient {
         &self,
         path: &str,
     ) -> Result<T> {
+        self.delete_document_request_with_retries(path, true).await
+    }
+
+    /// Makes one authenticated DELETE whose successful JSON may contain a
+    /// complete document body, without replaying the request in middleware.
+    pub(crate) async fn delete_document_request_once<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<T> {
+        self.delete_document_request_with_retries(path, false).await
+    }
+
+    async fn delete_document_request_with_retries<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        allow_retries: bool,
+    ) -> Result<T> {
         let req = HttpRequest {
             method: Method::DELETE,
             path: path.into(),
             query: Vec::default(),
             body: None,
         };
-        self.send_with_limit(req, self.response_limits.document_bytes)
+        self.send_with_limit_and_retries(req, self.response_limits.document_bytes, allow_retries)
             .await
     }
 
@@ -884,12 +901,23 @@ impl HttpClient {
         req: HttpRequest,
         response_limit: u64,
     ) -> Result<T> {
+        self.send_with_limit_and_retries(req, response_limit, true)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn send_with_limit_and_retries<T: DeserializeOwned>(
+        &self,
+        req: HttpRequest,
+        response_limit: u64,
+        allow_retries: bool,
+    ) -> Result<T> {
         // A retry clones and replays the complete request. Restrict every
         // retry path, including rate-limit handling, to methods whose HTTP
         // semantics make that replay safe. In particular, a POST or PATCH
         // response proves only that a response arrived; it does not make the
         // mutation safe to send again.
-        let retryable_method = is_idempotent_method(&req.method);
+        let retryable_method = allow_retries && is_idempotent_method(&req.method);
         // attempt counter is for server busy and connection drop errors
         // counter is reset to 0 whenever we wait based on 429 rate limit response
         let mut attempt = 0u32;

@@ -44,6 +44,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- object requests now offer `delete_once()` for soft-delete workflows that
+  must reconcile an uncertain response without middleware replaying `DELETE`
 - bounded predicate-based semantic read-after-write verification with finite
   timeout and validated attempt limits, retry of successful-but-stale values,
   cancellation-safe backoff, and secret-safe terminal classifications
