@@ -362,7 +362,9 @@ impl HttpClient {
         }
 
         const INITIAL_CAPACITY: u64 = 8 * 1024;
-        let initial_capacity = declared.unwrap_or(INITIAL_CAPACITY).min(INITIAL_CAPACITY);
+        let initial_capacity = limit
+            .min(declared.unwrap_or(INITIAL_CAPACITY))
+            .min(INITIAL_CAPACITY);
         let mut body = Vec::with_capacity(initial_capacity as usize);
         while let Some(chunk) = response
             .chunk()
@@ -1330,6 +1332,36 @@ mod tests {
         client.send::<()>(get_request()).await.expect("exact limit");
         server.await.expect("server task");
         assert_eq!(client.metrics_snapshot().bytes_received, 4);
+    }
+
+    #[tokio::test]
+    async fn one_byte_declared_response_succeeds_with_one_byte_cap() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n0".to_vec();
+        let (client, server) = serve_once_with_limits(response, test_limits(1, 1, 1)).await;
+
+        let value = client
+            .send::<u8>(get_request())
+            .await
+            .expect("one-byte declared response");
+        server.await.expect("server task");
+        assert_eq!(value, 0);
+        assert_eq!(client.metrics_snapshot().bytes_received, 1);
+    }
+
+    #[tokio::test]
+    async fn one_byte_chunked_response_succeeds_with_one_byte_cap() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\n0\r\n0\r\n\r\n"
+            .to_vec();
+        let (client, server) = serve_once_with_limits(response, test_limits(1, 1, 1)).await;
+
+        let value = client
+            .send::<u8>(get_request())
+            .await
+            .expect("one-byte chunked response");
+        server.await.expect("server task");
+        assert_eq!(value, 0);
+        assert_eq!(client.metrics_snapshot().bytes_received, 1);
     }
 
     #[tokio::test]

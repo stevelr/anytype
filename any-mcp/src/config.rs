@@ -19,7 +19,7 @@ const MAX_REQUEST_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 15;
 const MAX_STARTUP_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_JSON_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
-const DEFAULT_DOCUMENT_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_DOCUMENT_RESPONSE_BYTES: u64 = MAX_DOCUMENT_RESPONSE_BYTES;
 
 /// Validated configuration for one `any-mcp` process.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,11 +212,23 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.startup_timeout, Duration::from_secs(15));
         assert_eq!(config.json_response_bytes, 8 * 1024 * 1024);
-        assert_eq!(config.document_response_bytes, 16 * 1024 * 1024);
+        assert_eq!(config.document_response_bytes, MAX_DOCUMENT_RESPONSE_BYTES);
         assert_eq!(
             config.client_config().keystore_service.as_deref(),
             Some("anyr")
         );
+    }
+
+    #[test]
+    fn default_document_budget_is_routed_to_anytype_client() {
+        let config = config(&[]).expect("default configuration");
+        let client = config.client_config();
+
+        assert_eq!(
+            client.response_limits.document_bytes,
+            MAX_DOCUMENT_RESPONSE_BYTES
+        );
+        assert_eq!(client.response_limits.json_bytes, 8 * 1024 * 1024);
     }
 
     #[test]
