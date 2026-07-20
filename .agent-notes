@@ -5,3 +5,4 @@
 [pattern] rmcp 2.2.0 `schema_for_input`/`schema_for_output` emits JSON Schema 2020-12 and strips only root title/description; `serde(deny_unknown_fields)` produces `additionalProperties: false`.
 [gotcha] Schemars 1.2 emits documented string enums as `oneOf` constant branches and bounded `Option<Vec<T>>` as `type: ["array", "null"]`; strict validation must distinguish those finite/nullable shapes from open untagged unions.
 [pattern] anytype-api resolver ambiguity errors carry deterministic wire-safe `ResolveCandidate` values capped at 10 and use a hard scan limit; MCP adapters revalidate them, retain valid alternatives, and refuse empty candidate sets.
+[invariant] Resolver duplicate normalization selects a wire-safe representative before lexical ordering; unsafe same-ID rows must never displace a safe ambiguity candidate.
