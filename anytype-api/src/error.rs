@@ -385,10 +385,8 @@ fn grpc_error_is_authentication(error: &AnytypeGrpcError) -> bool {
     match error {
         AnytypeGrpcError::Auth { .. } => true,
         AnytypeGrpcError::View { source } => match source {
+            ViewError::Auth { .. } => true,
             ViewError::Rpc { source } => grpc_status_is_authentication(source),
-            // anytype-rpc uses this otherwise-success sentinel only when
-            // attaching the token failed before the view request was sent.
-            ViewError::ApiResponse { code: 0, .. } => true,
             ViewError::ApiResponse { .. }
             | ViewError::MissingObjectView
             | ViewError::MissingDataviewBlock { .. }
@@ -630,9 +628,12 @@ mod tests {
                 },
             }),
             grpc(AnytypeGrpcError::View {
-                source: ViewError::ApiResponse {
-                    code: 0,
-                    description: "SECRET_INVALID_TOKEN_METADATA".to_owned(),
+                source: ViewError::Auth {
+                    source: AuthError::InvalidMetadata {
+                        source: "SECRET\nVIEW_TOKEN"
+                            .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+                            .unwrap_err(),
+                    },
                 },
             }),
             grpc(AnytypeGrpcError::Backup {
@@ -663,6 +664,12 @@ mod tests {
             grpc(AnytypeGrpcError::View {
                 source: ViewError::Rpc {
                     source: tonic::Status::internal("SECRET_VIEW_INTERNAL"),
+                },
+            }),
+            grpc(AnytypeGrpcError::View {
+                source: ViewError::ApiResponse {
+                    code: 0,
+                    description: "SECRET_ZERO_API_CODE".to_owned(),
                 },
             }),
             grpc(AnytypeGrpcError::View {

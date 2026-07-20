@@ -582,6 +582,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn typed_view_authentication_uses_secret_safe_mcp_guidance() {
+        let source = anytype::test_util::view_authentication_error_fixture();
+
+        assert!(source.is_authentication());
+        assert!(mutation_rejection_is_definitive(&source));
+        assert_anytype_mapping(&source, Some(ToolErrorCode::Authentication));
+
+        let wire_error = match ToolError::from_anytype(&source) {
+            AnytypeErrorMapping::Ready(error) => error,
+            AnytypeErrorMapping::AmbiguityRequiresCandidates => {
+                panic!("authentication never requires candidates")
+            }
+        };
+        let encoded = serde_json::to_string(&wire_error).expect("serialize wire error");
+        assert!(!encoded.contains("SECRET_VIEW_TOKEN"));
+    }
+
     #[tokio::test]
     async fn opaque_http_and_grpc_transport_variants_are_indeterminate() {
         use anytype::prelude::{
@@ -630,6 +648,7 @@ mod tests {
             .await
             .expect_err("invalid endpoint must produce a gRPC error");
         assert!(matches!(grpc_error, AnytypeError::Grpc { .. }));
+        assert!(!grpc_error.is_authentication());
         assert!(!mutation_rejection_is_definitive(&grpc_error));
         assert_anytype_mapping(&grpc_error, Some(ToolErrorCode::Upstream));
 

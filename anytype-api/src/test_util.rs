@@ -24,6 +24,7 @@ use anytype_rpc::{
             template::create_from_object as template_create_from_object,
         },
     },
+    error::{AnytypeGrpcError, AuthError, ViewError},
     model::{
         block::{ContentValue, content::dataview::View as DataviewView},
         object_type::Layout,
@@ -83,6 +84,22 @@ pub enum TestError {
 
     #[snafu(display("Test assertion failed: {message}"))]
     Assertion { message: String },
+}
+
+/// Builds a typed pre-dispatch view authentication failure for downstream tests.
+#[doc(hidden)]
+pub fn view_authentication_error_fixture() -> AnytypeError {
+    let source = "SECRET_VIEW_TOKEN\n"
+        .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+        .expect_err("a newline is invalid in an ASCII metadata value");
+
+    AnytypeError::Grpc {
+        source: AnytypeGrpcError::View {
+            source: ViewError::Auth {
+                source: AuthError::InvalidMetadata { source },
+            },
+        },
+    }
 }
 
 impl From<AnytypeError> for TestError {

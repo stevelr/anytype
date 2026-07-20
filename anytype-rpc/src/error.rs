@@ -71,6 +71,10 @@ pub enum ConfigError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ViewError {
+    /// Authentication token attachment failed before request dispatch.
+    #[snafu(context(suffix(ViewSnafu)), display("Auth error: {source}"))]
+    Auth { source: AuthError },
+
     /// gRPC status error from a request.
     #[snafu(display("Transport error: {source}"))]
     Rpc { source: tonic::Status },
@@ -167,6 +171,12 @@ impl From<serde_json::Error> for ConfigError {
 }
 
 // From impls for ViewError
+impl From<AuthError> for ViewError {
+    fn from(source: AuthError) -> Self {
+        ViewError::Auth { source }
+    }
+}
+
 impl From<tonic::Status> for ViewError {
     fn from(source: tonic::Status) -> Self {
         ViewError::Rpc { source }
