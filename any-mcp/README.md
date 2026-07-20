@@ -6,10 +6,10 @@ A bounded, workflow-oriented Model Context Protocol server for Anytype.
 reading, and safely editing documents. It is intentionally not a one-for-one
 mirror of the Anytype API.
 
-## Phase 1 scaffold
+## Phase 1 foundations
 
-The current crate establishes the workspace, dependency, and protocol
-boundaries for later runtime and handler work:
+The current crate establishes the workspace, dependency, protocol, and shared
+wire-contract boundaries for later runtime and handler work:
 
 - [`rmcp`](https://docs.rs/rmcp/) 2.2.0 with the `server`, `macros`, `schemars`,
   and `transport-io` features;
@@ -17,6 +17,13 @@ boundaries for later runtime and handler work:
   the SDK's imminent release/API direction;
 - an `anytype-api`-only application dependency through the `anytype` crate;
   `any-mcp` never depends directly on generated `anytype-rpc` support; and
+- reusable strict JSON Schema 2020-12 input/output contracts with
+  `additionalProperties: false`, bounded domain strings, stable object
+  summaries, and canonical
+  `anytype://spaces/<space_id>/objects/<object_id>` resource URIs;
+- exact annotation profiles for read, create, and destructive update tools;
+- compact JSON text fallbacks matching each typed `structuredContent` result;
+  and stable, bounded, secret-safe execution error bodies; and
 - a minimal binary that constructs the server scaffold without writing to
   stdout.
 
@@ -28,6 +35,11 @@ binary exits after constructing the scaffold.
 
 - `src/main.rs` — minimal binary entry point.
 - `src/lib.rs` — shared crate surface for the binary and tests.
+- `src/domain.rs` — bounded values, object summaries, and resource URIs.
+- `src/schema.rs` — strict input/output schema generation.
+- `src/protocol.rs` — tool contracts and annotation profiles.
+- `src/result.rs` — structured results with compact JSON text fallbacks.
+- `src/error.rs` — stable, redacted tool execution errors.
 - `src/server.rs` — server identity, capabilities, and upcoming protocol
   declaration.
 
