@@ -23,6 +23,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   with compact JSON text fallbacks, and stable secret-safe execution errors.
 - Add reusable bounded pagination, versioned process-lifetime cursors bound to
   normalized queries, Unicode-safe body chunking, and collection/filter caps.
+- Convert candidate-rich `anytype-api` resolver ambiguities directly into
+  bounded MCP errors, retaining valid alternatives alongside malformed ones;
+  resolver scan-limit failures map to the stable `bounded_result` code.
 
 ### Changed
 

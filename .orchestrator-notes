@@ -1,11 +1,14 @@
 # Orchestrator Notes
 
 - Filter: `mcp`, actionable types bug/chore/task, priorities 0-2.
-- Closed this session: `any-cut`, `any-g8g`, `any-kus`, `any-mtc` after local and independent acceptance review.
-- Audited: all 18 remaining Phase 1 tickets (`any-kus` through `any-zk6`). Their phase ordering and transitive dependencies match the canonical design; no missing dependency or scope split is currently required.
+- Closed this session: `any-cut`, `any-g8g`, `any-kus`, `any-mtc`, `any-ch6`, and `any-nzd` after local and independent acceptance review.
+- Audited: all 18 original Phase 1 tickets (`any-kus` through `any-zk6`) plus their concrete anytype-api/any-mcp seams. The deeper seam pass found and corrected missing resolver and response-bound dependencies before handler work.
 - Integrated: reviewed `any-kus` and `any-mtc` stacks in `vsonxszx`; combined 53 tests, clippy, format, rustdoc, dependency tree, auth pings, and protocol initialize/EOF smoke passed.
-- Dependency correction: promoted `any-nzd` to P2 task, depending on `any-kus` and blocking `any-inq`, because candidate-free resolver ambiguity cannot meet the design.
+- Integrated: reviewed pagination/validation and resolver stacks in `lrvkyvmz`; combined any-mcp 69 tests, anytype 110/1 ignored, clippy, format, rustdoc, downstream checks, dependency tree, live auth pings, and protocol initialize/EOF smoke passed.
+- Dependency corrections: `any-nzd` now blocks `any-inq`, `any-ega`, `any-qwo`, and `any-tb2`, because each accepts resolver-backed space/type/view references. All later mutation/resource consumers are covered transitively; the graph is cycle-clean.
+- Added `any-ce6` (P1 security) to bound generic Anytype JSON response reads before handler-side projection; it blocks all four direct Phase 1 handler roots.
+- Added `any-8dy` (P1 foundation) for common handler encoding, checked continuation, object-summary conversion, and projected-property schemas; it blocks those same handler roots and prevents parallel implementations from drifting.
 - OFIs retained P3: `any-ipy` (safe nested gRPC classification) and `any-8nl` (anytype-api diagnostic redaction); neither blocks REST-backed Phase 1.
-- Ready: `any-ch6` (validation/pagination) and `any-nzd` (bounded resolver ambiguity candidates).
-- Blockers: remaining handler/test/docs tickets depend on these roots; later phases are deferred P4 design/review work.
-- Next: dispatch both ready tasks in isolated workspaces, review fixed revisions, integrate, close, and re-query.
+- Ready after exact reconciliation: `any-ce6` and `any-8dy`.
+- Blockers: concrete handlers wait on both explicit foundations; later phases remain deferred P4 design/review work.
+- Next: dispatch `any-ce6` and `any-8dy` in isolated workspaces, independently review fixed revisions, integrate, close, and re-query.
