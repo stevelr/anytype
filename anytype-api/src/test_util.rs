@@ -26,7 +26,7 @@ use tonic::Request;
 use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
 use crate::{
     filters::Filter,
-    grpc_util::{grpc_status, with_token_request},
+    grpc_util::with_token_request,
     objects::{DataModel, ObjectLayout},
     types::Type,
     verify::verify_semantic,
@@ -152,7 +152,7 @@ impl TestContext {
         let response = commands
             .object_create_object_type(request)
             .await
-            .map_err(grpc_status)?
+            .map_err(collection_fixture_transport_error)?
             .into_inner();
 
         let type_id = response.object_id;
@@ -218,6 +218,12 @@ fn collection_type_details(name: &str, plural_name: &str) -> Struct {
 fn string_value(value: &str) -> Value {
     Value {
         kind: Some(Kind::StringValue(value.to_owned())),
+    }
+}
+
+fn collection_fixture_transport_error(_: tonic::Status) -> AnytypeError {
+    AnytypeError::Other {
+        message: "collection type fixture gRPC request failed".to_owned(),
     }
 }
 
@@ -521,5 +527,14 @@ mod tests {
             Some(Kind::NumberValue(Layout::Collection as i32 as f64))
         );
         assert_eq!(details.fields.len(), 3);
+    }
+
+    #[test]
+    fn collection_fixture_transport_error_redacts_tonic_status() {
+        const SECRET: &str = "collection-fixture-secret-sentinel";
+        let error = collection_fixture_transport_error(tonic::Status::internal(SECRET));
+        let rendered = error.to_string();
+        assert_eq!(rendered, "collection type fixture gRPC request failed");
+        assert!(!rendered.contains(SECRET));
     }
 }
