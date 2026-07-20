@@ -47,36 +47,8 @@ const HANG_OBJECT_ID: &str = "bafyreihangaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
 const HANG_RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreihangaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const RESOURCE_TEMPLATE: &str = "anytype://spaces/{space_id}/objects/{object_id}";
-
-const NORMAL_TOOLS: [&str; 14] = [
-    "object_archive",
-    "object_create",
-    "object_edit",
-    "object_get",
-    "object_search",
-    "object_update",
-    "property_list",
-    "server_status",
-    "space_list",
-    "tag_list",
-    "template_list",
-    "type_list",
-    "view_list",
-    "view_object_list",
-];
-
-const READ_ONLY_TOOLS: [&str; 10] = [
-    "object_get",
-    "object_search",
-    "property_list",
-    "server_status",
-    "space_list",
-    "tag_list",
-    "template_list",
-    "type_list",
-    "view_list",
-    "view_object_list",
-];
+const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-normal.json");
+const READ_ONLY_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-read-only.json");
 
 struct HttpFixture {
     address: String,
@@ -656,6 +628,54 @@ fn assert_exchange_depth(stdout: &[u8], expected_frames: usize) {
     );
 }
 
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
+}
+
+fn assert_exact_wire_catalog(result: &Value, read_only: bool) -> Vec<String> {
+    let actual = canonical_json(json!({
+        "read_only": read_only,
+        "tools": result["tools"].clone(),
+    }));
+    let actual = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&actual).expect("serialize canonical wire catalog")
+    );
+    let expected = if read_only {
+        READ_ONLY_CATALOG_SNAPSHOT
+    } else {
+        NORMAL_CATALOG_SNAPSHOT
+    };
+    assert_eq!(
+        actual, expected,
+        "real tools/list descriptions, nested schemas, and annotations match the reviewed snapshot"
+    );
+    result["tools"]
+        .as_array()
+        .expect("wire catalog tools array")
+        .iter()
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .expect("wire catalog tool name")
+                .to_owned()
+        })
+        .collect()
+}
+
 fn initialize_legacy_session(process: &mut ProtocolProcess) {
     let initialized = process.request(
         1,
@@ -693,31 +713,7 @@ fn run_legacy_stdio_regression(read_only: bool) {
     initialize_legacy_session(&mut process);
 
     let listed = process.request(2, "tools/list", json!({}));
-    // After any-c34 integrates, compare this complete wire catalog with its
-    // reviewed canonical fixtures instead of duplicating those fixtures here.
-    let names = listed["result"]["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .map(|tool| tool["name"].as_str().expect("tool name"))
-        .collect::<Vec<_>>();
-    let expected = if read_only {
-        READ_ONLY_TOOLS.as_slice()
-    } else {
-        NORMAL_TOOLS.as_slice()
-    };
-    assert_eq!(names, expected);
-    assert!(
-        listed["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|tool| {
-                tool["inputSchema"]["additionalProperties"] == false
-                    && tool["outputSchema"]["additionalProperties"] == false
-                    && tool["annotations"].is_object()
-            })
-    );
+    let expected = assert_exact_wire_catalog(&listed["result"], read_only);
 
     let resources = process.request(3, "resources/list", json!({}));
     assert_eq!(resources["result"]["resources"], json!([]));
@@ -768,8 +764,8 @@ fn run_legacy_stdio_regression(read_only: bool) {
     );
 
     let mut id = 20;
-    for name in expected {
-        if matches!(*name, "server_status" | "object_search") {
+    for name in &expected {
+        if matches!(name.as_str(), "server_status" | "object_search") {
             continue;
         }
         let invalid = process.request(
@@ -857,13 +853,7 @@ fn advertised_2026_revision_supports_stateless_server_discovery() {
 
     let listed = process.request(2, "tools/list", json!({"_meta": modern_meta()}));
     assert_eq!(listed["result"]["resultType"], "complete");
-    assert_eq!(
-        listed["result"]["tools"]
-            .as_array()
-            .expect("modern tools array")
-            .len(),
-        READ_ONLY_TOOLS.len()
-    );
+    assert_exact_wire_catalog(&listed["result"], true);
     let output = process.finish();
     fixture.finish();
     assert_stdout_purity(&output.stdout);
