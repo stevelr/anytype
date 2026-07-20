@@ -117,6 +117,44 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 Workflow tools and resources are added in subsequent Phase 1 work.
 
+### Object discovery and reads
+
+The transport-neutral `object_search` and `object_get` handlers implement the
+bounded Phase 1 read path without adding the production tool router owned by a
+later catalog ticket.
+
+- `object_search` resolves an optional space and space-local type references,
+  executes exactly one upstream page, and validates returned offset, limit,
+  item count, and continuation metadata before issuing a cursor. Global search
+  type values are treated as keys because a name or id cannot be resolved
+  without a space. Results contain stable summaries plus only the explicitly
+  requested property keys; document bodies, snippets, and implicit full
+  property sets are never returned.
+  Archived objects are omitted from this core discovery workflow while the
+  cursor still advances by the checked upstream page window.
+- Search filters use a closed tagged model for text, number, select,
+  multi-select, date, checkbox, file, URL, email, phone, object-reference,
+  empty, and nonempty conditions. Filter count, value count, nesting depth,
+  scalar lengths, arrays, and numeric magnitude are bounded. Boolean and
+  numeric filters are passed through unchanged; they remain subject to the
+  known upstream [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
+  limitation instead of being silently rewritten with different semantics.
+  File and object filter operands are validated as safe bounded identifiers
+  before any upstream request.
+- `object_get` resolves the space but requires a stable object id. It returns
+  all properties only when the bounded set fits, or exactly an explicit
+  projection. An optional body request is indexed in Unicode characters,
+  defaults to 20,000 characters, caps at 100,000, reports continuation and
+  total character counts, and hashes the complete current body even when only
+  a chunk is returned. The unreturned body remainder never enters the MCP
+  result.
+
+All omittable read-input fields distinguish omission from explicit JSON
+`null`. Omission selects the documented default; `null` is malformed and can
+never broaden a scoped search to global search or a selected projection to all
+properties. Space-scoped type resolver results are revalidated as bounded,
+nonempty type keys before they enter a cursor binding or upstream search.
+
 ## Source layout
 
 - `src/config.rs` — validated environment and operational limits.
@@ -132,6 +170,8 @@ Workflow tools and resources are added in subsequent Phase 1 work.
 - `src/handler_support.rs` — controlled handler execution and checked page
   continuation helpers.
 - `src/object_output.rs` — validated summaries and bounded property projection.
+- `src/object_read.rs` — typed one-page object search and chunked object-get
+  handlers.
 - `src/validation.rs` — reusable collection, filter, and body chunk bounds.
 - `src/pagination.rs` — bounded pagination inputs and result pages.
 - `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.

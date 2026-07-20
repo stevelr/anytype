@@ -37,6 +37,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   date-times at construction, deserialization, and schema boundaries.
 - Classify handler conversion and result-encoding failures inside the runtime
   operation boundary so diagnostics cannot report false success outcomes.
+- Add typed, bounded `object_search` and `object_get` workflow handlers with
+  resolver-backed references, constrained filters and sorting, exact one-page
+  cursor integrity, explicit property projections, Unicode-safe body chunks,
+  and complete-current-body SHA-256 values.
+- Reject explicit null for every omittable object-read input, validate file
+  and object filter operands as safe ids before I/O, and revalidate resolved
+  type keys before cursor binding or search dispatch.
 
 ### Changed
 

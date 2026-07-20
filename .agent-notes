@@ -14,3 +14,7 @@
 [invariant] MCP page completion must verify upstream offset and limit exactly match the request and returned count does not exceed the requested limit before issuing any continuation cursor.
 [pattern] Runtime operation diagnostics must enclose upstream calls, handler conversion, and typed result encoding; conversion/encoding failures use static categories and never log error values.
 [pattern] Object discovery uses explicit SummaryOnly/Selected/AllBounded projection modes; AllBounded fails rather than truncating, while cursor projection fingerprints sort/dedup keys even though selected output preserves first-request order.
+[invariant] Object-search handlers execute one explicit upstream page and drop bodies/snippets even if an upstream list unexpectedly returns them; object-get verifies returned object/space identity before projecting or chunking.
+[gotcha] Global object search cannot resolve type names or ids without a space, so global `types` values are treated as keys; space-scoped searches resolve all type references through the bounded API resolver.
+[invariant] Omitted MCP input fields may select defaults, but explicit JSON null is malformed; use the non-serializable Omittable<T> input wrapper so runtime decoding and generated schemas cannot broaden scope or projection through Option/null semantics.
+[invariant] Resolver outputs cross an upstream trust boundary and must be revalidated as bounded domain values before cursor fingerprinting or request construction, even when the resolver accepts explicit fast paths such as `@key`.
