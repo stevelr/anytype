@@ -1,3 +1,4 @@
 # Agent Notes
 
-No active entries.
+[pattern] For MCP loop-stop reconciliation, use `br ready -l mcp -p 0 -p 1 -p 2 -t bug -t chore -t task --json`; report unselected results as session-deferred rather than calling the queue empty.
+[invariant] `br ready` excludes dependency/status-blocked work, so stop summaries must inventory blocked items separately from tracker-ready and session-deferred states.

@@ -1,5 +1,5 @@
 # Orchestrator Notes
 
-- Current loop scope is limited to priority 0-2 bug, chore, and task issues labeled `mcp`.
-- Setup ready set: `any-cut` and `any-g8g`; no matching issues are in progress.
-- `any-g8g` was promoted from P3 OFI to P2 task because tracker/session readiness reconciliation is straightforward and directly benefits this loop.
+- Audited `any-g8g`: Definition of Done is satisfied by the final filtered ready-query rule and explicit tracker-ready, session-deferred, and blocked classifications in `.agent-notes` and this file. No crate CHANGELOG entry applies to this orchestration-only change.
+- Blockers: none for `any-g8g`; closure is delegated to the closer agent. The final scoped ready query returned `[]`; `any-cut` remains in progress and 18 other scoped issues remain dependency-blocked.
+- Next action: close `any-g8g`, finish and verify `any-cut`, then rerun the filtered ready query before selecting or stopping work.
