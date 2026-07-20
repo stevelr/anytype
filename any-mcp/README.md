@@ -388,8 +388,8 @@ concurrency, timeout, cancellation, and shutdown controls. Its typed resource
 descriptor carries byte size, user/assistant audience, priority, and a strict
 RFC 3339 `lastModified` annotation when Anytype supplies one. Properties,
 snippets, and document content are never duplicated into descriptor metadata.
-Production server capability and catalog delegation are intentionally kept in
-the final catalog integration phase.
+The production server routes these resource methods through the same shared
+runtime and advertises their static capability alongside the tool catalog.
 
 ## Source layout
 
