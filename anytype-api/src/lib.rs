@@ -133,6 +133,34 @@
 //!   - View-related APIs use `view_*` to disambiguate list/collection/query objects
 //!     (`list_views`, `view_list_objects`, `view_add_objects`, `view_remove_object`).
 //!
+//! ## Secret-safe HTTP diagnostics
+//!
+//! HTTP tracing is metadata-only at every logging level. The
+//! `anytype::http` target reports a stable error variant plus status, validated
+//! method, and bounded path-only context when available. The
+//! `anytype::http_json` trace target reports only method, sanitized path,
+//! field counts, and byte counts. Neither target emits request or response
+//! bodies, query values, headers, full URLs, or credentials.
+//! This trace-level guarantee applies only to these library-owned HTTP targets;
+//! other `anytype` targets are outside its scope and require an application
+//! filter appropriate to their data.
+//!
+//! Standard [`AnytypeError`](crate::error::AnytypeError) `Display` and `Debug`
+//! formatting and its standard error source chain are also
+//! classification-oriented and secret-safe across all variants. Raw public
+//! fields remain available through explicit variant matching, so applications
+//! must not forward those values to diagnostics without their own policy.
+//!
+//! Use [`AnytypeError::diagnostic`](crate::error::AnytypeError::diagnostic)
+//! when forwarding an error to application diagnostics:
+//!
+//! ```rust,no_run
+//! # use anytype::prelude::*;
+//! # fn report(error: &AnytypeError) {
+//! tracing::warn!(error = %error.diagnostic(), "Anytype request failed");
+//! # }
+//! ```
+//!
 //#![warn(clippy::pedantic)] // experimental
 //#![warn(clippy::nursery)] // experimental
 #![allow(clippy::missing_errors_doc)] // pedantic

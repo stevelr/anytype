@@ -203,10 +203,12 @@ mod tests {
     fn dependency_payload_targets_cannot_override_metadata_deny_filter() {
         let _guard = super::test_support::trace_test_guard();
         let sentinel = "SECRET_SENTINEL_PAYLOAD";
-        let (dispatch, output) =
-            capture("anytype::http_json=trace,rmcp::transport=trace,any_mcp::logging_test=trace");
+        let (dispatch, output) = capture(
+            "anytype::http=trace,anytype::http_json=trace,rmcp::transport=trace,any_mcp::logging_test=trace",
+        );
 
         tracing::dispatcher::with_default(&dispatch, || {
+            tracing::error!(target: "anytype::http", payload = sentinel, "upstream error");
             tracing::error!(target: "anytype::http_json", payload = sentinel, "upstream body");
             tracing::error!(target: "rmcp::transport", payload = sentinel, "protocol frame");
             tracing::info!(target: "any_mcp::logging_test", safe = true, "safe event");
@@ -215,6 +217,7 @@ mod tests {
         let output = output.contents();
         assert!(output.contains("safe event"));
         assert!(!output.contains(sentinel));
+        assert!(!output.contains("upstream error"));
         assert!(!output.contains("upstream body"));
         assert!(!output.contains("protocol frame"));
     }

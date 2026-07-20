@@ -17,9 +17,8 @@ use std::{
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use reqwest::{ClientBuilder, Method, Response, StatusCode, header::HeaderMap};
+use reqwest::{ClientBuilder, Method, Response, StatusCode, Url, header::HeaderMap};
 use serde::{Serialize, de::DeserializeOwned};
-use snafu::prelude::*;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
@@ -169,6 +168,28 @@ fn retry_for_status(code: StatusCode) -> bool {
     }
 }
 
+fn log_http_status(request: &HttpRequest, status: StatusCode, variant: &'static str, attempt: u32) {
+    error!(
+        target: "anytype::http",
+        error_variant = variant,
+        http_status = status.as_u16(),
+        http_method = %request.method,
+        http_path = %diagnostic_path(&request.path),
+        attempt,
+        "HTTP request failed"
+    );
+}
+
+fn log_http_transport(request: &HttpRequest) {
+    error!(
+        target: "anytype::http",
+        error_variant = "transport",
+        http_method = %request.method,
+        http_path = %diagnostic_path(&request.path),
+        "HTTP request failed"
+    );
+}
+
 #[derive(Clone, Default)]
 pub struct HttpRequest {
     pub method: Method,
@@ -189,7 +210,7 @@ impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpRequest")
             .field("method", &self.method)
-            .field("path", &self.path)
+            .field("path", &diagnostic_path(&self.path))
             .field("query_fields", &self.query.len())
             .field("body", &self.body.as_ref().map_or(0, Bytes::len))
             .finish()
@@ -242,12 +263,91 @@ pub struct HttpClient {
 impl fmt::Debug for HttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpClient")
-            .field("base_url", &self.base_url)
+            .field("base_path", &diagnostic_path(&self.base_url))
             .field("api_key", &String::from("(MASKED)"))
             .field("rate_limit_max_retries", &self.rate_limit_max_retries)
             .field("metrics", &self.metrics)
             .finish_non_exhaustive()
     }
+}
+
+const MAX_DIAGNOSTIC_PATH_CHARS: usize = 512;
+const REDACTED_DIAGNOSTIC_PATH: &str = "/[redacted]";
+
+/// Returns bounded path-only context for HTTP diagnostics.
+///
+/// Valid absolute and scheme-relative HTTP URLs lose their scheme, authority,
+/// userinfo, query, and fragment. Valid origin-form request targets lose query
+/// and fragment values. Malformed, non-HTTP, control-bearing, and other target
+/// forms fail closed to a fixed redaction marker rather than echoing input.
+pub(crate) fn diagnostic_path(value: &str) -> String {
+    let parsed = parse_diagnostic_target(value);
+    let Some(path) = parsed.as_ref().map(Url::path) else {
+        return REDACTED_DIAGNOSTIC_PATH.to_owned();
+    };
+    let mut redacted = String::with_capacity(path.len().min(MAX_DIAGNOSTIC_PATH_CHARS));
+    for character in path.chars().take(MAX_DIAGNOSTIC_PATH_CHARS) {
+        redacted.push(if character.is_control() {
+            '�'
+        } else {
+            character
+        });
+    }
+    if path.chars().count() > MAX_DIAGNOSTIC_PATH_CHARS {
+        redacted.push('…');
+    }
+    if redacted.is_empty() {
+        redacted.push('/');
+    }
+    redacted
+}
+
+fn parse_diagnostic_target(value: &str) -> Option<Url> {
+    if value.is_empty()
+        || value.chars().any(char::is_control)
+        || value.chars().any(char::is_whitespace)
+        || value.contains('\\')
+        || has_invalid_percent_encoding(value)
+    {
+        return None;
+    }
+    let base = Url::parse("http://redacted.invalid/").ok()?;
+    if let Some(remainder) = value.strip_prefix("//") {
+        if remainder.starts_with('/') {
+            return None;
+        }
+        let parsed = base.join(value).ok()?;
+        return parsed.has_host().then_some(parsed);
+    }
+    if value.starts_with('/') {
+        return base.join(value).ok();
+    }
+    let parsed = Url::parse(value).ok()?;
+    let (_, remainder) = value.split_once(':')?;
+    (matches!(parsed.scheme(), "http" | "https")
+        && remainder.starts_with("//")
+        && !remainder[2..].starts_with('/')
+        && parsed.has_host())
+    .then_some(parsed)
+}
+
+fn has_invalid_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return true;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    false
 }
 
 struct ParsedRetry {
@@ -300,9 +400,11 @@ impl HttpClient {
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .build()
-            .context(HttpSnafu {
-                method: "client-init",
-                url: "",
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| AnytypeError::Http {
+                method: "client-init".to_owned(),
+                url: String::new(),
+                source,
             })?;
         for (name, limit, maximum) in [
             (
@@ -380,7 +482,12 @@ impl HttpClient {
         while let Some(chunk) = response
             .chunk()
             .await
-            .context(HttpSnafu { method, url: path })?
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| AnytypeError::Http {
+                method: method.to_owned(),
+                url: path.to_owned(),
+                source,
+            })?
         {
             self.metrics.add_bytes_received(chunk.len() as u64);
             let next_len = (body.len() as u64)
@@ -490,7 +597,7 @@ impl HttpClient {
         query: QueryWithFilters,
     ) -> Result<T> {
         query.validate().map_err(|err| AnytypeError::Validation {
-            message: format!("get_request {path} {err}"),
+            message: format!("get_request {} {err}", diagnostic_path(path)),
         })?;
         let req = HttpRequest {
             method: Method::GET,
@@ -509,7 +616,7 @@ impl HttpClient {
         response_limit: u64,
     ) -> Result<T> {
         query.validate().map_err(|err| AnytypeError::Validation {
-            message: format!("get_request_with_limit {path} {err}"),
+            message: format!("get_request_with_limit {} {err}", diagnostic_path(path)),
         })?;
         if response_limit == 0 || response_limit > self.response_limits.document_bytes {
             return Err(AnytypeError::Validation {
@@ -540,21 +647,18 @@ impl HttpClient {
         headers: HeaderMap,
     ) -> Result<reqwest::Response> {
         query.validate().map_err(|err| AnytypeError::Validation {
-            message: format!("get_streaming_request {path} {err}"),
+            message: format!("get_streaming_request {} {err}", diagnostic_path(path)),
         })?;
         self.limits.validate_query(&query.params)?;
 
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
-                message: format!(
-                    "HTTP credentials missing token. Client is not authenticated. url={}",
-                    self.base_url,
-                ),
+                message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!(path, "get_streaming_request");
+        debug!(path = %diagnostic_path(path), "get_streaming_request");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -565,9 +669,11 @@ impl HttpClient {
             .headers(headers)
             .send()
             .await
-            .context(HttpSnafu {
-                method: "get",
-                url: &full_url,
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| AnytypeError::Http {
+                method: "get".to_owned(),
+                url: path.to_owned(),
+                source,
             })?;
 
         if !response.status().is_success() {
@@ -597,7 +703,8 @@ impl HttpClient {
             path: path.into(),
             query: Vec::default(),
             body: Some(Bytes::from(
-                serde_json::to_vec(body).context(SerializationSnafu)?,
+                serde_json::to_vec(body)
+                    .map_err(|source| AnytypeError::Serialization { source })?,
             )),
         };
         self.send(req).await
@@ -615,7 +722,8 @@ impl HttpClient {
             path: path.into(),
             query: Vec::default(),
             body: Some(Bytes::from(
-                serde_json::to_vec(body).context(SerializationSnafu)?,
+                serde_json::to_vec(body)
+                    .map_err(|source| AnytypeError::Serialization { source })?,
             )),
         };
         self.send_with_limit(req, self.response_limits.document_bytes)
@@ -633,7 +741,8 @@ impl HttpClient {
             path: path.into(),
             query: query.params,
             body: Some(Bytes::from(
-                serde_json::to_vec(body).context(SerializationSnafu)?,
+                serde_json::to_vec(body)
+                    .map_err(|source| AnytypeError::Serialization { source })?,
             )),
         };
         self.send(req).await
@@ -652,7 +761,8 @@ impl HttpClient {
             path: path.into(),
             query: query.params,
             body: Some(Bytes::from(
-                serde_json::to_vec(body).context(SerializationSnafu)?,
+                serde_json::to_vec(body)
+                    .map_err(|source| AnytypeError::Serialization { source })?,
             )),
         };
         self.send_with_limit(req, self.response_limits.document_bytes)
@@ -666,7 +776,7 @@ impl HttpClient {
         body: &Req,
     ) -> Result<Resp> {
         let full_url = format!("{}{}", self.base_url, path);
-        debug!(path, "post_unauthenticated");
+        debug!(path = %diagnostic_path(path), "post_unauthenticated");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -675,9 +785,11 @@ impl HttpClient {
             .json(body)
             .send()
             .await
-            .context(HttpSnafu {
-                method: "post",
-                url: &full_url,
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| AnytypeError::Http {
+                method: "post".to_owned(),
+                url: path.to_owned(),
+                source,
             })?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
@@ -714,14 +826,11 @@ impl HttpClient {
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
-                message: format!(
-                    "HTTP credentials missing token. Client is not authenticated. url={}",
-                    self.base_url,
-                ),
+                message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!(path, "delete_no_content");
+        debug!(path = %diagnostic_path(path), "delete_no_content");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -730,9 +839,11 @@ impl HttpClient {
             .bearer_auth(token)
             .send()
             .await
-            .context(HttpSnafu {
-                method: "delete",
-                url: &full_url,
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| AnytypeError::Http {
+                method: "delete".to_owned(),
+                url: path.to_owned(),
+                source,
             })?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
@@ -765,14 +876,11 @@ impl HttpClient {
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
-                message: format!(
-                    "HTTP credentials missing token. Client is not authenticated. url={}",
-                    self.base_url,
-                ),
+                message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!(method = %method, path, "file_request");
+        debug!(method = %method, path = %diagnostic_path(path), "file_request");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -783,9 +891,11 @@ impl HttpClient {
             .headers(headers)
             .send()
             .await
-            .context(HttpSnafu {
-                method: method.as_str(),
-                url: &full_url,
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| AnytypeError::Http {
+                method: method.as_str().to_owned(),
+                url: path.to_owned(),
+                source,
             })?;
         let status = response.status();
         let response_headers = response.headers().clone();
@@ -851,14 +961,11 @@ impl HttpClient {
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
-                message: format!(
-                    "HTTP credentials missing token. Client is not authenticated. url={}",
-                    self.base_url,
-                ),
+                message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
             });
         };
         let full_url = format!("{}{}", self.base_url, path);
-        debug!(path, "post_multipart");
+        debug!(path = %diagnostic_path(path), "post_multipart");
         self.metrics.increment_requests();
         let response = self
             .client
@@ -868,9 +975,11 @@ impl HttpClient {
             .multipart(form)
             .send()
             .await
-            .context(HttpSnafu {
-                method: "post",
-                url: &full_url,
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| AnytypeError::Http {
+                method: "post".to_owned(),
+                url: path.to_owned(),
+                source,
             })?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
@@ -941,16 +1050,15 @@ impl HttpClient {
         // check for excessive request size or invalid query
         self.limits.validate_query(&req.query)?;
         if let Some(ref body) = req.body {
-            self.limits
-                .validate_body(body, &format!("http {} {}", req.method, req.path))?;
+            self.limits.validate_body(
+                body,
+                &format!("http {} {}", req.method, diagnostic_path(&req.path)),
+            )?;
         }
         let api_key = self.get_api_key();
         if api_key.token().is_none() {
             return Err(AnytypeError::Auth {
-                message: format!(
-                    "HTTP credentials missing token. Client is not authenticated. url={}",
-                    self.base_url,
-                ),
+                message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
             });
         }
         let full_url = format!("{}{}", self.base_url, req.path);
@@ -989,7 +1097,7 @@ impl HttpClient {
             self.metrics.increment_requests();
             self.metrics.add_bytes_sent(body_size);
 
-            match request.send().await {
+            match request.send().await.map_err(reqwest::Error::without_url) {
                 Ok(response) => {
                     let code = response.status();
                     if code != StatusCode::TOO_MANY_REQUESTS {
@@ -1048,7 +1156,14 @@ impl HttpClient {
                             let headers = response.headers();
                             match parse_retry_after(headers) {
                                 Err(err) => {
-                                    error!("{err:?}");
+                                    error!(
+                                        target: "anytype::http",
+                                        error_variant = "invalid_rate_limit_header",
+                                        http_status = code.as_u16(),
+                                        http_method = %req.method,
+                                        http_path = %diagnostic_path(&req.path),
+                                        "HTTP request failed"
+                                    );
                                     // couldn't parse header.
                                     return Err(err)
                                 }
@@ -1056,9 +1171,13 @@ impl HttpClient {
                                     if self.rate_limit_max_retries > 0
                                         && rate_limit_retries > self.rate_limit_max_retries
                                     {
-                                        error!(
+                                    error!(
+                                            target: "anytype::http",
+                                            error_variant = "rate_limit_retry_limit",
+                                            http_status = code.as_u16(),
+                                            http_method = %req.method,
+                                            http_path = %diagnostic_path(&req.path),
                                             attempt,
-                                            ?req,
                                             "http 429 Rate-limit retries exceeded max={}",
                                             self.rate_limit_max_retries
                                         );
@@ -1069,8 +1188,12 @@ impl HttpClient {
                                     }
                                     if duration > Duration::from_secs(RATE_LIMIT_WAIT_MAX_SECS) {
                                         error!(
+                                            target: "anytype::http",
+                                            error_variant = "rate_limit_backoff_limit",
+                                            http_status = code.as_u16(),
+                                            http_method = %req.method,
+                                            http_path = %diagnostic_path(&req.path),
                                             attempt,
-                                            ?req,
                                             "http 429 Rate-limit backoff={}s exceeds max",
                                             duration.as_secs()
                                         );
@@ -1096,15 +1219,20 @@ impl HttpClient {
                         StatusCode::BAD_REQUEST /* 400 */ => {
                             self.metrics.increment_errors();
                             let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            error!(?code, ?req, "http");
-                            return Err(AnytypeError::Validation { message })
+                            log_http_status(&req, code, "validation", attempt);
+                            return Err(AnytypeError::ApiError {
+                                code: code.as_u16(),
+                                method: req.method.to_string(),
+                                url: req.path,
+                                message,
+                            })
                         }
                         StatusCode::NOT_FOUND /* 404 */ |
                         StatusCode::GONE /* 410 */
                          => {
                             self.metrics.increment_errors();
                             self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            error!(?code, ?req, "http");
+                            log_http_status(&req, code, "not_found", attempt);
                             return Err(AnytypeError::NotFound{
                                 // too generic here - we don't know whether the query
                                 // needs to be reported at higher level
@@ -1116,20 +1244,20 @@ impl HttpClient {
                             // client is not authenticated
                             self.metrics.increment_errors();
                             self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            error!(?code, ?req, "http");
+                            log_http_status(&req, code, "unauthorized", attempt);
                             return Err(AnytypeError::Unauthorized)
                         }
                         StatusCode::FORBIDDEN /* 403 */ => {
                             // client is authenticated, but does not have permission to access the object
                             self.metrics.increment_errors();
                             self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            error!(?code, ?req, "http");
+                            log_http_status(&req, code, "forbidden", attempt);
                             return Err(AnytypeError::Forbidden)
                         }
                         _ => {
                             self.metrics.increment_errors();
                             let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            error!(?code, ?req, attempt, "http");
+                            log_http_status(&req, code, "api_error", attempt);
                             if attempt < MAX_RETRIES && retry_for_status(code) && retryable_method
                             {
                               log_and_backoff(attempt, "retryable HTTP status").await;
@@ -1147,7 +1275,7 @@ impl HttpClient {
                     }
                 }
                 Err(err) => {
-                    error!(?req, "HTTP transport failure");
+                    log_http_transport(&req);
                     // Check for connection or timeout errors
                     if (err.is_connect() || err.is_timeout()) && retryable_method {
                         rate_limit_retries = 0;
@@ -1201,7 +1329,7 @@ impl GetPaged for Arc<HttpClient> {
         query: QueryWithFilters,
     ) -> Result<super::paged::PagedResult<T>> {
         query.validate().map_err(|err| AnytypeError::Validation {
-            message: format!("get_request_paged {path} {err}"),
+            message: format!("get_request_paged {} {err}", diagnostic_path(path)),
         })?;
         let req = HttpRequest {
             method: Method::GET,
@@ -1221,14 +1349,15 @@ impl GetPaged for Arc<HttpClient> {
         query: QueryWithFilters,
     ) -> Result<super::paged::PagedResult<T>> {
         query.validate().map_err(|err| AnytypeError::Validation {
-            message: format!("post_request_paged {path} {err}"),
+            message: format!("post_request_paged {} {err}", diagnostic_path(path)),
         })?;
         let req = HttpRequest {
             method: Method::POST,
             path: path.into(),
             query: query.params,
             body: Some(Bytes::from(
-                serde_json::to_vec(body).context(SerializationSnafu)?,
+                serde_json::to_vec(body)
+                    .map_err(|source| AnytypeError::Serialization { source })?,
             )),
         };
         let response: PaginatedResponse<T> = self.send(req.clone()).await?;
@@ -1236,25 +1365,32 @@ impl GetPaged for Arc<HttpClient> {
     }
 }
 
-// dump request
-// requires RUST_LOG=anytype::http_json=trace
+// Secret-safe request metadata. Payload tracing is intentionally unavailable:
+// RUST_LOG may select this target but cannot expose bodies, query values,
+// headers, full URLs, or credentials.
 fn log_request(request: &HttpRequest) {
     if tracing::enabled!(target: "anytype::http_json", tracing::Level::TRACE) {
         trace!(
             target: "anytype::http_json",
             method = %request.method,
-            path = request.path,
+            path = %diagnostic_path(&request.path),
             query_fields = request.query.len(),
             body_bytes = request.body.as_ref().map_or(0, Bytes::len),
-            "HTTP request"
+            "HTTP request metadata"
         );
     }
 }
 
-// Log response metadata only. Anytype JSON may contain private document data.
+// Secret-safe response metadata. Anytype JSON may contain private document
+// data, so no tracing level or target can include `body` itself.
 fn log_response(path: &str, body: &Bytes) {
     if tracing::enabled!(target: "anytype::http_json", tracing::Level::TRACE) {
-        trace!(target: "anytype::http_json", path, body_bytes = body.len(), "HTTP response");
+        trace!(
+            target: "anytype::http_json",
+            path = %diagnostic_path(path),
+            body_bytes = body.len(),
+            "HTTP response metadata"
+        );
     }
 }
 
@@ -1269,7 +1405,15 @@ fn deserialize_json<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
     match serde_path_to_error::deserialize(&mut deserializer) {
         Ok(value) => Ok(value),
         Err(err) => {
-            error!("Deserialization failed at {}: {}", err.path(), err);
+            let source = err.inner();
+            error!(
+                target: "anytype::http",
+                error_variant = "deserialization",
+                json_category = ?source.classify(),
+                line = source.line(),
+                column = source.column(),
+                "HTTP response deserialization failed"
+            );
             Err(AnytypeError::Deserialization {
                 source: err.into_inner(),
             })
@@ -1308,19 +1452,30 @@ fn is_idempotent_method(method: &Method) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex, Once},
+        time::Duration,
+    };
 
     use reqwest::{
         ClientBuilder, Method, StatusCode,
         header::{HeaderMap, HeaderValue},
     };
+    use serde::Deserialize;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
         task::JoinHandle,
     };
+    use tracing::Dispatch;
+    use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt};
 
-    use super::{HttpClient, HttpRequest, deserialize_json, parse_retry_after};
+    use super::{
+        HttpClient, HttpRequest, MAX_DIAGNOSTIC_PATH_CHARS, REDACTED_DIAGNOSTIC_PATH,
+        deserialize_json, diagnostic_path, log_http_status, log_request, log_response,
+        parse_retry_after,
+    };
     use crate::prelude::{
         AnytypeClient, AnytypeError, ClientConfig, HttpCredentials, MAX_JSON_RESPONSE_BYTES,
         ResponseLimits, ValidationLimits,
@@ -1329,6 +1484,61 @@ mod tests {
     const TEST_SPACE_ID: &str =
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
     const TEST_OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+
+    static TRACE_TEST_INTEREST: Once = Once::new();
+
+    fn ensure_trace_interest() {
+        TRACE_TEST_INTEREST.call_once(|| {
+            let subscriber =
+                tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::TRACE);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("capture lock").clone())
+                .expect("diagnostics are UTF-8")
+        }
+    }
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::writer::MakeWriter<'writer> for Capture {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture() -> (Dispatch, Capture) {
+        ensure_trace_interest();
+        let output = Capture::default();
+        let layer = tracing_fmt::layer()
+            .with_writer(output.clone())
+            .with_target(true)
+            .with_ansi(false);
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(layer);
+        (Dispatch::new(subscriber), output)
+    }
 
     fn test_limits(json_bytes: u64, document_bytes: u64, error_bytes: u64) -> ResponseLimits {
         ResponseLimits {
@@ -2065,6 +2275,447 @@ mod tests {
     #[test]
     fn empty_success_body_deserializes_as_unit() {
         deserialize_json::<()>(b"").expect("empty mutation response");
+    }
+
+    #[test]
+    fn diagnostic_path_keeps_only_bounded_non_control_path_context() {
+        let secret = "URL_PASSWORD_SENTINEL";
+        let path = diagnostic_path(&format!(
+            "https://user:{secret}@example.invalid/v1/objects?token=QUERY_SECRET#fragment"
+        ));
+        assert_eq!(path, "/v1/objects");
+        assert!(!path.contains(secret));
+        assert!(!path.contains("QUERY_SECRET"));
+        assert_eq!(
+            diagnostic_path("//user:SCHEME_PASSWORD@example.invalid/v1/scheme?token=SECRET"),
+            "/v1/scheme"
+        );
+
+        assert_eq!(
+            diagnostic_path("/v1/spaces\nforged?authorization=HEADER_SECRET"),
+            REDACTED_DIAGNOSTIC_PATH
+        );
+
+        let bounded = diagnostic_path(&format!("/{}?token=QUERY_SECRET", "x".repeat(700)));
+        assert_eq!(bounded.chars().count(), MAX_DIAGNOSTIC_PATH_CHARS + 1);
+        assert!(bounded.ends_with('…'));
+        assert!(!bounded.contains("QUERY_SECRET"));
+    }
+
+    #[tokio::test]
+    async fn malformed_targets_fail_closed_across_standard_http_diagnostics() {
+        let malformed_absolute =
+            "https://user:MALFORMED_PASSWORD@[invalid-host/v1?token=MALFORMED_QUERY";
+        let malformed_scheme_relative =
+            "//user:SCHEME_RELATIVE_PASSWORD@[invalid-host/v1?token=SCHEME_QUERY";
+        let unsupported_target =
+            "credential:UNSUPPORTED_PASSWORD@example.invalid/v1?token=UNSUPPORTED_QUERY";
+        let control_target = "/v1/CONTROL_PATH\nCONTROL_SECRET?token=CONTROL_QUERY";
+        for target in [
+            malformed_absolute,
+            malformed_scheme_relative,
+            unsupported_target,
+            control_target,
+            "relative/path?token=RELATIVE_QUERY",
+            "///user:TRIPLE_SLASH_PASSWORD@example.invalid/v1?token=TRIPLE_QUERY",
+            "https:////user:EXCESS_SLASH_PASSWORD@example.invalid/v1?token=EXCESS_QUERY",
+            "https:\\user:BACKSLASH_PASSWORD@example.invalid/v1?token=BACKSLASH_QUERY",
+            "/v1/%ZZ/PERCENT_PASSWORD?token=PERCENT_QUERY",
+            "/v1/SPACE PASSWORD?token=SPACE_QUERY",
+        ] {
+            assert_eq!(diagnostic_path(target), REDACTED_DIAGNOSTIC_PATH);
+        }
+
+        let config = ClientConfig {
+            base_url: Some(malformed_absolute.to_owned()),
+            app_name: "diagnostic-constructor".to_owned(),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("diagnostic-constructor".to_owned()),
+            grpc_endpoint: Some(malformed_scheme_relative.to_owned()),
+            ..ClientConfig::default()
+        };
+        let config_debug = format!("{config:?}");
+        let (dispatch, output) = capture();
+        let client = tracing::dispatcher::with_default(&dispatch, || {
+            let client = AnytypeClient::with_config(config).expect("diagnostic fixture client");
+            let request = HttpRequest {
+                method: Method::POST,
+                path: control_target.to_owned(),
+                query: vec![("authorization".to_owned(), "TRACE_QUERY_SECRET".to_owned())],
+                body: Some(bytes::Bytes::from_static(b"TRACE_DOCUMENT_SECRET")),
+            };
+            log_request(&request);
+            log_response(
+                malformed_scheme_relative,
+                &bytes::Bytes::from_static(b"TRACE_RESPONSE_SECRET"),
+            );
+            log_http_status(&request, StatusCode::BAD_GATEWAY, "api_error", 1);
+            client
+        });
+        let api_error = AnytypeError::ApiError {
+            code: 502,
+            method: "GET".to_owned(),
+            url: malformed_absolute.to_owned(),
+            message: "MALFORMED_RESPONSE_SECRET".to_owned(),
+        };
+        let source = reqwest::Client::new()
+            .get(malformed_absolute)
+            .send()
+            .await
+            .expect_err("malformed URL must fail before transport")
+            .without_url();
+        let transport_error = AnytypeError::Http {
+            method: "GET".to_owned(),
+            url: malformed_absolute.to_owned(),
+            source,
+        };
+
+        let mut diagnostics = format!(
+            "{} {config_debug} {client:?} {:?} {api_error} {api_error:?} {} {transport_error} {transport_error:?} {}",
+            output.contents(),
+            client.client,
+            api_error.diagnostic(),
+            transport_error.diagnostic()
+        );
+        assert!(std::error::Error::source(&transport_error).is_none());
+        let mut source = std::error::Error::source(&transport_error);
+        while let Some(current) = source {
+            diagnostics.push_str(&format!(" {current} {current:?}"));
+            source = current.source();
+        }
+
+        assert!(diagnostics.contains(REDACTED_DIAGNOSTIC_PATH));
+        for secret in [
+            "MALFORMED_PASSWORD",
+            "MALFORMED_QUERY",
+            "SCHEME_RELATIVE_PASSWORD",
+            "SCHEME_QUERY",
+            "UNSUPPORTED_PASSWORD",
+            "UNSUPPORTED_QUERY",
+            "CONTROL_SECRET",
+            "CONTROL_QUERY",
+            "RELATIVE_QUERY",
+            "TRIPLE_SLASH_PASSWORD",
+            "TRIPLE_QUERY",
+            "EXCESS_SLASH_PASSWORD",
+            "EXCESS_QUERY",
+            "BACKSLASH_PASSWORD",
+            "BACKSLASH_QUERY",
+            "PERCENT_PASSWORD",
+            "PERCENT_QUERY",
+            "SPACE PASSWORD",
+            "SPACE_QUERY",
+            "TRACE_QUERY_SECRET",
+            "TRACE_DOCUMENT_SECRET",
+            "TRACE_RESPONSE_SECRET",
+            "MALFORMED_RESPONSE_SECRET",
+        ] {
+            assert!(
+                !diagnostics.contains(secret),
+                "standard diagnostics exposed {secret}: {diagnostics}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_whitespace_controls_fail_closed_across_aggregated_http_surfaces() {
+        let controls = [
+            ('\0', "NUL"),
+            ('\u{1}', "SOH"),
+            ('\u{7}', "BEL"),
+            ('\u{7f}', "DEL"),
+        ];
+        let mut target_sets = Vec::new();
+        let mut secrets = Vec::new();
+        for (control, label) in controls {
+            let password = format!("{label}_PASSWORD_SECRET");
+            let query = format!("{label}_QUERY_SECRET");
+            target_sets.push([
+                format!(
+                    "https://user:{password}@example.invalid/v1/{control}absolute?token={query}"
+                ),
+                format!("//user:{password}@example.invalid/v1/{control}scheme?token={query}"),
+                format!("/v1/{control}origin?token={query}"),
+            ]);
+            secrets.push(password);
+            secrets.push(query);
+        }
+
+        for target in target_sets.iter().flatten() {
+            assert_eq!(
+                diagnostic_path(target),
+                REDACTED_DIAGNOSTIC_PATH,
+                "control-bearing target must fail closed: {target:?}"
+            );
+        }
+
+        let config = ClientConfig {
+            base_url: Some(target_sets[0][0].clone()),
+            app_name: "control-diagnostic-constructor".to_owned(),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("control-diagnostic-constructor".to_owned()),
+            grpc_endpoint: Some(target_sets[1][1].clone()),
+            ..ClientConfig::default()
+        };
+        let config_debug = format!("{config:?}");
+        let (dispatch, output) = capture();
+        let client = tracing::dispatcher::with_default(&dispatch, || {
+            let client = AnytypeClient::with_config(config).expect("control diagnostic client");
+            for target in target_sets.iter().flatten() {
+                let request = HttpRequest {
+                    method: Method::POST,
+                    path: target.clone(),
+                    query: vec![(
+                        "authorization".to_owned(),
+                        "CONTROL_TRACE_QUERY_SECRET".to_owned(),
+                    )],
+                    body: Some(bytes::Bytes::from_static(b"CONTROL_TRACE_DOCUMENT_SECRET")),
+                };
+                log_request(&request);
+                log_response(
+                    target,
+                    &bytes::Bytes::from_static(b"CONTROL_TRACE_RESPONSE_SECRET"),
+                );
+                log_http_status(&request, StatusCode::BAD_GATEWAY, "api_error", 1);
+            }
+            client
+        });
+
+        let mut diagnostics = format!(
+            "{} {config_debug} {client:?} {:?}",
+            output.contents(),
+            client.client
+        );
+        for target in target_sets.iter().flatten() {
+            let api_error = AnytypeError::ApiError {
+                code: 502,
+                method: "GET".to_owned(),
+                url: target.clone(),
+                message: "CONTROL_API_RESPONSE_SECRET".to_owned(),
+            };
+            diagnostics.push_str(&format!(
+                " {api_error} {api_error:?} {}",
+                api_error.diagnostic()
+            ));
+
+            let source = reqwest::Client::new()
+                .get("relative-invalid-source")
+                .send()
+                .await
+                .expect_err("relative source URL must fail")
+                .without_url();
+            let transport_error = AnytypeError::Http {
+                method: "GET".to_owned(),
+                url: target.clone(),
+                source,
+            };
+            diagnostics.push_str(&format!(
+                " {transport_error} {transport_error:?} {}",
+                transport_error.diagnostic()
+            ));
+            assert!(std::error::Error::source(&transport_error).is_none());
+        }
+
+        assert!(diagnostics.contains(REDACTED_DIAGNOSTIC_PATH));
+        for (control, label) in controls {
+            assert!(
+                !diagnostics.contains(control),
+                "diagnostics retained {label} control: {diagnostics:?}"
+            );
+        }
+        for secret in secrets.iter().map(String::as_str).chain([
+            "CONTROL_TRACE_QUERY_SECRET",
+            "CONTROL_TRACE_DOCUMENT_SECRET",
+            "CONTROL_TRACE_RESPONSE_SECRET",
+            "CONTROL_API_RESPONSE_SECRET",
+        ]) {
+            assert!(
+                !diagnostics.contains(secret),
+                "standard diagnostics exposed {secret}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_http_trace_levels_remain_metadata_only() {
+        let request = HttpRequest {
+            method: Method::PATCH,
+            path: "https://user:URL_PASSWORD@example.invalid/v1/objects?token=URL_TOKEN".to_owned(),
+            query: vec![("authorization".to_owned(), "QUERY_TOKEN".to_owned())],
+            body: Some(bytes::Bytes::from_static(b"DOCUMENT_BODY_SECRET")),
+        };
+        let (dispatch, output) = capture();
+        tracing::dispatcher::with_default(&dispatch, || {
+            log_request(&request);
+            log_response(
+                &request.path,
+                &bytes::Bytes::from_static(b"RESPONSE_BODY_SECRET"),
+            );
+            log_http_status(&request, StatusCode::INTERNAL_SERVER_ERROR, "api_error", 2);
+        });
+
+        let diagnostics = output.contents();
+        assert!(diagnostics.contains("anytype::http_json"));
+        assert!(diagnostics.contains("anytype::http"));
+        assert!(diagnostics.contains("/v1/objects"));
+        assert!(diagnostics.contains("body_bytes=20"));
+        assert!(diagnostics.contains("http_status=500"));
+        for secret in [
+            "URL_PASSWORD",
+            "URL_TOKEN",
+            "QUERY_TOKEN",
+            "DOCUMENT_BODY_SECRET",
+            "RESPONSE_BODY_SECRET",
+            "authorization",
+        ] {
+            assert!(
+                !diagnostics.contains(secret),
+                "diagnostics exposed {secret}: {diagnostics}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_error_and_config_diagnostics_redact_adversarial_http_values() {
+        let error = AnytypeError::ApiError {
+            code: 502,
+            method: "get\nFORGED_METHOD".to_owned(),
+            url: "https://user:URL_PASSWORD@example.invalid/v1/objects?token=URL_TOKEN".to_owned(),
+            message: "UPSTREAM_RESPONSE_BODY_SECRET".to_owned(),
+        };
+        let safe = format!("{error} {error:?} {}", error.diagnostic());
+        assert!(safe.contains("status=502"));
+        assert!(safe.contains("path=/v1/objects"));
+        assert!(safe.contains("method=unknown"));
+        for secret in [
+            "FORGED_METHOD",
+            "URL_PASSWORD",
+            "URL_TOKEN",
+            "UPSTREAM_RESPONSE_BODY_SECRET",
+        ] {
+            assert!(
+                !safe.contains(secret),
+                "error diagnostics exposed {secret}: {safe}"
+            );
+        }
+
+        let rate_limit = AnytypeError::RateLimitExceeded {
+            header: "RATE_LIMIT_HEADER_SECRET".to_owned(),
+            duration: Duration::from_secs(3),
+        };
+        let rate_limit_diagnostics =
+            format!("{rate_limit} {rate_limit:?} {}", rate_limit.diagnostic());
+        assert!(!rate_limit_diagnostics.contains("RATE_LIMIT_HEADER_SECRET"));
+
+        let config = ClientConfig {
+            base_url: Some(
+                "https://user:CONFIG_PASSWORD@example.invalid/private?token=CONFIG_TOKEN"
+                    .to_owned(),
+            ),
+            app_name: "APP_NAME_SECRET".to_owned(),
+            keystore: Some("file:path=/KEYSTORE_PATH_SECRET".to_owned()),
+            keystore_service: Some("KEYSTORE_SERVICE_SECRET".to_owned()),
+            grpc_endpoint: Some(
+                "https://user:GRPC_PASSWORD@example.invalid/grpc?token=GRPC_TOKEN".to_owned(),
+            ),
+            ..ClientConfig::default()
+        };
+        let config_diagnostics = format!("{config:?}");
+        assert!(config_diagnostics.contains("base_path: Some(\"/private\")"));
+        assert!(config_diagnostics.contains("grpc_path: Some(\"/grpc\")"));
+        for secret in [
+            "CONFIG_PASSWORD",
+            "CONFIG_TOKEN",
+            "APP_NAME_SECRET",
+            "KEYSTORE_PATH_SECRET",
+            "KEYSTORE_SERVICE_SECRET",
+            "GRPC_PASSWORD",
+            "GRPC_TOKEN",
+        ] {
+            assert!(
+                !config_diagnostics.contains(secret),
+                "config Debug exposed {secret}: {config_diagnostics}"
+            );
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum DiagnosticChoice {
+        Allowed,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[expect(dead_code, reason = "deserialization diagnostic fixture")]
+    struct DiagnosticEnvelope {
+        choice: DiagnosticChoice,
+    }
+
+    #[test]
+    fn deserialization_diagnostic_omits_rejected_payload_value_and_source() {
+        let (dispatch, output) = capture();
+        let error = tracing::dispatcher::with_default(&dispatch, || {
+            deserialize_json::<DiagnosticEnvelope>(br#"{"choice":"DOCUMENT_VALUE_SECRET"}"#)
+                .expect_err("unknown enum value must fail")
+        });
+
+        let diagnostics = format!(
+            "{} {error} {error:?} {}",
+            output.contents(),
+            error.diagnostic()
+        );
+        assert!(diagnostics.contains("error_variant=\"deserialization\""));
+        assert!(diagnostics.contains("json_category=Data"));
+        assert!(!diagnostics.contains("DOCUMENT_VALUE_SECRET"));
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_error_source_chain_drops_credential_bearing_url() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve closed test address");
+        let address = listener.local_addr().expect("closed test address");
+        drop(listener);
+
+        let client = HttpClient::new(
+            ClientBuilder::new().no_proxy(),
+            format!("http://user:TRANSPORT_PASSWORD@{address}"),
+            ValidationLimits::default(),
+            test_limits(1024, 2048, 1024),
+            1,
+            HttpCredentials::new("AUTHORIZATION_TOKEN_SECRET"),
+        )
+        .expect("transport test client");
+        let error = client
+            .send::<()>(HttpRequest {
+                method: Method::POST,
+                path: "/v1/objects?token=TRANSPORT_QUERY_SECRET".to_owned(),
+                query: Vec::new(),
+                body: None,
+            })
+            .await
+            .expect_err("closed test address must reject the connection");
+
+        let mut diagnostics = format!("{error} {error:?} {}", error.diagnostic());
+        assert!(std::error::Error::source(&error).is_none());
+        let mut source = std::error::Error::source(&error);
+        while let Some(current) = source {
+            diagnostics.push_str(&format!(" {current} {current:?}"));
+            source = current.source();
+        }
+
+        assert!(diagnostics.contains("path=/v1/objects"));
+        for secret in [
+            "TRANSPORT_PASSWORD",
+            "TRANSPORT_QUERY_SECRET",
+            "AUTHORIZATION_TOKEN_SECRET",
+        ] {
+            assert!(
+                !diagnostics.contains(secret),
+                "transport diagnostics exposed {secret}: {diagnostics}"
+            );
+        }
     }
 
     #[test]

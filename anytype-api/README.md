@@ -20,7 +20,7 @@ Applications authenticate with Anytype servers using access tokens. One token is
 - gRPC back-end provides extensions not available in REST (rich file operations, structured chat blocks, and full event streaming)
 - Paginated responses and async Streams
 - Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
-- Http middleware with debug logging, retries, and rate limit handling
+- HTTP middleware with secret-safe metadata logging, retries, and rate limit handling
 - Client-side caching (spaces, properties, types)
 - Name and id resolution helpers (`resolve` module): accept a space, type,
   template, chat, view, or property by name, key, or id; ambiguous names return up to 10
@@ -109,6 +109,28 @@ overridden; timeout, proxy, DNS, TLS, and user-agent customization is retained.
 `ClientConfig::rate_limit_max_retries` continues to control consecutive 429
 retries for replay-safe requests; zero means no retry-count cap for those
 methods. It does not opt mutation requests into retries.
+
+### Secret-safe HTTP diagnostics
+
+The library-owned HTTP diagnostics remain metadata-only at every `RUST_LOG`
+level. The `anytype::http` target reports stable error variants with an HTTP
+status, validated method, and bounded path-only context when available.
+`anytype::http_json=trace` adds request/response byte counts and query-field
+counts, but never logs request or response bodies.
+
+No directive for those two HTTP targets enables query values, headers, full
+URLs, bearer tokens, credential-bearing URL components, or Anytype document
+content. This guarantee is HTTP-specific: other `anytype` tracing targets are
+outside its scope, so applications enabling them need an appropriate filter.
+
+Standard `AnytypeError` `Display` and `Debug` output and its error source chain
+exclude all free-form messages, identities, candidate values, last errors,
+paths from malformed targets, and typed upstream sources that could contain
+request or document content. Use `error.diagnostic()` for structured
+application logs. Raw public fields—including `ApiError::message`,
+`RateLimitExceeded::header`, validation messages, resolver identities, and
+typed sources—remain available through explicit variant matching and must not
+be logged without an application policy.
 
 ## Quick start
 
