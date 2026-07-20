@@ -87,6 +87,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   fingerprint that cannot strand cohorts or issue a duplicate create; identical
   retries of terminal indeterminate keys retain the fixed reread guidance,
   while mismatched fingerprints remain ordinary key conflicts.
+- Add typed `object_edit` with destructive annotations, required complete-body
+  SHA-256 concurrency checks, bounded ordered non-overlapping literal edits,
+  zero-write stale/count conflicts, one whole-body no-verify PATCH, finite
+  semantic verification, summary-and-new-hash output, and fixed indeterminate
+  handling for every ambiguous post-dispatch outcome.
 
 ### Changed
 
