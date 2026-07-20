@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod cursor;
+pub mod discovery;
 pub mod domain;
 pub mod error;
 pub mod handler_support;

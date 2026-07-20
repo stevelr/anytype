@@ -115,7 +115,33 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   `anytype` and `rmcp` target prefixes that can expose protocol or upstream
   payloads are denied by a non-overridable metadata filter outside `RUST_LOG`.
 
-Workflow tools and resources are added in subsequent Phase 1 work.
+### Status and schema discovery handlers
+
+The first read handlers are available as transport-neutral, typed operations;
+production catalog/router registration is kept separate. `server_status`
+returns only a parsed, redacted HTTP endpoint, API revision, startup probe
+availability, and enabled toolsets. URL user information, passwords, query
+parameters, and fragments are removed before encoding.
+
+`space_list`, `type_list`, `property_list`, `tag_list`, and `template_list`
+each request exactly one explicit upstream page and use the shared opaque
+cursor integrity checks. Space, type, and property references use the bounded
+`anytype-api` resolvers, so ambiguity returns actionable candidate IDs instead
+of selecting an arbitrary match. Type-scoped property discovery filters one
+upstream property window against the resolved type's linked property IDs;
+sparse pages still advance by the checked upstream window.
+
+Property summaries never contain tag options. Select and multi-select counts
+come from a separate `tags(...).limit(1).offset(0)` page's bounded `total`;
+the handler also verifies that zero, one, and larger totals agree with the
+first-page item count and continuation flag. Callers use `tag_list` to retrieve
+options explicitly. Template results reuse the summary-only object adapter and
+therefore contain no body or implicit property projection.
+
+Local TCP fixture tests exercise the real `anytype-api` fluent builders and
+verify exact paths and decoded queries for every paginated discovery handler,
+including page continuation, sparse pages, cursor mismatch without I/O,
+resolver errors, response ceilings, and secret-safe upstream failures.
 
 ## Source layout
 
@@ -125,6 +151,8 @@ Workflow tools and resources are added in subsequent Phase 1 work.
 - `src/main.rs` — non-interactive startup and binary exit behavior.
 - `src/lib.rs` — shared crate surface for the binary and tests.
 - `src/domain.rs` — bounded values, object summaries, and resource URIs.
+- `src/discovery.rs` — typed status and schema-discovery contracts and
+  transport-neutral handlers.
 - `src/schema.rs` — strict input/output schema generation.
 - `src/protocol.rs` — tool contracts and annotation profiles.
 - `src/result.rs` — structured results with compact JSON text fallbacks.

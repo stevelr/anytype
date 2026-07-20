@@ -37,6 +37,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   date-times at construction, deserialization, and schema boundaries.
 - Classify handler conversion and result-encoding failures inside the runtime
   operation boundary so diagnostics cannot report false success outcomes.
+- Add typed `server_status`, `space_list`, `type_list`, `property_list`,
+  `tag_list`, and `template_list` handlers with one-page opaque continuations,
+  resolver-backed references, redacted endpoint status, summary-only template
+  output, and bounded tag counts that never expand property options and verify
+  the first page's item/total/continuation consistency.
 
 ### Changed
 
