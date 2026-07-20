@@ -484,11 +484,15 @@ The two diagnostic tests are expected to pass while their product bugs remain:
 they prove the exact mutation was applied and cleaned up before asserting the
 fixed error code. A passing diagnostic is evidence of a reproduced blocker,
 not acceptance of the corresponding handler. Space and template list handlers
-currently receive honest terminal-page coverage because the public API has no
-cleanup-safe space deletion or template creation path. Collection objects use
-a dynamically resolved and layout-validated system collection type because
-custom type creation cannot request collection layout. Separate tracker
-dependencies cover those fixture gaps and multi-view `view_list` continuation.
+cannot both receive fixture-backed continuation coverage because the public API
+has no cleanup-safe space deletion or template creation path. `space_list`
+therefore requests one bounded ambient page, requires the current test space,
+and validates an optional cursor's shape and query binding without assuming
+whether the page is terminal. `template_list` covers its cleanup-safe terminal
+route. Collection objects use a dynamically resolved and layout-validated
+system collection type because custom type creation cannot request collection
+layout. Separate tracker dependencies cover exact space continuation/terminal
+proof, the other fixture gaps, and multi-view `view_list` continuation.
 
 ## Build
 
