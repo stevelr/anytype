@@ -566,15 +566,21 @@ Phase 1 read path.
   property sets are never returned.
   Archived objects are omitted from this core discovery workflow while the
   cursor still advances by the checked upstream page window.
-- Search filters use a closed tagged model for text, number, select,
+- MCP filters use one shared closed tagged model, currently consumed by
+  `object_search`, for text, number, select,
   multi-select, date, checkbox, file, URL, email, phone, object-reference,
-  empty, and nonempty conditions. Filter count, value count, nesting depth,
-  scalar lengths, arrays, and numeric magnitude are bounded. Boolean and
-  numeric filters are passed through unchanged; they remain subject to the
+  empty, and nonempty conditions. Each supported format and condition converts
+  directly to the corresponding `anytype-api` filter without client-side
+  post-pagination emulation. Filter count, value count, nesting depth, scalar
+  lengths, arrays, and numeric magnitude are bounded. Boolean and numeric
+  filters are passed through unchanged; they remain subject to the
   known upstream [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
   limitation instead of being silently rewritten with different semantics.
   File and object filter operands are validated as safe bounded identifiers
-  before any upstream request.
+  before any upstream request. Cursor identity sorts and deduplicates
+  commutative condition groups, nested groups, and set-valued operands while
+  the upstream request retains the caller's original order and values; the raw
+  request must still fit the existing 65,536-byte normalized-query ceiling.
 - `object_get` resolves the space but requires a stable object id. It returns
   all properties only when the bounded set fits, or exactly an explicit
   projection. An optional body request is indexed in Unicode characters,
@@ -631,6 +637,8 @@ runtime and advertises their static capability alongside the tool catalog.
   bounded resource reads.
 - `src/result.rs` — structured results with compact JSON text fallbacks.
 - `src/error.rs` — stable, redacted tool execution errors.
+- `src/filters.rs` — shared bounded filter DTOs and exact `anytype-api`
+  conversion.
 - `src/handler_support.rs` — controlled handler execution and checked page
   continuation helpers.
 - `src/object_output.rs` — validated summaries and bounded property projection.

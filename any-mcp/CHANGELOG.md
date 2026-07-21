@@ -8,6 +8,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Extract the `object_search` filter grammar into a shared bounded MCP DTO
+  matching the supported `anytype-api` formats and conditions one-to-one.
+  Preserve aggregate count/value/depth limits, identifier validation,
+  semantically canonical cursor bindings, and the known upstream
+  numeric/checkbox behavior without client-side post-pagination emulation.
+  Equivalent logical-group and set-operand permutations/duplicates now share a
+  cursor identity without changing their upstream presentation, and Date
+  filters include Anytype's supported `in` condition. Lock every conversion
+  and the reviewed catalog/token changes with focused tests and exact
+  snapshots.
 - Complete the prerelease documentation contract with current stable/preview
   startup, compact/standard and read-only catalogs, host registration,
   credentials, bounds, mutation uncertainty, security, cross-platform gates,
