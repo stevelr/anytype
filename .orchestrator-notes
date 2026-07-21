@@ -4,12 +4,13 @@
   - Scope: `mcp` label; actionable bug/chore/task priorities 0-2; Phase 1 must close before Phase 2 implementation.
   - Default workspace is clean after the AnyR conflict resolution. Preserve the independently active `anyr-0.5` workspace.
   - Phase 1 documents/release issue `any-83f` is integrated and closed. `any-cwi` was created for the newly identified shared harness plus spawned-stdio-to-headless E2E gap and blocks terminal verifier `any-zk6`.
-  - Phase 2 tickets are now priority 2; audit 10-20 tickets for scope and dependencies while Phase 1 implementation runs, but do not implement Phase 2 before Phase 1 closes.
+  - Phase 2 audit completed for 13 original tickets. Added independent members (`any-ztf`), views-write (`any-kqb`), and admin (`any-thu`) review gates plus shared selector/registry foundation `any-x97`; rewired domain implementations to matching reviews and the foundation. Existing Phase 2 defers remain until Phase 1 closes.
 
 - Blockers
-  - None currently. Headless live gates require valid `.test-env` credentials and a running server; verify before dispatching the live suite.
+  - `any-ccx` blocks `any-cwi`: cleanup-owned template fixtures reject the long-lived test space at 10,196 archived objects because of a hard 10,000 inventory cap. A dedicated anytype-api worker owns the fix.
+  - Headless credentials and server are healthy. Baseline fast suite passed 275 tests with 8 ignored; baseline live suite passed 4/5 and reproduced `any-ccx` twice.
   - Phase 2 design implementations remain behind human review tickets by design.
 
 - Next action
-  - Implement/review/integrate `any-cwi`, run fast and live gates, close it, then complete `any-zk6` terminal audit.
-  - Reconcile the Phase 2 dependency graph and dispatch the first ready design task(s) only after Phase 1 is closed.
+  - Integrate/review `any-ccx`, then `any-cwi`; run fast and live gates, close both, then complete `any-zk6` terminal audit.
+  - After Phase 1 closes, clear defer dates on all original Phase 2 tickets. Immediate design roots should be `any-x90`, `any-hru`, and `any-ii5`; dispatch them in parallel.
