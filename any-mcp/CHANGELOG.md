@@ -39,6 +39,26 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a shared bounded production-process driver and transport-neutral live
+  scenario suite, executing all 14 standard tools and all three resource
+  operations through both the direct production router and spawned production
+  stdio against headless Anytype. Add focused compact, read-only, and preview
+  real-headless sentinels; independent `anytype-api` readback; typed exhaustive
+  catalog ownership; bounded redacted failure evidence; content-verified
+  file/SQLite keystore isolation including WAL and cipher suffixes; explicit
+  protected live CI targets; and an unconditional scheduled clean-server soak,
+  while preserving the fast scripted HTTP protocol suite. Heap-own the
+  exhaustive production tool-dispatch future so repeated stdio calls cannot
+  overflow a Tokio worker stack, and keep child-abort stderr private until the
+  parent scenario classifies it structurally and records fixture cleanup
+  outcome.
+- Harden live acceptance follow-up by parsing Windows drive and ordinary
+  colon-bearing file-keystore paths without colon splitting, rejecting
+  duplicate/missing paths before snapshotting, proving the rebuilt child spec
+  points only to one WAL-aware snapshot, asserting the exact compact catalog
+  on the preview live wire, and retaining only structural stderr counts so
+  unregistered bodies, edit fragments, credentials, and cipher material cannot
+  enter failure reports.
 - Map structurally classified nested Anytype gRPC authentication failures to
   the fixed secret-safe MCP `authentication` error, including definitive
   post-dispatch rejection handling, without depending directly on

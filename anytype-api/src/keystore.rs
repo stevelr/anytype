@@ -227,19 +227,59 @@ fn parse_keystore(input: &str) -> Result<(&str, HashMap<&str, &str>), String> {
     let mut map = HashMap::new();
 
     if let Some(modifiers) = remainder {
-        for part in modifiers.split(':') {
-            if let Some((key, value)) = part.split_once('=') {
-                if key.is_empty() {
-                    return Err("invalid syntax. Expecting keystore name, or with modifiers, for example: 'keystore:key1=val1:key2=val2'".to_string());
-                }
-                map.insert(key, value);
-            } else {
-                return Err("invalid syntax. Expecting keystore name, or with modifiers, for example: 'keystore:key1=val1:key2=val2'".to_string());
-            }
+        for (key, value) in parse_modifier_pairs(modifiers)? {
+            // Preserve the established last-wins behavior for duplicate
+            // modifiers. Callers that require unique keys must reject them
+            // before constructing a store.
+            map.insert(key, value);
         }
     }
 
     Ok((keystore, map))
+}
+
+fn parse_modifier_pairs(input: &str) -> Result<Vec<(&str, &str)>, String> {
+    const SYNTAX: &str = "invalid syntax. Expecting keystore name, or with modifiers, for example: 'keystore:key1=val1:key2=val2'";
+    let mut pairs = Vec::new();
+    let mut remaining = input;
+    while !remaining.is_empty() {
+        let Some(equals) = remaining.find('=') else {
+            return Err(SYNTAX.to_owned());
+        };
+        let key = &remaining[..equals];
+        if !valid_modifier_key(key) {
+            return Err(SYNTAX.to_owned());
+        }
+        let value_and_rest = &remaining[equals + 1..];
+        let boundary = value_and_rest
+            .char_indices()
+            .find_map(|(index, character)| {
+                if character != ':' {
+                    return None;
+                }
+                let candidate = &value_and_rest[index + 1..];
+                let candidate_equals = candidate.find('=')?;
+                valid_modifier_key(&candidate[..candidate_equals]).then_some(index)
+            });
+        match boundary {
+            Some(index) => {
+                pairs.push((key, &value_and_rest[..index]));
+                remaining = &value_and_rest[index + 1..];
+            }
+            None => {
+                pairs.push((key, value_and_rest));
+                remaining = "";
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+fn valid_modifier_key(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 pub fn default_platform_keyring() -> &'static str {
@@ -546,6 +586,36 @@ mod tests {
 
     use super::*;
     use crate::config::DEFAULT_SERVICE_NAME;
+
+    #[test]
+    fn parser_preserves_windows_and_colon_bearing_paths() {
+        for (specification, expected) in [
+            (
+                r"file:path=C:\Users\example\keys.db:cipher=aes256",
+                r"C:\Users\example\keys.db",
+            ),
+            (
+                "file:path=C:/Users/example/keys.db:cipher=aes256",
+                "C:/Users/example/keys.db",
+            ),
+            (
+                "file:path=/var/lib/anytype/keys:primary.db:cipher=aes256",
+                "/var/lib/anytype/keys:primary.db",
+            ),
+        ] {
+            let (kind, modifiers) = parse_keystore(specification).expect("portable keystore spec");
+            assert_eq!(kind, "file");
+            assert_eq!(modifiers.get("path"), Some(&expected));
+            assert_eq!(modifiers.get("cipher"), Some(&"aes256"));
+        }
+    }
+
+    #[test]
+    fn parser_retains_documented_last_wins_modifier_behavior() {
+        let (_, modifiers) =
+            parse_keystore("file:path=first.db:path=second.db").expect("duplicate grammar");
+        assert_eq!(modifiers.get("path"), Some(&"second.db"));
+    }
 
     // TODO: this test case checks too many things - should be split up
     #[test]

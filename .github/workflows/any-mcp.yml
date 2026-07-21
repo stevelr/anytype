@@ -3,6 +3,9 @@
 name: any-mcp
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
   pull_request:
     paths:
       - ".github/workflows/any-mcp.yml"
@@ -14,6 +17,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
     paths:
       - ".github/workflows/any-mcp.yml"
       - "Cargo.lock"
@@ -54,4 +59,122 @@ jobs:
         run: cargo test --locked -p any-mcp --lib
 
       - name: Run portable production-process and stdio conformance tests
-        run: cargo test --locked -p any-mcp --test process_runtime --test stdio_conformance
+        run: cargo test --locked -p any-mcp --test process_runtime --test stdio_conformance --test headless_stdio_e2e
+
+  headless-e2e:
+    name: stdio to headless Anytype
+    if: >-
+      github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    environment: anytype-headless
+    runs-on:
+      - self-hosted
+      - linux
+      - anytype-headless
+    timeout-minutes: 30
+    concurrency:
+      group: any-mcp-headless
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: any-mcp-headless
+
+      - name: Run serial production-router and stdio-to-headless gates
+        shell: bash
+        env:
+          ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          test -n "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          set -a
+          source "$ANY_MCP_HEADLESS_ENV_FILE"
+          set +a
+          cargo run --locked -q -p anyr -- auth status --pretty
+          cargo test --locked -p any-mcp --lib headless_ -- \
+            --ignored --test-threads=1
+          cargo test --locked -p any-mcp --test headless_stdio_e2e -- \
+            --ignored --test-threads=1
+
+      - name: Retain redacted headless server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: any-mcp-headless-server-log
+          path: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  headless-clean-server-soak:
+    name: scheduled clean-server soak
+    if: github.event_name == 'schedule'
+    environment: anytype-headless
+    runs-on:
+      - self-hosted
+      - linux
+      - anytype-headless
+    timeout-minutes: 45
+    concurrency:
+      group: any-mcp-headless
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: any-mcp-headless
+
+      - name: Provision a clean isolated headless server
+        shell: bash
+        env:
+          ANY_MCP_HEADLESS_RESET_SCRIPT: ${{ vars.ANY_MCP_HEADLESS_RESET_SCRIPT }}
+        run: |
+          set -euo pipefail
+          test -n "$ANY_MCP_HEADLESS_RESET_SCRIPT"
+          test "${ANY_MCP_HEADLESS_RESET_SCRIPT#/}" != "$ANY_MCP_HEADLESS_RESET_SCRIPT"
+          test -x "$ANY_MCP_HEADLESS_RESET_SCRIPT"
+          "$ANY_MCP_HEADLESS_RESET_SCRIPT"
+
+      - name: Run all serial production-router and stdio-to-headless targets
+        shell: bash
+        env:
+          ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          test -n "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          set -a
+          source "$ANY_MCP_HEADLESS_ENV_FILE"
+          set +a
+          cargo run --locked -q -p anyr -- auth status --pretty
+          cargo test --locked -p any-mcp --lib headless_ -- \
+            --ignored --test-threads=1
+          cargo test --locked -p any-mcp --test headless_stdio_e2e -- \
+            --ignored --test-threads=1
+
+      - name: Retain redacted clean-server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: any-mcp-clean-server-log
+          path: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          if-no-files-found: warn
+          retention-days: 7

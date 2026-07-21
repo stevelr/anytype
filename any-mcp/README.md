@@ -634,10 +634,16 @@ runtime and advertises their static capability alongside the tool catalog.
   including every schema and annotation.
 - `tests/stdio_conformance.rs` — portable production-process protocol
   regression and preview/stable acceptance harness.
+- `tests/support/` — shared bounded process driver, transport-neutral live
+  scenario, and catalog-to-live-ownership audit.
+- `tests/headless_stdio_e2e.rs` — ignored production stdio-to-real-Anytype
+  workflow with independent `anytype-api` readback and cleanup.
 - `tests/schema/mcp-2026-07-28.json` — official draft schema used only as a
   test oracle for actual preview requests and results.
 - `STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client discovery
   evidence with current compatibility limits.
+- `TESTING.md` — executable test architecture, live ownership, evidence, and
+  CI cadence contract.
 
 ## Testing
 
@@ -676,6 +682,22 @@ Windows. The process harness uses only portable Rust process, TCP, path,
 environment, thread, and channel APIs; it does not depend on Unix signals,
 `/tmp`, executable suffixes, or shell scripts.
 
+The test harness treats transport and upstream backend as independent axes.
+Ordinary tests use the in-process router or the real stdio binary with a
+scripted HTTP fixture for deterministic protocol and handler feedback. The
+ignored live baseline runs the same reusable standard-profile scenarios
+through the in-process production router and the spawned production stdio
+binary against real headless Anytype. Together those scenarios execute every
+advertised tool and resource operation, verify mutations independently through
+`anytype-api`, and prove the complete MCP-wire-to-Anytype path. Compact,
+read-only, and preview configurations use focused real-headless risk sentinels
+rather than a Cartesian matrix. A typed catalog audit maps every advertised
+standard operation to exactly one executable scenario and fails on missing,
+duplicate, unknown, or non-executable owners. Pure schema, catalog, framing,
+and validation tests remain the only no-backend cases; production has no
+test-mode backend selector. See [`TESTING.md`](TESTING.md) for the maintained
+architecture and evidence contract.
+
 This is an OS-family portability gate, not a claim that CI exercises every CPU
 architecture. The workspace targets Linux x86_64/aarch64, macOS aarch64, and
 Windows x86_64/aarch64; the current dist configuration produces macOS aarch64,
@@ -689,32 +711,61 @@ gRPC before work, and runs serially so mutation verification does not compete
 with itself for the server's rate limit. Every created object, type, and
 property is registered immediately for cleanup. It requires a running headless
 server, a test space selected by `.test-env`, and `anyr auth status` reporting
-both HTTP and gRPC pings as OK. Run all passing coverage and known-behavior
-diagnostics from the repository root with one command:
+both HTTP and gRPC pings as OK. Run the direct-router and spawned-stdio targets
+explicitly from the repository root:
 
 ```sh
 source .test-env
-cargo test -p any-mcp headless_ -- --ignored --test-threads=1
+cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
+cargo test -p any-mcp --test headless_stdio_e2e -- --ignored --test-threads=1
 ```
 
-The exact passing representatives are
-`headless_default_discovery_routes_paginate_and_report_ambiguity`,
-`headless_view_body_and_resource_routes_are_complete_and_bound`, and
-`headless_mutations_are_visible_idempotent_and_conflict_safe`,
-`headless_create_body_canonicalization_is_verified_once`, and
-`headless_archive_applies_and_returns_verified_success`. These five exercise
-the production router, complete document resource,
-fixture-backed type/property/tag/object/view/view-object continuations,
-cursor/query binding, a two-template `limit=1` continuation with exact fixture
-identities and terminal proof, body continuation, explicit view selection,
-ambiguity evidence,
-idempotent create, read-after-write visibility, and stale/count-conflict edits
-that prove the body was not changed. The create-body representative proves the
-exact canonical stored body, one three-request create/verify exchange, zero
-retries, and a raw/canonical keyed replay with no additional I/O before cleanup.
-The archive case independently proves the exact id absent from active results
-and present in the bounded type-scoped archive before teardown, and asserts
-that middleware issued no retry.
+The selectable `headless_direct_standard_*` and
+`headless_stdio_standard_*` cases cover discovery, document/resource access,
+views, mutations, and archive through both entry paths. They execute all 14
+standard tools and `resources/list`, `resources/templates/list`, and
+`resources/read`, including bounded cursor terminality and binding,
+ambiguity, explicit view selection, idempotent create, independent
+read-after-write visibility, stale/count edit conflicts, and active/archive
+evidence. Existing focused live regressions remain alongside this acceptance
+baseline. The direct command selects exactly 13 intended `headless_` cases;
+the spawned target contains exactly 8 ignored live cases.
+
+The compact and read-only cases prove representative real reads and catalog
+filtering; direct read-only also proves defense-in-depth mutation rejection.
+The preview case uses stateless discovery and drives representative read and
+mutation behavior through the real stdio process. Failure records contain the
+scenario and generated fixture IDs, protocol metadata, bounded
+request/outcome-category counts, structural stderr byte/line/category metrics,
+and cleanup outcome—never raw diagnostic lines, unknown fields, arguments,
+bodies, edit fragments, upstream errors, or credentials.
+Direct cases additionally report `anytype-api` HTTP metric deltas; the spawned
+production child intentionally has no test-only metrics interface.
+
+When `.test-env` selects an explicit-path file/SQLite keystore, the stdio
+fixture content-verifies a test-owned snapshot of the main database and WAL,
+preserves Windows drive and ordinary colon-bearing paths plus cipher/suffix
+options, and removes the temporary main/WAL/SHM files. The child specification
+contains exactly one path pointing only to that snapshot. Plain defaults and
+missing, empty, or duplicate file/SQLite paths are rejected because they cannot
+be isolated safely; keep the source quiescent while the snapshot is created.
+
+The dedicated `headless-e2e` CI job is intentionally Linux/self-hosted rather
+than part of the portable hosted-runner matrix. Runners labeled
+`anytype-headless` must provide a running isolated Anytype server and set the
+repository variable `ANY_MCP_HEADLESS_ENV_FILE` to a readable, protected
+environment file with the same endpoint, keystore, and test-space settings as
+`.test-env`. It should also set `ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to a
+runner-produced server log with credentials and content removed; the job keeps
+that protected artifact for seven days on failure. Protect the
+`anytype-headless` environment so untrusted pull-request code cannot reach the
+self-hosted runner or credentials. The job runs serially on every matching
+MCP/API pull request and main/tag update; branch protection and release
+automation should require its latest green result. Fork pull requests are
+excluded before the protected runner is selected. A separate unconditional
+scheduled job invokes an operator-owned absolute reset script, provisions a
+clean isolated server, and then runs the same two explicit targets; this keeps
+path filters from hiding backend drift.
 
 `space_list` continuation uses two disposable spaces created and immediately
 registered through the test-only `anytype-api` fixture lifecycle. Their complete

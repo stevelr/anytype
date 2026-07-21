@@ -15,28 +15,30 @@
 //! releases.
 
 use std::{
-    any::Any,
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::Command,
     sync::{
         Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use serde_json::{Value, json};
 
+#[path = "support/process.rs"]
+mod process_support;
+
+use process_support::{
+    FRAME_QUEUE_CAPACITY, MAX_STDERR_BYTES, MAX_STDERR_LINE_BYTES, MAX_STDOUT_LINE_BYTES,
+    ProtocolProcess, read_bounded_stream, read_stdout,
+};
+
 const DEADLINE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
-const FRAME_QUEUE_CAPACITY: usize = 32;
-const MAX_STDOUT_LINE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
-const MAX_STDERR_BYTES: usize = 1024 * 1024;
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const HTTP_TOKEN: &str = "conformance-http-token-must-never-be-logged";
 const INPUT_SECRET: &str = "conformance-input-secret-must-never-be-logged";
@@ -324,20 +326,7 @@ fn respond_json(stream: &mut TcpStream, status: &str, body: Value) {
         .expect("write HTTP fixture response");
 }
 
-struct ProtocolProcess {
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    frames: mpsc::Receiver<Vec<u8>>,
-    stdout_thread: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
-    stderr_thread: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
-}
-
-struct ProcessOutput {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-impl ProtocolProcess {
+trait ConformanceProcessExt: Sized {
     fn start(fixture: &HttpFixture, read_only: bool) -> Self {
         Self::start_with_options(fixture, Some("standard"), read_only, None)
     }
@@ -369,12 +358,22 @@ impl ProtocolProcess {
         profile: Option<&str>,
         read_only: bool,
         protocol: Option<&str>,
+    ) -> Self;
+
+    fn modern_request(&mut self, id: u64, method: &str, params: Value) -> Value;
+
+    fn modern_request_with_id(&mut self, id: Value, method: &str, params: Value) -> Value;
+}
+
+impl ConformanceProcessExt for ProtocolProcess {
+    fn start_with_options(
+        fixture: &HttpFixture,
+        profile: Option<&str>,
+        read_only: bool,
+        protocol: Option<&str>,
     ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
         command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .env("ANYTYPE_URL", &fixture.address)
             .env("ANYTYPE_KEYSTORE", "env")
             .env("ANYTYPE_KEYSTORE_SERVICE", "any-mcp-conformance")
@@ -397,49 +396,7 @@ impl ProtocolProcess {
         } else {
             command.env_remove("ANY_MCP_PROTOCOL");
         }
-        let mut child = command.spawn().expect("spawn production any-mcp binary");
-        let stdin = child.stdin.take().expect("child stdin");
-        let stdout = child.stdout.take().expect("child stdout");
-        let stderr = child.stderr.take().expect("child stderr");
-        let (frame_tx, frames) = mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
-        let stdout_thread = thread::spawn(move || read_stdout(stdout, &frame_tx));
-        let stderr_thread = thread::spawn(move || {
-            read_bounded_stream(stderr, MAX_STDERR_LINE_BYTES, MAX_STDERR_BYTES)
-        });
-        Self {
-            child: Some(child),
-            stdin: Some(stdin),
-            frames,
-            stdout_thread: Some(stdout_thread),
-            stderr_thread: Some(stderr_thread),
-        }
-    }
-
-    fn send(&mut self, frame: Value) {
-        self.send_bytes(&serde_json::to_vec(&frame).expect("encode JSON-RPC frame"));
-    }
-
-    fn send_bytes(&mut self, frame: &[u8]) {
-        let stdin = self.stdin.as_mut().expect("open child stdin");
-        stdin.write_all(frame).expect("write JSON-RPC frame");
-        stdin.write_all(b"\n").expect("terminate JSON-RPC frame");
-        stdin.flush().expect("flush JSON-RPC frame");
-    }
-
-    fn notification(&mut self, method: &str, params: Value) {
-        self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
-    }
-
-    fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
-        self.send(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params
-        }));
-        let response = self.read_frame();
-        assert_eq!(response["id"], id, "response id for {method}");
-        response
+        ProtocolProcess::spawn(command)
     }
 
     fn modern_request(&mut self, id: u64, method: &str, params: Value) -> Value {
@@ -464,101 +421,12 @@ impl ProtocolProcess {
         ) {
             assert_official_modern_request(&request);
         }
-        self.send_modern_request(id, method, request)
-    }
-
-    fn send_modern_request(&mut self, id: Value, method: &str, request: Value) -> Value {
         self.send(request);
         let response = self.read_frame();
         assert_eq!(response["id"], id, "response id for {method}");
         assert_official_modern_response(&response);
+        self.record_response(&response);
         response
-    }
-
-    fn read_frame(&self) -> Value {
-        let bytes = self
-            .frames
-            .recv_timeout(DEADLINE)
-            .expect("protocol response before deadline");
-        assert_eq!(bytes.last(), Some(&b'\n'), "one LF-delimited stdout frame");
-        assert_ne!(bytes.first(), Some(&b'\n'), "no blank stdout frame");
-        serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("stdout line is one JSON frame")
-    }
-
-    fn shutdown(&mut self, graceful: bool, require_success: bool) -> Result<ProcessOutput, String> {
-        drop(self.stdin.take());
-        let mut errors = Vec::new();
-        let status = self.child.take().and_then(|mut child| {
-            if graceful {
-                let deadline = Instant::now() + DEADLINE;
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break Some(status),
-                        Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
-                        Ok(None) => {
-                            errors.push("any-mcp did not exit after clean stdin EOF".to_owned());
-                            if let Err(error) = child.kill() {
-                                errors.push(format!("kill hung any-mcp child: {error}"));
-                            }
-                            break match child.wait() {
-                                Ok(status) => Some(status),
-                                Err(error) => {
-                                    errors.push(format!("wait for killed any-mcp child: {error}"));
-                                    None
-                                }
-                            };
-                        }
-                        Err(error) => {
-                            errors.push(format!("poll any-mcp child status: {error}"));
-                            if let Err(kill_error) = child.kill() {
-                                errors.push(format!(
-                                    "kill any-mcp child after poll error: {kill_error}"
-                                ));
-                            }
-                            break match child.wait() {
-                                Ok(status) => Some(status),
-                                Err(wait_error) => {
-                                    errors.push(format!("wait for any-mcp child: {wait_error}"));
-                                    None
-                                }
-                            };
-                        }
-                    }
-                }
-            } else {
-                if let Err(error) = child.kill() {
-                    errors.push(format!("kill dropped any-mcp child: {error}"));
-                }
-                match child.wait() {
-                    Ok(status) => Some(status),
-                    Err(error) => {
-                        errors.push(format!("wait for dropped any-mcp child: {error}"));
-                        None
-                    }
-                }
-            }
-        });
-        if require_success
-            && let Some(status) = status
-            && !status.success()
-        {
-            errors.push(format!(
-                "any-mcp exited unsuccessfully after stdin EOF: {status}"
-            ));
-        }
-
-        let stdout = join_reader(self.stdout_thread.take(), "stdout", &mut errors);
-        let stderr = join_reader(self.stderr_thread.take(), "stderr", &mut errors);
-        if errors.is_empty() {
-            Ok(ProcessOutput { stdout, stderr })
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-
-    fn finish(mut self) -> ProcessOutput {
-        self.shutdown(true, true)
-            .unwrap_or_else(|error| panic!("bounded protocol process cleanup failed: {error}"))
     }
 }
 
@@ -572,140 +440,6 @@ fn assert_compact_wire_catalog(result: &Value) {
         serde_json::to_string_pretty(&actual).expect("serialize compact wire catalog")
     );
     assert_eq!(actual, COMPACT_CATALOG_SNAPSHOT);
-}
-
-impl Drop for ProtocolProcess {
-    fn drop(&mut self) {
-        if (self.child.is_some()
-            || self.stdin.is_some()
-            || self.stdout_thread.is_some()
-            || self.stderr_thread.is_some())
-            && let Err(error) = self.shutdown(false, false)
-            && !thread::panicking()
-        {
-            panic!("bounded dropped protocol process cleanup failed: {error}");
-        }
-    }
-}
-
-fn read_stdout(stdout: impl Read, frames: &mpsc::SyncSender<Vec<u8>>) -> std::io::Result<Vec<u8>> {
-    let mut reader = BufReader::with_capacity(8 * 1024, stdout);
-    let mut all = Vec::new();
-    let mut line = Vec::new();
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            if !line.is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "stdout ended with an unterminated protocol frame",
-                ));
-            }
-            return Ok(all);
-        }
-        let chunk_len = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |position| position + 1);
-        let next_line_len = line
-            .len()
-            .checked_add(chunk_len)
-            .ok_or_else(|| std::io::Error::other("stdout line length overflow"))?;
-        if next_line_len > MAX_STDOUT_LINE_BYTES {
-            return Err(std::io::Error::other(
-                "stdout protocol frame exceeds byte cap",
-            ));
-        }
-        let next_total = all
-            .len()
-            .checked_add(chunk_len)
-            .ok_or_else(|| std::io::Error::other("stdout aggregate length overflow"))?;
-        if next_total > MAX_STDOUT_BYTES {
-            return Err(std::io::Error::other("stdout exceeds aggregate byte cap"));
-        }
-        let complete = available[chunk_len - 1] == b'\n';
-        line.extend_from_slice(&available[..chunk_len]);
-        all.extend_from_slice(&available[..chunk_len]);
-        reader.consume(chunk_len);
-        if complete {
-            frames
-                .try_send(std::mem::take(&mut line))
-                .map_err(|error| {
-                    std::io::Error::other(format!(
-                        "bounded stdout frame queue unavailable: {error}"
-                    ))
-                })?;
-        }
-    }
-}
-
-fn read_bounded_stream(
-    mut stream: impl Read,
-    max_line_bytes: usize,
-    max_bytes: usize,
-) -> std::io::Result<Vec<u8>> {
-    let mut all = Vec::new();
-    let mut line_bytes = 0_usize;
-    let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        let read = stream.read(&mut buffer)?;
-        if read == 0 {
-            return Ok(all);
-        }
-        let next_total = all
-            .len()
-            .checked_add(read)
-            .ok_or_else(|| std::io::Error::other("diagnostic aggregate length overflow"))?;
-        if next_total > max_bytes {
-            return Err(std::io::Error::other(
-                "diagnostic stream exceeds aggregate byte cap",
-            ));
-        }
-        for byte in &buffer[..read] {
-            line_bytes = line_bytes
-                .checked_add(1)
-                .ok_or_else(|| std::io::Error::other("diagnostic line length overflow"))?;
-            if line_bytes > max_line_bytes {
-                return Err(std::io::Error::other("diagnostic line exceeds byte cap"));
-            }
-            if *byte == b'\n' {
-                line_bytes = 0;
-            }
-        }
-        all.extend_from_slice(&buffer[..read]);
-    }
-}
-
-fn join_reader(
-    handle: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
-    name: &str,
-    errors: &mut Vec<String>,
-) -> Vec<u8> {
-    let Some(handle) = handle else {
-        return Vec::new();
-    };
-    match handle.join() {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(error)) => {
-            errors.push(format!("read bounded {name}: {error}"));
-            Vec::new()
-        }
-        Err(payload) => {
-            errors.push(format!(
-                "{name} reader panicked: {}",
-                panic_payload(&payload)
-            ));
-            Vec::new()
-        }
-    }
-}
-
-fn panic_payload(payload: &Box<dyn Any + Send>) -> &str {
-    payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload")
 }
 
 #[test]
@@ -1009,6 +743,27 @@ fn production_stdio_normal_mode_legacy_regression_is_bounded_and_pure() {
 #[test]
 fn production_stdio_read_only_mode_legacy_regression_is_bounded_and_pure() {
     run_legacy_stdio_regression(true);
+}
+
+#[test]
+fn repeated_production_tool_dispatch_remains_stack_bounded() {
+    let fixture = HttpFixture::start();
+    let mut process = ProtocolProcess::start(&fixture, false);
+    initialize_legacy_session(&mut process);
+
+    for id in 2..=129 {
+        let status = process.request(
+            id,
+            "tools/call",
+            json!({"name": "server_status", "arguments": {}}),
+        );
+        assert_structured_result(&status["result"], false);
+    }
+
+    let output = process.finish();
+    fixture.finish();
+    assert_stdout_purity(&output.stdout);
+    assert_exchange_depth(&output.stdout, 129);
 }
 
 fn run_modern_stdio_acceptance(read_only: bool) {

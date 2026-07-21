@@ -462,6 +462,10 @@ export RUST_LOG=
 export ANYTYPE_DISABLE_RATE_LIMIT=1
 ```
 
+Keystore modifiers use `:key=value` boundaries. Path values may contain a
+Windows drive colon or ordinary colons that are not followed by another
+modifier key and `=`.
+
 Run smoke test
 
 ```sh

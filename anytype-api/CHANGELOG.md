@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- file/SQLite keystore modifier parsing now recognizes only `:key=`
+  boundaries, preserving Windows drive paths and ordinary colon-bearing path
+  values while retaining the established last-wins behavior for duplicate
+  modifiers
 - HTTP diagnostics now emit only structured variant/status/method/path metadata:
   request and response payloads, query values, headers, credentials, and full
   URLs remain unavailable at every trace level. Malformed and unsupported

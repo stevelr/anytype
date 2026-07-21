@@ -217,6 +217,7 @@ version = "0.5.0-pre.1"
 dependencies = [
  "anytype",
  "chrono",
+ "futures-util",
  "getrandom 0.3.4",
  "jsonschema",
  "rmcp",

@@ -439,7 +439,11 @@ impl ServerHandler for AnyMcpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.dispatch_tool(request, &context.ct).await
+        // The exhaustive dispatch future contains every typed workflow branch
+        // and is large in debug builds. Keep it off rmcp's Tokio worker stack;
+        // repeated production stdio calls otherwise eventually overflow a
+        // worker even when each individual operation succeeds.
+        Box::pin(self.dispatch_tool(request, &context.ct)).await
     }
 
     async fn list_resources(
