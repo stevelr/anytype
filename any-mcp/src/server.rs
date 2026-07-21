@@ -132,12 +132,13 @@ impl fmt::Debug for AnyMcpServer {
 }
 
 impl AnyMcpServer {
-    /// Builds the complete static Phase 1 catalog over one authenticated runtime.
+    /// Builds the selected static Phase 1 catalog over one authenticated runtime.
     ///
-    /// Read-only runtime configuration omits every mutating tool while retaining
-    /// all read tools and resources. Catalog construction validates the exact
-    /// canonical inventory and refuses duplicate or disconnected contracts.
-    /// The serialized normal and read-only inventories are also locked by a
+    /// Compact and standard profiles retain complete, byte-identical contracts
+    /// for every shared tool. Read-only runtime configuration then omits every
+    /// selected mutation while resources remain available. Catalog construction
+    /// validates each exact profile/access inventory and refuses duplicate or
+    /// disconnected contracts. All four serialized inventories are locked by a
     /// deterministic, reviewed `o200k_base` token-budget regression so schema
     /// growth cannot silently consume model context.
     ///
@@ -1640,7 +1641,7 @@ mod tests {
             .div_ceil(100);
         assert!(
             reviewed.compact_catalog_tokens < catalog_limit,
-            "default catalog must remain below 5% of the smallest supported context: {} >= {}",
+            "default catalog must remain below 5% of the internal compatibility-policy context floor: {} >= {}",
             reviewed.compact_catalog_tokens,
             catalog_limit,
         );
