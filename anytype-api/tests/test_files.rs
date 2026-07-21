@@ -1,4 +1,7 @@
-use anytype::test_util::{TestResult, unique_suffix, with_test_context};
+use anytype::{
+    prelude::AnytypeError,
+    test_util::{TestResult, unique_suffix, with_test_context},
+};
 
 #[tokio::test]
 async fn test_rest_file_upload_download_and_delete() -> TestResult<()> {
@@ -33,6 +36,36 @@ async fn test_rest_file_upload_download_and_delete() -> TestResult<()> {
             .download_bytes(&ctx.space_id, &file.id)
             .await?;
         assert_eq!(downloaded.as_ref(), payload.as_slice());
+
+        let bounded = ctx
+            .client
+            .files()
+            .download_request(&ctx.space_id, &file.id)
+            .response_limit_bytes(payload.len() as u64)
+            .error_limit_bytes(64 * 1024)
+            .header_evidence_limit_bytes(4096)
+            .max_attempts(2)
+            .download()
+            .await?;
+        assert_eq!(bounded.bytes.as_ref(), payload.as_slice());
+        assert_eq!(bounded.metadata.content_length, Some(payload.len() as u64));
+        assert!(bounded.metadata.retained_header_bytes <= 4096);
+
+        let oversized = ctx
+            .client
+            .files()
+            .download_request(&ctx.space_id, &file.id)
+            .response_limit_bytes(payload.len() as u64 - 1)
+            .download()
+            .await
+            .expect_err("caller-specific file ceiling must reject one-over response");
+        assert!(matches!(
+            oversized,
+            AnytypeError::ResponseTooLarge {
+                limit,
+                declared: Some(declared)
+            } if limit == payload.len() as u64 - 1 && declared == payload.len() as u64
+        ));
 
         ctx.client.files().delete(&ctx.space_id, &file.id).await?;
         Ok(())

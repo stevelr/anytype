@@ -43,6 +43,13 @@ use crate::{
 // Public types
 // ============================================================================
 
+/// Hard ceiling for retained allowlisted file-response header evidence.
+pub const MAX_FILE_HEADER_EVIDENCE_BYTES: u64 = 1024 * 1024;
+/// Hard ceiling for physical attempts made by one file request.
+pub const MAX_FILE_REQUEST_ATTEMPTS: u32 = 6;
+
+pub(crate) const DEFAULT_FILE_HEADER_EVIDENCE_BYTES: u64 = 64 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileObject {
     pub id: String,
@@ -121,6 +128,10 @@ pub struct FileHttpMetadata {
     pub etag: Option<String>,
     /// Cache policy supplied by the file endpoint.
     pub cache_control: Option<String>,
+    /// Total bytes retained across the allowlisted response headers.
+    ///
+    /// Header names, separators, and values all count toward this total.
+    pub retained_header_bytes: u64,
 }
 
 /// Result of a configurable REST file download.
@@ -295,11 +306,16 @@ impl<'a> FilesClient<'a> {
             file_id: file_id.into(),
             width: None,
             range: None,
+            invalid_range: false,
             if_match: None,
             if_none_match: None,
             if_modified_since: None,
             if_unmodified_since: None,
             if_range: None,
+            response_limit_bytes: None,
+            error_limit_bytes: None,
+            header_evidence_limit_bytes: None,
+            max_attempts: None,
         }
     }
 
@@ -389,11 +405,16 @@ pub struct FileContentRequest<'a> {
     file_id: String,
     width: Option<u32>,
     range: Option<String>,
+    invalid_range: bool,
     if_match: Option<String>,
     if_none_match: Option<String>,
     if_modified_since: Option<String>,
     if_unmodified_since: Option<String>,
     if_range: Option<String>,
+    response_limit_bytes: Option<u64>,
+    error_limit_bytes: Option<u64>,
+    header_evidence_limit_bytes: Option<u64>,
+    max_attempts: Option<u32>,
 }
 
 impl FileContentRequest<'_> {
@@ -411,6 +432,67 @@ impl FileContentRequest<'_> {
     #[must_use]
     pub fn range(mut self, range: impl Into<String>) -> Self {
         self.range = Some(range.into());
+        self.invalid_range = false;
+        self
+    }
+
+    /// Select a checked inclusive byte range from `offset` for at most `length` bytes.
+    ///
+    /// A zero length and arithmetic overflow are rejected before network I/O.
+    /// The response is still bounded independently with
+    /// [`response_limit_bytes`](Self::response_limit_bytes), so callers that
+    /// need an overrun sentinel can request `length + 1` body bytes there.
+    #[must_use]
+    pub fn byte_range(mut self, offset: u64, length: u64) -> Self {
+        self.range = offset
+            .checked_add(length.saturating_sub(1))
+            .filter(|_| length != 0)
+            .map(|end| format!("bytes={offset}-{end}"));
+        self.invalid_range = self.range.is_none();
+        self
+    }
+
+    /// Set the maximum successful response-body bytes buffered for this request.
+    ///
+    /// The value must be nonzero and cannot exceed the client's configured
+    /// [`ResponseLimits::file_bytes`](crate::client::ResponseLimits::file_bytes).
+    /// It does not change the client-wide default or any other request.
+    #[must_use]
+    pub const fn response_limit_bytes(mut self, limit: u64) -> Self {
+        self.response_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Set the maximum error-response bytes buffered for this request.
+    ///
+    /// The value must be nonzero and cannot exceed the client's configured
+    /// [`ResponseLimits::error_bytes`](crate::client::ResponseLimits::error_bytes).
+    #[must_use]
+    pub const fn error_limit_bytes(mut self, limit: u64) -> Self {
+        self.error_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Set the retained evidence ceiling for allowlisted file response headers.
+    ///
+    /// Values are limited to [`MAX_FILE_HEADER_EVIDENCE_BYTES`]. The ceiling
+    /// is enforced independently on every physical response before retry or
+    /// body processing. Unrelated headers are never copied into the public
+    /// result.
+    #[must_use]
+    pub const fn header_evidence_limit_bytes(mut self, limit: u64) -> Self {
+        self.header_evidence_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Set the cumulative physical-attempt ceiling for this safe request.
+    ///
+    /// One through [`MAX_FILE_REQUEST_ATTEMPTS`] attempts are accepted. The
+    /// initial send and every 429, retryable-status, connection, or timeout
+    /// replay share this one counter. `POST` file uploads are unaffected.
+    #[must_use]
+    pub const fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = Some(max_attempts);
         self
     }
 
@@ -466,6 +548,10 @@ impl FileContentRequest<'_> {
             .map(|width| vec![("width".to_string(), width.to_string())])
             .unwrap_or_default();
         let mut headers = HeaderMap::new();
+        if self.invalid_range {
+            return invalid_range();
+        }
+        let requested_range = self.range.as_deref().map(parse_request_range).transpose()?;
         insert_optional_header(&mut headers, RANGE, self.range)?;
         insert_optional_header(&mut headers, IF_MATCH, self.if_match)?;
         insert_optional_header(&mut headers, IF_NONE_MATCH, self.if_none_match)?;
@@ -473,14 +559,56 @@ impl FileContentRequest<'_> {
         insert_optional_header(&mut headers, IF_UNMODIFIED_SINCE, self.if_unmodified_since)?;
         insert_optional_header(&mut headers, IF_RANGE, self.if_range)?;
 
+        let response_limit = self
+            .response_limit_bytes
+            .unwrap_or_else(|| self.client.client.file_response_limit());
+        let error_limit = self
+            .error_limit_bytes
+            .unwrap_or_else(|| self.client.client.error_response_limit());
+        let header_limit = self
+            .header_evidence_limit_bytes
+            .unwrap_or(DEFAULT_FILE_HEADER_EVIDENCE_BYTES);
+        if header_limit == 0 || header_limit > MAX_FILE_HEADER_EVIDENCE_BYTES {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "file header evidence limit must be between 1 and {MAX_FILE_HEADER_EVIDENCE_BYTES} bytes"
+                ),
+            });
+        }
+        let max_attempts = self.max_attempts.unwrap_or(1);
+        if max_attempts == 0 || max_attempts > MAX_FILE_REQUEST_ATTEMPTS {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "file request attempts must be between 1 and {MAX_FILE_REQUEST_ATTEMPTS}"
+                ),
+            });
+        }
+
         let response = self
             .client
             .client
-            .file_request(method, &path, &query, headers)
+            .file_request_with_limits(
+                method.clone(),
+                &path,
+                &query,
+                headers,
+                response_limit,
+                error_limit,
+                header_limit,
+                max_attempts,
+            )
             .await?;
+        let metadata = file_http_metadata(
+            &response.headers,
+            response.status,
+            method,
+            requested_range,
+            response.body.len() as u64,
+            header_limit,
+        )?;
         Ok(FileContentResponse {
             status: response.status,
-            metadata: file_http_metadata(&response.headers),
+            metadata,
             bytes: response.body,
         })
     }
@@ -543,26 +671,323 @@ fn insert_optional_header(
     Ok(())
 }
 
-fn file_http_metadata(headers: &HeaderMap) -> FileHttpMetadata {
-    FileHttpMetadata {
-        content_type: header_string(headers, CONTENT_TYPE),
-        content_length: headers
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok()),
-        content_range: header_string(headers, CONTENT_RANGE),
-        accept_ranges: header_string(headers, ACCEPT_RANGES),
-        last_modified: header_string(headers, LAST_MODIFIED),
-        etag: header_string(headers, ETAG),
-        cache_control: header_string(headers, CACHE_CONTROL),
+#[derive(Debug, Clone, Copy)]
+enum RequestRange {
+    From {
+        start: u64,
+        inclusive_end: Option<u64>,
+    },
+    Suffix {
+        length: u64,
+    },
+}
+
+fn parse_request_range(value: &str) -> Result<RequestRange> {
+    let Some(spec) = value.strip_prefix("bytes=") else {
+        return invalid_range();
+    };
+    if spec.is_empty() || spec.contains(',') || spec.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return invalid_range();
+    }
+    let Some((start, end)) = spec.split_once('-') else {
+        return invalid_range();
+    };
+    let range = match (start.is_empty(), end.is_empty()) {
+        (false, false) => {
+            let start = parse_canonical_u64(start).ok_or_else(invalid_range_error)?;
+            let end = parse_canonical_u64(end).ok_or_else(invalid_range_error)?;
+            if start > end {
+                return invalid_range();
+            }
+            RequestRange::From {
+                start,
+                inclusive_end: Some(end),
+            }
+        }
+        (false, true) => RequestRange::From {
+            start: parse_canonical_u64(start).ok_or_else(invalid_range_error)?,
+            inclusive_end: None,
+        },
+        (true, false) => {
+            let suffix = parse_canonical_u64(end).ok_or_else(invalid_range_error)?;
+            if suffix == 0 {
+                return invalid_range();
+            }
+            RequestRange::Suffix { length: suffix }
+        }
+        (true, true) => return invalid_range(),
+    };
+    Ok(range)
+}
+
+fn invalid_range<T>() -> Result<T> {
+    Err(invalid_range_error())
+}
+
+fn invalid_range_error() -> AnytypeError {
+    AnytypeError::Validation {
+        message: "file range must be one canonical bytes range".to_owned(),
     }
 }
 
-fn header_string(headers: &HeaderMap, name: HeaderName) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
+fn parse_canonical_u64(value: &str) -> Option<u64> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return None;
+    }
+    value.parse().ok()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedContentRange {
+    start: u64,
+    end: u64,
+    total: u64,
+}
+
+fn parse_content_range(value: &str) -> Option<ParsedContentRange> {
+    let spec = value.strip_prefix("bytes ")?;
+    let (range, total) = spec.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = parse_canonical_u64(start)?;
+    let end = parse_canonical_u64(end)?;
+    let total = parse_canonical_u64(total)?;
+    if start > end || end >= total {
+        return None;
+    }
+    Some(ParsedContentRange { start, end, total })
+}
+
+fn file_http_metadata(
+    headers: &HeaderMap,
+    status: StatusCode,
+    method: Method,
+    requested_range: Option<RequestRange>,
+    body_len: u64,
+    evidence_limit: u64,
+) -> Result<FileHttpMetadata> {
+    let retained_header_bytes = retained_file_header_bytes(headers, status, evidence_limit)?;
+    let content_type = single_header(headers, status, CONTENT_TYPE, "content-type")?;
+    let content_length = single_header(headers, status, CONTENT_LENGTH, "content-length")?
+        .map(|value| {
+            parse_canonical_u64(&value).ok_or(AnytypeError::InvalidFileResponseHeader {
+                status: status.as_u16(),
+                header: "content-length",
+                issue: "malformed",
+            })
+        })
+        .transpose()?;
+    let content_range = single_header(headers, status, CONTENT_RANGE, "content-range")?;
+    let accept_ranges = single_header(headers, status, ACCEPT_RANGES, "accept-ranges")?;
+    let last_modified = single_header(headers, status, LAST_MODIFIED, "last-modified")?
+        .map(|value| {
+            httpdate::parse_http_date(&value)
+                .map(httpdate::fmt_http_date)
+                .map_err(|_| AnytypeError::InvalidFileResponseHeader {
+                    status: status.as_u16(),
+                    header: "last-modified",
+                    issue: "malformed",
+                })
+        })
+        .transpose()?;
+    let etag = single_header(headers, status, ETAG, "etag")?
+        .map(|value| validate_etag(value, status))
+        .transpose()?;
+    let cache_control = single_header(headers, status, CACHE_CONTROL, "cache-control")?;
+
+    if let Some(value) = content_type.as_deref()
+        && (value.len() > 255
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+            || value.parse::<mime::Mime>().is_err())
+    {
+        return Err(AnytypeError::InvalidFileResponseHeader {
+            status: status.as_u16(),
+            header: "content-type",
+            issue: "malformed",
+        });
+    }
+    if let Some(value) = accept_ranges.as_deref()
+        && value != "bytes"
+        && value != "none"
+    {
+        return Err(AnytypeError::InvalidFileResponseHeader {
+            status: status.as_u16(),
+            header: "accept-ranges",
+            issue: "unsupported",
+        });
+    }
+
+    if method == Method::GET && status.is_success() {
+        let declared = content_length.ok_or(AnytypeError::InvalidFileResponseHeader {
+            status: status.as_u16(),
+            header: "content-length",
+            issue: "missing",
+        })?;
+        if declared != body_len {
+            return Err(AnytypeError::InvalidFileResponseHeader {
+                status: status.as_u16(),
+                header: "content-length",
+                issue: "body-length-mismatch",
+            });
+        }
+    }
+
+    if status == StatusCode::PARTIAL_CONTENT {
+        let parsed = content_range
+            .as_deref()
+            .and_then(parse_content_range)
+            .ok_or(AnytypeError::InvalidFileResponseHeader {
+                status: status.as_u16(),
+                header: "content-range",
+                issue: if content_range.is_some() {
+                    "malformed"
+                } else {
+                    "missing"
+                },
+            })?;
+        let span = parsed
+            .end
+            .checked_sub(parsed.start)
+            .and_then(|value| value.checked_add(1));
+        if span != Some(body_len) {
+            return Err(AnytypeError::InvalidFileResponseHeader {
+                status: status.as_u16(),
+                header: "content-range",
+                issue: "body-length-mismatch",
+            });
+        }
+        let Some(requested) = requested_range else {
+            return Err(AnytypeError::InvalidFileResponseHeader {
+                status: status.as_u16(),
+                header: "content-range",
+                issue: "unexpected",
+            });
+        };
+        let request_matches = match requested {
+            RequestRange::From {
+                start,
+                inclusive_end,
+            } => {
+                parsed.start == start
+                    && inclusive_end.is_none_or(|requested_end| parsed.end <= requested_end)
+            }
+            RequestRange::Suffix { length } => {
+                span.is_some_and(|span| span <= length)
+                    && parsed.end.checked_add(1) == Some(parsed.total)
+            }
+        };
+        if !request_matches || parsed.total == 0 {
+            return Err(AnytypeError::InvalidFileResponseHeader {
+                status: status.as_u16(),
+                header: "content-range",
+                issue: "request-mismatch",
+            });
+        }
+    } else if content_range.is_some() && status.is_success() {
+        return Err(AnytypeError::InvalidFileResponseHeader {
+            status: status.as_u16(),
+            header: "content-range",
+            issue: "unexpected",
+        });
+    }
+
+    Ok(FileHttpMetadata {
+        content_type,
+        content_length,
+        content_range,
+        accept_ranges,
+        last_modified,
+        etag,
+        cache_control,
+        retained_header_bytes,
+    })
+}
+
+fn validate_etag(value: String, status: StatusCode) -> Result<String> {
+    let opaque = value.strip_prefix("W/").unwrap_or(&value);
+    if opaque.len() < 2
+        || !opaque.starts_with('"')
+        || !opaque.ends_with('"')
+        || opaque[1..opaque.len() - 1]
+            .bytes()
+            .any(|byte| byte == b'"' || byte < 0x21 || byte == 0x7f)
+    {
+        return Err(AnytypeError::InvalidFileResponseHeader {
+            status: status.as_u16(),
+            header: "etag",
+            issue: "malformed",
+        });
+    }
+    Ok(value)
+}
+
+fn single_header(
+    headers: &HeaderMap,
+    status: StatusCode,
+    name: HeaderName,
+    display_name: &'static str,
+) -> Result<Option<String>> {
+    let values: Vec<_> = headers.get_all(&name).iter().collect();
+    if values.len() > 1 {
+        return Err(AnytypeError::InvalidFileResponseHeader {
+            status: status.as_u16(),
+            header: display_name,
+            issue: "duplicate",
+        });
+    }
+    values
+        .first()
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| AnytypeError::InvalidFileResponseHeader {
+                    status: status.as_u16(),
+                    header: display_name,
+                    issue: "non-utf8",
+                })
+        })
+        .transpose()
+}
+
+pub(crate) fn retained_file_header_bytes(
+    headers: &HeaderMap,
+    status: StatusCode,
+    limit: u64,
+) -> Result<u64> {
+    let allowlist = [
+        CONTENT_LENGTH,
+        CONTENT_RANGE,
+        CONTENT_TYPE,
+        ETAG,
+        LAST_MODIFIED,
+        ACCEPT_RANGES,
+        CACHE_CONTROL,
+    ];
+    let mut retained = 0_u64;
+    for name in allowlist {
+        for value in headers.get_all(&name) {
+            retained = retained
+                .checked_add(name.as_str().len() as u64)
+                .and_then(|value_len| value_len.checked_add(value.as_bytes().len() as u64 + 2))
+                .ok_or(AnytypeError::FileHeaderEvidenceTooLarge {
+                    limit,
+                    status: status.as_u16(),
+                })?;
+            if retained > limit {
+                return Err(AnytypeError::FileHeaderEvidenceTooLarge {
+                    limit,
+                    status: status.as_u16(),
+                });
+            }
+        }
+    }
+    Ok(retained)
 }
 
 /// Builder for an HTTP (REST) file upload. Created by
@@ -1979,6 +2404,52 @@ mod tests {
         (client, server)
     }
 
+    async fn mock_file_client_sequence(
+        responses: Vec<&'static str>,
+    ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock file server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(responses.len());
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.expect("accept mock request");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut chunk).await.expect("read mock request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write mock response");
+                requests.push(String::from_utf8(request).expect("HTTP request is UTF-8"));
+            }
+            requests
+        });
+
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-file-http-unit-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("file-http-unit");
+        config.base_url = Some(format!("http://{address}"));
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("file-http-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("create mock client");
+        client.set_api_key(HttpCredentials::new("test-token"));
+        (client, server)
+    }
+
     #[test]
     fn simple_path_and_byte_uploads_select_rest() {
         let path = FileSource::Path(PathBuf::from("example.txt"));
@@ -2142,6 +2613,256 @@ mod tests {
         assert!(response.is_not_modified());
         assert!(response.bytes.is_empty());
         server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn per_request_body_limit_accepts_exact_boundary_and_rejects_one_over() {
+        let responses = vec![
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\nConnection: close\r\n\r\nbytes",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\nConnection: close\r\n\r\nbytes",
+        ];
+        let (client, server) = mock_file_client_sequence(responses).await;
+
+        let response = client
+            .files()
+            .download_request("space-1", "file-1")
+            .response_limit_bytes(5)
+            .download()
+            .await
+            .expect("exact limit is accepted");
+        assert_eq!(response.bytes, Bytes::from_static(b"bytes"));
+
+        let error = client
+            .files()
+            .download_request("space-1", "file-1")
+            .response_limit_bytes(4)
+            .download()
+            .await
+            .expect_err("one byte over the request limit must fail");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ResponseTooLarge {
+                limit: 4,
+                declared: Some(5)
+            }
+        ));
+        assert_eq!(server.await.expect("mock server task").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_contradictory_range_evidence_fails_closed() {
+        let responses = vec![
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nContent-Range: bytes 1-5/11\r\nConnection: close\r\n\r\nhello",
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nContent-Range: bytes nonsense\r\nConnection: close\r\n\r\nhello",
+        ];
+        let (client, server) = mock_file_client_sequence(responses).await;
+
+        for expected_issue in ["request-mismatch", "malformed"] {
+            let error = client
+                .files()
+                .download_request("space-1", "file-1")
+                .range("bytes=0-4")
+                .response_limit_bytes(5)
+                .download()
+                .await
+                .expect_err("bad range evidence must fail");
+            assert!(matches!(
+                error,
+                crate::error::AnytypeError::InvalidFileResponseHeader {
+                    header: "content-range",
+                    issue,
+                    ..
+                } if issue == expected_issue
+            ));
+        }
+        assert_eq!(server.await.expect("mock server task").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_validator_and_header_budget_fail_with_typed_evidence() {
+        let responses = vec![
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\nETag: \"one\"\r\nETag: \"two\"\r\nConnection: close\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\nETag: W/\"unterminated\r\nConnection: close\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+        ];
+        let (client, server) = mock_file_client_sequence(responses).await;
+
+        let duplicate = client
+            .files()
+            .download_request("space-1", "file-1")
+            .download()
+            .await
+            .expect_err("duplicate ETag must fail");
+        assert!(matches!(
+            duplicate,
+            crate::error::AnytypeError::InvalidFileResponseHeader {
+                status: 200,
+                header: "etag",
+                issue: "duplicate"
+            }
+        ));
+
+        let malformed = client
+            .files()
+            .download_request("space-1", "file-1")
+            .download()
+            .await
+            .expect_err("malformed ETag must fail");
+        assert!(matches!(
+            malformed,
+            crate::error::AnytypeError::InvalidFileResponseHeader {
+                status: 200,
+                header: "etag",
+                issue: "malformed"
+            }
+        ));
+
+        let bounded = client
+            .files()
+            .download_request("space-1", "file-1")
+            .header_evidence_limit_bytes(8)
+            .download()
+            .await
+            .expect_err("allowlisted headers over their request budget must fail");
+        assert!(matches!(
+            bounded,
+            crate::error::AnytypeError::FileHeaderEvidenceTooLarge {
+                limit: 8,
+                status: 200
+            }
+        ));
+        assert_eq!(server.await.expect("mock server task").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn truncated_body_and_malformed_metadata_fail_closed() {
+        let responses = vec![
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfour",
+            "HTTP/1.1 200 OK\r\nContent-Type: not a mime\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\nLast-Modified: yesterday\r\nConnection: close\r\n\r\nx",
+        ];
+        let (client, server) = mock_file_client_sequence(responses).await;
+
+        let truncated = client
+            .files()
+            .download_request("space-1", "file-1")
+            .response_limit_bytes(5)
+            .download()
+            .await
+            .expect_err("truncated response must fail");
+        assert!(matches!(truncated, crate::error::AnytypeError::Http { .. }));
+
+        for expected_header in ["content-type", "last-modified"] {
+            let malformed = client
+                .files()
+                .download_request("space-1", "file-1")
+                .download()
+                .await
+                .expect_err("malformed metadata must fail");
+            assert!(matches!(
+                malformed,
+                crate::error::AnytypeError::InvalidFileResponseHeader {
+                    header,
+                    issue: "malformed",
+                    ..
+                } if header == expected_header
+            ));
+        }
+        assert_eq!(server.await.expect("mock server task").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn safe_retries_share_one_physical_attempt_ceiling() {
+        let responses = vec![
+            "HTTP/1.1 429 Too Many Requests\r\nRateLimit-Reset: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ];
+        let (client, server) = mock_file_client_sequence(responses).await;
+        let response = client
+            .files()
+            .download_request("space-1", "file-1")
+            .max_attempts(3)
+            .response_limit_bytes(2)
+            .header_evidence_limit_bytes(128)
+            .download()
+            .await
+            .expect("third and final physical attempt succeeds");
+        assert_eq!(response.bytes, Bytes::from_static(b"ok"));
+        let requests = server.await.expect("mock server task");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(client.http_metrics().total_requests, 3);
+        assert_eq!(client.http_metrics().retries, 2);
+    }
+
+    #[tokio::test]
+    async fn intermediate_retry_header_evidence_overflow_stops_without_replay() {
+        let responses = vec![
+            "HTTP/1.1 429 Too Many Requests\r\nRateLimit-Reset: 0\r\nContent-Length: 0\r\nETag: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\r\nConnection: close\r\n\r\n",
+        ];
+        let (client, server) = mock_file_client_sequence(responses).await;
+
+        let error = client
+            .files()
+            .download_request("space-1", "file-1")
+            .max_attempts(3)
+            .header_evidence_limit_bytes(64)
+            .download()
+            .await
+            .expect_err("intermediate retry headers must be bounded before replay");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::FileHeaderEvidenceTooLarge {
+                limit: 64,
+                status: 429
+            }
+        ));
+        assert_eq!(server.await.expect("mock server task").len(), 1);
+        assert_eq!(client.http_metrics().total_requests, 1);
+        assert_eq!(client.http_metrics().retries, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_ceiling_never_sends_one_attempt_over() {
+        let responses = vec![
+            "HTTP/1.1 429 Too Many Requests\r\nRateLimit-Reset: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 429 Too Many Requests\r\nRateLimit-Reset: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ];
+        let (client, server) = mock_file_client_sequence(responses).await;
+        let error = client
+            .files()
+            .download_request("space-1", "file-1")
+            .max_attempts(2)
+            .download()
+            .await
+            .expect_err("second physical attempt exhausts the request ceiling");
+        assert!(matches!(
+            error,
+            crate::error::AnytypeError::ApiError { code: 429, .. }
+        ));
+        assert_eq!(server.await.expect("mock server task").len(), 2);
+        assert_eq!(client.http_metrics().total_requests, 2);
+        assert_eq!(client.http_metrics().retries, 1);
+    }
+
+    #[test]
+    fn request_range_grammar_is_canonical_and_checked() {
+        assert!(super::parse_request_range("bytes=0-4").is_ok());
+        assert!(super::parse_request_range("bytes=4-").is_ok());
+        assert!(super::parse_request_range("bytes=-4").is_ok());
+        for invalid in [
+            "bytes=00-4",
+            "bytes=4-3",
+            "bytes=-0",
+            "bytes=0-1,3-4",
+            "items=0-4",
+            "bytes=0 - 4",
+        ] {
+            assert!(
+                super::parse_request_range(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 
     #[tokio::test]

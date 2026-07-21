@@ -67,6 +67,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- REST file request builders now support caller-specific success/error body
+  limits, bounded allowlisted-header evidence, checked byte ranges, and one
+  cumulative physical-attempt ceiling. File metadata and validators are
+  validated without changing global defaults; oversized, truncated,
+  duplicate, malformed, contradictory, or over-retried responses fail closed
+  with typed secret-safe errors. Each physical response, including an
+  intermediate retry, is checked against the allowlisted-header evidence
+  ceiling before retry or body processing.
 - Add `objects::plain_markdown_representation`, a documented closed contract
   that separates the safe Anytype write form from the exact canonical read form
   for empty bodies and single plain lines containing alphanumeric characters,
