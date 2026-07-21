@@ -312,27 +312,56 @@ Table listing features for `view objects`:
 
 Chat commands accept `anyr chat --transport auto|rest|grpc <command>` (default
 `auto`). This is scoped to chat operations and is separate from the root
-`--grpc URL` endpoint option. It selects the transport *policy* for each
-operation: which backend the operation is intended to use.
+`--grpc URL` endpoint option. It selects which backend each operation runs over.
 
 - `auto` resolves each operation to its policy backend: REST for single-space
-  `list` and `create`, plain message `list`/`get`/`send`/`edit`/`delete` and
-  `read` in one space, and a single-chat `listen` (REST SSE); gRPC for
-  cross-space list, chat text search, rich chat-object `get`, `unread`, and
-  multi-chat `listen`.
-- `rest` rejects gRPC-only operations with an actionable error (for example
-  `anyr chat --transport rest get ...` explains that rich chat-object lookup
-  requires gRPC).
-- `grpc` selects the gRPC policy, which carries the full-fidelity 0.4 message
-  reply shape.
+  `list` and `create`, plain message `list`/`get`/`send`/`edit`/`delete`,
+  message `search` and `react`, `read`/`read-reactions`/`read-all` in one space,
+  and a single-chat `listen` (REST SSE); gRPC for cross-space list, chat text
+  search, rich chat-object `get`, `unread`, structured `--blocks-json` sends and
+  edits, and multi-chat, `--previews`, or `--buffer` `listen`.
+- `rest` rejects gRPC-only operations and options with an actionable error (for
+  example `anyr chat --transport rest get ...` explains that rich chat-object
+  lookup requires gRPC, and `--blocks-json` cannot be combined with it).
+- `grpc` selects the gRPC backend, which carries the full-fidelity 0.4 message
+  reply shape. REST-only operations such as message `search` reject it.
 
-The resolved policy backend is reported only in verbose diagnostics (`-v`),
-never injected into the JSON payload. Note that the `rest` rejection guard is
-the only part of the policy enforced today: the handlers currently dispatch
-`create` and single-space plain `list` over REST and every other operation over
-gRPC. Rerouting the REST-capable message/read/listen operations onto the REST
-backend is staged for follow-up work, so `auto` and `grpc` do not yet change
-which backend an operation executes over.
+The resolved backend is reported only in verbose diagnostics (`-v`), never
+injected into the JSON payload. Because REST replies intentionally contain fewer
+fields (no `ChatState` or structured blocks), pick `--transport grpc` when a
+script needs the full reply shape.
+
+**Chat listing, creation, and messages**
+
+- `anyr chat list --space SPACE [--filter FILTER]...` applies property filters to
+  a single-space REST listing. `--filter` requires `--space` and is rejected
+  alongside `--text` (text search uses the gRPC discovery API).
+- `anyr chat create SPACE NAME [--icon-emoji EMOJI | --icon-file FILE]` attaches
+  an icon; the two icon options are mutually exclusive. With an icon under REST
+  the dedicated chat builder is used; otherwise the generic object create is.
+- `anyr chat messages send ... [--reply-to MESSAGE] [--blocks-json JSON_OR_@FILE]`
+  and `anyr chat messages edit ... [--attachment TYPE:TARGET]... [--blocks-json
+  JSON_OR_@FILE]`. `--reply-to` works over both REST and gRPC sends. On `edit`,
+  the supplied `--attachment` values are the complete replacement list.
+  `--blocks-json` takes a JSON array of `MessageBlock` values, selects gRPC, and
+  is mutually exclusive with `--transport rest`.
+- `anyr chat messages search SPACE CHAT QUERY [pagination]` is REST-only and
+  preserves the server's search-result envelope.
+- `anyr chat messages react SPACE CHAT MESSAGE EMOJI` toggles a reaction (REST
+  under `auto`; gRPC additionally reports the resulting on/off state).
+
+**Chat read state and streams**
+
+- `anyr chat read SPACE CHAT` maps to the space-scoped REST read builder under
+  REST; `anyr chat read-reactions SPACE CHAT [--order-id ORDER]` and `anyr chat
+  read-all SPACE CHAT` map to their dedicated REST operations. `anyr chat unread`
+  stays gRPC-only.
+- `anyr chat listen --chat CHAT --space SPACE [--initial-limit N] [--heartbeat
+  SECONDS]` streams one chat over REST SSE with initial-message replay and
+  heartbeat controls. `anyr chat listen --chat CHAT... [--previews] [--buffer N]
+  [--include-history N] [--after ORDER]` uses the reconnecting gRPC listener,
+  which remains the choice for multiple chats, cross-chat previews, and catch-up
+  watermarks.
 
 **Chat order ids**
 

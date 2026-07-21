@@ -1122,6 +1122,10 @@ pub enum ChatCommands {
         #[arg(long)]
         text: Option<String>,
 
+        /// property filter(s); only for a space-scoped REST listing (no --text)
+        #[command(flatten)]
+        filter: FilterArgs,
+
         #[command(flatten)]
         pagination: PaginationArgs,
     },
@@ -1133,6 +1137,14 @@ pub enum ChatCommands {
 
         /// chat name
         name: String,
+
+        /// icon emoji (mutually exclusive with --icon-file)
+        #[arg(long, group = "chat_icon")]
+        icon_emoji: Option<String>,
+
+        /// icon file path (mutually exclusive with --icon-emoji)
+        #[arg(long, group = "chat_icon")]
+        icon_file: Option<String>,
     },
 
     /// Get chat object
@@ -1173,6 +1185,28 @@ pub enum ChatCommands {
         last_state_id: Option<String>,
     },
 
+    /// Mark reactions as read (REST)
+    ReadReactions {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+
+        /// mark reactions read through this order id
+        #[arg(long)]
+        order_id: Option<String>,
+    },
+
+    /// Mark every message in a chat as read (REST)
+    ReadAll {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+    },
+
     /// Mark messages as unread
     Unread {
         /// space id or name
@@ -1211,6 +1245,22 @@ pub enum ChatCommands {
         /// include stream lifecycle events in output
         #[arg(long)]
         show_events: bool,
+
+        /// (REST SSE) replay the last N messages when the stream opens
+        #[arg(long)]
+        initial_limit: Option<u32>,
+
+        /// (REST SSE) heartbeat interval in seconds (1-60)
+        #[arg(long)]
+        heartbeat: Option<u32>,
+
+        /// (gRPC) subscribe to cross-chat message previews
+        #[arg(long)]
+        previews: bool,
+
+        /// (gRPC) event buffer capacity
+        #[arg(long)]
+        buffer: Option<usize>,
     },
 }
 
@@ -1296,6 +1346,14 @@ pub enum ChatMessagesCommands {
         #[arg(long)]
         content_text: Option<String>,
 
+        /// reply to an existing message (id or order id)
+        #[arg(long)]
+        reply_to: Option<String>,
+
+        /// structured message blocks as a JSON array (@file, @-, or -); requires gRPC
+        #[arg(long)]
+        blocks_json: Option<String>,
+
         /// message text if --text is not provided
         #[arg(value_name = "TEXT", trailing_var_arg = true)]
         text_args: Vec<String>,
@@ -1324,9 +1382,17 @@ pub enum ChatMessagesCommands {
         #[arg(long = "mark", value_name = "SPEC")]
         mark: Vec<String>,
 
+        /// replacement attachments (format `type:target_id`); complete replacement list
+        #[arg(long = "attachment", value_name = "SPEC")]
+        attachment: Vec<String>,
+
         /// raw JSON `MessageContent` (@file, @-, or -)
         #[arg(long)]
         content_json: Option<String>,
+
+        /// structured message blocks as a JSON array (@file, @-, or -); requires gRPC
+        #[arg(long)]
+        blocks_json: Option<String>,
     },
 
     /// Delete a message
@@ -1339,6 +1405,36 @@ pub enum ChatMessagesCommands {
 
         /// message id or order id
         message_id: String,
+    },
+
+    /// Search messages in a chat (REST-only)
+    Search {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+
+        /// full-text search query
+        query: String,
+
+        #[command(flatten)]
+        pagination: PaginationArgs,
+    },
+
+    /// Toggle a reaction on a message
+    React {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+
+        /// message id or order id
+        message_id: String,
+
+        /// reaction emoji
+        emoji: String,
     },
 }
 
