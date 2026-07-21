@@ -19,12 +19,9 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
             let mut request = ctx
                 .client
                 .view_list_objects(space_id, list_id)
+                .view(view)
                 .limit(pagination_limit(&pagination))
                 .offset(pagination_offset(&pagination));
-
-            if let Some(view_id) = view {
-                request = request.view(view_id);
-            }
 
             for filter in parse_filters(&filter.filters)? {
                 request = request.filter(filter);
@@ -95,6 +92,48 @@ pub async fn handle(ctx: &AppContext, args: super::ListArgs) -> Result<()> {
                 .await?;
             ctx.output
                 .emit_json(&serde_json::json!({ "result": result }))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::{Cli, Commands, ListCommands};
+
+    fn list_command(args: &[&str]) -> Result<ListCommands, clap::Error> {
+        let cli = Cli::try_parse_from(args)?;
+        match cli.command {
+            Commands::List(list) => Ok(list.command),
+            other => panic!("expected list command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_objects_requires_view() {
+        // Missing --view is now rejected at parse time.
+        let err = list_command(&["anyr", "list", "objects", "space", "list"])
+            .expect_err("missing --view should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn list_objects_accepts_view() {
+        let command = list_command(&["anyr", "list", "objects", "space", "list", "--view", "grid"])
+            .expect("view provided should parse");
+        match command {
+            ListCommands::Objects {
+                space,
+                list_id,
+                view,
+                ..
+            } => {
+                assert_eq!(space, "space");
+                assert_eq!(list_id, "list");
+                assert_eq!(view, "grid");
+            }
+            other => panic!("expected objects command, got {other:?}"),
         }
     }
 }

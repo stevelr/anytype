@@ -209,6 +209,38 @@ anyr view objects --view All "Work" Task --cols name,creator,status
 anyr view objects --view ByProject "Work" Task --json
 ```
 
+**List objects for a view (list/collection)**
+
+```sh
+# --view is required; it identifies which view's objects to return
+anyr list objects "Work" $collection_id --view All -t
+```
+
+**Update a property**
+
+```sh
+# rename a property
+anyr property update "Work" Status --name "Task Status"
+
+# change only the key; the current name is reused automatically
+anyr property update "Work" Status --key task_status
+# (an update with neither --name nor --key is rejected)
+```
+
+**Update a type's property list**
+
+```sh
+# merge a property into the current list (read/merge)
+anyr type update "Work" Task --add-property Status
+
+# replace the complete non-featured property list (KEY:FORMAT:NAME, repeatable)
+anyr type update "Work" Task --set-property status:select:Status --set-property due:date:Due
+
+# remove all non-featured recommended properties
+anyr type update "Work" Task --clear-properties
+# (--add-property, --set-property, and --clear-properties are mutually exclusive)
+```
+
 If you have a list or grid formatted view, you can use `view objects` to list the view items by specifying the space name, list, and view.
 
 - Results are filtered and sorted by the criteria in the view.
