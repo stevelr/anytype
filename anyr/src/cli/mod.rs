@@ -327,9 +327,9 @@ pub enum FileCommands {
         /// id of file object to delete
         object_id: String,
 
-        /// use the REST HTTP API instead of gRPC
+        /// permanently delete the file, bypassing the bin
         #[arg(long)]
-        http: bool,
+        permanent: bool,
     },
     #[command(
         alias = "down",
@@ -366,11 +366,11 @@ pub enum FileCommands {
         #[arg(short = 'f', long, value_name = "FILE")]
         file: PathBuf,
 
-        /// file type hint
+        /// file type hint (selects the gRPC backend)
         #[arg(long, value_enum)]
         file_type: Option<FileTypeArg>,
 
-        /// use the REST HTTP API instead of gRPC (ignores --file-type)
+        /// (deprecated) no-op: a plain upload already uses REST; errors if combined with --file-type
         #[arg(long)]
         http: bool,
     },
