@@ -298,6 +298,9 @@ client
 path upload and returns a normalized `FileObject`. Adding `file_type`, `style`,
 `details`, or creation-context options selects the richer gRPC upload.
 
+`files().preload(space)` accepts either `from_path(path)` or `from_url(url)` as
+its source and always runs over gRPC, returning the preload file id.
+
 ## Chats
 
 Space-scoped chat listing, creation, plain-message CRUD, lookup/search,

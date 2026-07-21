@@ -54,16 +54,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
     (requires `--name`), and `--mime` sets the MIME type for a REST upload.
   - `--file-type`, `--style`, `--details JSON_OR_@FILE`, `--created-in-context`,
     and `--created-in-context-ref` route the upload through the gRPC backend.
-- `anyr file preload SPACE -f FILE` preloads a file (gRPC) and returns a preload
-  file id; `anyr file discard-preload SPACE FILE_ID` discards one.
+- `anyr file preload SPACE (--file FILE | --url URL)` preloads a file (gRPC) from
+  a local path or a remote URL and returns a preload file id; `anyr file
+  discard-preload SPACE FILE_ID` discards one.
 - `anyr file metadata SPACE FILE` issues a REST `HEAD` request and reports the
   HTTP status plus the header metadata (etag, content-type, content-length,
   last-modified, ...) in both JSON and table output; supports `--width` and the
   conditional headers (`--if-match`, `--if-none-match`, `--if-modified-since`,
   `--if-unmodified-since`).
-- `anyr file download --http` gained REST options: `--width`, `--range`, and the
-  conditional headers `--if-match`, `--if-none-match`, `--if-modified-since`,
+- `anyr file download SPACE FILE` gained REST options: `--width`, `--range`, and
+  the conditional headers `--if-match`, `--if-none-match`, `--if-modified-since`,
   `--if-unmodified-since`, and `--if-range`.
+- `anyr file download-via-heart FILE_ID` performs a legacy gRPC (anytype-heart)
+  download, writing bytes with `--dir`/`--file` destinations.
 
 ### Changed
 
@@ -75,10 +78,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - **Breaking**: `anyr file delete` no longer accepts `--http`; the flag has been
   removed and deletion now uses the REST files client (add `--permanent` to skip
   the bin).
-- **Breaking**: `anyr file download --http` output changed. JSON now reports
-  `{status, written, path, bytes, metadata}` (previously `{path}`), and table
-  output is now `status N PATH` (previously the bare path). A `304`/`412`/`416`
-  response leaves the destination file untouched and reports `written: false`.
+- **Breaking**: `anyr file download` now uses REST unconditionally and takes
+  `SPACE` as a required leading positional (`anyr file download SPACE FILE`); the
+  `--http` and `--space` flags have been removed, and the REST options
+  (`--width`, `--range`, `--if-*`) are no longer gated behind `--http`. JSON now
+  reports `{status, written, path, bytes, metadata}` (previously `{path}`), and
+  table output is now `status N PATH` (previously the bare path); a
+  `304`/`412`/`416` response leaves the destination file untouched and reports
+  `written: false`. The legacy gRPC (anytype-heart) download moved to the
+  separate `anyr file download-via-heart FILE_ID` subcommand.
 - `anyr file upload --http` is now a deprecated no-op (a plain upload already
   uses REST); it prints a deprecation warning and is rejected when combined with
   any gRPC-only option (`--url`, `--file-type`, `--style`, `--details`, or a
