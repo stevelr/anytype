@@ -11,7 +11,8 @@ Homepage: https://github.com/stevelr/anytype
 # show options
 anyr --help
 
-# check authentication status (HTTP + gRPC)
+# check authentication status; reports HTTP and gRPC credentials
+# separately (present/missing) plus a live ping for each set
 anyr auth status
 # authenticate with desktop and http endpoint
 anyr auth login
