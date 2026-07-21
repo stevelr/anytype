@@ -659,6 +659,13 @@ fn read_content_source(value: &str) -> Result<String> {
     bail!("content source must be @file, @-, or -");
 }
 
+/// Resolves a CLI message argument into a message id.
+///
+/// Message ids are passed through unchanged. Anything else is treated as a
+/// (possibly hex-encoded) chat `order_id`: the hex form the CLI prints and
+/// accepts on the command line is decoded here — a CLI-only textual
+/// convenience — before the order-id-to-message-id lookup is delegated to the
+/// shared [`AnytypeClient::resolve_message_id`] resolver.
 async fn resolve_message_id_for_order(
     ctx: &AppContext,
     chat_id: &str,
@@ -669,24 +676,7 @@ async fn resolve_message_id_for_order(
     }
 
     let order_id = decode_order_id_arg(message_id_or_order_id)?;
-    let page = ctx
-        .client
-        .chats()
-        .list_messages(chat_id)
-        .after(order_id.clone())
-        .before(order_id.clone())
-        .include_boundary(true)
-        .limit(1)
-        .list_page()
-        .await?;
-
-    let message = page
-        .messages
-        .into_iter()
-        .find(|message| message.order_id == order_id)
-        .ok_or_else(|| anyhow!("message not found for order id: {order_id}"))?;
-
-    Ok(message.id)
+    Ok(ctx.client.resolve_message_id(chat_id, &order_id).await?)
 }
 
 async fn resolve_message_ids(

@@ -28,6 +28,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `AnytypeClient::resolve_*` methods. Behavior is unchanged, except: a type
   lookup that matches nothing now reports "not found" instead of "ambiguous",
   and not-found/ambiguous messages use the shared `AnytypeError` formats.
+- chat order-id-to-message-id resolution now delegates to the shared
+  `AnytypeClient::resolve_message_id` / `resolve_message_ids` resolver; the CLI
+  retains only its hex order-id encode/decode helpers (no user-facing change).
 
 ## [0.4.1]
 
