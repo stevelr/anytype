@@ -521,6 +521,36 @@ pub fn begin_page<P: Serialize>(
     limit: PageLimit,
     normalized_params: &P,
 ) -> Result<PageRequest, HandlerError> {
+    let binding = page_query_fingerprint(tool, limit, normalized_params)?;
+    let offset = cursor.map_or_else(
+        || PageOffset::new(0),
+        |cursor| cursors.resolve(cursor, binding),
+    )?;
+    Ok(PageRequest {
+        offset,
+        limit,
+        binding,
+    })
+}
+
+/// Applies the exact page-binding size limit to an alternate presentation.
+///
+/// Handlers that use a smaller semantic cursor representation call this on
+/// the original bounded request first, preserving the existing raw normalized
+/// query ceiling without using that presentation as the cursor identity.
+pub(crate) fn validate_page_binding_size<P: Serialize>(
+    tool: &'static str,
+    limit: PageLimit,
+    normalized_params: &P,
+) -> Result<(), HandlerError> {
+    page_query_fingerprint(tool, limit, normalized_params).map(drop)
+}
+
+fn page_query_fingerprint<P: Serialize>(
+    tool: &'static str,
+    limit: PageLimit,
+    normalized_params: &P,
+) -> Result<QueryFingerprint, HandlerError> {
     if !valid_tool_discriminator(tool) {
         return Err(HandlerError::new(ToolError::upstream()));
     }
@@ -531,20 +561,11 @@ pub fn begin_page<P: Serialize>(
         fields.remove("offset");
         fields.remove("limit");
     }
-    let binding = QueryFingerprint::from_normalized(&CursorBinding {
+    Ok(QueryFingerprint::from_normalized(&CursorBinding {
         tool,
         limit: limit.get(),
         params: &params,
-    })?;
-    let offset = cursor.map_or_else(
-        || PageOffset::new(0),
-        |cursor| cursors.resolve(cursor, binding),
-    )?;
-    Ok(PageRequest {
-        offset,
-        limit,
-        binding,
-    })
+    })?)
 }
 
 /// Builds a bounded page and, only when upstream reports more data, issues a

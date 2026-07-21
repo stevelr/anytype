@@ -5,28 +5,28 @@
 
 //! Bounded object discovery and document-read workflow handlers.
 
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 use anytype::{
-    filters::{Condition, Filter, FilterExpression},
     objects::Object,
     paged::{PagedResult, PaginatedResponse},
 };
 use rmcp::{
     model::CallToolResult,
-    schemars::{JsonSchema, Schema, SchemaGenerator, json_schema},
+    schemars::{JsonSchema, Schema, SchemaGenerator},
 };
-use serde::{Deserialize, Deserializer, Serialize, de};
-use serde_json::Number;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     cursor::{CursorStore, CursorToken},
-    domain::{BoundedText, DomainValueError, EntityId, ObjectId, TypeKey},
+    domain::{BoundedText, DomainValueError, ObjectId, TypeKey},
     error::ToolError,
+    filters::McpFilterExpression,
     handler_support::{
         HandlerError, HandlerOperationError, UpstreamPagination, begin_page, execute_handler,
-        execute_prepared_handler, finish_page,
+        execute_prepared_handler, finish_page, validate_page_binding_size,
     },
     object_output::{ObjectOutput, ProjectionMode, normalized_projection_keys, object_output},
     pagination::{Page, PageLimit},
@@ -34,74 +34,17 @@ use crate::{
     runtime::{OperationContext, RuntimeContext},
     schema::SchemaContractError,
     validation::{
-        BodyChunk, BodyChunkInput, BoundedList, FilterBudget, FilterList, FilterValueList, IdList,
-        Omittable, ProjectionList, chunk_body, optional_non_null_schema,
+        BodyChunk, BodyChunkInput, IdList, Omittable, ProjectionList, chunk_body,
+        optional_non_null_schema,
     },
 };
 
-/// Maximum characters accepted in a human-facing space or type reference.
-pub const MAX_REFERENCE_CHARS: usize = 512;
+pub use crate::domain::AnytypeReference;
+
 /// Maximum characters accepted in search text or a scalar filter value.
 pub const MAX_SEARCH_TEXT_CHARS: usize = 4_096;
-/// Maximum characters accepted in a date filter value.
-pub const MAX_FILTER_DATE_CHARS: usize = 64;
-/// Maximum absolute numeric filter value.
-pub const MAX_FILTER_NUMBER_ABS: f64 = 1_000_000_000_000_000.0;
 
 type SearchText = BoundedText<MAX_SEARCH_TEXT_CHARS>;
-type FilterText = BoundedText<MAX_SEARCH_TEXT_CHARS>;
-type FilterDate = BoundedText<MAX_FILTER_DATE_CHARS>;
-
-/// A nonempty bounded Anytype name, key, or identifier.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(transparent)]
-pub struct AnytypeReference(BoundedText<MAX_REFERENCE_CHARS>);
-
-impl AnytypeReference {
-    /// Validates a nonempty bounded reference.
-    pub fn new(value: impl Into<String>) -> Result<Self, DomainValueError> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(DomainValueError::Empty);
-        }
-        BoundedText::new(value).map(Self)
-    }
-
-    /// Borrows the reference text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl AsRef<str> for AnytypeReference {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl<'de> Deserialize<'de> for AnytypeReference {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
-    }
-}
-
-impl JsonSchema for AnytypeReference {
-    fn schema_name() -> Cow<'static, str> {
-        "AnytypeReference".into()
-    }
-
-    fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({
-            "type": "string",
-            "minLength": 1,
-            "maxLength": MAX_REFERENCE_CHARS,
-        })
-    }
-}
 
 type Reference = AnytypeReference;
 
@@ -125,449 +68,6 @@ pub struct SearchSort {
     direction: SearchSortDirection,
 }
 
-/// Logical operator for one bounded filter group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SearchFilterOperator {
-    /// Require every condition and nested group.
-    And,
-    /// Require at least one condition or nested group.
-    Or,
-}
-
-/// Operators supported for textual property formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TextCondition {
-    /// Equal.
-    Eq,
-    /// Not equal.
-    Ne,
-    /// Contains the supplied text.
-    Contains,
-    /// Does not contain the supplied text.
-    NotContains,
-}
-
-/// Operators supported for numeric properties.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum NumberCondition {
-    /// Equal.
-    Eq,
-    /// Not equal.
-    Ne,
-    /// Less than.
-    Lt,
-    /// Less than or equal.
-    Lte,
-    /// Greater than.
-    Gt,
-    /// Greater than or equal.
-    Gte,
-}
-
-/// Operators supported for dates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DateCondition {
-    /// Equal.
-    Eq,
-    /// Less than.
-    Lt,
-    /// Less than or equal.
-    Lte,
-    /// Greater than.
-    Gt,
-    /// Greater than or equal.
-    Gte,
-}
-
-/// Operators supported for a single-select property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SelectCondition {
-    /// Match one of the supplied values.
-    In,
-    /// Match none of the supplied values.
-    NotIn,
-}
-
-/// Operators supported for multi-value properties.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ArrayCondition {
-    /// Match at least one supplied value.
-    In,
-    /// Match none of the supplied values.
-    NotIn,
-    /// Require all supplied values.
-    AllIn,
-}
-
-/// Operators supported for checkbox properties.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckboxCondition {
-    /// Equal.
-    Eq,
-    /// Not equal.
-    Ne,
-}
-
-/// A finite numeric filter value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct FilterNumber(Number);
-
-impl FilterNumber {
-    /// Validates a finite practical numeric value.
-    pub fn new(value: Number) -> Result<Self, FilterNumberError> {
-        let Some(as_float) = value.as_f64() else {
-            return Err(FilterNumberError);
-        };
-        if !as_float.is_finite()
-            || as_float.abs() > MAX_FILTER_NUMBER_ABS
-            || value.to_string().len() > 128
-        {
-            Err(FilterNumberError)
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    fn json_number(&self) -> Number {
-        self.0.clone()
-    }
-}
-
-impl<'de> Deserialize<'de> for FilterNumber {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::new(Number::deserialize(deserializer)?).map_err(de::Error::custom)
-    }
-}
-
-impl JsonSchema for FilterNumber {
-    fn schema_name() -> Cow<'static, str> {
-        "FilterNumber".into()
-    }
-
-    fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({
-            "type": "number",
-            "minimum": -MAX_FILTER_NUMBER_ABS,
-            "maximum": MAX_FILTER_NUMBER_ABS,
-        })
-    }
-}
-
-/// A numeric filter outside the supported finite range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FilterNumberError;
-
-impl std::fmt::Display for FilterNumberError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("numeric filter value is outside its supported finite range")
-    }
-}
-
-impl std::error::Error for FilterNumberError {}
-
-/// One constrained Anytype search filter.
-///
-/// The tagged form prevents ambiguous free-form JSON. Checkbox and numeric
-/// filters are forwarded exactly as supplied. They are currently affected by
-/// upstream anytype-heart#2879; this server does not rewrite them into a query
-/// with different semantics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "format", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SearchFilter {
-    /// Plain text property.
-    Text {
-        /// Property key.
-        property_key: TypeKey,
-        /// Text operator.
-        condition: TextCondition,
-        /// Compared text.
-        value: FilterText,
-    },
-    /// Numeric property.
-    Number {
-        /// Property key.
-        property_key: TypeKey,
-        /// Numeric operator.
-        condition: NumberCondition,
-        /// Compared number.
-        value: FilterNumber,
-    },
-    /// Single-select property.
-    Select {
-        /// Property key.
-        property_key: TypeKey,
-        /// Select operator.
-        condition: SelectCondition,
-        /// Compared tag ids or keys.
-        values: FilterValueList<Reference>,
-    },
-    /// Multi-select property.
-    MultiSelect {
-        /// Property key.
-        property_key: TypeKey,
-        /// Array operator.
-        condition: ArrayCondition,
-        /// Compared tag ids or keys.
-        values: FilterValueList<Reference>,
-    },
-    /// RFC 3339-like date property value accepted by Anytype.
-    Date {
-        /// Property key.
-        property_key: TypeKey,
-        /// Date operator.
-        condition: DateCondition,
-        /// Compared date text.
-        value: FilterDate,
-    },
-    /// Checkbox property.
-    Checkbox {
-        /// Property key.
-        property_key: TypeKey,
-        /// Boolean operator.
-        condition: CheckboxCondition,
-        /// Compared checkbox state.
-        value: bool,
-    },
-    /// File-reference property.
-    Files {
-        /// Property key.
-        property_key: TypeKey,
-        /// Array operator.
-        condition: ArrayCondition,
-        /// Compared file ids.
-        values: FilterValueList<EntityId>,
-    },
-    /// URL property.
-    Url {
-        /// Property key.
-        property_key: TypeKey,
-        /// Text operator.
-        condition: TextCondition,
-        /// Compared URL text.
-        value: FilterText,
-    },
-    /// Email property.
-    Email {
-        /// Property key.
-        property_key: TypeKey,
-        /// Text operator.
-        condition: TextCondition,
-        /// Compared email text.
-        value: FilterText,
-    },
-    /// Phone property.
-    Phone {
-        /// Property key.
-        property_key: TypeKey,
-        /// Text operator.
-        condition: TextCondition,
-        /// Compared phone text.
-        value: FilterText,
-    },
-    /// Object-reference property.
-    Objects {
-        /// Property key.
-        property_key: TypeKey,
-        /// Array operator.
-        condition: ArrayCondition,
-        /// Compared object ids.
-        values: FilterValueList<ObjectId>,
-    },
-    /// Require a property to be empty.
-    Empty {
-        /// Property key.
-        property_key: TypeKey,
-    },
-    /// Require a property to be present and nonempty.
-    NotEmpty {
-        /// Property key.
-        property_key: TypeKey,
-    },
-}
-
-impl SearchFilter {
-    fn value_count(&self) -> usize {
-        match self {
-            Self::Select { values, .. } | Self::MultiSelect { values, .. } => {
-                values.as_slice().len()
-            }
-            Self::Files { values, .. } => values.as_slice().len(),
-            Self::Objects { values, .. } => values.as_slice().len(),
-            Self::Empty { .. } | Self::NotEmpty { .. } => 0,
-            _ => 1,
-        }
-    }
-
-    fn to_anytype(&self) -> Result<Filter, HandlerError> {
-        let filter = match self {
-            Self::Text {
-                property_key,
-                condition,
-                value,
-            } => Filter::Text {
-                condition: text_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                text: value.as_str().to_owned(),
-            },
-            Self::Number {
-                property_key,
-                condition,
-                value,
-            } => Filter::Number {
-                condition: number_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                number: value.json_number(),
-            },
-            Self::Select {
-                property_key,
-                condition,
-                values,
-            } => Filter::Select {
-                condition: select_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                select: nonempty_values(values)?,
-            },
-            Self::MultiSelect {
-                property_key,
-                condition,
-                values,
-            } => Filter::MultiSelect {
-                condition: array_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                multi_select: nonempty_values(values)?,
-            },
-            Self::Date {
-                property_key,
-                condition,
-                value,
-            } => Filter::Date {
-                condition: date_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                date: value.as_str().to_owned(),
-            },
-            Self::Checkbox {
-                property_key,
-                condition,
-                value,
-            } => Filter::Checkbox {
-                condition: checkbox_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                checkbox: *value,
-            },
-            Self::Files {
-                property_key,
-                condition,
-                values,
-            } => Filter::Files {
-                condition: array_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                files: nonempty_values(values)?,
-            },
-            Self::Url {
-                property_key,
-                condition,
-                value,
-            } => Filter::Url {
-                condition: text_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                url: value.as_str().to_owned(),
-            },
-            Self::Email {
-                property_key,
-                condition,
-                value,
-            } => Filter::Email {
-                condition: text_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                email: value.as_str().to_owned(),
-            },
-            Self::Phone {
-                property_key,
-                condition,
-                value,
-            } => Filter::Phone {
-                condition: text_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                phone: value.as_str().to_owned(),
-            },
-            Self::Objects {
-                property_key,
-                condition,
-                values,
-            } => Filter::Objects {
-                condition: array_condition(*condition),
-                property_key: property_key.as_str().to_owned(),
-                objects: nonempty_values(values)?,
-            },
-            Self::Empty { property_key } => Filter::is_empty(property_key.as_str()),
-            Self::NotEmpty { property_key } => Filter::not_empty(property_key.as_str()),
-        };
-        Ok(filter)
-    }
-}
-
-/// One nested, bounded filter expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SearchFilterExpression {
-    /// Operator combining direct conditions and child groups.
-    operator: SearchFilterOperator,
-    /// Direct conditions in this group.
-    #[serde(default)]
-    conditions: FilterList<SearchFilter>,
-    /// Nested groups in this group.
-    #[serde(default)]
-    filters: FilterList<SearchFilterExpression>,
-}
-
-impl SearchFilterExpression {
-    fn to_anytype(&self) -> Result<FilterExpression, HandlerError> {
-        let mut budget = FilterBudget::default();
-        self.to_anytype_at(1, &mut budget)
-    }
-
-    fn to_anytype_at(
-        &self,
-        depth: usize,
-        budget: &mut FilterBudget,
-    ) -> Result<FilterExpression, HandlerError> {
-        budget.record(depth, 0)?;
-        if self.conditions.as_slice().is_empty() && self.filters.as_slice().is_empty() {
-            return Err(HandlerError::new(ToolError::validation()));
-        }
-        let conditions = self
-            .conditions
-            .as_slice()
-            .iter()
-            .map(|filter| {
-                budget.record(depth, filter.value_count())?;
-                filter.to_anytype()
-            })
-            .collect::<Result<Vec<_>, HandlerError>>()?;
-        let filters = self
-            .filters
-            .as_slice()
-            .iter()
-            .map(|filter| filter.to_anytype_at(depth.saturating_add(1), budget))
-            .collect::<Result<Vec<_>, HandlerError>>()?;
-        Ok(match self.operator {
-            SearchFilterOperator::And => FilterExpression::and(conditions, filters),
-            SearchFilterOperator::Or => FilterExpression::or(conditions, filters),
-        })
-    }
-}
-
 /// Strict input for `object_search`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -586,7 +86,7 @@ pub struct ObjectSearchInput {
     /// Optional bounded nested filter expression.
     #[serde(default)]
     #[schemars(schema_with = "optional_filter_schema")]
-    filters: Omittable<SearchFilterExpression>,
+    filters: Omittable<McpFilterExpression>,
     /// Optional single property sort.
     #[serde(default)]
     #[schemars(schema_with = "optional_sort_schema")]
@@ -696,8 +196,19 @@ impl ObjectReadHandlers {
                 let filters = input
                     .filters
                     .as_ref()
-                    .map(SearchFilterExpression::to_anytype)
+                    .map(McpFilterExpression::to_anytype)
                     .transpose()?;
+                let filter_binding = input
+                    .filters
+                    .as_ref()
+                    .map(McpFilterExpression::cursor_binding_value)
+                    .transpose()?;
+                let raw_filter_binding = input
+                    .filters
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|_| HandlerError::new(ToolError::upstream()))?;
                 let mut normalized_types = input.types.as_slice().to_vec();
                 normalized_types.sort_by(|left, right| left.as_str().cmp(right.as_str()));
                 normalized_types.dedup_by(|left, right| left.as_str() == right.as_str());
@@ -727,13 +238,18 @@ impl ObjectReadHandlers {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                let binding = SearchBinding {
+                let raw_binding = SearchBinding {
                     space_id: space_id.as_deref(),
                     text: input.text.as_ref(),
                     types: &resolved_types,
-                    filters: input.filters.as_ref(),
+                    filters: raw_filter_binding.as_ref(),
                     sort: input.sort.as_ref(),
                     property_keys: &projection,
+                };
+                validate_page_binding_size("object_search", input.limit, &raw_binding)?;
+                let binding = SearchBinding {
+                    filters: filter_binding.as_ref(),
+                    ..raw_binding
                 };
                 let page_request = begin_page(
                     cursors,
@@ -836,7 +352,7 @@ struct SearchBinding<'a> {
     space_id: Option<&'a str>,
     text: Option<&'a SearchText>,
     types: &'a [String],
-    filters: Option<&'a SearchFilterExpression>,
+    filters: Option<&'a Value>,
     sort: Option<&'a SearchSort>,
     property_keys: &'a [TypeKey],
 }
@@ -874,19 +390,6 @@ fn convert_search_response(
     finish_page(cursors, request, upstream, items)
 }
 
-fn nonempty_values<T: AsRef<str>, const MAX: usize>(
-    values: &BoundedList<T, MAX>,
-) -> Result<Vec<String>, HandlerError> {
-    if values.as_slice().is_empty() {
-        return Err(HandlerError::new(ToolError::validation()));
-    }
-    Ok(values
-        .as_slice()
-        .iter()
-        .map(|value| value.as_ref().to_owned())
-        .collect())
-}
-
 fn validate_explicit_type_reference(reference: &Reference) -> Result<(), HandlerError> {
     if let Some(key) = reference.as_str().strip_prefix('@') {
         TypeKey::new(key).map_err(|_| HandlerError::new(ToolError::validation()))?;
@@ -905,58 +408,6 @@ fn validate_resolved_type_key(value: String) -> Result<String, HandlerError> {
         })
 }
 
-const fn text_condition(condition: TextCondition) -> Condition {
-    match condition {
-        TextCondition::Eq => Condition::Equal,
-        TextCondition::Ne => Condition::NotEqual,
-        TextCondition::Contains => Condition::Contains,
-        TextCondition::NotContains => Condition::NotContains,
-    }
-}
-
-const fn number_condition(condition: NumberCondition) -> Condition {
-    match condition {
-        NumberCondition::Eq => Condition::Equal,
-        NumberCondition::Ne => Condition::NotEqual,
-        NumberCondition::Lt => Condition::Less,
-        NumberCondition::Lte => Condition::LessOrEqual,
-        NumberCondition::Gt => Condition::Greater,
-        NumberCondition::Gte => Condition::GreaterOrEqual,
-    }
-}
-
-const fn date_condition(condition: DateCondition) -> Condition {
-    match condition {
-        DateCondition::Eq => Condition::Equal,
-        DateCondition::Lt => Condition::Less,
-        DateCondition::Lte => Condition::LessOrEqual,
-        DateCondition::Gt => Condition::Greater,
-        DateCondition::Gte => Condition::GreaterOrEqual,
-    }
-}
-
-const fn select_condition(condition: SelectCondition) -> Condition {
-    match condition {
-        SelectCondition::In => Condition::In,
-        SelectCondition::NotIn => Condition::NotIn,
-    }
-}
-
-const fn array_condition(condition: ArrayCondition) -> Condition {
-    match condition {
-        ArrayCondition::In => Condition::In,
-        ArrayCondition::NotIn => Condition::NotIn,
-        ArrayCondition::AllIn => Condition::AllIn,
-    }
-}
-
-const fn checkbox_condition(condition: CheckboxCondition) -> Condition {
-    match condition {
-        CheckboxCondition::Eq => Condition::Equal,
-        CheckboxCondition::Ne => Condition::NotEqual,
-    }
-}
-
 fn optional_reference_schema(generator: &mut SchemaGenerator) -> Schema {
     optional_non_null_schema::<Reference>(generator)
 }
@@ -966,7 +417,7 @@ fn optional_search_text_schema(generator: &mut SchemaGenerator) -> Schema {
 }
 
 fn optional_filter_schema(generator: &mut SchemaGenerator) -> Schema {
-    optional_non_null_schema::<SearchFilterExpression>(generator)
+    optional_non_null_schema::<McpFilterExpression>(generator)
 }
 
 fn optional_sort_schema(generator: &mut SchemaGenerator) -> Schema {
@@ -1009,7 +460,7 @@ mod tests {
     use crate::{
         runtime::StartupStatus,
         schema::{input_schema, output_schema},
-        validation::{BodyCharLimit, BodyOffset, MAX_FILTER_DEPTH, MAX_FILTER_VALUES},
+        validation::{BodyCharLimit, BodyOffset},
     };
 
     fn property(key: &str, value: PropertyValue) -> PropertyWithValue {
@@ -1129,7 +580,7 @@ mod tests {
                 .unwrap()
                 .insert(field.to_owned(), serde_json::Value::Null);
             assert!(
-                serde_json::from_value::<SearchFilterExpression>(expression).is_err(),
+                serde_json::from_value::<McpFilterExpression>(expression).is_err(),
                 "filter expression accepted null {field}"
             );
         }
@@ -1177,49 +628,6 @@ mod tests {
         .unwrap();
         assert!(omitted_get.property_keys.is_none());
         assert!(omitted_get.body.is_none());
-    }
-
-    #[test]
-    fn file_and_object_filter_values_require_wire_safe_ids() {
-        let invalid = [
-            "path/segment".to_owned(),
-            ".".to_owned(),
-            "..".to_owned(),
-            "idé".to_owned(),
-            "x".repeat(crate::domain::MAX_ENTITY_ID_CHARS + 1),
-        ];
-        for format in ["files", "objects"] {
-            for value in &invalid {
-                let filter = json!({
-                    "format":format,
-                    "property_key":"attachments",
-                    "condition":"in",
-                    "values":[value]
-                });
-                assert!(
-                    serde_json::from_value::<SearchFilter>(filter).is_err(),
-                    "{format} accepted unsafe id {value:?}"
-                );
-            }
-        }
-        assert!(
-            serde_json::from_value::<SearchFilter>(json!({
-                "format":"files",
-                "property_key":"attachments",
-                "condition":"in",
-                "values":["file-1"]
-            }))
-            .is_ok()
-        );
-        assert!(
-            serde_json::from_value::<SearchFilter>(json!({
-                "format":"objects",
-                "property_key":"links",
-                "condition":"in",
-                "values":["object-1"]
-            }))
-            .is_ok()
-        );
     }
 
     #[test]
@@ -1315,93 +723,6 @@ mod tests {
         };
         assert!(convert_search_response(&store, overflow_request, overflow, &[]).is_err());
         assert_eq!(store.entry_count(), 0);
-    }
-
-    fn leaf_filter() -> SearchFilterExpression {
-        SearchFilterExpression {
-            operator: SearchFilterOperator::And,
-            conditions: FilterList::new(vec![SearchFilter::Text {
-                property_key: TypeKey::new("name").unwrap(),
-                condition: TextCondition::Contains,
-                value: FilterText::new("road").unwrap(),
-            }])
-            .unwrap(),
-            filters: FilterList::new(Vec::new()).unwrap(),
-        }
-    }
-
-    #[test]
-    fn filter_depth_value_and_empty_array_bounds_are_enforced() {
-        let mut nested = leaf_filter();
-        for _ in 1..MAX_FILTER_DEPTH {
-            nested = SearchFilterExpression {
-                operator: SearchFilterOperator::And,
-                conditions: FilterList::new(Vec::new()).unwrap(),
-                filters: FilterList::new(vec![nested]).unwrap(),
-            };
-        }
-        assert!(nested.to_anytype().is_ok());
-        let too_deep = SearchFilterExpression {
-            operator: SearchFilterOperator::And,
-            conditions: FilterList::new(Vec::new()).unwrap(),
-            filters: FilterList::new(vec![nested]).unwrap(),
-        };
-        assert!(too_deep.to_anytype().is_err());
-
-        let values = (0..MAX_FILTER_VALUES)
-            .map(|index| Reference::new(format!("v{index}")).unwrap())
-            .collect();
-        let max_values = SearchFilter::Select {
-            property_key: TypeKey::new("tag").unwrap(),
-            condition: SelectCondition::In,
-            values: FilterValueList::new(values).unwrap(),
-        };
-        assert!(max_values.to_anytype().is_ok());
-        let empty_values = SearchFilter::Select {
-            property_key: TypeKey::new("tag").unwrap(),
-            condition: SelectCondition::In,
-            values: FilterValueList::new(Vec::new()).unwrap(),
-        };
-        assert!(empty_values.to_anytype().is_err());
-        assert!(FilterNumber::new(Number::from_f64(MAX_FILTER_NUMBER_ABS).unwrap()).is_ok());
-        assert!(FilterNumber::new(Number::from_f64(MAX_FILTER_NUMBER_ABS * 2.0).unwrap()).is_err());
-    }
-
-    #[test]
-    fn checkbox_and_number_filters_are_forwarded_without_rewriting() {
-        let checkbox = SearchFilter::Checkbox {
-            property_key: TypeKey::new("done").unwrap(),
-            condition: CheckboxCondition::Eq,
-            value: false,
-        }
-        .to_anytype()
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(checkbox).unwrap(),
-            json!({"condition":"eq","property_key":"done","checkbox":false})
-        );
-        let number = SearchFilter::Number {
-            property_key: TypeKey::new("priority").unwrap(),
-            condition: NumberCondition::Gt,
-            value: FilterNumber::new(Number::from_f64(2.5).unwrap()).unwrap(),
-        }
-        .to_anytype()
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(number).unwrap(),
-            json!({"condition":"gt","property_key":"priority","number":2.5})
-        );
-        let integer: SearchFilter = serde_json::from_value(json!({
-            "format":"number",
-            "property_key":"priority",
-            "condition":"eq",
-            "value":2
-        }))
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(integer.to_anytype().unwrap()).unwrap(),
-            json!({"condition":"eq","property_key":"priority","number":2})
-        );
     }
 
     fn runtime_at(endpoint: &str) -> RuntimeContext {
@@ -1543,6 +864,37 @@ mod tests {
                 .is_err()
             );
         }
+        assert_eq!(metrics.client().http_metrics().total_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn semantic_filter_deduplication_does_not_weaken_raw_query_size_bound() {
+        let runtime = runtime();
+        let metrics = runtime.clone();
+        let handlers =
+            ObjectReadHandlers::new(runtime, Arc::new(CursorStore::new().unwrap())).unwrap();
+        let repeated = json!({
+            "format":"text",
+            "property_key":"name",
+            "condition":"contains",
+            "value":"x".repeat(MAX_SEARCH_TEXT_CHARS)
+        });
+        let input: ObjectSearchInput = serde_json::from_value(json!({
+            "filters":{
+                "operator":"and",
+                "conditions":vec![repeated; 49],
+                "filters":[]
+            }
+        }))
+        .unwrap();
+        let result = handlers
+            .object_search(input, &CancellationToken::new())
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["code"],
+            "validation"
+        );
         assert_eq!(metrics.client().http_metrics().total_requests, 0);
     }
 
@@ -1704,12 +1056,20 @@ mod tests {
             "types":["page"],
             "filters":{
                 "operator":"and",
-                "conditions":[{
-                    "format":"checkbox",
-                    "property_key":"done",
-                    "condition":"eq",
-                    "value":true
-                }],
+                "conditions":[
+                    {
+                        "format":"select",
+                        "property_key":"tag",
+                        "condition":"in",
+                        "values":["beta","alpha","alpha"]
+                    },
+                    {
+                        "format":"checkbox",
+                        "property_key":"done",
+                        "condition":"eq",
+                        "value":true
+                    }
+                ],
                 "filters":[]
             },
             "sort":{"property_key":"last_modified_date","direction":"desc"},
@@ -1728,6 +1088,27 @@ mod tests {
         assert!(!first_value.to_string().contains("hidden"));
         input.cursor = Omittable::Present(
             CursorToken::new(first_value["next_cursor"].as_str().unwrap().to_owned()).unwrap(),
+        );
+        input.filters = Omittable::Present(
+            serde_json::from_value(json!({
+                "operator":"and",
+                "conditions":[
+                    {
+                        "format":"checkbox",
+                        "property_key":"done",
+                        "condition":"eq",
+                        "value":true
+                    },
+                    {
+                        "format":"select",
+                        "property_key":"tag",
+                        "condition":"in",
+                        "values":["alpha","beta"]
+                    }
+                ],
+                "filters":[]
+            }))
+            .unwrap(),
         );
         let second = handlers
             .object_search(input, &CancellationToken::new())
@@ -1750,8 +1131,19 @@ mod tests {
         let first_body: serde_json::Value = serde_json::from_str(first_body).unwrap();
         assert_eq!(first_body["query"], "roadmap");
         assert_eq!(first_body["types"], json!(["page"]));
-        assert_eq!(first_body["filters"]["conditions"][0]["checkbox"], true);
+        assert_eq!(
+            first_body["filters"]["conditions"][0]["select"],
+            "beta,alpha,alpha"
+        );
+        assert_eq!(first_body["filters"]["conditions"][1]["checkbox"], true);
         assert_eq!(first_body["sort"]["property_key"], "last_modified_date");
+        let second_body = requests[1].split("\r\n\r\n").nth(1).unwrap();
+        let second_body: serde_json::Value = serde_json::from_str(second_body).unwrap();
+        assert_eq!(second_body["filters"]["conditions"][0]["checkbox"], true);
+        assert_eq!(
+            second_body["filters"]["conditions"][1]["select"],
+            "alpha,beta"
+        );
     }
 
     #[tokio::test]
