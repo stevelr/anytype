@@ -1,8 +1,15 @@
 # Orchestrator Notes
 
-- Scope: br ready, types bug/chore/task, priorities 0-2 (no label filter this session).
-- Carried in_progress from prior mcp scope: `any-260` (stable MCP protocol default + gated 2026 preview, P1) and `any-nus` (schema token budget + cross-platform CI, P2); triage these before ready-only work.
-- Ready queue is the anyr 0.5 CLI gap plan (docs/anyr-0.5-cli-gap-analysis.md) plus `any-q1n` (test-coverage review). Phase ordering from the plan's rollout section is now encoded as br deps: phase-1 (any-ori, any-2b1, any-f5t) -> phase-2 (any-ho5, any-6r7) -> phase-3 (any-vtr, any-ga2) -> phase-4 (any-hcq) -> phase-5 (any-5gx). `any-8tf` (cleanup) and `any-q1n` are unordered.
-- Prior mcp-phase history (18 Phase 1 tickets integrated and closed) pruned 2026-07-21; durable code invariants remain in .agent-notes.
-- any-83f (Phase 1.18 any-mcp docs) verification-only closeout: README 36.7K + CHANGELOG + rustdoc satisfy acceptance; no code/doc edits; empty diff. Closed 2026-07-21. No blockers.
-- anyr 0.5 phase-1 closeout 2026-07-21: any-ori, any-2b1, any-f5t verified (real handlers + clap/handler tests + rustdoc + README; no gate-config/security-path edits) and closed. anyr/CHANGELOG.md Unreleased updated. Code in loop commit (property.rs/list.rs/mod.rs/types.rs/README); changelog+notes+graph in follow-up snapshot. Next: phase-2 (any-ho5 file upload, any-6r7 file delete); any-260/any-nus triage still pending.
+- Current state
+  - Scope: `mcp` label; actionable bug/chore/task priorities 0-2; Phase 1 must close before Phase 2 implementation.
+  - Default workspace is clean after the AnyR conflict resolution. Preserve the independently active `anyr-0.5` workspace.
+  - Phase 1 documents/release issue `any-83f` is integrated and closed. `any-cwi` was created for the newly identified shared harness plus spawned-stdio-to-headless E2E gap and blocks terminal verifier `any-zk6`.
+  - Phase 2 tickets are now priority 2; audit 10-20 tickets for scope and dependencies while Phase 1 implementation runs, but do not implement Phase 2 before Phase 1 closes.
+
+- Blockers
+  - None currently. Headless live gates require valid `.test-env` credentials and a running server; verify before dispatching the live suite.
+  - Phase 2 design implementations remain behind human review tickets by design.
+
+- Next action
+  - Implement/review/integrate `any-cwi`, run fast and live gates, close it, then complete `any-zk6` terminal audit.
+  - Reconcile the Phase 2 dependency graph and dispatch the first ready design task(s) only after Phase 1 is closed.
