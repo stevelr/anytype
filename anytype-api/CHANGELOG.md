@@ -118,6 +118,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - configurable REST file requests with image widths, `HEAD` metadata, byte
   ranges, conditional headers and preserved HTTP control statuses, plus
   permanent deletion through the `skip_bin` option
+- `FilePreloadRequest::from_url` builds a preload request from a remote URL,
+  complementing the existing `from_path`; the unified upload path routes URL
+  preloads through the gRPC backend
 - space-scoped REST chat APIs for chat listing/creation, plain message listing,
   single-message lookup, message search, deletion, reactions, and read state
 - direct REST chat message add/edit builders, dynamic filters for chat listings,

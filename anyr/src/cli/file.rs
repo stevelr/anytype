@@ -153,11 +153,10 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
                 .emit_json(&json!({ "id": object_id, "deleted": true, "permanent": permanent }))
         }
         FileCommands::Download {
+            space,
             object_id,
             dir,
             file,
-            space,
-            http,
             width,
             range,
             if_match,
@@ -166,18 +165,22 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             if_unmodified_since,
             if_range,
         } => {
-            if http {
-                let opts = RestDownloadOptions {
-                    width,
-                    range,
-                    if_match,
-                    if_none_match,
-                    if_modified_since,
-                    if_unmodified_since,
-                    if_range,
-                };
-                return download_http(ctx, &object_id, space.as_deref(), dir, file, opts).await;
-            }
+            let opts = RestDownloadOptions {
+                width,
+                range,
+                if_match,
+                if_none_match,
+                if_modified_since,
+                if_unmodified_since,
+                if_range,
+            };
+            download_http(ctx, &object_id, &space, dir, file, opts).await
+        }
+        FileCommands::DownloadViaHeart {
+            object_id,
+            dir,
+            file,
+        } => {
             let mut request = ctx.client.files().download(&object_id);
             match (&dir, &file) {
                 (Some(path), None) => {
@@ -310,12 +313,18 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
         FileCommands::Preload {
             space,
             file,
+            url,
             file_type,
             created_in_context,
             created_in_context_ref,
         } => {
             let space_id = ctx.client.resolve_space_id(&space).await?;
-            let mut request = ctx.client.files().preload(&space_id).from_path(&file);
+            let mut request = ctx.client.files().preload(&space_id);
+            if let Some(path) = file {
+                request = request.from_path(&path);
+            } else if let Some(url) = url {
+                request = request.from_url(url);
+            }
             if let Some(file_type) = file_type {
                 request = request.file_type(file_type.into());
             }
@@ -348,7 +357,7 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
     }
 }
 
-/// REST-only download options that apply to the `--http` download path.
+/// REST download options that apply to the default `file download` path.
 #[derive(Default)]
 struct RestDownloadOptions {
     width: Option<u32>,
@@ -368,13 +377,11 @@ struct RestDownloadOptions {
 async fn download_http(
     ctx: &AppContext,
     object_id: &str,
-    space: Option<&str>,
+    space: &str,
     dir: Option<PathBuf>,
     file: Option<PathBuf>,
     opts: RestDownloadOptions,
 ) -> Result<()> {
-    let space =
-        space.ok_or_else(|| anyhow::anyhow!("--space is required when downloading with --http"))?;
     let space_id = ctx.client.resolve_space_id(space).await?;
     let mut request = ctx.client.files().download_request(&space_id, object_id);
     if let Some(width) = opts.width {
@@ -935,23 +942,19 @@ mod tests {
     }
 
     #[test]
-    fn download_rest_options_require_http() {
-        assert!(file_command(&["anyr", "file", "download", "file-1", "--width", "64"]).is_err());
-        assert!(
-            file_command(&["anyr", "file", "download", "file-1", "--range", "bytes=0-9"]).is_err()
-        );
+    fn download_requires_space_and_object() {
+        // REST is the default; SPACE is now a required positional.
+        assert!(file_command(&["anyr", "file", "download", "file-1"]).is_err());
     }
 
     #[test]
-    fn download_parses_rest_options_with_http() {
+    fn download_parses_space_object_and_rest_options() {
         let command = file_command(&[
             "anyr",
             "file",
             "download",
-            "file-1",
-            "--http",
-            "--space",
             "space",
+            "file-1",
             "--width",
             "128",
             "--range",
@@ -959,22 +962,73 @@ mod tests {
             "--if-none-match",
             "\"etag\"",
         ])
-        .expect("REST download options parse with --http");
+        .expect("default REST download parses with options");
         match command {
             FileCommands::Download {
-                http,
+                space,
+                object_id,
                 width,
                 range,
                 if_none_match,
                 ..
             } => {
-                assert!(http);
+                assert_eq!(space, "space");
+                assert_eq!(object_id, "file-1");
                 assert_eq!(width, Some(128));
                 assert_eq!(range.as_deref(), Some("bytes=0-9"));
                 assert_eq!(if_none_match.as_deref(), Some("\"etag\""));
             }
             other => panic!("expected download command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn download_rejects_removed_http_and_space_flags() {
+        // --http/--space were removed; REST is unconditional now.
+        assert!(file_command(&["anyr", "file", "download", "space", "file-1", "--http"]).is_err());
+        assert!(
+            file_command(&[
+                "anyr", "file", "download", "space", "file-1", "--space", "other",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn download_destination_is_mutually_exclusive() {
+        assert!(
+            file_command(&[
+                "anyr", "file", "download", "space", "file-1", "--dir", "/tmp", "--file", "/tmp/x",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn download_via_heart_parses_object_and_destination() {
+        let command = file_command(&[
+            "anyr",
+            "file",
+            "download-via-heart",
+            "file-1",
+            "--dir",
+            "/tmp",
+        ])
+        .expect("legacy gRPC download parses");
+        match command {
+            FileCommands::DownloadViaHeart { object_id, dir, .. } => {
+                assert_eq!(object_id, "file-1");
+                assert_eq!(dir.as_deref(), Some(std::path::Path::new("/tmp")));
+            }
+            other => panic!("expected download-via-heart command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn download_via_heart_takes_no_space_positional() {
+        // The legacy path is keyed only by file id (0.4 behavior), so a second
+        // positional must be rejected.
+        assert!(file_command(&["anyr", "file", "download-via-heart", "space", "file-1"]).is_err());
     }
 
     #[test]
@@ -1027,12 +1081,14 @@ mod tests {
             FileCommands::Preload {
                 space,
                 file,
+                url,
                 file_type,
                 created_in_context,
                 ..
             } => {
                 assert_eq!(space, "space");
-                assert_eq!(file, std::path::PathBuf::from("/tmp/x"));
+                assert_eq!(file.as_deref(), Some(std::path::Path::new("/tmp/x")));
+                assert!(url.is_none());
                 assert!(file_type.is_some());
                 assert_eq!(created_in_context.as_deref(), Some("obj1"));
             }
@@ -1041,8 +1097,45 @@ mod tests {
     }
 
     #[test]
-    fn preload_requires_file() {
+    fn preload_parses_url_source() {
+        let command = file_command(&[
+            "anyr",
+            "file",
+            "preload",
+            "space",
+            "--url",
+            "https://e/x.png",
+        ])
+        .expect("preload from --url parses");
+        match command {
+            FileCommands::Preload { file, url, .. } => {
+                assert!(file.is_none());
+                assert_eq!(url.as_deref(), Some("https://e/x.png"));
+            }
+            other => panic!("expected preload command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preload_requires_a_source() {
         assert!(file_command(&["anyr", "file", "preload", "space"]).is_err());
+    }
+
+    #[test]
+    fn preload_sources_are_mutually_exclusive() {
+        assert!(
+            file_command(&[
+                "anyr",
+                "file",
+                "preload",
+                "space",
+                "--file",
+                "/tmp/x",
+                "--url",
+                "https://e/x",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

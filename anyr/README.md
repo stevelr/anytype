@@ -31,8 +31,8 @@ anyr object list "Work" --type page -t
 anyr file list "Personal" -t
 
 # Download/upload file bytes
-# use `--dir DIR`  to set download dir, or `--file PATH` for destination file path
-anyr file download <FILE_OBJECT_ID> --dir /tmp
+# download fetches bytes over REST; use `--dir DIR` or `--file PATH` for the destination
+anyr file download "Personal" <FILE_OBJECT_ID> --dir /tmp
 anyr file upload "Personal" -f ./path/to/file.png
 
 # Create a chat in a regular space
@@ -213,27 +213,35 @@ gRPC-only option instead of silently dropping it.
 **Preload a file for later placement (gRPC)**
 
 ```sh
-# preload returns a preload file id; --url is not yet supported (file only)
+# preload returns a preload file id; source is either --file or --url
 anyr file preload "Personal" -f ./draft.png --file-type image \
   --created-in-context <OBJECT_ID>
+# preload a file fetched from a remote URL
+anyr file preload "Personal" --url https://example.com/logo.png --file-type image
 # discard a preload you no longer need
 anyr file discard-preload "Personal" <PRELOAD_FILE_ID>
 ```
 
 **Download with REST options and inspect metadata (HEAD)**
 
-The REST download (`--http --space SPACE`) emits `status`, `written`, `path`,
-`bytes`, and the HTTP `metadata` fields as JSON. A `304 Not Modified` or a
-failed precondition leaves the destination file untouched.
+`anyr file download SPACE FILE_ID` fetches the bytes over REST in the anyr
+process and emits `status`, `written`, `path`, `bytes`, and the HTTP `metadata`
+fields as JSON. A `304 Not Modified` or a failed precondition leaves the
+destination file untouched. Use `anyr file download-via-heart FILE_ID` for the
+legacy 0.4 gRPC path where the Heart process writes the bytes to its own
+destination path.
 
 ```sh
 # REST download of a 128px image variant, only if the cache validator changed
-anyr file download <FILE_OBJECT_ID> --http --space "Personal" \
+anyr file download "Personal" <FILE_OBJECT_ID> \
   --dir /tmp --width 128 --if-none-match '"prev-etag"'
 
 # ranged REST download
-anyr file download <FILE_OBJECT_ID> --http --space "Personal" \
+anyr file download "Personal" <FILE_OBJECT_ID> \
   --file /tmp/part --range bytes=0-499
+
+# legacy gRPC download (Heart writes the bytes)
+anyr file download-via-heart <FILE_OBJECT_ID> --dir /tmp
 
 # metadata only (HEAD): status + headers, no body written
 anyr file metadata "Personal" <FILE_OBJECT_ID> --width 128

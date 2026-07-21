@@ -339,6 +339,9 @@ pub enum FileCommands {
         #[arg(long)]
         permanent: bool,
     },
+    /// Download a file's bytes over the REST HTTP API, writing them in the anyr
+    /// process to `--file`, into `--dir`, or to `<object_id>` in the current
+    /// directory. This is the default download path.
     #[command(
         alias = "down",
         group = ArgGroup::new("download_destination")
@@ -346,6 +349,9 @@ pub enum FileCommands {
             .multiple(false)
     )]
     Download {
+        /// space id or name
+        space: String,
+
         /// id of file object to download
         object_id: String,
 
@@ -357,41 +363,52 @@ pub enum FileCommands {
         #[arg(short = 'f', long, value_name = "FILE")]
         file: Option<PathBuf>,
 
-        /// space id or name (required with --http)
-        #[arg(long)]
-        space: Option<String>,
-
-        /// use the REST HTTP API instead of gRPC
-        #[arg(long)]
-        http: bool,
-
-        /// (REST) pre-rendered image variant width in pixels; requires --http
-        #[arg(long, value_name = "PIXELS", requires = "http")]
+        /// pre-rendered image variant width in pixels
+        #[arg(long, value_name = "PIXELS")]
         width: Option<u32>,
 
-        /// (REST) HTTP byte range, e.g. `bytes=0-499`; requires --http
-        #[arg(long, value_name = "HTTP_RANGE", requires = "http")]
+        /// HTTP byte range, e.g. `bytes=0-499`
+        #[arg(long, value_name = "HTTP_RANGE")]
         range: Option<String>,
 
-        /// (REST) `If-Match` precondition entity tag; requires --http
-        #[arg(long, value_name = "ETAG", requires = "http")]
+        /// `If-Match` precondition entity tag
+        #[arg(long, value_name = "ETAG")]
         if_match: Option<String>,
 
-        /// (REST) `If-None-Match` cache validator entity tag; requires --http
-        #[arg(long, value_name = "ETAG", requires = "http")]
+        /// `If-None-Match` cache validator entity tag
+        #[arg(long, value_name = "ETAG")]
         if_none_match: Option<String>,
 
-        /// (REST) `If-Modified-Since` HTTP-date; requires --http
-        #[arg(long, value_name = "HTTP_DATE", requires = "http")]
+        /// `If-Modified-Since` HTTP-date
+        #[arg(long, value_name = "HTTP_DATE")]
         if_modified_since: Option<String>,
 
-        /// (REST) `If-Unmodified-Since` HTTP-date precondition; requires --http
-        #[arg(long, value_name = "HTTP_DATE", requires = "http")]
+        /// `If-Unmodified-Since` HTTP-date precondition
+        #[arg(long, value_name = "HTTP_DATE")]
         if_unmodified_since: Option<String>,
 
-        /// (REST) `If-Range` validator for a ranged request; requires --http
-        #[arg(long, value_name = "VALUE", requires = "http")]
+        /// `If-Range` validator for a ranged request
+        #[arg(long, value_name = "VALUE")]
         if_range: Option<String>,
+    },
+    /// Download a file via the legacy Heart-side gRPC path, letting the Heart
+    /// process write the bytes to its own destination path (0.4 behavior).
+    #[command(
+        group = ArgGroup::new("heart_download_destination")
+            .args(["dir", "file"])
+            .multiple(false)
+    )]
+    DownloadViaHeart {
+        /// id of file object to download
+        object_id: String,
+
+        /// output directory (optional)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// output file path (optional)
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: Option<PathBuf>,
     },
     /// Fetch file HTTP metadata with a REST `HEAD` request (no body).
     #[command(alias = "meta")]
@@ -478,13 +495,23 @@ pub enum FileCommands {
         http: bool,
     },
     /// Preload a file for a later object (gRPC), returning a preload id.
+    #[command(
+        group = ArgGroup::new("preload_source")
+            .args(["file", "url"])
+            .required(true)
+            .multiple(false)
+    )]
     Preload {
         /// space id or name
         space: String,
 
         /// input file path
         #[arg(short = 'f', long, value_name = "FILE")]
-        file: PathBuf,
+        file: Option<PathBuf>,
+
+        /// remote URL to fetch and preload
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
 
         /// file type hint
         #[arg(long, value_enum)]
