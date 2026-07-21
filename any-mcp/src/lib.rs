@@ -37,7 +37,9 @@
 //! [`RuntimeConfig::from_env`] validates exact protocol, profile, read-only,
 //! timeout, concurrency, and response-budget settings without echoing invalid
 //! values. [`RuntimeContext::start`] loads existing Anytype credentials and
-//! performs bounded authenticated health checks. [`serve_stdio`] reserves
+//! performs bounded authenticated health checks. HTTP is always required;
+//! standard read-write also requires gRPC for verified archive readback, while
+//! compact and read-only selections may run HTTP-only. [`serve_stdio`] reserves
 //! stdout for protocol frames; redacted diagnostics go to stderr.
 //!
 //! Every handler runs under shared concurrency, timeout, cancellation, response

@@ -244,10 +244,23 @@ pub enum EnabledToolset {
     Views,
 }
 
-fn enabled_toolsets(profile: ApplicationProfile) -> Result<EnabledToolsets, ValidationError> {
-    let values = match profile {
-        ApplicationProfile::Compact => vec![EnabledToolset::Core, EnabledToolset::Documents],
-        ApplicationProfile::Standard => vec![
+fn enabled_toolsets(
+    profile: ApplicationProfile,
+    read_only: bool,
+) -> Result<EnabledToolsets, ValidationError> {
+    let values = match (profile, read_only) {
+        (ApplicationProfile::Compact, _) => {
+            vec![EnabledToolset::Core, EnabledToolset::Documents]
+        }
+        (ApplicationProfile::Standard, true) => vec![
+            EnabledToolset::Core,
+            EnabledToolset::Documents,
+            EnabledToolset::Discovery,
+            EnabledToolset::Properties,
+            EnabledToolset::Templates,
+            EnabledToolset::Views,
+        ],
+        (ApplicationProfile::Standard, false) => vec![
             EnabledToolset::Core,
             EnabledToolset::Documents,
             EnabledToolset::Discovery,
@@ -504,7 +517,7 @@ impl DiscoveryHandlers {
                     api_version: ApiVersion::new(api_version).map_err(domain_handler_error)?,
                     http_available: status.http_available,
                     grpc_available: status.grpc_available,
-                    enabled_toolsets: enabled_toolsets(profile)?,
+                    enabled_toolsets: enabled_toolsets(profile, read_only)?,
                 })
             },
         )
@@ -1577,6 +1590,51 @@ mod tests {
         for secret in ["alice", "secret", "token", "fragment"] {
             assert!(!wire.contains(secret));
         }
+    }
+
+    #[test]
+    fn enabled_toolsets_do_not_claim_omitted_read_only_mutations() {
+        let standard_read_write =
+            serde_json::to_value(enabled_toolsets(ApplicationProfile::Standard, false).unwrap())
+                .unwrap();
+        let standard_read_only =
+            serde_json::to_value(enabled_toolsets(ApplicationProfile::Standard, true).unwrap())
+                .unwrap();
+        assert!(
+            standard_read_write
+                .as_array()
+                .unwrap()
+                .contains(&json!("create"))
+        );
+        assert!(
+            standard_read_write
+                .as_array()
+                .unwrap()
+                .contains(&json!("advanced_mutations"))
+        );
+        assert!(
+            !standard_read_only
+                .as_array()
+                .unwrap()
+                .contains(&json!("create"))
+        );
+        assert!(
+            !standard_read_only
+                .as_array()
+                .unwrap()
+                .contains(&json!("advanced_mutations"))
+        );
+        assert_eq!(
+            standard_read_only,
+            json!([
+                "core",
+                "documents",
+                "discovery",
+                "properties",
+                "templates",
+                "views"
+            ])
+        );
     }
 
     #[tokio::test]

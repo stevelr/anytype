@@ -49,7 +49,6 @@ const HANG_OBJECT_ID: &str = "bafyreihangaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
 const HANG_RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreihangaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const RESOURCE_TEMPLATE: &str = "anytype://spaces/{space_id}/objects/{object_id}";
-const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-normal.json");
 const READ_ONLY_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-read-only.json");
 const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-compact.json");
 const MCP_DRAFT_SCHEMA: &str = include_str!("schema/mcp-2026-07-28.json");
@@ -328,13 +327,15 @@ fn respond_json(stream: &mut TcpStream, status: &str, body: Value) {
 
 trait ConformanceProcessExt: Sized {
     fn start(fixture: &HttpFixture, read_only: bool) -> Self {
-        Self::start_with_options(fixture, Some("standard"), read_only, None)
+        let profile = if read_only { "standard" } else { "compact" };
+        Self::start_with_options(fixture, Some(profile), read_only, None)
     }
 
     fn start_preview(fixture: &HttpFixture, read_only: bool) -> Self {
+        let profile = if read_only { "standard" } else { "compact" };
         Self::start_with_options(
             fixture,
-            Some("standard"),
+            Some(profile),
             read_only,
             Some("experimental-2026-07-28"),
         )
@@ -427,6 +428,55 @@ impl ConformanceProcessExt for ProtocolProcess {
         assert_official_modern_response(&response);
         self.record_response(&response);
         response
+    }
+}
+
+#[test]
+fn standard_read_write_http_only_fails_before_protocol_output() {
+    for protocol in [None, Some("experimental-2026-07-28")] {
+        let fixture = HttpFixture::start();
+        let fixture_address = fixture.address.clone();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+        command
+            .env("ANYTYPE_URL", &fixture.address)
+            .env("ANYTYPE_KEYSTORE", "env")
+            .env("ANYTYPE_KEYSTORE_SERVICE", "any-mcp-http-only-rejection")
+            .env("ANYTYPE_KEY_HTTP_TOKEN", HTTP_TOKEN)
+            .env("ANY_MCP_PROFILE", "standard")
+            .env("ANY_MCP_READ_ONLY", "0")
+            .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "5")
+            .env("RUST_LOG", "any_mcp=info")
+            .env_remove("ANYTYPE_GRPC_ENDPOINT")
+            .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
+            .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
+            .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
+        if let Some(protocol) = protocol {
+            command.env("ANY_MCP_PROTOCOL", protocol);
+        } else {
+            command.env_remove("ANY_MCP_PROTOCOL");
+        }
+        let output = command
+            .output()
+            .expect("run HTTP-only standard read-write process");
+        fixture.finish();
+
+        assert!(!output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "startup failure keeps stdout empty"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8 diagnostics");
+        assert!(
+            stderr.contains("selected Anytype MCP catalog requires configured gRPC credentials")
+        );
+        for secret in [
+            HTTP_TOKEN,
+            INPUT_SECRET,
+            DOCUMENT_BODY,
+            fixture_address.as_str(),
+        ] {
+            assert!(!stderr.contains(secret), "startup diagnostic is redacted");
+        }
     }
 }
 
@@ -538,7 +588,7 @@ fn assert_exact_wire_catalog(result: &Value, read_only: bool) -> Vec<String> {
     let expected = if read_only {
         READ_ONLY_CATALOG_SNAPSHOT
     } else {
-        NORMAL_CATALOG_SNAPSHOT
+        COMPACT_CATALOG_SNAPSHOT
     };
     assert_eq!(
         actual, expected,
@@ -720,7 +770,7 @@ fn run_legacy_stdio_regression(read_only: bool) {
     let output = process.finish();
     fixture.finish();
     assert_stdout_purity(&output.stdout);
-    assert_exchange_depth(&output.stdout, if read_only { 19 } else { 23 });
+    assert_exchange_depth(&output.stdout, if read_only { 19 } else { 13 });
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("\"id\":80"),
         "rmcp cancellation suppresses the cancelled request response"
@@ -916,7 +966,7 @@ fn run_modern_stdio_acceptance(read_only: bool) {
     let output = process.finish();
     fixture.finish();
     assert_stdout_purity(&output.stdout);
-    assert_exchange_depth(&output.stdout, if read_only { 21 } else { 25 });
+    assert_exchange_depth(&output.stdout, if read_only { 21 } else { 15 });
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("\"id\":80"),
         "modern cancellation suppresses the cancelled request response"

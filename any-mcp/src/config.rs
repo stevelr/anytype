@@ -61,6 +61,17 @@ impl ApplicationProfile {
             Self::Standard => "standard",
         }
     }
+
+    /// Returns whether this profile/access selection requires authenticated
+    /// gRPC availability before its complete catalog can be advertised.
+    ///
+    /// Standard read-write includes `object_archive`, whose independent
+    /// archived-presence proof uses Anytype's gRPC search surface. All other
+    /// Phase 1 catalogs are complete over authenticated HTTP alone.
+    #[must_use]
+    pub const fn requires_grpc(self, read_only: bool) -> bool {
+        matches!(self, Self::Standard) && !read_only
+    }
 }
 
 /// Validated configuration for one `any-mcp` process.
@@ -444,6 +455,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!message.contains(secret_like));
+    }
+
+    #[test]
+    fn only_standard_read_write_requires_grpc() {
+        assert!(!ApplicationProfile::Compact.requires_grpc(false));
+        assert!(!ApplicationProfile::Compact.requires_grpc(true));
+        assert!(ApplicationProfile::Standard.requires_grpc(false));
+        assert!(!ApplicationProfile::Standard.requires_grpc(true));
     }
 
     #[test]
