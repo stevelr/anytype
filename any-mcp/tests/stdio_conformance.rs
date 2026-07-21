@@ -47,9 +47,9 @@ const HANG_OBJECT_ID: &str = "bafyreihangaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
 const HANG_RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreihangaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const RESOURCE_TEMPLATE: &str = "anytype://spaces/{space_id}/objects/{object_id}";
-const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-normal.json");
-const READ_ONLY_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-read-only.json");
-const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-compact.json");
+const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-normal.snap");
+const READ_ONLY_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-read-only.snap");
+const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("snapshots/catalog-compact.snap");
 const MCP_DRAFT_SCHEMA: &str = include_str!("schema/mcp-2026-07-28.json");
 
 static MODERN_REQUEST_SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {

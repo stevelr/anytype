@@ -10,3 +10,7 @@ docs/
 tmp/
 AGENTS.md
 graphify-out
+
+# per-orchestration scratch notes — never committed
+.agent-notes
+.orchestrator-notes
