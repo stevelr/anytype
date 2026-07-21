@@ -574,12 +574,12 @@ mod tests {
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
     const OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
     const RESOURCE_URI: &str = "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
-    const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("../tests/snapshots/catalog-normal.json");
+    const NORMAL_CATALOG_SNAPSHOT: &str = include_str!("../tests/snapshots/catalog-normal.snap");
     const READ_ONLY_CATALOG_SNAPSHOT: &str =
-        include_str!("../tests/snapshots/catalog-read-only.json");
-    const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("../tests/snapshots/catalog-compact.json");
+        include_str!("../tests/snapshots/catalog-read-only.snap");
+    const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("../tests/snapshots/catalog-compact.snap");
     const COMPACT_READ_ONLY_CATALOG_SNAPSHOT: &str =
-        include_str!("../tests/snapshots/catalog-compact-read-only.json");
+        include_str!("../tests/snapshots/catalog-compact-read-only.snap");
     const REPRESENTATIVE_RESULTS_SNAPSHOT: &str =
         include_str!("../tests/snapshots/result-representatives.json");
     const TOKEN_BUDGET_SNAPSHOT: &str = include_str!("../tests/snapshots/token-budget.json");
@@ -2001,19 +2001,19 @@ mod tests {
     #[ignore = "manual updater; review every schema and annotation diff before committing"]
     fn write_catalog_snapshots() {
         write_snapshot(
-            "catalog-normal.json",
+            "catalog-normal.snap",
             &catalog_snapshot(ApplicationProfile::Standard, false),
         );
         write_snapshot(
-            "catalog-read-only.json",
+            "catalog-read-only.snap",
             &catalog_snapshot(ApplicationProfile::Standard, true),
         );
         write_snapshot(
-            "catalog-compact.json",
+            "catalog-compact.snap",
             &catalog_snapshot(ApplicationProfile::Compact, false),
         );
         write_snapshot(
-            "catalog-compact-read-only.json",
+            "catalog-compact-read-only.snap",
             &catalog_snapshot(ApplicationProfile::Compact, true),
         );
     }
