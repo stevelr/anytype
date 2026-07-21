@@ -182,6 +182,60 @@ anyr file list "Personal" --type image --size-gte 1048576 --name-contains report
 
 # list pdf or docx files in space Personal
 anyr file list "Personal" --ext-in pdf,docx -t
+
+# search files, sorted by a property (ascending by default; add --desc)
+anyr file search "Personal" --text report --sort name -t
+anyr file search "Personal" --sort last_modified_date --desc -t
+```
+
+**Upload files (unified builder picks REST or gRPC automatically)**
+
+A plain path or stdin upload uses REST; `--url`, `--file-type`, `--style`,
+`--details`, or a creation-context option promotes the request to gRPC.
+
+```sh
+# REST: a plain path (optionally with an explicit --mime)
+anyr file upload "Personal" -f ./report.pdf --mime application/pdf
+
+# REST: read bytes from stdin (requires --name)
+cat ./report.pdf | anyr file upload "Personal" --stdin --name report.pdf
+
+# gRPC: fetch a remote URL with rich placement/details
+anyr file upload "Personal" --url https://example.com/logo.png \
+  --file-type image --style embed --details '{"source":"web"}' \
+  --created-in-context <OBJECT_ID> --created-in-context-ref <BLOCK_ID>
+```
+
+`--http` on upload is a deprecated no-op; it errors when combined with a
+gRPC-only option instead of silently dropping it.
+
+**Preload a file for later placement (gRPC)**
+
+```sh
+# preload returns a preload file id; --url is not yet supported (file only)
+anyr file preload "Personal" -f ./draft.png --file-type image \
+  --created-in-context <OBJECT_ID>
+# discard a preload you no longer need
+anyr file discard-preload "Personal" <PRELOAD_FILE_ID>
+```
+
+**Download with REST options and inspect metadata (HEAD)**
+
+The REST download (`--http --space SPACE`) emits `status`, `written`, `path`,
+`bytes`, and the HTTP `metadata` fields as JSON. A `304 Not Modified` or a
+failed precondition leaves the destination file untouched.
+
+```sh
+# REST download of a 128px image variant, only if the cache validator changed
+anyr file download <FILE_OBJECT_ID> --http --space "Personal" \
+  --dir /tmp --width 128 --if-none-match '"prev-etag"'
+
+# ranged REST download
+anyr file download <FILE_OBJECT_ID> --http --space "Personal" \
+  --file /tmp/part --range bytes=0-499
+
+# metadata only (HEAD): status + headers, no body written
+anyr file metadata "Personal" <FILE_OBJECT_ID> --width 128
 ```
 
 **List items in query or collection**

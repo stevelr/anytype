@@ -285,6 +285,14 @@ pub enum FileCommands {
         #[arg(long)]
         text: Option<String>,
 
+        /// sort results by property key (for example `name` or `last_modified_date`)
+        #[arg(long, value_name = "PROPERTY")]
+        sort: Option<String>,
+
+        /// sort in descending order (default ascending); requires --sort
+        #[arg(long, requires = "sort")]
+        desc: bool,
+
         #[command(flatten)]
         pagination: PaginationArgs,
 
@@ -356,9 +364,121 @@ pub enum FileCommands {
         /// use the REST HTTP API instead of gRPC
         #[arg(long)]
         http: bool,
+
+        /// (REST) pre-rendered image variant width in pixels; requires --http
+        #[arg(long, value_name = "PIXELS", requires = "http")]
+        width: Option<u32>,
+
+        /// (REST) HTTP byte range, e.g. `bytes=0-499`; requires --http
+        #[arg(long, value_name = "HTTP_RANGE", requires = "http")]
+        range: Option<String>,
+
+        /// (REST) `If-Match` precondition entity tag; requires --http
+        #[arg(long, value_name = "ETAG", requires = "http")]
+        if_match: Option<String>,
+
+        /// (REST) `If-None-Match` cache validator entity tag; requires --http
+        #[arg(long, value_name = "ETAG", requires = "http")]
+        if_none_match: Option<String>,
+
+        /// (REST) `If-Modified-Since` HTTP-date; requires --http
+        #[arg(long, value_name = "HTTP_DATE", requires = "http")]
+        if_modified_since: Option<String>,
+
+        /// (REST) `If-Unmodified-Since` HTTP-date precondition; requires --http
+        #[arg(long, value_name = "HTTP_DATE", requires = "http")]
+        if_unmodified_since: Option<String>,
+
+        /// (REST) `If-Range` validator for a ranged request; requires --http
+        #[arg(long, value_name = "VALUE", requires = "http")]
+        if_range: Option<String>,
     },
-    #[command(alias = "up")]
+    /// Fetch file HTTP metadata with a REST `HEAD` request (no body).
+    #[command(alias = "meta")]
+    Metadata {
+        /// space id or name
+        space: String,
+
+        /// id of file object to inspect
+        object_id: String,
+
+        /// pre-rendered image variant width in pixels
+        #[arg(long, value_name = "PIXELS")]
+        width: Option<u32>,
+
+        /// `If-Match` precondition entity tag
+        #[arg(long, value_name = "ETAG")]
+        if_match: Option<String>,
+
+        /// `If-None-Match` cache validator entity tag
+        #[arg(long, value_name = "ETAG")]
+        if_none_match: Option<String>,
+
+        /// `If-Modified-Since` HTTP-date
+        #[arg(long, value_name = "HTTP_DATE")]
+        if_modified_since: Option<String>,
+
+        /// `If-Unmodified-Since` HTTP-date precondition
+        #[arg(long, value_name = "HTTP_DATE")]
+        if_unmodified_since: Option<String>,
+    },
+    #[command(
+        alias = "up",
+        group = ArgGroup::new("upload_source")
+            .args(["file", "url", "stdin"])
+            .required(true)
+            .multiple(false)
+    )]
     Upload {
+        /// space id or name
+        space: String,
+
+        /// input file path (REST unless a gRPC-only option is set)
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: Option<PathBuf>,
+
+        /// remote URL to fetch and upload (selects the gRPC backend)
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+
+        /// read the file bytes from stdin (requires --name)
+        #[arg(long, requires = "name")]
+        stdin: bool,
+
+        /// file name to record for a --stdin upload (only used with --stdin)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// MIME type used by a REST (path/stdin) upload
+        #[arg(long, value_name = "MIME")]
+        mime: Option<String>,
+
+        /// file type hint (selects the gRPC backend)
+        #[arg(long, value_enum)]
+        file_type: Option<FileTypeArg>,
+
+        /// file style: auto, link, or embed (selects the gRPC backend)
+        #[arg(long, value_enum)]
+        style: Option<FileStyleArg>,
+
+        /// extra object details as JSON or `@FILE` (selects the gRPC backend)
+        #[arg(long, value_name = "JSON_OR_@FILE")]
+        details: Option<String>,
+
+        /// object id the file is created in context of (selects the gRPC backend)
+        #[arg(long, value_name = "OBJECT_ID")]
+        created_in_context: Option<String>,
+
+        /// block id the file is created in context of (selects the gRPC backend)
+        #[arg(long, value_name = "BLOCK_ID")]
+        created_in_context_ref: Option<String>,
+
+        /// (deprecated) no-op: a plain upload already uses REST; errors if combined with a gRPC-only option
+        #[arg(long)]
+        http: bool,
+    },
+    /// Preload a file for a later object (gRPC), returning a preload id.
+    Preload {
         /// space id or name
         space: String,
 
@@ -366,13 +486,25 @@ pub enum FileCommands {
         #[arg(short = 'f', long, value_name = "FILE")]
         file: PathBuf,
 
-        /// file type hint (selects the gRPC backend)
+        /// file type hint
         #[arg(long, value_enum)]
         file_type: Option<FileTypeArg>,
 
-        /// (deprecated) no-op: a plain upload already uses REST; errors if combined with --file-type
-        #[arg(long)]
-        http: bool,
+        /// object id the file is created in context of
+        #[arg(long, value_name = "OBJECT_ID")]
+        created_in_context: Option<String>,
+
+        /// block id the file is created in context of
+        #[arg(long, value_name = "BLOCK_ID")]
+        created_in_context_ref: Option<String>,
+    },
+    /// Discard a previously preloaded file (gRPC).
+    DiscardPreload {
+        /// space id or name
+        space: String,
+
+        /// preload file id to discard
+        file_id: String,
     },
 }
 
@@ -633,6 +765,16 @@ pub enum FileTypeArg {
     Video,
     Audio,
     Pdf,
+}
+
+#[derive(Clone, ValueEnum, Debug)]
+pub enum FileStyleArg {
+    /// let the server choose how the file is embedded
+    Auto,
+    /// reference the file as a link block
+    Link,
+    /// embed the file inline
+    Embed,
 }
 
 #[derive(Args, Debug)]
