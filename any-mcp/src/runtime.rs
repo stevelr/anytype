@@ -546,6 +546,7 @@ impl UpstreamDiagnostic {
             AnytypeError::NoKeyStore | AnytypeError::KeyStore { .. } => Self::new("keystore"),
             AnytypeError::Grpc { .. } | AnytypeError::GrpcUnavailable { .. } => Self::new("grpc"),
             AnytypeError::CacheDisabled => Self::new("cache"),
+            AnytypeError::BodyGraph { .. } => Self::new("body_graph"),
             AnytypeError::VerifyTimeout { .. } => Self::new("verification"),
             AnytypeError::Other { .. } => Self::new("other"),
         }

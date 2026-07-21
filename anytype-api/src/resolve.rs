@@ -16,6 +16,8 @@
 //! - [`resolve_chat_target`](AnytypeClient::resolve_chat_target) - chat (or space) name or id → [`ChatTarget`]
 //! - [`resolve_chat_ids`](AnytypeClient::resolve_chat_ids) - batch form of [`resolve_chat_target`](AnytypeClient::resolve_chat_target)
 //! - [`resolve_chat_name`](AnytypeClient::resolve_chat_name) - chat id → display name
+//! - [`resolve_message_id`](AnytypeClient::resolve_message_id) - message id or chat order id → message id
+//! - [`resolve_message_ids`](AnytypeClient::resolve_message_ids) - batch form of [`resolve_message_id`](AnytypeClient::resolve_message_id)
 //!
 //! Shared conventions:
 //!
@@ -592,6 +594,68 @@ impl AnytypeClient {
             .find(|chat| chat.id == chat_id)
             .ok_or_else(|| not_found("chat", chat_id))?;
         Ok(chat.name.unwrap_or_else(|| chat_id.to_string()))
+    }
+
+    /// Resolves a message reference into its message id.
+    ///
+    /// Accepts either a message id — returned unchanged when it already looks
+    /// like an object id ([`looks_like_object_id`]) — or a chat `order_id`. An
+    /// order id is looked up in `chat_id` with a single bounded page that
+    /// includes the boundary, and the matching message's id is returned.
+    ///
+    /// Order ids are the opaque values carried by
+    /// [`ChatMessage::order_id`](crate::chats::ChatMessage); pass them exactly
+    /// as the server reports them. Any textual encoding a caller applies to
+    /// carry an order id through another medium (for example hex-encoding it
+    /// for a command line) must be undone before calling this method.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::NotFound`] if no message in `chat_id` has that order id
+    /// - any error returned while listing chat messages
+    pub async fn resolve_message_id(
+        &self,
+        chat_id: &str,
+        message_id_or_order_id: &str,
+    ) -> Result<String> {
+        if looks_like_object_id(message_id_or_order_id) {
+            return Ok(message_id_or_order_id.to_string());
+        }
+
+        let page = self
+            .chats()
+            .list_messages(chat_id)
+            .after(message_id_or_order_id)
+            .before(message_id_or_order_id)
+            .include_boundary(true)
+            .limit(1)
+            .list_page()
+            .await?;
+
+        page.messages
+            .into_iter()
+            .find(|message| message.order_id == message_id_or_order_id)
+            .map(|message| message.id)
+            .ok_or_else(|| not_found("message", message_id_or_order_id))
+    }
+
+    /// Resolves an array of message references into message ids.
+    ///
+    /// Batch form of
+    /// [`resolve_message_id`](AnytypeClient::resolve_message_id); fails on the
+    /// first item that does not resolve.
+    ///
+    /// # Errors
+    /// - any error returned by [`resolve_message_id`](AnytypeClient::resolve_message_id)
+    pub async fn resolve_message_ids(
+        &self,
+        chat_id: &str,
+        message_ids: &[String],
+    ) -> Result<Vec<String>> {
+        let mut resolved = Vec::with_capacity(message_ids.len());
+        for message_id in message_ids {
+            resolved.push(self.resolve_message_id(chat_id, message_id).await?);
+        }
+        Ok(resolved)
     }
 
     /// Resolves a chat name (case-insensitive) into a chat id within a space.
@@ -2151,6 +2215,70 @@ mod tests {
         let requests = requests.await.expect("chat HTTP fixture task");
         assert_eq!(requests.len(), 1);
         assert!(requests[0].lines().next().unwrap().contains("limit=99"));
+        mock.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_message_id_maps_order_id_and_passes_ids_through() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gRPC probe");
+        let grpc_address = probe.local_addr().expect("gRPC fixture address");
+        drop(probe);
+        let mock = crate::mock::MockChatServer::start(grpc_address).expect("start chat mock");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let (base_url, requests) = paged_fixture_server(Vec::new()).await;
+        let client = fixture_client_with_grpc(base_url, format!("http://{grpc_address}"));
+
+        let message_id = client
+            .chats()
+            .add_message(OBJECT_ID)
+            .content(crate::chats::MessageContent::new().text("fixture"))
+            .send()
+            .await
+            .expect("create mock chat message");
+
+        let page = client
+            .chats()
+            .list_messages(OBJECT_ID)
+            .limit(10)
+            .list_page()
+            .await
+            .expect("list mock chat messages");
+        let order_id = page
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .map(|message| message.order_id.clone())
+            .expect("stored message present");
+        assert_ne!(order_id, message_id);
+
+        let by_order = client
+            .resolve_message_id(OBJECT_ID, &order_id)
+            .await
+            .expect("resolve by order id");
+        assert_eq!(by_order, message_id);
+
+        // A value that already looks like an object id is returned unchanged
+        // without a lookup.
+        let passthrough = client
+            .resolve_message_id(OBJECT_ID, OBJECT_ID)
+            .await
+            .expect("message id passthrough");
+        assert_eq!(passthrough, OBJECT_ID);
+
+        let batch = client
+            .resolve_message_ids(OBJECT_ID, &[order_id.clone(), OBJECT_ID.to_string()])
+            .await
+            .expect("resolve batch");
+        assert_eq!(batch, vec![message_id, OBJECT_ID.to_string()]);
+
+        let missing = client
+            .resolve_message_id(OBJECT_ID, "9999999999999999")
+            .await
+            .expect_err("unknown order id must not resolve");
+        assert!(matches!(missing, AnytypeError::NotFound { .. }));
+
+        drop(requests);
         mock.shutdown().await;
     }
 

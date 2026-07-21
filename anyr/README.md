@@ -11,7 +11,8 @@ Homepage: https://github.com/stevelr/anytype
 # show options
 anyr --help
 
-# check authentication status (HTTP + gRPC)
+# check authentication status; reports HTTP and gRPC credentials
+# separately (present/missing) plus a live ping for each set
 anyr auth status
 # authenticate with desktop and http endpoint
 anyr auth login
@@ -30,8 +31,8 @@ anyr object list "Work" --type page -t
 anyr file list "Personal" -t
 
 # Download/upload file bytes
-# use `--dir DIR`  to set download dir, or `--file PATH` for destination file path
-anyr file download <FILE_OBJECT_ID> --dir /tmp
+# download fetches bytes over REST; use `--dir DIR` or `--file PATH` for the destination
+anyr file download "Personal" <FILE_OBJECT_ID> --dir /tmp
 anyr file upload "Personal" -f ./path/to/file.png
 
 # Create a chat in a regular space
@@ -182,6 +183,63 @@ anyr file list "Personal" --type image --size-gte 1048576 --name-contains report
 
 # list pdf or docx files in space Personal
 anyr file list "Personal" --ext-in pdf,docx -t
+
+# search files, sorted by a property (ascending by default; add --desc)
+anyr file search "Personal" --text report --sort name -t
+anyr file search "Personal" --sort last_modified_date --desc -t
+```
+
+**Upload files (unified builder picks REST or gRPC automatically)**
+
+A plain path or stdin upload uses REST; `--url`, `--file-type`, `--style`,
+`--details`, or a creation-context option promotes the request to gRPC.
+
+```sh
+# REST: a plain path (optionally with an explicit --mime)
+anyr file upload "Personal" -f ./report.pdf --mime application/pdf
+
+# REST: read bytes from stdin (requires --name)
+cat ./report.pdf | anyr file upload "Personal" --stdin --name report.pdf
+
+# gRPC: fetch a remote URL with rich placement/details
+anyr file upload "Personal" --url https://example.com/logo.png \
+  --file-type image --style embed --details '{"source":"web"}' \
+  --created-in-context <OBJECT_ID> --created-in-context-ref <BLOCK_ID>
+```
+
+`--http` on upload is a deprecated no-op; it errors when combined with a
+gRPC-only option instead of silently dropping it.
+
+**Preload a file for later placement (gRPC)**
+
+```sh
+# preload returns a preload file id; source is either --file or --url
+anyr file preload "Personal" -f ./draft.png --file-type image \
+  --created-in-context <OBJECT_ID>
+# preload a file fetched from a remote URL
+anyr file preload "Personal" --url https://example.com/logo.png --file-type image
+# discard a preload you no longer need
+anyr file discard-preload "Personal" <PRELOAD_FILE_ID>
+```
+
+**Download with REST options and inspect metadata (HEAD)**
+
+`anyr file download SPACE FILE_ID` fetches the bytes over REST in the anyr
+process and emits `status`, `written`, `path`, `bytes`, and the HTTP `metadata`
+fields as JSON. A `304 Not Modified` or a failed precondition leaves the
+destination file untouched. REST is the only download path.
+
+```sh
+# REST download of a 128px image variant, only if the cache validator changed
+anyr file download "Personal" <FILE_OBJECT_ID> \
+  --dir /tmp --width 128 --if-none-match '"prev-etag"'
+
+# ranged REST download
+anyr file download "Personal" <FILE_OBJECT_ID> \
+  --file /tmp/part --range bytes=0-499
+
+# metadata only (HEAD): status + headers, no body written
+anyr file metadata "Personal" <FILE_OBJECT_ID> --width 128
 ```
 
 **List items in query or collection**
@@ -252,6 +310,61 @@ Table listing features for `view objects`:
 - Table listing defaults to name column only. Specify columns in table output with `--cols/--columns` and a comma-separated list of property keys. Example `--cols name,creator,created_date,status`
 - Format dates with strftime format: `--date-format` or `ANYTYPE_DATE_FORMAT`, defaults to `%Y-%m-%d %H:%M:%S`.
 - Members names are displayed instead of member id.
+
+**Chat transport**
+
+Chat commands accept `anyr chat --transport auto|rest|grpc <command>` (default
+`auto`). This is scoped to chat operations and is separate from the root
+`--grpc URL` endpoint option. It selects which backend each operation runs over.
+
+- `auto` resolves each operation to its policy backend: REST for single-space
+  `list` and `create`, plain message `list`/`get`/`send`/`edit`/`delete`,
+  message `search` and `react`, `read`/`read-reactions`/`read-all` in one space,
+  and a single-chat `listen` (REST SSE); gRPC for cross-space list, chat text
+  search, rich chat-object `get`, `unread`, structured `--blocks-json` sends and
+  edits, and multi-chat, `--previews`, or `--buffer` `listen`.
+- `rest` rejects gRPC-only operations and options with an actionable error (for
+  example `anyr chat --transport rest get ...` explains that rich chat-object
+  lookup requires gRPC, and `--blocks-json` cannot be combined with it).
+- `grpc` selects the gRPC backend, which carries the full-fidelity 0.4 message
+  reply shape. REST-only operations such as message `search` reject it.
+
+The resolved backend is reported only in verbose diagnostics (`-v`), never
+injected into the JSON payload. Because REST replies intentionally contain fewer
+fields (no `ChatState` or structured blocks), pick `--transport grpc` when a
+script needs the full reply shape.
+
+**Chat listing, creation, and messages**
+
+- `anyr chat list --space SPACE [--filter FILTER]...` applies property filters to
+  a single-space REST listing. `--filter` requires `--space` and is rejected
+  alongside `--text` (text search uses the gRPC discovery API).
+- `anyr chat create SPACE NAME [--icon-emoji EMOJI | --icon-file FILE]` attaches
+  an icon; the two icon options are mutually exclusive. With an icon under REST
+  the dedicated chat builder is used; otherwise the generic object create is.
+- `anyr chat messages send ... [--reply-to MESSAGE] [--blocks-json JSON_OR_@FILE]`
+  and `anyr chat messages edit ... [--attachment TYPE:TARGET]... [--blocks-json
+  JSON_OR_@FILE]`. `--reply-to` works over both REST and gRPC sends. On `edit`,
+  the supplied `--attachment` values are the complete replacement list.
+  `--blocks-json` takes a JSON array of `MessageBlock` values, selects gRPC, and
+  is mutually exclusive with `--transport rest`.
+- `anyr chat messages search SPACE CHAT QUERY [pagination]` is REST-only and
+  preserves the server's search-result envelope.
+- `anyr chat messages react SPACE CHAT MESSAGE EMOJI` toggles a reaction (REST
+  under `auto`; gRPC additionally reports the resulting on/off state).
+
+**Chat read state and streams**
+
+- `anyr chat read SPACE CHAT` maps to the space-scoped REST read builder under
+  REST; `anyr chat read-reactions SPACE CHAT [--order-id ORDER]` and `anyr chat
+  read-all SPACE CHAT` map to their dedicated REST operations. `anyr chat unread`
+  stays gRPC-only.
+- `anyr chat listen --chat CHAT --space SPACE [--initial-limit N] [--heartbeat
+  SECONDS]` streams one chat over REST SSE with initial-message replay and
+  heartbeat controls. `anyr chat listen --chat CHAT... [--previews] [--buffer N]
+  [--include-history N] [--after ORDER]` uses the reconnecting gRPC listener,
+  which remains the choice for multiple chats, cross-chat previews, and catch-up
+  watermarks.
 
 **Chat order ids**
 

@@ -90,6 +90,74 @@ Claude Code, and MCP Inspector registration commands and their exact pinned
 protocol revisions. Client registration is separate from Anytype login: create
 and store credentials with `anyr` or Anytype before starting the MCP host.
 
+## Quick start
+
+Build the current workspace prerelease and confirm that the existing `anyr`
+credentials can reach Anytype:
+
+```sh
+cargo build -p any-mcp
+anyr auth status --pretty
+realpath target/debug/any-mcp
+```
+
+The last command prints the absolute path to the binary built in this checkout.
+Replace `/absolute/path/to/anytype/target/debug/any-mcp` in both examples below
+with that platform-specific absolute path; the workspace build does not install
+`any-mcp` on `PATH`. On Windows, resolve `target\debug\any-mcp.exe` and prefer
+the JSON/TOML-safe forward-slash form, for example
+`C:/repo/target/debug/any-mcp.exe`. If native backslashes are retained, double
+every backslash in either quoted format, for example
+`C:\\repo\\target\\debug\\any-mcp.exe`; a single backslash can be parsed as an
+escape.
+
+An MCP host starts that binary and communicates with it over stdio.
+The server does not perform login or print credentials. It reuses the endpoint
+and keystore selected by `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
+`ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE` (default `anyr`). The default
+startup is the stable `2025-11-25` protocol, the four-tool compact profile, and
+read-write access. For a safer first registration, select compact read-only
+explicitly:
+
+```json
+{
+  "mcpServers": {
+    "anytype": {
+      "command": "/absolute/path/to/anytype/target/debug/any-mcp",
+      "env": {
+        "ANY_MCP_PROTOCOL": "stable",
+        "ANY_MCP_PROFILE": "compact",
+        "ANY_MCP_READ_ONLY": "1",
+        "ANYTYPE_URL": "http://127.0.0.1:31009",
+        "ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
+        "ANYTYPE_KEYSTORE_SERVICE": "anyr"
+      }
+    }
+  }
+}
+```
+
+Use a platform-appropriate keystore path or keep the host's existing Anytype
+environment instead of copying credentials into configuration. When
+`ANYTYPE_KEYSTORE=env`, supply `ANYTYPE_KEY_HTTP_TOKEN` only through the host
+environment or another secret facility; never put its value in prompts, tool
+arguments, or logs.
+
+Codex uses the same settings in `config.toml` and can forward the operator's
+existing non-secret selectors:
+
+```toml
+[mcp_servers.anytype]
+command = "/absolute/path/to/anytype/target/debug/any-mcp"
+env = { ANY_MCP_PROTOCOL = "stable", ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
+env_vars = ["ANYTYPE_URL", "ANYTYPE_GRPC_ENDPOINT", "ANYTYPE_KEYSTORE", "ANYTYPE_KEYSTORE_SERVICE"]
+```
+
+See [stdio protocol verification](STDIO_CONFORMANCE.md) for the tested Codex,
+Claude Code, and MCP Inspector registration commands and their exact pinned
+protocol revisions. Client registration is separate from Anytype login: create
+and store credentials with `anyr` or Anytype before starting the MCP host.
+
 ## Phase 1 foundations
 
 The crate provides an authenticated stdio runtime, a complete static Phase 1
@@ -285,7 +353,6 @@ gRPC fails admission rather than dynamically omitting `object_archive`, so all
 four catalog inventories remain exact: compact read-write 4, compact read-only
 3, standard read-write 14, and standard read-only 10. Missing HTTP fails every
 selection.
-
 `tools/list` is a static, cursor-free catalog selected once at startup with
 `ANY_MCP_PROFILE`. The default `compact` profile advertises the coherent
 existing-document workflow `server_status`, `object_search`, `object_get`, and
@@ -740,7 +807,6 @@ architecture. The workspace targets Linux x86_64/aarch64, macOS aarch64, and
 Windows x86_64/aarch64; the current dist configuration produces macOS aarch64,
 Linux x86_64/aarch64, and Windows x86_64 artifacts. No external `any-mcp`
 release is published by this documentation change.
-
 ## Headless integration tests
 
 The ignored live suite uses `with_test_context`, checks authenticated HTTP and

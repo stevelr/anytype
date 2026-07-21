@@ -80,6 +80,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   for empty bodies and single plain lines containing alphanumeric characters,
   spaces, and underscores. Canonical replay is idempotent; ambiguous Markdown
   and backslash forms are rejected instead of broadly unescaped.
+- Typed, bounded, fail-closed body-block reads: `AnytypeClient::blocks()` and
+  the new public `body` module (re-exported through the prelude) expose an
+  object's rich body as a validated `BodySnapshot`/`BodyBlock` tree with exact
+  identities and child order, read via gRPC `ObjectShow` with a best-effort
+  `ObjectClose` after every successful show. Content kinds, text styles, and
+  marks are closed v1 enums; anything else reads as an explicit
+  `BlockContent::Unsupported` marker with a content-free summary. Per-request
+  `BodyLimits` clamp to hard ceilings and can only tighten. Malformed,
+  duplicate, cyclic, dangling, or oversized graphs fail the whole read with
+  the new `AnytypeError::BodyGraph` variant, whose display and `detail` carry
+  only block IDs and structural counts — never block text, URLs, or tokens —
+  and a partial or truncated snapshot is never returned.
 - `AnytypeError::is_authentication()` now exposes a secret-safe,
   `anytype-api`-level classification for direct and nested gRPC authentication
   failures without requiring callers to depend on `anytype-rpc` or format
@@ -135,6 +147,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - configurable REST file requests with image widths, `HEAD` metadata, byte
   ranges, conditional headers and preserved HTTP control statuses, plus
   permanent deletion through the `skip_bin` option
+- `FilePreloadRequest::from_url` builds a preload request from a remote URL,
+  complementing the existing `from_path`; the unified upload path routes URL
+  preloads through the gRPC backend
 - space-scoped REST chat APIs for chat listing/creation, plain message listing,
   single-message lookup, message search, deletion, reactions, and read state
 - direct REST chat message add/edit builders, dynamic filters for chat listings,
@@ -145,7 +160,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - new `resolve` module: name and id resolution helpers as `AnytypeClient` methods —
   `resolve_space_id`, `resolve_type`, `resolve_type_id`, `resolve_type_ids`,
   `resolve_type_key`, `resolve_template`, `resolve_view_id`, `resolve_property_id`, `resolve_chat_target`
-  (returns the new `ChatTarget` struct), `resolve_chat_ids`, and `resolve_chat_name`.
+  (returns the new `ChatTarget` struct), `resolve_chat_ids`, `resolve_chat_name`,
+  `resolve_message_id`, and `resolve_message_ids` (resolve a chat message id or
+  `order_id` into a message id, and the batch form).
   Moved from the anyr cli so all clients share the same "name or id" conventions.
   `ChatTarget` and `DEFAULT_CHAT_NAME` are exported in the prelude.
 - new error variant `AnytypeError::Ambiguous`, returned by the `resolve_*` helpers

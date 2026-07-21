@@ -8,21 +8,89 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
-- `type update` gains `--set-property KEY:FORMAT:NAME` (replaces the complete
-  non-featured property list) and `--clear-properties` (removes all non-featured
-  recommended properties); `--add-property`, `--set-property`, and
-  `--clear-properties` are mutually exclusive.
+- `anyr chat --transport auto|rest|grpc` selects the transport policy for chat
+  operations (default `auto`). `rest` rejects operations that only gRPC can
+  serve (for example cross-space list, chat text search, rich `get`, `unread`,
+  structured `--blocks-json` send/edit, and multi-chat `listen`) with an
+  actionable error, and `grpc` rejects the REST-only `messages search`; the
+  resolved policy backend is reported in verbose diagnostics (`-v`). Under
+  `auto`, REST-capable operations (single-space `list`, `create`, `messages
+  list|get|send|edit|delete|search|react`, `read`/`read-reactions`/`read-all`,
+  and single-`--chat` `listen` with `--space`) route through the REST
+  `SpaceChatsClient`; everything else falls back to gRPC.
+- `anyr chat list --filter KEY=VALUE` applies property filters to a space-scoped
+  REST listing (no `--text`).
+- `anyr chat create` gained `--icon-emoji` / `--icon-file` (mutually exclusive)
+  to set the new chat object's icon.
+- `anyr chat messages send` gained `--reply-to MESSAGE` (reply to an existing
+  message by id or order id) and `--blocks-json JSON` (structured message blocks
+  as a JSON array via `@file`, `@-`, or `-`; routes through gRPC). `messages
+  edit` likewise gained `--blocks-json`.
+- `anyr chat messages search SPACE CHAT QUERY` runs a REST-only full-text search
+  over a chat's messages; `anyr chat messages react SPACE CHAT MESSAGE EMOJI`
+  toggles a reaction on a message.
+- `anyr chat read-reactions SPACE CHAT` marks reactions read (optionally through
+  an order id), and `anyr chat read-all SPACE CHAT` marks every message in a
+  chat as read (both REST).
+- `anyr chat listen` gained a REST SSE listener for a single `--chat` with
+  `--space`: `--initial-limit N` replays the last N messages when the stream
+  opens and `--heartbeat SECONDS` (1-60) sets the keep-alive interval. The
+  gRPC-only options `--include-history`, `--after`, `--previews`, and `--buffer`
+  (and a `--chat`-only listen without `--space`) route through the reconnecting
+  gRPC listener.
 - program used to generate test vectors for account key generation
 - `anyr type update` property-list controls (mutually exclusive with
   `--add-property`):
   - `--set-property KEY:FORMAT:NAME` replaces the complete non-featured
     property list.
   - `--clear-properties` removes all non-featured recommended properties.
+- `anyr file delete --permanent` deletes a file object permanently (skips the
+  bin) instead of moving it to the bin.
+- `anyr file search` sorting: `--sort PROPERTY` orders results by a property key
+  (for example `name` or `last_modified_date`), and `--desc` selects descending
+  order (requires `--sort`).
+- `anyr file upload` gained richer sources and gRPC-only options:
+  - `--url URL` uploads a remote file, `--stdin` uploads bytes read from stdin
+    (requires `--name`), and `--mime` sets the MIME type for a REST upload.
+  - `--file-type`, `--style`, `--details JSON_OR_@FILE`, `--created-in-context`,
+    and `--created-in-context-ref` route the upload through the gRPC backend.
+- `anyr file preload SPACE (--file FILE | --url URL)` preloads a file (gRPC) from
+  a local path or a remote URL and returns a preload file id; `anyr file
+  discard-preload SPACE FILE_ID` discards one.
+- `anyr file metadata SPACE FILE` issues a REST `HEAD` request and reports the
+  HTTP status plus the header metadata (etag, content-type, content-length,
+  last-modified, ...) in both JSON and table output; supports `--width` and the
+  conditional headers (`--if-match`, `--if-none-match`, `--if-modified-since`,
+  `--if-unmodified-since`).
+- `anyr file download SPACE FILE` gained REST options: `--width`, `--range`, and
+  the conditional headers `--if-match`, `--if-none-match`, `--if-modified-since`,
+  `--if-unmodified-since`, and `--if-range`.
 
 ### Changed
 
+- `anyr auth status` now reports HTTP and gRPC credentials separately with an
+  explicit present/missing indicator per set, so it is clear which credential
+  set a REST versus gRPC command needs.
 - **Breaking**: `anyr list objects` now requires `--view` (view name or id); a
   missing view is rejected at parse time instead of failing client-side.
+- **Breaking**: `anyr file delete` no longer accepts `--http`; the flag has been
+  removed and deletion now uses the REST files client (add `--permanent` to skip
+  the bin).
+- **Breaking**: `anyr file download` now uses REST unconditionally and takes
+  `SPACE` as a required leading positional (`anyr file download SPACE FILE`); the
+  `--http` and `--space` flags have been removed, and the REST options
+  (`--width`, `--range`, `--if-*`) are no longer gated behind `--http`. JSON now
+  reports `{status, written, path, bytes, metadata}` (previously `{path}`), and
+  table output is now `status N PATH` (previously the bare path); a
+  `304`/`412`/`416` response leaves the destination file untouched and reports
+  `written: false`. The legacy gRPC (anytype-heart) download command has been
+  removed; REST is now the sole download path.
+- `anyr file upload --http` is now a deprecated no-op (a plain upload already
+  uses REST); it prints a deprecation warning and is rejected when combined with
+  any gRPC-only option (`--url`, `--file-type`, `--style`, `--details`, or a
+  `--created-in-context*` option), since those select the gRPC transport. The
+  REST-only options `--mime` and `--stdin` are likewise rejected up front when
+  combined with a gRPC-only option instead of being silently dropped.
 - `anyr property update` now requires at least one of `--name` or `--key` and
   rejects a no-flag invocation before any network I/O; when `--name` is omitted
   it reuses the property's current name so a key-only update still satisfies
@@ -33,6 +101,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `AnytypeClient::resolve_*` methods. Behavior is unchanged, except: a type
   lookup that matches nothing now reports "not found" instead of "ambiguous",
   and not-found/ambiguous messages use the shared `AnytypeError` formats.
+- chat order-id-to-message-id resolution now delegates to the shared
+  `AnytypeClient::resolve_message_id` / `resolve_message_ids` resolver; the CLI
+  retains only its hex order-id encode/decode helpers (no user-facing change).
 
 ## [0.4.1]
 

@@ -1,21 +1,21 @@
 {
-	"version": "0.2",
-	"language": "en",
-	"dictionaries": ["rust"],
-	"ignorePaths": ["target/", "Cargo.lock", "spec/*.yaml", "*.json"],
-	"ignoreRegExpList": ["/bafyrei[a-z0-9]*/gi", "/xafyrei[a-z0-9]*/gi", "/[a-z]{20,}/gi"],
-	"words": [
-		"anyr",
-		"anytype",
-		"apikey",
-		"arboard",
-		"Deeplink",
-		"enigo",
-		"osascript",
-		"peekable",
-		"reqwest",
-		"rustls",
-		"Schoettler",
-		"stevelr"
-	]
+  "version": "0.2",
+  "language": "en",
+  "dictionaries": ["rust"],
+  "ignorePaths": ["target/", "Cargo.lock", "spec/*.yaml", "*.json"],
+  "ignoreRegExpList": ["/bafyrei[a-z0-9]*/gi", "/xafyrei[a-z0-9]*/gi", "/[a-z]{20,}/gi"],
+  "words": [
+    "anyr",
+    "anytype",
+    "apikey",
+    "arboard",
+    "Deeplink",
+    "enigo",
+    "osascript",
+    "peekable",
+    "reqwest",
+    "rustls",
+    "Schoettler",
+    "stevelr"
+  ]
 }

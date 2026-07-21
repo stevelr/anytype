@@ -23,7 +23,7 @@ use anytype_rpc::{
                 subscribe_to_message_previews, toggle_message_reaction, unread, unsubscribe,
                 unsubscribe_from_message_previews,
             },
-            object::search_with_meta,
+            object::{close as object_close, search_with_meta, show as object_show},
             process::{subscribe as process_subscribe, unsubscribe as process_unsubscribe},
             workspace::open as workspace_open,
         },
@@ -92,6 +92,19 @@ impl MockChatServerHandle {
     pub async fn emit_event(&self, event: Event) {
         broadcast_event(&self.state, event).await;
     }
+
+    /// Registers an `ObjectShow` fixture for `(space_id, object_id)`.
+    pub async fn set_object_view(&self, space_id: &str, object_id: &str, view: model::ObjectView) {
+        let mut state = self.state.lock().await;
+        state
+            .object_views
+            .insert((space_id.to_string(), object_id.to_string()), view);
+    }
+
+    /// Returns how many `ObjectClose` calls the mock has served.
+    pub async fn object_close_count(&self) -> usize {
+        self.state.lock().await.object_close_log.len()
+    }
 }
 
 #[derive(Clone)]
@@ -113,6 +126,8 @@ impl MockChatServer {
             preview_subscriptions: HashSet::new(),
             event_listeners: Vec::new(),
             disconnect_epoch: Arc::new(AtomicU64::new(0)),
+            object_views: HashMap::new(),
+            object_close_log: Vec::new(),
         };
         state
             .space_chats
@@ -167,6 +182,10 @@ struct MockState {
     preview_subscriptions: HashSet<String>,
     event_listeners: Vec<EventListener>,
     disconnect_epoch: Arc<AtomicU64>,
+    /// Registered `ObjectShow` fixtures keyed by `(space_id, object_id)`.
+    object_views: HashMap<(String, String), model::ObjectView>,
+    /// `(space_id, object_id)` pairs closed through `ObjectClose`.
+    object_close_log: Vec<(String, String)>,
 }
 
 impl Default for MockState {
@@ -179,6 +198,8 @@ impl Default for MockState {
             preview_subscriptions: HashSet::new(),
             event_listeners: Vec::new(),
             disconnect_epoch: Arc::new(AtomicU64::new(0)),
+            object_views: HashMap::new(),
+            object_close_log: Vec::new(),
         }
     }
 }
@@ -465,6 +486,22 @@ impl Service<http::Request<Body>> for ChatService {
                 let fut = async move {
                     let mut grpc = Grpc::new(ProstCodec::default());
                     let svc = ObjectSearchWithMetaSvc { state };
+                    Ok(grpc.unary(svc, req).await)
+                };
+                Box::pin(fut)
+            }
+            "/anytype.ClientCommands/ObjectShow" => {
+                let fut = async move {
+                    let mut grpc = Grpc::new(ProstCodec::default());
+                    let svc = ObjectShowSvc { state };
+                    Ok(grpc.unary(svc, req).await)
+                };
+                Box::pin(fut)
+            }
+            "/anytype.ClientCommands/ObjectClose" => {
+                let fut = async move {
+                    let mut grpc = Grpc::new(ProstCodec::default());
+                    let svc = ObjectCloseSvc { state };
                     Ok(grpc.unary(svc, req).await)
                 };
                 Box::pin(fut)
@@ -1238,6 +1275,69 @@ impl tonic::server::UnaryService<unread::Request> for ChatUnreadMessagesSvc {
                 error: None,
                 event: None,
             }))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ObjectShowSvc {
+    state: Arc<Mutex<MockState>>,
+}
+
+impl tonic::server::UnaryService<object_show::Request> for ObjectShowSvc {
+    type Response = object_show::Response;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
+
+    fn call(&mut self, request: Request<object_show::Request>) -> Self::Future {
+        let state_handle = self.state.clone();
+        Box::pin(async move {
+            let _user = authenticate(request.metadata(), &state_handle).await?;
+            let input = request.into_inner();
+            let state = state_handle.lock().await;
+            let view = state
+                .object_views
+                .get(&(input.space_id.clone(), input.object_id.clone()))
+                .cloned();
+            drop(state);
+
+            let response = view.map_or_else(
+                || object_show::Response {
+                    error: Some(object_show::response::Error {
+                        code: object_show::response::error::Code::NotFound as i32,
+                        description: "object not found".to_string(),
+                    }),
+                    object_view: None,
+                },
+                |view| object_show::Response {
+                    error: None,
+                    object_view: Some(view),
+                },
+            );
+            Ok(Response::new(response))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ObjectCloseSvc {
+    state: Arc<Mutex<MockState>>,
+}
+
+impl tonic::server::UnaryService<object_close::Request> for ObjectCloseSvc {
+    type Response = object_close::Response;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
+
+    fn call(&mut self, request: Request<object_close::Request>) -> Self::Future {
+        let state_handle = self.state.clone();
+        Box::pin(async move {
+            let _user = authenticate(request.metadata(), &state_handle).await?;
+            let input = request.into_inner();
+            let mut state = state_handle.lock().await;
+            state
+                .object_close_log
+                .push((input.space_id, input.object_id));
+            drop(state);
+            Ok(Response::new(object_close::Response { error: None }))
         })
     }
 }

@@ -93,10 +93,14 @@ impl_grpc_error!(
 );
 
 // object
-use anytype_rpc::anytype::rpc::object::{list_delete, search_with_meta};
+use anytype_rpc::anytype::rpc::object::{
+    close as object_close, list_delete, search_with_meta, show as object_show,
+};
 
 impl_grpc_error!(
     list_delete::response::Error,
+    object_close::response::Error,
+    object_show::response::Error,
     search_with_meta::response::Error,
 );
 

@@ -1672,6 +1672,16 @@ impl FilePreloadRequest<'_> {
         self
     }
 
+    /// Preload a file fetched from a remote URL.
+    ///
+    /// Preloading always runs over gRPC, so a URL source is uploaded the same
+    /// way the unified upload builder handles [`FileUploadRequest::from_url`].
+    #[must_use]
+    pub fn from_url(mut self, url: impl Into<String>) -> Self {
+        self.source = Some(FileSource::Url(url.into()));
+        self
+    }
+
     #[must_use]
     pub fn file_type(mut self, file_type: FileType) -> Self {
         self.file_type = Some(file_type);
@@ -2467,6 +2477,28 @@ mod tests {
         assert!(!upload_uses_rest(Some(&path), true));
         assert!(!upload_uses_rest(Some(&url), false));
         assert!(!upload_uses_rest(None, false));
+    }
+
+    #[test]
+    fn preload_source_tracks_url_and_path() {
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-preload-unit-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("preload-unit");
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("preload-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("create client");
+
+        let url_request = client
+            .files()
+            .preload("space")
+            .from_url("https://example.invalid/file");
+        assert!(matches!(url_request.source, Some(FileSource::Url(_))));
+
+        let path_request = client.files().preload("space").from_path("example.txt");
+        assert!(matches!(path_request.source, Some(FileSource::Path(_))));
     }
 
     #[test]
