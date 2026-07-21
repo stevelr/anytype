@@ -216,8 +216,55 @@ pub type IdList<T> = BoundedList<T, MAX_IDS>;
 pub type ProjectionList<T> = BoundedList<T, MAX_PROJECTIONS>;
 /// Bounded filter list.
 pub type FilterList<T> = BoundedList<T, MAX_FILTERS>;
-/// Bounded filter-value list.
-pub type FilterValueList<T> = BoundedList<T, MAX_FILTER_VALUES>;
+/// Bounded filter-value list whose wire schema advertises the handler's
+/// nonempty requirement.
+///
+/// Construction and deserialization deliberately retain an empty vector so
+/// the handler's existing semantic validation remains defense in depth and
+/// produces the established structured validation error when invoked
+/// directly outside schema-aware decoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FilterValueList<T>(BoundedList<T, MAX_FILTER_VALUES>);
+
+impl<T> FilterValueList<T> {
+    /// Validates the per-list maximum without removing the handler's nonempty
+    /// check.
+    pub fn new(values: Vec<T>) -> Result<Self, ValidationError> {
+        BoundedList::new(values).map(Self)
+    }
+
+    /// Borrows the validated elements.
+    #[must_use]
+    pub fn as_slice(&self) -> &[T] {
+        self.0.as_slice()
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for FilterValueList<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        BoundedList::deserialize(deserializer).map(Self)
+    }
+}
+
+impl<T: JsonSchema> JsonSchema for FilterValueList<T> {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Owned(format!(
+            "NonEmptyFilterValueList{}Of{}",
+            MAX_FILTER_VALUES,
+            T::schema_name()
+        ))
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "array",
+            "items": generator.subschema_for::<T>(),
+            "minItems": 1,
+            "maxItems": MAX_FILTER_VALUES,
+        })
+    }
+}
 
 /// Aggregate runtime budget for nested filters.
 #[derive(Debug, Default)]

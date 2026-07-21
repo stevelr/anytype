@@ -531,6 +531,14 @@ impl UpstreamDiagnostic {
             AnytypeError::Ambiguous { .. } => Self::new("ambiguous"),
             AnytypeError::ResolutionLimitExceeded { .. } => Self::new("resolution_limit"),
             AnytypeError::ResponseTooLarge { .. } => Self::new("response_too_large"),
+            AnytypeError::FileHeaderEvidenceTooLarge { status, .. } => Self {
+                category: "file_header_evidence_too_large",
+                http_status: Some(*status),
+            },
+            AnytypeError::InvalidFileResponseHeader { status, .. } => Self {
+                category: "invalid_file_response_header",
+                http_status: Some(*status),
+            },
             AnytypeError::ChatSseEventTooLarge { .. } => Self::new("chat_sse_event_too_large"),
             AnytypeError::ChatSseTransport { .. } => Self::new("chat_sse_transport"),
             AnytypeError::RateLimitExceeded { .. } => Self::new("rate_limit"),
@@ -1428,7 +1436,24 @@ mod tests {
             message: secret.to_string(),
         });
         assert_eq!(grpc, UpstreamDiagnostic::new("grpc"));
-        assert!(!format!("{api:?}{auth:?}{grpc:?}").contains(secret));
+        let file_headers =
+            UpstreamDiagnostic::from_error(&AnytypeError::FileHeaderEvidenceTooLarge {
+                limit: 4_096,
+                status: 429,
+            });
+        assert_eq!(file_headers.category, "file_header_evidence_too_large");
+        assert_eq!(file_headers.http_status, Some(429));
+        let malformed_file =
+            UpstreamDiagnostic::from_error(&AnytypeError::InvalidFileResponseHeader {
+                status: 206,
+                header: "content-range",
+                issue: "malformed",
+            });
+        assert_eq!(malformed_file.category, "invalid_file_response_header");
+        assert_eq!(malformed_file.http_status, Some(206));
+        assert!(
+            !format!("{api:?}{auth:?}{grpc:?}{file_headers:?}{malformed_file:?}").contains(secret)
+        );
     }
 
     #[tokio::test]

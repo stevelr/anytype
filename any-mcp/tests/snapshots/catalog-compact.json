@@ -854,34 +854,6 @@
             "maxItems": 100,
             "type": "array"
           },
-          "BoundedList100OfEntityId": {
-            "items": {
-              "$ref": "#/$defs/EntityId"
-            },
-            "maxItems": 100,
-            "type": "array"
-          },
-          "BoundedList100OfObjectId": {
-            "items": {
-              "$ref": "#/$defs/ObjectId"
-            },
-            "maxItems": 100,
-            "type": "array"
-          },
-          "BoundedList50OfMcpFilter": {
-            "items": {
-              "$ref": "#/$defs/McpFilter"
-            },
-            "maxItems": 50,
-            "type": "array"
-          },
-          "BoundedList50OfMcpFilterExpression": {
-            "items": {
-              "$ref": "#/$defs/McpFilterExpression"
-            },
-            "maxItems": 50,
-            "type": "array"
-          },
           "BoundedList50OfTypeKey": {
             "items": {
               "$ref": "#/$defs/TypeKey"
@@ -1057,7 +1029,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfAnytypeReference",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
                     "description": "Compared tag ids or keys."
                   }
                 },
@@ -1086,7 +1058,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfAnytypeReference",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
                     "description": "Compared tag ids or keys."
                   }
                 },
@@ -1173,7 +1145,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfEntityId",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
                     "description": "Compared file ids."
                   }
                 },
@@ -1289,7 +1261,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfObjectId",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
                     "description": "Compared object ids."
                   }
                 },
@@ -1342,28 +1314,101 @@
             ]
           },
           "McpFilterExpression": {
-            "additionalProperties": false,
-            "description": "One nested, bounded filter expression shared by MCP workflows.",
-            "properties": {
-              "conditions": {
-                "$ref": "#/$defs/BoundedList50OfMcpFilter",
-                "default": [],
-                "description": "Direct conditions in this group."
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "conditions": {
+                    "default": [],
+                    "description": "Direct conditions in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilter"
+                    },
+                    "maxItems": 50,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "filters": {
+                    "default": [],
+                    "description": "Nested groups in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilterExpression"
+                    },
+                    "maxItems": 50,
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "operator": {
+                    "$ref": "#/$defs/FilterOperator",
+                    "description": "Operator combining direct conditions and child groups."
+                  }
+                },
+                "required": [
+                  "operator",
+                  "conditions"
+                ],
+                "type": "object"
               },
-              "filters": {
-                "$ref": "#/$defs/BoundedList50OfMcpFilterExpression",
-                "default": [],
-                "description": "Nested groups in this group."
-              },
-              "operator": {
-                "$ref": "#/$defs/FilterOperator",
-                "description": "Operator combining direct conditions and child groups."
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "conditions": {
+                    "default": [],
+                    "description": "Direct conditions in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilter"
+                    },
+                    "maxItems": 50,
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "filters": {
+                    "default": [],
+                    "description": "Nested groups in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilterExpression"
+                    },
+                    "maxItems": 50,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "operator": {
+                    "$ref": "#/$defs/FilterOperator",
+                    "description": "Operator combining direct conditions and child groups."
+                  }
+                },
+                "required": [
+                  "operator",
+                  "filters"
+                ],
+                "type": "object"
               }
-            },
-            "required": [
-              "operator"
             ],
-            "type": "object"
+            "description": "One nested, bounded filter expression shared by MCP workflows. At least one of conditions or filters must be present and nonempty."
+          },
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
           },
           "NumberCondition": {
             "description": "Operators supported for numeric properties.",
@@ -1459,6 +1504,12 @@
                 "type": "string"
               }
             ]
+          },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
           },
           "TextCondition": {
             "description": "Operators supported for textual property formats.",

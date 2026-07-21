@@ -328,7 +328,8 @@ fn validate_untyped_schema(schema: &JsonObject, root: &serde_json::Value) -> boo
             return strict_branches
                 && (is_nullable_union(branches)
                     || is_scalar_enum_union(branches, root)
-                    || is_discriminated_union(branches, root));
+                    || is_discriminated_union(branches, root)
+                    || is_nonempty_array_object_union(branches, root));
         }
     }
     false
@@ -468,6 +469,81 @@ fn is_discriminated_union(branches: &[serde_json::Value], root: &serde_json::Val
         }
         true
     })
+}
+
+fn is_nonempty_array_object_union(
+    branches: &[serde_json::Value],
+    root: &serde_json::Value,
+) -> bool {
+    if branches.len() != 2 {
+        return false;
+    }
+    let Some(left) = resolve_schema(&branches[0], root).and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    let Some(right) = resolve_schema(&branches[1], root).and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    let Some(left_properties) = left
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    let Some(right_properties) = right
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    if left_properties.len() != right_properties.len()
+        || !left_properties
+            .keys()
+            .all(|name| right_properties.contains_key(name))
+    {
+        return false;
+    }
+    let Some(left_required) = required_property_names(left) else {
+        return false;
+    };
+    let Some(right_required) = required_property_names(right) else {
+        return false;
+    };
+    let left_only = left_required
+        .iter()
+        .filter(|name| !right_required.contains(name))
+        .copied()
+        .collect::<Vec<_>>();
+    let right_only = right_required
+        .iter()
+        .filter(|name| !left_required.contains(name))
+        .copied()
+        .collect::<Vec<_>>();
+    if left_only.len() != 1 || right_only.len() != 1 || left_only[0] == right_only[0] {
+        return false;
+    }
+    array_minimum(left_properties.get(left_only[0])) >= 1
+        && array_minimum(right_properties.get(left_only[0])) == 0
+        && array_minimum(right_properties.get(right_only[0])) >= 1
+        && array_minimum(left_properties.get(right_only[0])) == 0
+}
+
+fn required_property_names(schema: &JsonObject) -> Option<Vec<&str>> {
+    schema
+        .get("required")?
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect()
+}
+
+fn array_minimum(schema: Option<&serde_json::Value>) -> u64 {
+    schema
+        .and_then(|schema| schema.get("minItems"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
 }
 
 fn resolve_schema<'a>(
@@ -807,5 +883,84 @@ mod tests {
     fn bounded_tagged_union_is_accepted() {
         let schema = input_schema::<TaggedUnionInput>().unwrap();
         assert!(schema["$defs"]["TaggedSelector"]["oneOf"].is_array());
+    }
+
+    #[test]
+    fn nonempty_array_object_union_is_narrowly_accepted() {
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "operator": {
+                            "type": "string",
+                            "maxLength": 3,
+                            "description": "Boolean operator."
+                        },
+                        "conditions": {
+                            "type": "array",
+                            "items": { "type": "string", "maxLength": 8 },
+                            "minItems": 1,
+                            "maxItems": 50,
+                            "description": "Leaf conditions."
+                        },
+                        "filters": {
+                            "type": "array",
+                            "items": { "type": "string", "maxLength": 8 },
+                            "minItems": 0,
+                            "maxItems": 50,
+                            "description": "Nested filters."
+                        }
+                    },
+                    "required": ["operator", "conditions"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "operator": {
+                            "type": "string",
+                            "maxLength": 3,
+                            "description": "Boolean operator."
+                        },
+                        "conditions": {
+                            "type": "array",
+                            "items": { "type": "string", "maxLength": 8 },
+                            "minItems": 0,
+                            "maxItems": 50,
+                            "description": "Leaf conditions."
+                        },
+                        "filters": {
+                            "type": "array",
+                            "items": { "type": "string", "maxLength": 8 },
+                            "minItems": 1,
+                            "maxItems": 50,
+                            "description": "Nested filters."
+                        }
+                    },
+                    "required": ["operator", "filters"]
+                }
+            ]
+        });
+
+        assert!(strict_wire_schema(&schema, &schema));
+
+        let mut no_nonempty_branch = schema.clone();
+        no_nonempty_branch["anyOf"][1]["properties"]["filters"]["minItems"] = json!(0);
+        assert!(!strict_wire_schema(
+            &no_nonempty_branch,
+            &no_nonempty_branch
+        ));
+
+        let mut mismatched_properties = schema.clone();
+        mismatched_properties["anyOf"][1]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("operator");
+        assert!(!strict_wire_schema(
+            &mismatched_properties,
+            &mismatched_properties
+        ));
     }
 }

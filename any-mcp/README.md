@@ -572,7 +572,11 @@ Phase 1 read path.
   empty, and nonempty conditions. Each supported format and condition converts
   directly to the corresponding `anytype-api` filter without client-side
   post-pagination emulation. Filter count, value count, nesting depth, scalar
-  lengths, arrays, and numeric magnitude are bounded. Boolean and numeric
+  lengths, arrays, and numeric magnitude are bounded. Set operands advertise
+  1..100 values, and the recursive expression schema requires at least one
+  nonempty condition or child array while retaining omission defaults.
+  Select references are 1..512 Unicode scalars, preserve whitespace, and reject
+  commas because the upstream request encoding uses comma delimiters. Boolean and numeric
   filters are passed through unchanged; they remain subject to the
   known upstream [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
   limitation instead of being silently rewritten with different semantics.
@@ -696,11 +700,11 @@ Catalog changes are never accepted through an environment variable. Follow
 the explicit regeneration and review procedure in
 [`tests/snapshots/README.md`](tests/snapshots/README.md), including its pinned
 `o200k_base` token-count audit. The complete serialized default compact
-`tools/list` result is 9,423 tokens, strictly below 10,000 tokens (5% of the
-internal 200,000-token compatibility-policy floor), with 577 tokens of
-headroom. Its 2% material-growth boundary is 9,612 tokens, retaining 388 tokens
-of headroom. Compact read-only is 8,134 tokens. Exact reviewed baselines also
-measure explicit standard (22,663) and standard read-only (15,408), plus
+`tools/list` result is 9,669 tokens, strictly below 10,000 tokens (5% of the
+internal 200,000-token compatibility-policy floor), with 331 tokens of
+headroom. Its 2% material-growth boundary is 9,863 tokens, retaining 137 tokens
+of headroom. Compact read-only is 8,380 tokens. Exact reviewed baselines also
+measure explicit standard (22,909) and standard read-only (15,654), plus
 schema-valid representative search/get results; any
 count drift fails, and growth of at least 2% requires a recorded material-growth
 rationale. Then run:

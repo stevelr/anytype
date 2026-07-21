@@ -15,10 +15,10 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Number, Value, json};
 
 use crate::{
-    domain::{AnytypeReference, BoundedText, EntityId, ObjectId, TypeKey},
+    domain::{BoundedText, DomainValueError, EntityId, MAX_REFERENCE_CHARS, ObjectId, TypeKey},
     error::ToolError,
     handler_support::HandlerError,
-    validation::{BoundedList, FilterBudget, FilterList, FilterValueList},
+    validation::{FilterBudget, FilterList, FilterValueList},
 };
 
 /// Maximum characters accepted in a scalar textual filter value.
@@ -32,6 +32,85 @@ pub const MAX_FILTER_NUMBER_ABS: f64 = 1_000_000_000_000_000.0;
 pub type FilterText = BoundedText<MAX_FILTER_TEXT_CHARS>;
 /// Bounded date text accepted by the Anytype HTTP API.
 pub type FilterDate = BoundedText<MAX_FILTER_DATE_CHARS>;
+
+/// A nonempty select/tag reference that cannot collide under Anytype's
+/// comma-delimited select serialization.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct SelectReference(BoundedText<MAX_REFERENCE_CHARS>);
+
+impl SelectReference {
+    /// Validates a select reference without trimming or otherwise normalizing
+    /// the caller's value.
+    pub fn new(value: impl Into<String>) -> Result<Self, SelectReferenceError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(SelectReferenceError::Domain(DomainValueError::Empty));
+        }
+        if value.contains(',') {
+            return Err(SelectReferenceError::Comma);
+        }
+        BoundedText::new(value)
+            .map(Self)
+            .map_err(SelectReferenceError::Domain)
+    }
+
+    /// Borrows the exact validated reference.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for SelectReference {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<'de> Deserialize<'de> for SelectReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for SelectReference {
+    fn schema_name() -> Cow<'static, str> {
+        "SelectReference".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_REFERENCE_CHARS,
+            "pattern": "^[^,]+$",
+        })
+    }
+}
+
+/// Failure to construct an unambiguous select reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectReferenceError {
+    /// The shared reference length or nonempty bound failed.
+    Domain(DomainValueError),
+    /// A comma would collide with Anytype's list delimiter.
+    Comma,
+}
+
+impl std::fmt::Display for SelectReferenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Domain(error) => error.fmt(formatter),
+            Self::Comma => formatter.write_str("select reference must not contain a comma"),
+        }
+    }
+}
+
+impl std::error::Error for SelectReferenceError {}
 
 /// Logical operator for one bounded filter group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -221,7 +300,7 @@ pub enum McpFilter {
         /// Select operator.
         condition: SelectCondition,
         /// Compared tag ids or keys.
-        values: FilterValueList<AnytypeReference>,
+        values: FilterValueList<SelectReference>,
     },
     /// Multi-select property.
     MultiSelect {
@@ -230,7 +309,7 @@ pub enum McpFilter {
         /// Array operator.
         condition: ArrayCondition,
         /// Compared tag ids or keys.
-        values: FilterValueList<AnytypeReference>,
+        values: FilterValueList<SelectReference>,
     },
     /// RFC 3339-like date property value accepted by Anytype.
     Date {
@@ -454,7 +533,7 @@ impl McpFilter {
 }
 
 /// One nested, bounded filter expression shared by MCP workflows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpFilterExpression {
     /// Operator combining direct conditions and child groups.
@@ -465,6 +544,67 @@ pub struct McpFilterExpression {
     /// Nested groups in this group.
     #[serde(default)]
     filters: FilterList<McpFilterExpression>,
+}
+
+impl JsonSchema for McpFilterExpression {
+    fn schema_name() -> Cow<'static, str> {
+        "McpFilterExpression".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "One nested, bounded filter expression shared by MCP workflows. At least one of conditions or filters must be present and nonempty.",
+            "anyOf": [
+                expression_schema_branch(generator, true),
+                expression_schema_branch(generator, false),
+            ],
+        })
+    }
+}
+
+fn expression_schema_branch(generator: &mut SchemaGenerator, require_conditions: bool) -> Schema {
+    let required_member = if require_conditions {
+        "conditions"
+    } else {
+        "filters"
+    };
+    let condition_minimum = usize::from(require_conditions);
+    let filter_minimum = usize::from(!require_conditions);
+    json_schema!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "operator": described_schema(
+                generator.subschema_for::<FilterOperator>(),
+                "Operator combining direct conditions and child groups.",
+            ),
+            "conditions": {
+                "type": "array",
+                "description": "Direct conditions in this group.",
+                "items": generator.subschema_for::<McpFilter>(),
+                "minItems": condition_minimum,
+                "maxItems": crate::validation::MAX_FILTERS,
+                "default": [],
+            },
+            "filters": {
+                "type": "array",
+                "description": "Nested groups in this group.",
+                "items": generator.subschema_for::<McpFilterExpression>(),
+                "minItems": filter_minimum,
+                "maxItems": crate::validation::MAX_FILTERS,
+                "default": [],
+            },
+        },
+        "required": ["operator", required_member],
+    })
+}
+
+fn described_schema(mut schema: Schema, description: &'static str) -> Schema {
+    schema.insert(
+        "description".to_owned(),
+        Value::String(description.to_owned()),
+    );
+    schema
 }
 
 impl McpFilterExpression {
@@ -533,8 +673,8 @@ impl McpFilterExpression {
     }
 }
 
-fn nonempty_values<T: AsRef<str>, const MAX: usize>(
-    values: &BoundedList<T, MAX>,
+fn nonempty_values<T: AsRef<str>>(
+    values: &FilterValueList<T>,
 ) -> Result<Vec<String>, HandlerError> {
     if values.as_slice().is_empty() {
         return Err(HandlerError::new(ToolError::validation()));
@@ -744,6 +884,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn select_references_are_comma_free_bounded_and_preserved_exactly() {
+        assert!(SelectReference::new("é".repeat(MAX_REFERENCE_CHARS)).is_ok());
+        assert!(SelectReference::new("é".repeat(MAX_REFERENCE_CHARS + 1)).is_err());
+        assert!(SelectReference::new("").is_err());
+        assert!(SelectReference::new("alpha,beta").is_err());
+
+        for format in ["select", "multi_select"] {
+            assert!(
+                serde_json::from_value::<McpFilter>(json!({
+                    "format":format,
+                    "property_key":"tag",
+                    "condition":"in",
+                    "values":["alpha,beta"]
+                }))
+                .is_err(),
+                "{format} accepted an ambiguous comma-bearing reference"
+            );
+            assert!(
+                serde_json::from_value::<McpFilter>(json!({
+                    "format":format,
+                    "property_key":"tag",
+                    "condition":"in",
+                    "values":["alpha","beta"]
+                }))
+                .is_ok()
+            );
+        }
+
+        assert_conversion(
+            json!({
+                "format":"select",
+                "property_key":"tag",
+                "condition":"in",
+                "values":[" alpha ","beta"]
+            }),
+            json!({
+                "condition":"in",
+                "property_key":"tag",
+                "select":" alpha ,beta"
+            }),
+        );
+
+        let schema = serde_json::to_value(schema_for!(SelectReference)).unwrap();
+        assert_eq!(schema["minLength"], 1);
+        assert_eq!(schema["maxLength"], MAX_REFERENCE_CHARS);
+        assert_eq!(schema["pattern"], "^[^,]+$");
+    }
+
     fn leaf_filter() -> McpFilterExpression {
         McpFilterExpression {
             operator: FilterOperator::And,
@@ -794,7 +983,7 @@ mod tests {
         assert!(excessive_filter_count.to_anytype().is_err());
 
         let values = (0..MAX_FILTER_VALUES)
-            .map(|index| AnytypeReference::new(format!("v{index}")).unwrap())
+            .map(|index| SelectReference::new(format!("v{index}")).unwrap())
             .collect();
         let max_values = McpFilter::Select {
             property_key: TypeKey::new("tag").unwrap(),
@@ -816,7 +1005,7 @@ mod tests {
                     condition: SelectCondition::In,
                     values: FilterValueList::new(
                         (0..51)
-                            .map(|index| AnytypeReference::new(format!("a{index}")).unwrap())
+                            .map(|index| SelectReference::new(format!("a{index}")).unwrap())
                             .collect(),
                     )
                     .unwrap(),
@@ -826,7 +1015,7 @@ mod tests {
                     condition: SelectCondition::In,
                     values: FilterValueList::new(
                         (0..50)
-                            .map(|index| AnytypeReference::new(format!("b{index}")).unwrap())
+                            .map(|index| SelectReference::new(format!("b{index}")).unwrap())
                             .collect(),
                     )
                     .unwrap(),
@@ -1147,6 +1336,49 @@ mod tests {
         assert!(encoded.contains("\"maxItems\":100"));
         assert!(encoded.contains("\"maxLength\":4096"));
         assert!(encoded.contains("\"maximum\":1000000000000000.0"));
+
+        let definitions = schema["$defs"].as_object().unwrap();
+        let expression = &definitions["McpFilterExpression"];
+        let branches = expression["anyOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0]["required"], json!(["operator", "conditions"]));
+        assert_eq!(branches[1]["required"], json!(["operator", "filters"]));
+        assert_eq!(branches[0]["properties"]["conditions"]["minItems"], 1);
+        assert_eq!(branches[0]["properties"]["filters"]["minItems"], 0);
+        assert_eq!(branches[1]["properties"]["conditions"]["minItems"], 0);
+        assert_eq!(branches[1]["properties"]["filters"]["minItems"], 1);
+        for branch in branches {
+            assert_eq!(branch["properties"]["conditions"]["default"], json!([]));
+            assert_eq!(branch["properties"]["filters"]["default"], json!([]));
+            assert_eq!(branch["properties"]["conditions"]["maxItems"], 50);
+            assert_eq!(branch["properties"]["filters"]["maxItems"], 50);
+        }
+
+        let value_lists = definitions
+            .iter()
+            .filter(|(name, _)| name.starts_with("NonEmptyFilterValueList100Of"))
+            .map(|(_, schema)| schema)
+            .collect::<Vec<_>>();
+        assert_eq!(value_lists.len(), 3);
+        for value_list in value_lists {
+            assert_eq!(value_list["minItems"], 1);
+            assert_eq!(value_list["maxItems"], 100);
+        }
+
+        let empty: McpFilterExpression = serde_json::from_value(json!({"operator":"and"})).unwrap();
+        assert!(empty.to_anytype().is_err());
+        let explicit_empty: McpFilterExpression = serde_json::from_value(json!({
+            "operator":"and",
+            "conditions":[],
+            "filters":[]
+        }))
+        .unwrap();
+        assert!(explicit_empty.to_anytype().is_err());
+        for field in ["conditions", "filters"] {
+            let mut value = json!({"operator":"and"});
+            value[field] = Value::Null;
+            assert!(serde_json::from_value::<McpFilterExpression>(value).is_err());
+        }
 
         let date_schema = serde_json::to_value(schema_for!(DateCondition)).unwrap();
         let conditions = date_schema["oneOf"]
