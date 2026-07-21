@@ -153,7 +153,7 @@ impl AnytypeResources {
         }
     }
 
-    /// Protocol adapter for an eventual `ServerHandler::read_resource` method.
+    /// Protocol adapter used by the production `ServerHandler::read_resource` method.
     pub async fn read_resource(
         &self,
         request: ReadResourceRequestParams,

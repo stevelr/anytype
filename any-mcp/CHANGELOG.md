@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Complete the prerelease documentation contract with current stable/preview
+  startup, compact/standard and read-only catalogs, host registration,
+  credentials, bounds, mutation uncertainty, security, cross-platform gates,
+  resource behavior, and reviewed token baselines. Add `any-mcp` to the
+  workspace project index and expand public crate/catalog rustdoc without
+  claiming unimplemented optional toolsets or a published release.
 - Make the latest released MCP protocol (`2025-11-25`) and its
   initialize/initialized lifecycle the production stdio default. The stateless
   `2026-07-28` implementation remains compiled and schema-tested, but now
@@ -28,20 +34,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   identical complete contracts. Enforce deterministic complete-`tools/list`
   and representative-result budgets with compact canonical JSON and pinned
   `o200k_base` tokenization. The reviewed 9,423-token compact catalog remains
-  below 5% of the documented 200,000-token support floor with 577 tokens of
-  headroom; exact baselines cover all four profile/read-only envelopes, reject
-  drift, and require an
+  below 5% of the internal 200,000-token compatibility-policy floor with 577
+  tokens of headroom; exact baselines cover all four profile/read-only
+  envelopes, reject drift, and require an
   explicit rationale for material growth of at least 2%. Validate the current
   production output schemas against reviewed search/get results, and run the
   schema/unit and portable real-process stdio suites on Linux, macOS, and
   Windows in a dedicated CI matrix.
-- Add a bounded dual-era stdio adapter that preserves the rmcp legacy
-  initialization lifecycle for current clients and implements stateless MCP
+- Add bounded, explicitly selected stdio adapters: the released rmcp
+  initialization lifecycle is the production default, while stateless MCP
   `2026-07-28` discovery, per-request metadata/version validation, `-32022`
   negotiation errors, complete-result discrimination, cache hints, concurrent
-  cancellation, clean EOF, and the full normal/read-only tool and resource
-  surface. Validate real modern process exchanges against the official draft
-  schema. The legacy decoder now emits exactly one JSON-RPC parse error for
+  cancellation, clean EOF, and the full standard read-write/read-only tool and resource
+  surface. Validate real preview process exchanges against the official draft
+  schema. The stable decoder now emits exactly one JSON-RPC parse error for
   each syntactically malformed newline frame with an explicit null response
   ID, distinguishes oversized and well-formed invalid requests, never replies
   to valid JSON-RPC notification shapes, and remains usable for subsequent
@@ -78,7 +84,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   terminal page, requiring both exact fixture IDs, stable query-bound cursors,
   no repeated cursor or item, and a fixed traversal bound.
 - Add the initial bounded, workflow-oriented `any-mcp` scaffold using `rmcp`
-  2.2.0 and protocol revision `2026-07-28`.
+  2.2.0, including the compiled `2026-07-28` preview contract.
 - Add authenticated long-lived Anytype client startup, bounded and cancellable
   upstream execution, request/startup timeouts, stderr-only diagnostics, and
   clean stdio EOF shutdown.
@@ -180,10 +186,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   four mutation tools and rejects stale direct mutation calls before argument
   decoding, resolver work, or upstream I/O.
 - Add a cross-platform production-process stdio regression harness with
-  bounded deadlines, authenticated loopback fixtures, exact normal/read-only
+  bounded deadlines, authenticated loopback fixtures, exact profile/read-only
   catalogs, all-tool dispatch, resource reads, structured results,
   cancellation, unknown and invalid requests, clean EOF, and complete
-  stdout/stderr purity checks. Cover modern MCP 2026-07-28 discovery plus
+  stdout/stderr purity checks. Cover preview MCP 2026-07-28 discovery plus
   malformed-first and post-initialize parse recovery, including repeated and
   oversized frames followed by successful requests in both server modes.
 - Bound each captured protocol frame, diagnostic line, aggregate stream, and
@@ -191,7 +197,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and join every owned worker on success and failure. Assert exact response
   counts separately from byte purity and require JSON-RPC 2.0 on every stdout
   object.
-- Compare the complete real normal/read-only `tools/list` wire payload against
+- Compare all four real profile/read-only `tools/list` wire payloads against
   the reviewed canonical catalog snapshots, including exact descriptions,
   nested input/output schemas, annotations, ordering, and omissions without
   duplicating fixture contents.
@@ -200,7 +206,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   counts, live `server_status` calls from both released clients, and the
   official conformance runner's current HTTP-only server interface without
   claiming an inapplicable stdio conformance pass.
-- Add reviewed deterministic normal/read-only catalog snapshots, an independent
+- Add reviewed deterministic profile/read-only catalog snapshots, an independent
   fail-closed local-reference graph audit for recursive schema bounds and exact
   annotation audits, exact character/byte boundary coverage, exhaustive Anytype
   error-classifier assertions, and cross-surface secret-redaction checks.

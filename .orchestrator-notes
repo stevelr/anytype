@@ -1,7 +1,8 @@
 # Orchestrator Notes
 
 - Scope: br ready, types bug/chore/task, priorities 0-2 (no label filter this session).
-- In_progress to triage before ready-only work: `any-83f` (any-mcp docs; implementation complete and independently approved at rebased commit 34cb2607 / change rzkknnup on parent 3e8771da191a — needs INTEGRATION into default workspace only, then closeout) and `any-8tf` (anyr resolve cleanup; bulk migration done, remaining scope is chat.rs resolve_message_id_for_order/resolve_message_ids move-or-document per ticket description).
+- `any-83f` CLOSED 2026-07-21 (closeItem it1): Phase 1.18 any-mcp docs integrated as change wvkusyrl and closed. Diff = 12 doc/rustdoc files (+250/-57 approved) plus fmt whitespace normalization; no gate-config, security-path, anyr, or anytype-api edits. CHANGELOG prerelease entry already in-diff (no duplicate added).
+- In_progress to triage before ready-only work: `any-8tf` (anyr resolve cleanup; bulk migration done, remaining scope is chat.rs resolve_message_id_for_order/resolve_message_ids move-or-document per ticket description).
 - anyr 0.5 plan (docs/anyr-0.5-cli-gap-analysis.md): phase-1 (any-ori, any-2b1, any-f5t) all closed. Phase-2 (any-ho5, any-6r7) is status=blocked solely by `any-a7k` (type env, P0): prior session's file.rs-only owner could not edit anyr/src/cli/mod.rs clap declarations. Resolution is orchestration-scoped — assign one batch owning both anyr/src/cli/mod.rs and file.rs, then unblock/close any-a7k via the designated closer. Phases 3-5 (any-vtr, any-ga2 -> any-hcq -> any-5gx) wait behind phase-2 via existing br deps.
 - Test-coverage track: any-gc5 (design doc, ready now) -> any-jzn (human review gate) -> any-g3x (file tickets) -> any-q1n parent.
 - Prior mcp-phase history pruned 2026-07-21; durable code invariants remain in .agent-notes (read-only for workers).

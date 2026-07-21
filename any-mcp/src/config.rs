@@ -101,8 +101,8 @@ impl RuntimeConfig {
     /// # Errors
     ///
     /// Returns [`ConfigError`] when an environment value is non-Unicode,
-    /// violates an exact protocol/read-only switch grammar, is non-numeric or
-    /// zero, or exceeds its defensive maximum.
+    /// violates an exact protocol/profile/read-only switch grammar, is
+    /// non-numeric or zero, or exceeds its defensive maximum.
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)),
