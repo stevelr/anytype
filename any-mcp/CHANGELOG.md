@@ -8,6 +8,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Extract the `object_search` filter grammar into a shared bounded MCP DTO
+  matching the supported `anytype-api` formats and conditions one-to-one.
+  Preserve aggregate count/value/depth limits, identifier validation,
+  semantically canonical cursor bindings, and the known upstream
+  numeric/checkbox behavior without client-side post-pagination emulation.
+  Equivalent logical-group and set-operand permutations/duplicates now share a
+  cursor identity without changing their upstream presentation, and Date
+  filters include Anytype's supported `in` condition. Select operands use a
+  dedicated 1..512-scalar, comma-free reference so the upstream comma-delimited
+  encoding is unambiguous. Set arrays advertise 1..100 items, and the recursive
+  expression schema requires at least one nonempty member array while retaining
+  the runtime checks. Lock every conversion and the reviewed catalog/token
+  changes with focused tests and exact snapshots.
 - Complete the prerelease documentation contract with current stable/preview
   startup, compact/standard and read-only catalogs, host registration,
   credentials, bounds, mutation uncertainty, security, cross-platform gates,
@@ -24,6 +37,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Classify the bounded and malformed file-response evidence errors introduced
+  by `anytype-api` exhaustively: header-budget failures map to
+  `bounded_result`, malformed upstream file headers map to `upstream`, mutation
+  uncertainty remains conservative, and diagnostics retain only fixed
+  categories plus the numeric HTTP status.
 - Make profile admission truthful about transport dependencies: standard
   read-write now requires authenticated HTTP and gRPC before advertising its
   fixed fourteen-tool catalog, while compact and read-only catalogs may start

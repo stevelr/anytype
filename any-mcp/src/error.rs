@@ -179,6 +179,8 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         AnytypeError::Grpc { .. } => error.is_authentication(),
         AnytypeError::Http { .. }
         | AnytypeError::ResponseTooLarge { .. }
+        | AnytypeError::FileHeaderEvidenceTooLarge { .. }
+        | AnytypeError::InvalidFileResponseHeader { .. }
         | AnytypeError::ChatSseEventTooLarge { .. }
         | AnytypeError::ChatSseTransport { .. }
         | AnytypeError::TooManyRetries { .. }
@@ -315,6 +317,7 @@ impl ToolError {
             }
             AnytypeError::ResolutionLimitExceeded { .. }
             | AnytypeError::ResponseTooLarge { .. }
+            | AnytypeError::FileHeaderEvidenceTooLarge { .. }
             | AnytypeError::ChatSseEventTooLarge { .. } => ToolErrorCode::BoundedResult,
             AnytypeError::NotFound { .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
@@ -328,6 +331,7 @@ impl ToolError {
                 code: 409 | 412, ..
             } => ToolErrorCode::Conflict,
             AnytypeError::Http { .. }
+            | AnytypeError::InvalidFileResponseHeader { .. }
             | AnytypeError::ChatSseTransport { .. }
             | AnytypeError::ApiError { .. }
             | AnytypeError::TooManyRetries { .. }
@@ -549,6 +553,21 @@ mod tests {
                     declared: Some(2),
                 },
                 ToolErrorCode::BoundedResult,
+            ),
+            (
+                AnytypeError::FileHeaderEvidenceTooLarge {
+                    limit: 4_096,
+                    status: 429,
+                },
+                ToolErrorCode::BoundedResult,
+            ),
+            (
+                AnytypeError::InvalidFileResponseHeader {
+                    status: 206,
+                    header: "content-range",
+                    issue: "malformed",
+                },
+                ToolErrorCode::Upstream,
             ),
             (
                 AnytypeError::TooManyRetries { n: 3 },

@@ -284,13 +284,29 @@ let response = client
     .files()
     .download_request(space_id, file_id)
     .width(640)
-    .range("bytes=0-4095")
+    .byte_range(0, 4096)
+    .response_limit_bytes(4097)
+    .error_limit_bytes(64 * 1024)
+    .header_evidence_limit_bytes(4096)
+    .max_attempts(6)
     .if_none_match("\"cached-etag\"")
     .download()
     .await?;
 
 println!("status: {}, type: {:?}", response.status, response.metadata.content_type);
 ```
+
+These controls are per request: they never widen or mutate the configured
+global response limits. Successful GETs require one canonical `Content-Length`
+that matches the buffered body. Partial responses additionally require one
+canonical `Content-Range` consistent with the requested range and body.
+`Content-Type`, `ETag`, `Last-Modified`, and `Accept-Ranges` are parsed and
+validated; duplicates, non-UTF-8 values, contradictions, truncation, and
+allowlisted header evidence over the selected ceiling fail with typed,
+secret-safe errors. The header ceiling is checked independently before body or
+retry processing on every physical response, including intermediate 429 and
+retryable-status responses. The attempt ceiling is cumulative across 429,
+retryable status, connection, and timeout replays.
 
 Use `files().metadata(space_id, file_id)` for a simple `HEAD` request. File
 deletion moves the object to the bin by default; permanent deletion is explicit:

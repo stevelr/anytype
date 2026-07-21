@@ -56,6 +56,7 @@ pub mod cursor;
 pub mod discovery;
 pub mod domain;
 pub mod error;
+pub mod filters;
 pub mod handler_support;
 pub mod logging;
 pub mod mutation_value;

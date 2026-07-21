@@ -20,6 +20,9 @@ pub const MAX_TYPE_KEY_CHARS: usize = 256;
 pub const MAX_TIMESTAMP_CHARS: usize = 64;
 /// Maximum number of Unicode scalar values in an Anytype resource URI.
 pub const MAX_RESOURCE_URI_CHARS: usize = 1024;
+/// Maximum number of Unicode scalar values in a human-facing Anytype
+/// name, key, or identifier reference.
+pub const MAX_REFERENCE_CHARS: usize = 512;
 
 /// Error returned when a bounded wire value violates its declared constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +114,57 @@ impl<const MAX: usize> JsonSchema for BoundedText<MAX> {
         json_schema!({
             "type": "string",
             "maxLength": MAX,
+        })
+    }
+}
+
+/// A nonempty bounded Anytype name, key, or identifier reference.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct AnytypeReference(BoundedText<MAX_REFERENCE_CHARS>);
+
+impl AnytypeReference {
+    /// Validates and constructs a nonempty bounded reference.
+    pub fn new(value: impl Into<String>) -> Result<Self, DomainValueError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(DomainValueError::Empty);
+        }
+        BoundedText::new(value).map(Self)
+    }
+
+    /// Borrows the reference text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for AnytypeReference {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<'de> Deserialize<'de> for AnytypeReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for AnytypeReference {
+    fn schema_name() -> Cow<'static, str> {
+        "AnytypeReference".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_REFERENCE_CHARS,
         })
     }
 }

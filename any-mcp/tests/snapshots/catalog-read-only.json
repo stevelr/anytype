@@ -651,34 +651,6 @@
             "maxItems": 100,
             "type": "array"
           },
-          "BoundedList100OfEntityId": {
-            "items": {
-              "$ref": "#/$defs/EntityId"
-            },
-            "maxItems": 100,
-            "type": "array"
-          },
-          "BoundedList100OfObjectId": {
-            "items": {
-              "$ref": "#/$defs/ObjectId"
-            },
-            "maxItems": 100,
-            "type": "array"
-          },
-          "BoundedList50OfSearchFilter": {
-            "items": {
-              "$ref": "#/$defs/SearchFilter"
-            },
-            "maxItems": 50,
-            "type": "array"
-          },
-          "BoundedList50OfSearchFilterExpression": {
-            "items": {
-              "$ref": "#/$defs/SearchFilterExpression"
-            },
-            "maxItems": 50,
-            "type": "array"
-          },
           "BoundedList50OfTypeKey": {
             "items": {
               "$ref": "#/$defs/TypeKey"
@@ -742,6 +714,11 @@
                 "const": "gte",
                 "description": "Greater than or equal.",
                 "type": "string"
+              },
+              {
+                "const": "in",
+                "description": "Match a date value accepted by Anytype's `in` condition.",
+                "type": "string"
               }
             ]
           },
@@ -756,54 +733,23 @@
             "minimum": -1000000000000000.0,
             "type": "number"
           },
-          "NumberCondition": {
-            "description": "Operators supported for numeric properties.",
+          "FilterOperator": {
+            "description": "Logical operator for one bounded filter group.",
             "oneOf": [
               {
-                "const": "eq",
-                "description": "Equal.",
+                "const": "and",
+                "description": "Require every condition and nested group.",
                 "type": "string"
               },
               {
-                "const": "ne",
-                "description": "Not equal.",
-                "type": "string"
-              },
-              {
-                "const": "lt",
-                "description": "Less than.",
-                "type": "string"
-              },
-              {
-                "const": "lte",
-                "description": "Less than or equal.",
-                "type": "string"
-              },
-              {
-                "const": "gt",
-                "description": "Greater than.",
-                "type": "string"
-              },
-              {
-                "const": "gte",
-                "description": "Greater than or equal.",
+                "const": "or",
+                "description": "Require at least one condition or nested group.",
                 "type": "string"
               }
             ]
           },
-          "ObjectId": {
-            "maxLength": 256,
-            "minLength": 1,
-            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
-            "type": "string"
-          },
-          "PageLimit": {
-            "maximum": 100,
-            "minimum": 1,
-            "type": "integer"
-          },
-          "SearchFilter": {
-            "description": "One constrained Anytype search filter.\n\nThe tagged form prevents ambiguous free-form JSON. Checkbox and numeric\nfilters are forwarded exactly as supplied. They are currently affected by\nupstream anytype-heart#2879; this server does not rewrite them into a query\nwith different semantics.",
+          "McpFilter": {
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. They are currently affected by\nupstream `anytype-heart#2879`; this server does not rewrite them into a\nquery with different semantics.",
             "oneOf": [
               {
                 "additionalProperties": false,
@@ -880,7 +826,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfAnytypeReference",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
                     "description": "Compared tag ids or keys."
                   }
                 },
@@ -909,7 +855,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfAnytypeReference",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
                     "description": "Compared tag ids or keys."
                   }
                 },
@@ -996,7 +942,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfEntityId",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
                     "description": "Compared file ids."
                   }
                 },
@@ -1112,7 +1058,7 @@
                     "description": "Property key."
                   },
                   "values": {
-                    "$ref": "#/$defs/BoundedList100OfObjectId",
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
                     "description": "Compared object ids."
                   }
                 },
@@ -1164,44 +1110,148 @@
               }
             ]
           },
-          "SearchFilterExpression": {
-            "additionalProperties": false,
-            "description": "One nested, bounded filter expression.",
-            "properties": {
-              "conditions": {
-                "$ref": "#/$defs/BoundedList50OfSearchFilter",
-                "default": [],
-                "description": "Direct conditions in this group."
+          "McpFilterExpression": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "conditions": {
+                    "default": [],
+                    "description": "Direct conditions in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilter"
+                    },
+                    "maxItems": 50,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "filters": {
+                    "default": [],
+                    "description": "Nested groups in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilterExpression"
+                    },
+                    "maxItems": 50,
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "operator": {
+                    "$ref": "#/$defs/FilterOperator",
+                    "description": "Operator combining direct conditions and child groups."
+                  }
+                },
+                "required": [
+                  "operator",
+                  "conditions"
+                ],
+                "type": "object"
               },
-              "filters": {
-                "$ref": "#/$defs/BoundedList50OfSearchFilterExpression",
-                "default": [],
-                "description": "Nested groups in this group."
-              },
-              "operator": {
-                "$ref": "#/$defs/SearchFilterOperator",
-                "description": "Operator combining direct conditions and child groups."
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "conditions": {
+                    "default": [],
+                    "description": "Direct conditions in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilter"
+                    },
+                    "maxItems": 50,
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "filters": {
+                    "default": [],
+                    "description": "Nested groups in this group.",
+                    "items": {
+                      "$ref": "#/$defs/McpFilterExpression"
+                    },
+                    "maxItems": 50,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "operator": {
+                    "$ref": "#/$defs/FilterOperator",
+                    "description": "Operator combining direct conditions and child groups."
+                  }
+                },
+                "required": [
+                  "operator",
+                  "filters"
+                ],
+                "type": "object"
               }
-            },
-            "required": [
-              "operator"
             ],
-            "type": "object"
+            "description": "One nested, bounded filter expression shared by MCP workflows. At least one of conditions or filters must be present and nonempty."
           },
-          "SearchFilterOperator": {
-            "description": "Logical operator for one bounded filter group.",
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NumberCondition": {
+            "description": "Operators supported for numeric properties.",
             "oneOf": [
               {
-                "const": "and",
-                "description": "Require every condition and nested group.",
+                "const": "eq",
+                "description": "Equal.",
                 "type": "string"
               },
               {
-                "const": "or",
-                "description": "Require at least one condition or nested group.",
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
                 "type": "string"
               }
             ]
+          },
+          "ObjectId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "PageLimit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
           },
           "SearchSort": {
             "additionalProperties": false,
@@ -1252,6 +1302,12 @@
               }
             ]
           },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
+          },
           "TextCondition": {
             "description": "Operators supported for textual property formats.",
             "oneOf": [
@@ -1291,7 +1347,7 @@
             "description": "Opaque continuation cursor."
           },
           "filters": {
-            "$ref": "#/$defs/SearchFilterExpression",
+            "$ref": "#/$defs/McpFilterExpression",
             "description": "Optional bounded nested filter expression."
           },
           "limit": {

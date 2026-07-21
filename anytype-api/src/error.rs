@@ -68,6 +68,26 @@ pub enum AnytypeError {
         declared: Option<u64>,
     },
 
+    /// Allowlisted file response headers exceeded the caller's evidence budget.
+    #[snafu(display("file response header evidence exceeds the configured {limit}-byte limit"))]
+    FileHeaderEvidenceTooLarge {
+        /// Maximum retained allowlisted header bytes for this request.
+        limit: u64,
+        /// HTTP response status retained without any header or body value.
+        status: u16,
+    },
+
+    /// An allowlisted file response header was structurally invalid.
+    #[snafu(display("invalid file response header {header}: {issue}"))]
+    InvalidFileResponseHeader {
+        /// HTTP response status retained without the response body.
+        status: u16,
+        /// Fixed allowlisted header name.
+        header: &'static str,
+        /// Fixed validation classification such as `duplicate` or `malformed`.
+        issue: &'static str,
+    },
+
     /// A chat SSE event exceeded its configured incremental buffer ceiling.
     ///
     /// No event bytes, URL, credentials, or upstream body are retained.
@@ -324,6 +344,12 @@ impl AnytypeError {
                 Some(crate::http_client::diagnostic_path(url)),
             ),
             Self::ResponseTooLarge { .. } => ("response_too_large", None, None, None),
+            Self::FileHeaderEvidenceTooLarge { status, .. } => {
+                ("file_header_evidence_too_large", Some(*status), None, None)
+            }
+            Self::InvalidFileResponseHeader { status, .. } => {
+                ("invalid_file_response_header", Some(*status), None, None)
+            }
             Self::ChatSseEventTooLarge { .. } => ("chat_sse_event_too_large", None, None, None),
             Self::ChatSseTransport { path } => (
                 "chat_sse_transport",
@@ -382,6 +408,8 @@ impl AnytypeError {
             Self::Http { .. }
             | Self::ApiError { .. }
             | Self::ResponseTooLarge { .. }
+            | Self::FileHeaderEvidenceTooLarge { .. }
+            | Self::InvalidFileResponseHeader { .. }
             | Self::ChatSseEventTooLarge { .. }
             | Self::ChatSseTransport { .. }
             | Self::TooManyRetries { .. }

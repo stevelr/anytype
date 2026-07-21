@@ -284,7 +284,7 @@ pub mod prelude {
         files::{
             FileContentRequest, FileContentResponse, FileDeleteRequest, FileHttpMetadata,
             FileHttpUploadRequest, FileObject, FileStyle, FileType, FileUploadResponse,
-            FilesClient,
+            FilesClient, MAX_FILE_HEADER_EVIDENCE_BYTES, MAX_FILE_REQUEST_ATTEMPTS,
         },
         keystore::GrpcCredentials,
         process_watcher::{
