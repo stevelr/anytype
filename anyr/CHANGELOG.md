@@ -14,11 +14,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - `--set-property KEY:FORMAT:NAME` replaces the complete non-featured
     property list.
   - `--clear-properties` removes all non-featured recommended properties.
+- `anyr file delete --permanent` deletes a file object permanently (skips the
+  bin) instead of moving it to the bin.
 
 ### Changed
 
 - **Breaking**: `anyr list objects` now requires `--view` (view name or id); it
   is no longer optional.
+- **Breaking**: `anyr file delete` no longer accepts `--http`; the flag has been
+  removed and deletion now uses the REST files client (add `--permanent` to skip
+  the bin).
+- `anyr file upload --http` is now a deprecated no-op (a plain upload already
+  uses REST); it prints a deprecation warning and is rejected when combined with
+  `--file-type`, since `--file-type` selects the gRPC transport.
 - `anyr property update` now requires at least one of `--name` or `--key` and
   rejects a no-flag invocation before any network I/O. A key-only update reuses
   the property's current name so it still satisfies the REST contract.

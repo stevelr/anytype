@@ -126,21 +126,21 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
         FileCommands::Delete {
             space,
             object_id,
-            http,
+            permanent,
         } => {
             let space_id = ctx.client.resolve_space_id(&space).await?;
-            if http {
-                // REST delete (`DELETE /v1/spaces/{space}/files/{id}`) returns 204.
-                ctx.client.files().delete(&space_id, &object_id).await?;
-                if ctx.output.format() == OutputFormat::Table {
-                    return ctx.output.emit_text(&format!("deleted {object_id}"));
-                }
-                return ctx
-                    .output
-                    .emit_json(&json!({ "id": object_id, "deleted": true }));
+            // Canonical REST delete (`DELETE /v1/spaces/{space}/files/{id}`);
+            // `--permanent` maps to `skip_bin=true` (bypass the bin).
+            let mut request = ctx.client.files().delete_request(&space_id, &object_id);
+            if permanent {
+                request = request.permanently();
             }
-            let object = ctx.client.object(space_id, object_id).delete().await?;
-            ctx.output.emit_json(&object)
+            request.delete().await?;
+            if ctx.output.format() == OutputFormat::Table {
+                return ctx.output.emit_text(&format!("deleted {object_id}"));
+            }
+            ctx.output
+                .emit_json(&json!({ "id": object_id, "deleted": true, "permanent": permanent }))
         }
         FileCommands::Download {
             object_id,
@@ -181,18 +181,15 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             file_type,
             http,
         } => {
-            let space_id = ctx.client.resolve_space_id(&space).await?;
+            validate_upload_transport(http, file_type.is_some())?;
             if http {
-                // REST upload; `--file-type` is a gRPC-only hint and is ignored here.
-                let response = ctx
-                    .client
-                    .files()
-                    .upload(&space_id)
-                    .from_path(&file)
-                    .upload()
-                    .await?;
-                return ctx.output.emit_json(&response);
+                eprintln!(
+                    "warning: --http is deprecated and no longer selects a transport; a plain upload already uses REST"
+                );
             }
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            // The unified builder picks the least-capable backend that preserves
+            // the request: REST for a plain path, gRPC once `--file-type` is set.
             let mut request = ctx.client.files().upload(&space_id).from_path(&file);
             if let Some(file_type) = file_type {
                 request = request.file_type(file_type.into());
@@ -325,6 +322,21 @@ fn parse_properties(props: &[String]) -> Result<Vec<(String, String)>> {
     props.iter().map(|prop| parse_property(prop)).collect()
 }
 
+/// Reject the deprecated `--http` upload flag when it is combined with a
+/// gRPC-only option.
+///
+/// `--http` is still accepted as a deprecated no-op (a plain upload already
+/// uses REST), but it must not silently discard a gRPC-only selector such as
+/// `--file-type`; that combination is an error instead.
+fn validate_upload_transport(http: bool, has_file_type: bool) -> Result<()> {
+    if http && has_file_type {
+        anyhow::bail!(
+            "--http cannot be combined with --file-type (a gRPC-only option); drop --http to keep --file-type"
+        );
+    }
+    Ok(())
+}
+
 impl From<FileTypeArg> for FileType {
     fn from(value: FileTypeArg) -> Self {
         match value {
@@ -334,5 +346,104 @@ impl From<FileTypeArg> for FileType {
             FileTypeArg::Audio => Self::Audio,
             FileTypeArg::Pdf => Self::Pdf,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::validate_upload_transport;
+    use crate::cli::{Cli, Commands, FileCommands};
+
+    fn file_command(args: &[&str]) -> Result<FileCommands, clap::Error> {
+        let cli = Cli::try_parse_from(args)?;
+        match cli.command {
+            Commands::File(file) => Ok(file.command),
+            other => panic!("expected file command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upload_transport_rejects_http_with_file_type() {
+        // --http (deprecated) must not silently discard a gRPC-only option.
+        assert!(validate_upload_transport(true, true).is_err());
+    }
+
+    #[test]
+    fn upload_transport_accepts_deprecated_http_alone() {
+        assert!(validate_upload_transport(true, false).is_ok());
+    }
+
+    #[test]
+    fn upload_transport_accepts_file_type_alone() {
+        assert!(validate_upload_transport(false, true).is_ok());
+    }
+
+    #[test]
+    fn upload_still_parses_deprecated_http_with_file_type() {
+        // clap accepts the pair; rejection happens in the handler.
+        let command = file_command(&[
+            "anyr",
+            "file",
+            "upload",
+            "space",
+            "--file",
+            "/tmp/x.png",
+            "--http",
+            "--file-type",
+            "image",
+        ])
+        .expect("upload with --http and --file-type parses");
+        match command {
+            FileCommands::Upload {
+                http, file_type, ..
+            } => {
+                assert!(http);
+                assert!(file_type.is_some());
+            }
+            other => panic!("expected upload command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upload_defaults_have_no_http_or_file_type() {
+        let command = file_command(&["anyr", "file", "upload", "space", "--file", "/tmp/x.png"])
+            .expect("plain upload parses");
+        match command {
+            FileCommands::Upload {
+                http, file_type, ..
+            } => {
+                assert!(!http);
+                assert!(file_type.is_none());
+            }
+            other => panic!("expected upload command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_defaults_to_non_permanent() {
+        let command = file_command(&["anyr", "file", "delete", "space", "file-1"])
+            .expect("plain delete parses");
+        match command {
+            FileCommands::Delete { permanent, .. } => assert!(!permanent),
+            other => panic!("expected delete command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_accepts_permanent() {
+        let command = file_command(&["anyr", "file", "delete", "space", "file-1", "--permanent"])
+            .expect("permanent delete parses");
+        match command {
+            FileCommands::Delete { permanent, .. } => assert!(permanent),
+            other => panic!("expected delete command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_rejects_removed_http_flag() {
+        // --http was removed from the delete surface entirely.
+        assert!(file_command(&["anyr", "file", "delete", "space", "file-1", "--http"]).is_err());
     }
 }
