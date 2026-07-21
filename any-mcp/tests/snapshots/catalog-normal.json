@@ -70,7 +70,7 @@
           },
           "id": {
             "$ref": "#/$defs/ObjectId",
-            "description": "Stable identifier Anytype confirmed in the archive response."
+            "description": "Stable identifier confirmed by independent stored-state verification."
           },
           "resource_uri": {
             "$ref": "#/$defs/ObjectResourceUri",

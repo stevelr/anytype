@@ -24,6 +24,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Require independent, finite active-absence and original-type-scoped archived
+  readback before every `object_archive` success. The single non-replayed DELETE
+  response is dispatch evidence only; matching, malformed, mismatched, and
+  uncertain responses cannot bypass stored-state verification, and unproven
+  outcomes retain fixed mutation-indeterminate guidance.
 - Preserve exact body verification while avoiding Anytype Markdown
   double-escaping for the closed plain-line subset shared by `object_create`,
   `object_update`, and `object_edit`. Raw and canonical plain bodies containing
@@ -152,11 +157,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and update can distinguish definitive local/HTTP rejection from ambiguous
   transport, timeout, response, retry, and server outcomes after dispatch.
 - Add the typed `object_archive` soft-delete workflow with destructive
-  annotations, pre-I/O read-only enforcement, safe resolver/response identity
+  annotations, pre-I/O read-only enforcement, safe preflight/evidence identity
   validation, one non-replayed DELETE, and a minimal verified archived-state
-  result. Exact immediate success is accepted directly; uncertain responses
-  use finite active-absence plus original-type-scoped archive confirmation,
-  while unproven outcomes return fixed mutation-indeterminate guidance.
+  result. Every non-definitively-rejected dispatch uses finite independent
+  active-absence plus original-type-scoped archive confirmation; the DELETE
+  body is never success evidence, while unproven outcomes return fixed
+  mutation-indeterminate guidance.
 - Add the exact Anytype document resource template and transport-neutral
   resource handlers with strict canonical URI parsing, intentionally empty
   instance listing, complete 100,000-character markdown reads, document-byte
