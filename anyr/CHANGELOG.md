@@ -43,6 +43,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- `anyr auth status` now reports HTTP and gRPC credentials separately with an
+  explicit present/missing indicator per set, so it is clear which credential
+  set a REST versus gRPC command needs.
 - **Breaking**: `anyr list objects` now requires `--view` (view name or id); it
   is no longer optional.
 - **Breaking**: `anyr file delete` no longer accepts `--http`; the flag has been
