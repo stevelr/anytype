@@ -151,9 +151,9 @@ impl RuntimeContext {
     /// The timeout covers both waiting for a permit and the upstream future.
     /// A handler should pass the cancellation token from its rmcp
     /// `RequestContext`, which rmcp cancels on `notifications/cancelled`.
-    /// Until concrete handlers land, this explicit token parameter is the
-    /// tested integration seam. Diagnostics use a server-generated correlation
-    /// ID and never the peer-controlled raw MCP request ID.
+    /// Production handlers pass their request token through this explicit seam.
+    /// Diagnostics use a server-generated correlation ID and never the
+    /// peer-controlled raw MCP request ID.
     pub async fn execute<F, T>(
         &self,
         context: OperationContext,
@@ -617,7 +617,9 @@ impl std::error::Error for StartupError {}
 
 /// Runs the authenticated server over stdin/stdout until EOF.
 ///
-/// Stdout is passed directly to rmcp and is never used for diagnostics.
+/// The selected bounded framing adapter owns stdout, which is never used for
+/// diagnostics. Stable mode delegates typed lifecycle dispatch to rmcp;
+/// experimental preview mode uses the stateless adapter.
 ///
 /// # Errors
 ///
