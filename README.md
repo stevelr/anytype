@@ -25,4 +25,14 @@ This repository is a rust workspace for Anytype automation, with client librarie
 <p>Experimental Rust gRPC client for Anytype</p>
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+<h3><a href="./any-mcp/">🔗 any-mcp</a></h3>
+<p>Bounded, workflow-oriented MCP server for Anytype</p>
+</td>
+<td width="50%" valign="top">
+<h3><a href="./anyback/">💾 anyback</a></h3>
+<p>Backup, restore, and inspect Anytype spaces</p>
+</td>
+</tr>
 </table>

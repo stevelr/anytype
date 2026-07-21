@@ -3,12 +3,51 @@
 // SPDX-FileCopyrightText: 2026 Steve Schoettler
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared foundations for the `any-mcp` binary.
+//! Bounded, workflow-oriented MCP server foundations for Anytype.
 //!
-//! The crate exposes authenticated Anytype client startup, bounded upstream
-//! execution controls, strict MCP schemas, typed results and errors, and the
-//! stdio service lifecycle. It depends on `anytype-api` through the `anytype`
-//! crate and never directly on generated `anytype-rpc` support.
+//! The `any-mcp` binary owns one authenticated [`anytype`](https://docs.rs/anytype)
+//! client and serves strict tools and document resources over stdio. It is a
+//! curated workflow surface, not a one-for-one Anytype API mirror, and never
+//! depends directly on generated `anytype-rpc` support.
+//!
+//! # Production defaults
+//!
+//! - [`ProtocolMode::Stable`] uses the released MCP `2025-11-25`
+//!   initialize/initialized lifecycle. The compiled stateless `2026-07-28`
+//!   adapter requires an explicit experimental environment selector.
+//! - [`ApplicationProfile::Compact`] advertises `server_status`,
+//!   `object_search`, `object_get`, and `object_edit`; read-only compact omits
+//!   `object_edit`.
+//! - [`ApplicationProfile::Standard`] advertises the complete fourteen-tool
+//!   Phase 1 catalog; read-only standard retains its ten read tools.
+//! - Resources advertise only the canonical
+//!   `anytype://spaces/{space_id}/objects/{object_id}` template. Instance
+//!   listing is empty and document discovery remains paginated through
+//!   `object_search`.
+//!
+//! ```
+//! use any_mcp::{ApplicationProfile, ProtocolMode};
+//!
+//! assert_eq!(ApplicationProfile::default(), ApplicationProfile::Compact);
+//! assert_eq!(ProtocolMode::default(), ProtocolMode::Stable);
+//! ```
+//!
+//! # Startup and safety
+//!
+//! [`RuntimeConfig::from_env`] validates exact protocol, profile, read-only,
+//! timeout, concurrency, and response-budget settings without echoing invalid
+//! values. [`RuntimeContext::start`] loads existing Anytype credentials and
+//! performs bounded authenticated health checks. [`serve_stdio`] reserves
+//! stdout for protocol frames; redacted diagnostics go to stderr.
+//!
+//! Every handler runs under shared concurrency, timeout, cancellation, response
+//! byte, schema, and result bounds. Read-only mode removes mutation tools and
+//! rejects stale direct calls before decoding or I/O. Once a mutation may have
+//! been dispatched, uncertain outcomes require rereading before retry rather
+//! than claiming failure or replaying a write.
+//!
+//! The crate README contains current host registration, complete tool semantics,
+//! protocol compatibility, token baselines, and operational guidance.
 
 pub mod config;
 pub mod cursor;

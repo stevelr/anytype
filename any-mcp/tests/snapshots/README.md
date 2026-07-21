@@ -19,13 +19,13 @@ snapshot acceptance conditional on an environment variable in CI.
 
 `token-budget.json` is the reviewed token-count baseline for the current
 production catalogs and `result-representatives.json`. The test constructs the
-actual normal and read-only catalogs, recursively sorts JSON object keys while
+all four profile/read-only catalogs, recursively sorts JSON object keys while
 preserving array order, serializes compact UTF-8 JSON with `serde_json`, and
 counts tokens with `o200k_base` from `tiktoken-rs` 0.12.0. This fixed pipeline
 is identical on Linux, macOS, and Windows; it does not use a host-installed
 Python package, network service, byte/token estimate, or platform newline.
 
-The documented smallest supported model context is 200,000 tokens. The
+The internal compatibility-policy floor is a 200,000-token model context. The
 complete default compact `tools/list` result is 9,423 tokens, leaving 577
 tokens below the strict 10,000-token ceiling (5% of that support floor).
 Compact read-only is 8,134 tokens; explicit standard and standard read-only are

@@ -6,7 +6,7 @@
 //! Bounded view discovery and selected-view object listing workflows.
 //!
 //! These handlers are transport-neutral. The production tool catalog owns
-//! their eventual rmcp routing; this module owns the strict typed contracts,
+//! their rmcp routing; this module owns the strict typed contracts,
 //! resolver calls, one-page upstream reads, bounded conversion, and cursor
 //! integrity checks.
 

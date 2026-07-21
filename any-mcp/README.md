@@ -6,6 +6,74 @@ A bounded, workflow-oriented Model Context Protocol server for Anytype.
 reading, and safely editing documents. It is intentionally not a one-for-one
 mirror of the Anytype API.
 
+## Quick start
+
+Build the current workspace prerelease and confirm that the existing `anyr`
+credentials can reach Anytype:
+
+```sh
+cargo build -p any-mcp
+anyr auth status --pretty
+realpath target/debug/any-mcp
+```
+
+The last command prints the absolute path to the binary built in this checkout.
+Replace `/absolute/path/to/anytype/target/debug/any-mcp` in both examples below
+with that platform-specific absolute path; the workspace build does not install
+`any-mcp` on `PATH`. On Windows, resolve `target\debug\any-mcp.exe` and prefer
+the JSON/TOML-safe forward-slash form, for example
+`C:/repo/target/debug/any-mcp.exe`. If native backslashes are retained, double
+every backslash in either quoted format, for example
+`C:\\repo\\target\\debug\\any-mcp.exe`; a single backslash can be parsed as an
+escape.
+
+An MCP host starts that binary and communicates with it over stdio.
+The server does not perform login or print credentials. It reuses the endpoint
+and keystore selected by `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
+`ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE` (default `anyr`). The default
+startup is the stable `2025-11-25` protocol, the four-tool compact profile, and
+read-write access. For a safer first registration, select compact read-only
+explicitly:
+
+```json
+{
+  "mcpServers": {
+    "anytype": {
+      "command": "/absolute/path/to/anytype/target/debug/any-mcp",
+      "env": {
+        "ANY_MCP_PROTOCOL": "stable",
+        "ANY_MCP_PROFILE": "compact",
+        "ANY_MCP_READ_ONLY": "1",
+        "ANYTYPE_URL": "http://127.0.0.1:31009",
+        "ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
+        "ANYTYPE_KEYSTORE_SERVICE": "anyr"
+      }
+    }
+  }
+}
+```
+
+Use a platform-appropriate keystore path or keep the host's existing Anytype
+environment instead of copying credentials into configuration. When
+`ANYTYPE_KEYSTORE=env`, supply `ANYTYPE_KEY_HTTP_TOKEN` only through the host
+environment or another secret facility; never put its value in prompts, tool
+arguments, or logs.
+
+Codex uses the same settings in `config.toml` and can forward the operator's
+existing non-secret selectors:
+
+```toml
+[mcp_servers.anytype]
+command = "/absolute/path/to/anytype/target/debug/any-mcp"
+env = { ANY_MCP_PROTOCOL = "stable", ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
+env_vars = ["ANYTYPE_URL", "ANYTYPE_GRPC_ENDPOINT", "ANYTYPE_KEYSTORE", "ANYTYPE_KEYSTORE_SERVICE"]
+```
+
+See [stdio protocol verification](STDIO_CONFORMANCE.md) for the tested Codex,
+Claude Code, and MCP Inspector registration commands and their exact pinned
+protocol revisions. Client registration is separate from Anytype login: create
+and store credentials with `anyr` or Anytype before starting the MCP host.
+
 ## Phase 1 foundations
 
 The crate provides an authenticated stdio runtime, a complete static Phase 1
@@ -25,11 +93,16 @@ Supported Anytype settings:
 
 - `ANYTYPE_URL` and `ANYTYPE_GRPC_ENDPOINT` select endpoints;
 - `ANYTYPE_KEYSTORE` selects the keystore (`env` supports no-persistence
-  deployments using `ANYTYPE_KEY_HTTP_TOKEN`); and
+  deployments using `ANYTYPE_KEY_HTTP_TOKEN` for HTTP and either
+  `ANYTYPE_KEY_ACCOUNT_KEY` or `ANYTYPE_KEY_SESSION_TOKEN` for optional gRPC);
+  and
 - `ANYTYPE_KEYSTORE_SERVICE` selects the existing credential service and
   defaults to `anyr` for compatibility.
 
 Operational settings are bounded defensively:
+
+All numeric settings below require an integer of at least 1 as well as the
+stated maximum.
 
 - `ANY_MCP_PROTOCOL` is absent or exactly `stable` for the production
   initialize-based protocol. Exact value `experimental-2026-07-28` enables the
@@ -89,9 +162,11 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   and `transport-io` features;
 - production advertises rmcp's latest released protocol, exactly `2025-11-25`,
   and uses the standard `initialize`/`notifications/initialized` lifecycle.
-  Released revisions through the documented `2024-11-05` minimum negotiate on
-  that lifecycle. Protocol negotiation is between MCP hosts/clients and the
-  server; language models do not select a wire revision;
+  Released revisions from the oldest explicitly regression-tested revision,
+  `2024-11-05`, through `2025-11-25` negotiate on that lifecycle. Unknown
+  revisions fall back to the stable server default. Protocol negotiation is
+  between MCP hosts/clients and the server; language models do not select a
+  wire revision;
 - stateless MCP `2026-07-28` is compiled and schema-tested but available only
   with `ANY_MCP_PROTOCOL=experimental-2026-07-28`. Its `server/discover`,
   per-request version/capability metadata, optional validated client identity,
@@ -99,7 +174,7 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   server handler/catalog implementation as stable mode. A first request can
   never opt an ordinary process into this preview, and stable startup rejects
   an initialize request for the compiled preview revision;
-- modern responses include `resultType: complete`; discovery and the static
+- preview responses include `resultType: complete`; discovery and the static
   tool/resource catalogs carry positive public cache hints, while authenticated
   document reads are immediately stale and private. Unsupported versions use
   error `-32022` with exact `supported` and `requested` data;
@@ -109,9 +184,9 @@ raw MCP IDs are never formatted. Operators can explicitly override the
   malformed frame and one `-32600` response per oversized or well-formed
   invalid frame. Valid JSON-RPC notification shapes never receive a response,
   including when their parameters cannot be decoded. Decoder and service
-  responses share one stdout writer. The modern path allows at most 64 active
+  responses share one stdout writer. The preview path allows at most 64 active
   requests; both paths preserve cancellation and prompt EOF shutdown;
-- modern request IDs accept every bounded string, including the schema-valid
+- preview request IDs accept every bounded string, including the schema-valid
   empty string, plus exactly represented signed/unsigned JSON integers. Strings
   are capped at 256 bytes and integers at serde_json's exact i64/u64 range as
   deliberate transport resource/response-correlation bounds;
@@ -124,6 +199,10 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 - reusable pagination defaults of 20 and a hard maximum of 100, with opaque,
   versioned continuation cursors bound to normalized query parameters and the
   issuing server process;
+- at most 4,096 live process-local cursors and 65,536 bytes of normalized query
+  material per cursor fingerprint. Body chunk metadata is capped at
+  100,000,000 total Unicode characters, while the configured document-response
+  byte ceiling normally becomes the tighter complete-body bound;
 - transport-neutral handler helpers that execute upstream calls and bounded
   conversion under the runtime controls, encode only through the declared
   typed contract, verify upstream offset/limit and result count before cursor
@@ -156,6 +235,32 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 ### Production catalog profiles and read-only mode
 
+| Startup selection | Read-write tools | Read-only tools |
+| --- | ---: | ---: |
+| default / `ANY_MCP_PROFILE=compact` | 4 | 3 |
+| `ANY_MCP_PROFILE=standard` | 14 | 10 |
+
+| Tool | Compact | Standard | Bounded workflow |
+| --- | :---: | :---: | --- |
+| `server_status` | ✓ | ✓ | Redacted endpoint, selected profile/access, startup availability, and stable enabled toolsets |
+| `object_search` | ✓ | ✓ | One checked page of summaries with bounded filters, projection, and cursor |
+| `object_get` | ✓ | ✓ | One exact object with bounded properties and optional body chunk/full-body hash |
+| `object_edit` | ✓ | ✓ | Ordered exact-match whole-body edit with required hash and one PATCH |
+| `space_list` |  | ✓ | One checked page of space summaries |
+| `type_list` |  | ✓ | One checked page of types in one resolved space |
+| `property_list` |  | ✓ | One checked property page, optionally scoped to a resolved type |
+| `tag_list` |  | ✓ | One checked tag-option page for one resolved select property |
+| `template_list` |  | ✓ | One checked page of body-free template summaries |
+| `view_list` |  | ✓ | One checked page of views for one list object |
+| `view_object_list` |  | ✓ | One selected view page with explicit bounded projection |
+| `object_create` |  | ✓ | One POST, bounded verification, and optional process-lifetime idempotency key |
+| `object_update` |  | ✓ | Explicit whole-field replacement with optional body-hash precondition and one update |
+| `object_archive` |  | ✓ | One soft-delete dispatch with bounded state confirmation |
+
+Read-only mode removes `object_edit` from compact and `object_create`,
+`object_update`, `object_edit`, and `object_archive` from standard. Every
+retained tool keeps the identical complete contract and handler.
+
 `tools/list` is a static, cursor-free catalog selected once at startup with
 `ANY_MCP_PROFILE`. The default `compact` profile advertises the coherent
 existing-document workflow `server_status`, `object_search`, `object_get`, and
@@ -169,6 +274,10 @@ The catalog is built once from the same typed contracts used by dispatch and
 then filtered, so a shared tool name has an identical complete description,
 input schema, output schema, annotation, and handler in every profile.
 Unknown or non-Unicode profile values fail startup without echoing their value.
+
+Only `compact` and `standard` exist. Proposed `schema`, `members`,
+`views-write`, `files`, `chats`, and `admin` toolsets are not implemented or
+selectable in this release.
 
 The server also advertises static resource and tool capabilities without
 `listChanged` or resource subscriptions. `resources/templates/list` exposes
@@ -537,7 +646,7 @@ the explicit regeneration and review procedure in
 [`tests/snapshots/README.md`](tests/snapshots/README.md), including its pinned
 `o200k_base` token-count audit. The complete serialized default compact
 `tools/list` result is 9,423 tokens, strictly below 10,000 tokens (5% of the
-documented 200,000-token smallest supported context), with 577 tokens of
+internal 200,000-token compatibility-policy floor), with 577 tokens of
 headroom. Its 2% material-growth boundary is 9,612 tokens, retaining 388 tokens
 of headroom. Compact read-only is 8,134 tokens. Exact reviewed baselines also
 measure explicit standard (22,639) and standard read-only (15,408), plus
@@ -554,6 +663,12 @@ budget, and unit tests plus the real-process stdio suites on Linux, macOS, and
 Windows. The process harness uses only portable Rust process, TCP, path,
 environment, thread, and channel APIs; it does not depend on Unix signals,
 `/tmp`, executable suffixes, or shell scripts.
+
+This is an OS-family portability gate, not a claim that CI exercises every CPU
+architecture. The workspace targets Linux x86_64/aarch64, macOS aarch64, and
+Windows x86_64/aarch64; the current dist configuration produces macOS aarch64,
+Linux x86_64/aarch64, and Windows x86_64 artifacts. No external `any-mcp`
+release is published by this documentation change.
 
 ## Headless integration tests
 
@@ -629,7 +744,7 @@ included in runtime error formatting or startup diagnostics.
 The production-process regression harness checks the complete advertised
 catalog, document resources, structured success and error results,
 cancellation, malformed and unknown requests, clean EOF, and stdout/stderr
-purity in normal and read-only modes. It also verifies preview stateless
+purity across profile and read-only modes. It also verifies preview stateless
 discovery, stable lifecycle negotiation, and exact malformed-frame recovery
 before and after stable initialization. See
 [stdio protocol verification](STDIO_CONFORMANCE.md)
