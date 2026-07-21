@@ -44,11 +44,12 @@ use crate::{
     view_handlers::{ViewListInput, ViewObjectListInput, ViewReadHandlers},
 };
 
-/// Upcoming MCP protocol revision advertised by `any-mcp`.
+/// Latest released MCP protocol revision advertised by production `any-mcp`.
 ///
-/// `rmcp` 2.2.0 models this draft revision ahead of its stable default, so the
-/// server selects it explicitly to follow the SDK's upcoming API direction.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2026_07_28;
+/// This is intentionally rmcp's stable `LATEST`, with an exact assertion in
+/// tests so a dependency upgrade cannot silently promote an unreleased wire
+/// contract.
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::LATEST;
 
 const SERVER_STATUS: &str = "server_status";
 const SPACE_LIST: &str = "space_list";
@@ -520,11 +521,12 @@ mod tests {
     use std::{fs, path::Path, time::Duration};
 
     use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
+    use rmcp::ServiceExt;
     use serde_json::{Value, json};
     use tokio::{
         io::{
             AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf,
-            WriteHalf, split,
+            WriteHalf, duplex, split,
         },
         net::TcpListener,
     };
@@ -1241,7 +1243,7 @@ mod tests {
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "protocolVersion": "2026-07-28",
+                    "protocolVersion": "2025-11-25",
                     "capabilities": {},
                     "clientInfo": {"name": "catalog-test", "version": "0.0.0"}
                 }
@@ -1250,7 +1252,44 @@ mod tests {
         .await;
         let response = read_frame(reader).await;
         assert_eq!(response["id"], 1);
-        assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
+        assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
+    }
+
+    async fn negotiate_protocol_version(requested: &str) -> Value {
+        let server = AnyMcpServer::new(runtime(false)).expect("static test catalog");
+        let (client_transport, server_transport) = duplex(4096);
+        let server_task = tokio::spawn(async move {
+            server
+                .serve(server_transport)
+                .await
+                .expect("server initializes")
+        });
+        let (reader, mut writer) = split(client_transport);
+        let mut reader = BufReader::new(reader);
+        write_frame(
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": requested,
+                    "capabilities": {},
+                    "clientInfo": {"name": "compatibility-test", "version": "0.0.0"}
+                }
+            }),
+        )
+        .await;
+        let response = read_frame(&mut reader).await;
+        drop(writer);
+        drop(reader);
+        server_task
+            .await
+            .expect("server task")
+            .cancel()
+            .await
+            .expect("cancel server");
+        response["result"]["protocolVersion"].clone()
     }
 
     async fn request(
@@ -1275,8 +1314,9 @@ mod tests {
         let server = AnyMcpServer::new(runtime(false)).unwrap();
         let info = server.info();
 
-        assert_eq!(info.protocol_version, ProtocolVersion::V_2026_07_28);
-        assert_eq!(info.protocol_version.as_str(), "2026-07-28");
+        assert_eq!(ProtocolVersion::LATEST, ProtocolVersion::V_2025_11_25);
+        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_11_25);
+        assert_eq!(info.protocol_version.as_str(), "2025-11-25");
         assert_eq!(info.server_info.name, env!("CARGO_PKG_NAME"));
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
         let tools = info.capabilities.tools.expect("tools capability");
@@ -1284,6 +1324,14 @@ mod tests {
         let resources = info.capabilities.resources.expect("resources capability");
         assert_eq!(resources.list_changed, None);
         assert_eq!(resources.subscribe, None);
+    }
+
+    #[tokio::test]
+    async fn stable_protocol_negotiates_every_supported_released_revision() {
+        for version in ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"] {
+            assert_eq!(negotiate_protocol_version(version).await, version);
+        }
+        assert_eq!(negotiate_protocol_version("2099-99-99").await, "2025-11-25");
     }
 
     #[test]

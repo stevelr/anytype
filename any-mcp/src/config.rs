@@ -20,10 +20,27 @@ const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 15;
 const MAX_STARTUP_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_JSON_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_DOCUMENT_RESPONSE_BYTES: u64 = MAX_DOCUMENT_RESPONSE_BYTES;
+const EXPERIMENTAL_PROTOCOL_VALUE: &str = "experimental-2026-07-28";
+
+/// Stdio protocol selected for one `any-mcp` process.
+///
+/// The released initialize-based MCP protocol is the production default. The
+/// stateless 2026-07-28 adapter is deliberately available only through its
+/// exact experimental environment value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProtocolMode {
+    /// Latest released initialize/initialized MCP lifecycle.
+    #[default]
+    Stable,
+    /// Experimental stateless MCP 2026-07-28 preview.
+    Experimental20260728,
+}
 
 /// Validated configuration for one `any-mcp` process.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
+    /// Stdio protocol mode selected at process startup.
+    pub protocol_mode: ProtocolMode,
     /// Whether the production catalog omits and rejects mutating workflows.
     pub read_only: bool,
     /// Maximum number of concurrent Anytype operations.
@@ -47,15 +64,15 @@ impl RuntimeConfig {
     ///
     /// Anytype settings use `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
     /// `ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE`. Operational limits
-    /// use `ANY_MCP_READ_ONLY`, `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
+    /// use `ANY_MCP_PROTOCOL`, `ANY_MCP_READ_ONLY`, `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
     /// `ANY_MCP_STARTUP_TIMEOUT_SECS`, `ANY_MCP_JSON_RESPONSE_BYTES`, and
     /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when an environment value is non-Unicode,
-    /// violates the exact read-only switch grammar, is non-numeric or zero,
-    /// or exceeds its defensive maximum.
+    /// violates an exact protocol/read-only switch grammar, is non-numeric or
+    /// zero, or exceeds its defensive maximum.
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)),
@@ -87,6 +104,7 @@ impl RuntimeConfig {
     where
         F: Fn(&'static str) -> Result<Option<String>, ConfigError>,
     {
+        let protocol_mode = parse_protocol_mode(lookup("ANY_MCP_PROTOCOL")?)?;
         let read_only = parse_read_only(lookup("ANY_MCP_READ_ONLY")?)?;
         let max_concurrency = parse_bounded(
             "ANY_MCP_MAX_CONCURRENCY",
@@ -126,6 +144,7 @@ impl RuntimeConfig {
         }
 
         Ok(Self {
+            protocol_mode,
             read_only,
             max_concurrency,
             request_timeout: Duration::from_secs(request_timeout_secs),
@@ -138,6 +157,17 @@ impl RuntimeConfig {
             keystore_service: non_empty(lookup("ANYTYPE_KEYSTORE_SERVICE")?)
                 .unwrap_or_else(|| DEFAULT_KEYSTORE_SERVICE.to_string()),
         })
+    }
+}
+
+fn parse_protocol_mode(value: Option<String>) -> Result<ProtocolMode, ConfigError> {
+    match value.as_deref() {
+        None | Some("stable") => Ok(ProtocolMode::Stable),
+        Some(EXPERIMENTAL_PROTOCOL_VALUE) => Ok(ProtocolMode::Experimental20260728),
+        Some(_) => Err(ConfigError::invalid(
+            "ANY_MCP_PROTOCOL",
+            "must be exactly stable or experimental-2026-07-28",
+        )),
     }
 }
 
@@ -225,6 +255,7 @@ mod tests {
         let config = config(&[]).expect("default configuration");
 
         assert_eq!(config.max_concurrency, 8);
+        assert_eq!(config.protocol_mode, ProtocolMode::Stable);
         assert!(!config.read_only);
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.startup_timeout, Duration::from_secs(15));
@@ -256,6 +287,7 @@ mod tests {
             ("ANYTYPE_KEYSTORE", "env"),
             ("ANYTYPE_KEYSTORE_SERVICE", "custom-service"),
             ("ANY_MCP_READ_ONLY", "1"),
+            ("ANY_MCP_PROTOCOL", "experimental-2026-07-28"),
             ("ANY_MCP_MAX_CONCURRENCY", "16"),
             ("ANY_MCP_REQUEST_TIMEOUT_SECS", "45"),
             ("ANY_MCP_STARTUP_TIMEOUT_SECS", "20"),
@@ -271,6 +303,7 @@ mod tests {
         assert_eq!(client.keystore_service.as_deref(), Some("custom-service"));
         assert_eq!(config.max_concurrency, 16);
         assert!(config.read_only);
+        assert_eq!(config.protocol_mode, ProtocolMode::Experimental20260728);
         assert_eq!(config.request_timeout, Duration::from_secs(45));
         assert_eq!(client.response_limits.json_bytes, 1_048_576);
         assert_eq!(client.response_limits.document_bytes, 2_097_152);
@@ -313,6 +346,35 @@ mod tests {
             let error = config(&[("ANY_MCP_READ_ONLY", invalid)]).unwrap_err();
             let message = error.to_string();
             assert!(message.contains("ANY_MCP_READ_ONLY"));
+        }
+    }
+
+    #[test]
+    fn protocol_mode_is_stable_by_default_and_preview_is_exact() {
+        assert_eq!(config(&[]).unwrap().protocol_mode, ProtocolMode::Stable);
+        assert_eq!(
+            config(&[("ANY_MCP_PROTOCOL", "stable")])
+                .unwrap()
+                .protocol_mode,
+            ProtocolMode::Stable
+        );
+        assert_eq!(
+            config(&[("ANY_MCP_PROTOCOL", "experimental-2026-07-28")])
+                .unwrap()
+                .protocol_mode,
+            ProtocolMode::Experimental20260728
+        );
+        for invalid in [
+            "",
+            "preview",
+            "2026-07-28",
+            "Experimental-2026-07-28",
+            " experimental-2026-07-28",
+            "experimental-2026-07-28 ",
+        ] {
+            let error = config(&[("ANY_MCP_PROTOCOL", invalid)]).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("ANY_MCP_PROTOCOL"));
         }
     }
 }

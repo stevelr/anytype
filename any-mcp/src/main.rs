@@ -17,12 +17,13 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = any_mcp::RuntimeConfig::from_env()?;
+    let protocol_mode = config.protocol_mode;
     let runtime = any_mcp::RuntimeContext::start(&config).await?;
     tracing::info!(
         http_available = runtime.startup_status().http_available,
         grpc_available = runtime.startup_status().grpc_available,
         "authenticated Anytype runtime ready"
     );
-    any_mcp::serve_stdio(runtime).await?;
+    any_mcp::serve_stdio(runtime, protocol_mode).await?;
     Ok(())
 }
