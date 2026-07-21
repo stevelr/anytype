@@ -6,8 +6,8 @@
 //! Single-object soft-archive workflow.
 //!
 //! This module deliberately exposes only Anytype's ordinary object DELETE,
-//! which archives one object. It uses bounded active and archived reads only
-//! to confirm an uncertain DELETE outcome; it never calls permanent batch
+//! which archives one object. Every successful call uses bounded independent
+//! active and archived reads after dispatch; it never calls permanent batch
 //! deletion, delete-all, or space mutation APIs.
 
 use std::{borrow::Cow, fmt, future::Future, time::Duration};
@@ -180,7 +180,7 @@ impl JsonSchema for ArchivedState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectArchiveOutput {
-    /// Stable identifier Anytype confirmed in the archive response.
+    /// Stable identifier confirmed by independent stored-state verification.
     id: ObjectId,
     /// Verified archived state; this value is always true.
     archived: ArchivedState,
@@ -225,12 +225,12 @@ pub fn object_archive_tool() -> Result<WorkflowTool<ObjectArchiveOutput>, Schema
 ///
 /// The mutation gate runs before resolution or upstream I/O. The handler reads
 /// and validates the exact active object's space, object, and type identities,
-/// then marks and sends one non-replayed DELETE. An exact immediate
-/// `archived=true` response succeeds directly. Every uncertain post-dispatch
-/// outcome instead uses finite read-after-write confirmation: the exact object
-/// must be absent from the bounded active surface and present in the bounded,
-/// original-type-scoped archived surface. Failure to prove both facts returns
-/// fixed mutation-indeterminate guidance and never replays DELETE.
+/// then marks and sends one non-replayed DELETE. Its response is dispatch
+/// evidence only. Every success requires finite independent read-after-write
+/// confirmation: the exact object must be absent from the bounded active
+/// surface and present in the bounded, original-type-scoped archived surface.
+/// Failure to prove both facts returns fixed mutation-indeterminate guidance
+/// and never replays DELETE.
 pub async fn object_archive(
     runtime: &RuntimeContext,
     contract: &WorkflowTool<ObjectArchiveOutput>,
@@ -238,11 +238,36 @@ pub async fn object_archive(
     input: &ObjectArchiveInput,
     cancellation: &CancellationToken,
 ) -> CallToolResult {
+    object_archive_with_verifier(
+        runtime,
+        contract,
+        access,
+        input,
+        cancellation,
+        |client, verification, identity| async move {
+            verify_archive_state(&client, &verification, &identity).await
+        },
+    )
+    .await
+}
+
+async fn object_archive_with_verifier<Verify, VerifyFuture>(
+    runtime: &RuntimeContext,
+    contract: &WorkflowTool<ObjectArchiveOutput>,
+    access: MutationAccess,
+    input: &ObjectArchiveInput,
+    cancellation: &CancellationToken,
+    verify: Verify,
+) -> CallToolResult
+where
+    Verify: FnOnce(AnytypeClient, VerifyConfig, ArchiveIdentity) -> VerifyFuture,
+    VerifyFuture: Future<Output = Result<(), AnytypeError>>,
+{
     if let Err(error) = require_mutation_access(access) {
         return tool_error(error.tool_error());
     }
 
-    let client = runtime.client();
+    let client = runtime.client().clone();
     let verification = archive_verification_config(
         client
             .get_config()
@@ -269,16 +294,13 @@ pub async fn object_archive(
             .delete_once()
             .await
         {
-            Ok(returned) if immediate_archive_matches(&returned, &identity) => {
-                return Ok::<_, HandlerOperationError>(archive_output(&identity));
-            }
             Err(error) if mutation_rejection_is_definitive(&error) => {
                 return Err(error.into());
             }
             Ok(_) | Err(_) => {}
         }
 
-        verify_archive_state(client, &verification, &identity)
+        verify(client, verification, identity.clone())
             .await
             .map_err(|_| HandlerError::new(ToolError::mutation_indeterminate()))?;
         Ok::<_, HandlerOperationError>(archive_output(&identity))
@@ -374,18 +396,6 @@ fn checked_preflight_identity(
         object_id,
         type_id,
     })
-}
-
-fn immediate_archive_matches(object: &Object, identity: &ArchiveIdentity) -> bool {
-    object.archived
-        && validate_object_identity(
-            object,
-            &identity.space_id,
-            &identity.object_id,
-            Some(&identity.type_id),
-            false,
-        )
-        .is_ok()
 }
 
 fn archive_output(identity: &ArchiveIdentity) -> ObjectArchiveOutput {
@@ -609,6 +619,7 @@ mod tests {
     const TYPE_ID: &str = "bafyreityyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
     const OTHER_TYPE_ID: &str = "bafyreizzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
 
+    #[derive(Clone)]
     struct FixtureReply {
         status: &'static str,
         body: String,
@@ -870,23 +881,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archives_exactly_one_object_at_the_intended_soft_delete_path() {
+    async fn applied_archive_requires_independent_verification_after_one_delete() {
         let (base_url, server) = fixture(vec![
             preflight_reply(),
             FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID))),
         ])
         .await;
         let runtime = runtime(base_url, Duration::from_secs(1));
-        let result = object_archive(
+        let verification_calls = Arc::new(AtomicUsize::new(0));
+        let recorded_calls = verification_calls.clone();
+        let result = object_archive_with_verifier(
             &runtime,
             &object_archive_tool().unwrap(),
             MutationAccess::Allowed,
             &input(SPACE_ID, OBJECT_ID),
             &CancellationToken::new(),
+            move |_, _, verified_identity| async move {
+                recorded_calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(verified_identity, identity());
+                verify_archive_state_with(
+                    &VerifyConfig {
+                        timeout: Duration::from_secs(1),
+                        initial_delay: Duration::ZERO,
+                        max_delay: Duration::ZERO,
+                        max_attempts: 2,
+                    },
+                    &verified_identity,
+                    || async {
+                        Ok(ArchiveEvidence {
+                            active_absent: true,
+                            archived_present: true,
+                        })
+                    },
+                )
+                .await
+            },
         )
         .await;
 
         assert_eq!(result.is_error, Some(false));
+        assert_eq!(verification_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             result.structured_content,
             Some(json!({
@@ -969,30 +1003,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_success_responses_recover_or_return_indeterminate_without_redelete() {
+    async fn matching_delete_body_without_applied_state_is_indeterminate() {
+        let (base_url, server) = fixture(vec![
+            preflight_reply(),
+            FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID))),
+        ])
+        .await;
+        let runtime = runtime(base_url, Duration::from_secs(1));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let recorded_attempts = attempts.clone();
+        let result = object_archive_with_verifier(
+            &runtime,
+            &object_archive_tool().unwrap(),
+            MutationAccess::Allowed,
+            &input(SPACE_ID, OBJECT_ID),
+            &CancellationToken::new(),
+            move |_, _, verified_identity| async move {
+                verify_archive_state_with(
+                    &VerifyConfig {
+                        timeout: Duration::from_secs(1),
+                        initial_delay: Duration::ZERO,
+                        max_delay: Duration::ZERO,
+                        max_attempts: 3,
+                    },
+                    &verified_identity,
+                    move || {
+                        recorded_attempts.fetch_add(1, Ordering::SeqCst);
+                        async {
+                            Ok(ArchiveEvidence {
+                                active_absent: false,
+                                archived_present: false,
+                            })
+                        }
+                    },
+                )
+                .await
+            },
+        )
+        .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result_code(&result), "conflict");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        let requests = server.await.expect("matching response fixture task");
+        assert_eq!(requests.len(), 2);
+        assert_one_delete(&requests);
+    }
+
+    #[tokio::test]
+    async fn mismatched_and_malformed_delete_bodies_are_dispatch_evidence_only() {
         let cases = [
-            object_response(SPACE_ID, OTHER_OBJECT_ID, true, Some(TYPE_ID)),
-            object_response(OTHER_SPACE_ID, OBJECT_ID, true, Some(TYPE_ID)),
-            object_response(SPACE_ID, OBJECT_ID, false, Some(TYPE_ID)),
-            object_response(SPACE_ID, "../unsafe", true, Some(TYPE_ID)),
-            object_response("../unsafe", OBJECT_ID, true, Some(TYPE_ID)),
-            object_response(SPACE_ID, OBJECT_ID, true, Some(OTHER_TYPE_ID)),
+            FixtureReply::json(object_response(
+                SPACE_ID,
+                OTHER_OBJECT_ID,
+                true,
+                Some(TYPE_ID),
+            )),
+            FixtureReply::json(object_response(
+                OTHER_SPACE_ID,
+                OBJECT_ID,
+                true,
+                Some(TYPE_ID),
+            )),
+            FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, false, Some(TYPE_ID))),
+            FixtureReply::json(object_response(
+                SPACE_ID,
+                OBJECT_ID,
+                true,
+                Some(OTHER_TYPE_ID),
+            )),
+            FixtureReply::malformed("{"),
         ];
-        for response in cases {
-            let (base_url, server) =
-                fixture(vec![preflight_reply(), FixtureReply::json(response)]).await;
+        for reply in cases {
+            let (base_url, server) = fixture(vec![preflight_reply(), reply]).await;
             let runtime = runtime(base_url, Duration::from_millis(100));
-            let result = object_archive(
+            let result = object_archive_with_verifier(
                 &runtime,
                 &object_archive_tool().unwrap(),
                 MutationAccess::Allowed,
                 &input(SPACE_ID, OBJECT_ID),
                 &CancellationToken::new(),
+                |_, _, _| async { Ok(()) },
             )
             .await;
-            assert_eq!(result.is_error, Some(true));
-            assert_eq!(result_code(&result), "conflict");
-            let requests = server.await.expect("malformed fixture task");
+            assert_eq!(result.is_error, Some(false));
+            let requests = server.await.expect("dispatch-evidence fixture task");
             assert_eq!(requests.len(), 2);
             assert_one_delete(&requests);
         }
@@ -1126,43 +1221,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_delete_failures_are_indeterminate_after_one_dispatch() {
+    async fn independent_verification_timeout_is_indeterminate_after_one_delete() {
+        let (base_url, server) = fixture(vec![
+            preflight_reply(),
+            FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID))),
+        ])
+        .await;
+        let runtime = runtime(base_url, Duration::from_millis(40));
+        let result = object_archive_with_verifier(
+            &runtime,
+            &object_archive_tool().unwrap(),
+            MutationAccess::Allowed,
+            &input(SPACE_ID, OBJECT_ID),
+            &CancellationToken::new(),
+            |_, _, _| async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(())
+            },
+        )
+        .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result_code(&result), "conflict");
+        let requests = server.await.expect("verification timeout fixture task");
+        assert_eq!(requests.len(), 2);
+        assert_one_delete(&requests);
+    }
+
+    #[tokio::test]
+    async fn uncertain_delete_outcomes_are_reconciled_without_replay() {
         let mut oversized = object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID));
         oversized["object"]["name"] = json!("x".repeat(2_000));
         let cases = [
             FixtureReply::error("408 Request Timeout", "request timeout"),
             FixtureReply::error("307 Temporary Redirect", "redirect target"),
-            FixtureReply::malformed("{"),
             FixtureReply::json(oversized),
             FixtureReply::disconnect(),
         ];
         for reply in cases {
-            let (base_url, server) = fixture(vec![preflight_reply(), reply]).await;
-            let runtime = runtime_with_limits(
-                base_url,
-                Duration::from_millis(100),
-                ResponseLimits {
-                    json_bytes: 512,
-                    document_bytes: 512,
-                    error_bytes: 64,
-                    file_bytes: 64,
-                    chat_sse_event_bytes: 64,
-                },
-            );
-            let result = object_archive(
-                &runtime,
-                &object_archive_tool().unwrap(),
-                MutationAccess::Allowed,
-                &input(SPACE_ID, OBJECT_ID),
-                &CancellationToken::new(),
-            )
-            .await;
+            for independently_applied in [true, false] {
+                let (base_url, server) = fixture(vec![preflight_reply(), reply.clone()]).await;
+                let runtime = runtime_with_limits(
+                    base_url,
+                    Duration::from_millis(100),
+                    ResponseLimits {
+                        json_bytes: 512,
+                        document_bytes: 512,
+                        error_bytes: 64,
+                        file_bytes: 64,
+                        chat_sse_event_bytes: 64,
+                    },
+                );
+                let result = object_archive_with_verifier(
+                    &runtime,
+                    &object_archive_tool().unwrap(),
+                    MutationAccess::Allowed,
+                    &input(SPACE_ID, OBJECT_ID),
+                    &CancellationToken::new(),
+                    move |_, _, _| async move {
+                        if independently_applied {
+                            Ok(())
+                        } else {
+                            Err(recovery_error())
+                        }
+                    },
+                )
+                .await;
 
-            assert_eq!(result.is_error, Some(true));
-            assert_eq!(result_code(&result), "conflict");
-            let requests = server.await.expect("ambiguous failure fixture task");
-            assert_eq!(requests.len(), 2);
-            assert_one_delete(&requests);
+                assert_eq!(result.is_error, Some(!independently_applied));
+                if !independently_applied {
+                    assert_eq!(result_code(&result), "conflict");
+                }
+                let requests = server.await.expect("uncertain failure fixture task");
+                assert_eq!(requests.len(), 2);
+                assert_one_delete(&requests);
+            }
         }
     }
 

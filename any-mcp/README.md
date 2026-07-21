@@ -327,15 +327,17 @@ safe object, space, and type identities before mutation. It marks dispatch
 immediately before one non-replayed DELETE under the shared runtime controls
 and document-response ceiling.
 
-An immediate response succeeds only when it contains the same safe object and
-space identifiers with `archived=true`. A false, malformed, mismatched,
-oversized, transport, timeout-status, redirect, or other uncertain response
-starts finite read-after-write confirmation instead of another DELETE. Within
-hard attempt, time, page, and item caps, confirmation must prove the exact id
-absent from the active object surface and present in the original-type-scoped
-archived surface. Unproven, incomplete, or unsafe evidence returns fixed
-mutation-indeterminate guidance. Definitive authentication, validation,
-not-found, conflict, and rate-limit rejections retain their ordinary errors.
+The DELETE response is dispatch evidence only and can never establish success.
+After every non-definitively-rejected dispatch—including a matching,
+false, malformed, mismatched, oversized, transport, timeout-status, redirect,
+or other uncertain response—the handler performs finite independent
+read-after-write confirmation instead of another DELETE. Within hard attempt,
+time, page, and item caps, confirmation must prove the exact id absent from the
+active HTTP object surface and present in the original-type-scoped archived
+gRPC search surface. Unproven, incomplete, unavailable, or unsafe evidence
+returns fixed mutation-indeterminate guidance. Definitive authentication,
+validation, not-found, conflict, and rate-limit rejections retain their
+ordinary errors.
 
 Its typed result contains the archived object id, the confirmed boolean state,
 and the canonical Anytype resource URI. The tool contract is destructive,
@@ -659,7 +661,7 @@ the explicit regeneration and review procedure in
 internal 200,000-token compatibility-policy floor), with 577 tokens of
 headroom. Its 2% material-growth boundary is 9,612 tokens, retaining 388 tokens
 of headroom. Compact read-only is 8,134 tokens. Exact reviewed baselines also
-measure explicit standard (22,664) and standard read-only (15,408), plus
+measure explicit standard (22,663) and standard read-only (15,408), plus
 schema-valid representative search/get results; any
 count drift fails, and growth of at least 2% requires a recorded material-growth
 rationale. Then run:
