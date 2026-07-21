@@ -5,19 +5,19 @@
   - Preserve the independently active `anyr-0.5` workspace. It is not an MCP integration target and must not be rebased, resolved, forgotten, or deleted. Duplicate approved MCP patches onto the default line when their original changes have descendants in that workspace.
   - Phase 1 documents/release issue `any-83f` is integrated and closed. The versioned harness contract is `any-mcp/TESTING.md`; design task `any-n3s` is closed and human review gate `any-lzn` awaits explicit sign-off.
   - `any-ccx` is independently approved, duplicated onto default as `kpqytont` / `02a640b6`, fully gated, closed, and its isolated workspace removed. The scoped type inventory passed against the configured headless server after the operator cleared the archive in `test12`.
-  - `any-cwi` R3 is independently approved and integrated as `yspvrvsr` / `5006ec14`. It covers all 14 standard tools and all three resource operations through direct and spawned real-headless scenarios, plus compact/read-only/preview sentinels, ownership auditing, bounded structural diagnostics, keystore isolation, CI, and soak/reset support. Combined gates pass: anytype 222/1 ignored, any-mcp 297/24 ignored, direct live 13/13, spawned live 8/8, clippy/fmt clean; actionlint is unavailable locally.
+  - `any-cwi` R3 is independently approved and integrated as `yspvrvsr`. It covers all 14 standard tools and all three resource operations through direct and spawned real-headless scenarios, plus compact/read-only/preview sentinels, ownership auditing, bounded structural diagnostics, keystore isolation, CI, and soak/reset support. Its implementation children remain open only behind human gate `any-lzn`.
   - `any-l4s` is integrated and closed. `anytype-api` now separates wire and canonical Markdown representations so exact-body updates do not double-escape canonical GET content; focused and live regressions are green.
   - `any-jbr` is integrated and closed. Archive success requires independent active-absence and gRPC archive-presence evidence after one delete dispatch.
+  - `any-fo7` R2 is independently approved, integrated as `mwyvpotw` / `6f5e5857`, fully gated, and closed. HTTP is universal; only standard read-write requires gRPC; configured-but-unhealthy gRPC still fails every selection; server status is access-aware. Combined gates: anytype 222/1 ignored, any-mcp 303/24 ignored, direct live 13/13, spawned live 8/8, clippy/fmt clean.
   - `any-oex` records future per-suite disposable-space isolation. Existing `anytype-api` cleanup-owned space fixtures make automation plausible, but suite-level spawned-process visibility, readiness, interrupted-job recovery, and safe deletion still require a proof.
-  - Phase 2 audit completed for 13 original tickets. Added independent members (`any-ztf`), views-write (`any-kqb`), and admin (`any-thu`) review gates plus shared selector/registry foundation `any-x97`; rewired domain implementations to matching reviews and the foundation. Existing Phase 2 defers remain until Phase 1 closes.
+  - Independent Phase 2 audit approved all 18 open P2 MCP tickets: no cycles, scope errors, or hidden-ready dependency errors. After Phase 1 and defer clearing, roots are exactly `any-x90`, `any-hru`, and `any-ii5`; split `any-tn6`, `any-qx4`, and `any-g92` only after approved designs fix their retained surfaces.
 
 - Blockers
-  - Headless credentials and server are healthy. `any-cwi` implementation children remain tracker-blocked only by human review gate `any-lzn`; review-ready evidence is recorded on both tickets.
-  - Phase 1 terminal verifier `any-zk6` remains blocked by `any-fo7` capability/startup admission and reconciliation of the `any-cwi` human gate/children.
+  - Headless credentials and server are healthy. The filtered actionable queue is empty; `any-cwi` implementation children remain tracker-blocked only by human review gate `any-lzn`, with review-ready evidence recorded on both tickets.
+  - Phase 1 terminal verifier `any-zk6` remains blocked only by reconciliation of the `any-cwi` human gate/children. Its independent production/E2E audit is approved; terminal work must correct stale fixture-blocker claims in `docs/api-test-coverage-audit.md`, rerun final gates, and close after CWI.
   - Phase 2 design implementations remain behind human review tickets by design.
 
 - Next action
-  - Obtain explicit human sign-off on `any-lzn`, then reconcile the implemented `any-cwi` children and parent.
-  - `any-fo7` capability/startup admission is delegated in isolated workspace `mcp-fo7`; review it independently and integrate it by duplication.
-  - Obtain explicit human sign-off on `any-lzn`, then complete `any-zk6` production wiring and coverage-matrix audit.
+  - Obtain explicit human sign-off on `any-lzn`, then close implemented CWI children in dependency order: `ioy`; `if7` + `npm`; `ysn`; `43d` + `0y3`; `gpx`; `pn3`; parent `cwi`.
+  - Complete `any-zk6`: correct the stale API coverage audit, rerun exact catalog/ownership/token and serial live gates, perform final no-Phase-2-leak grep/runtime audit, then close.
   - After Phase 1 closes, clear defer dates on all original Phase 2 tickets. Immediate design roots should be `any-x90`, `any-hru`, and `any-ii5`; dispatch them in parallel.
