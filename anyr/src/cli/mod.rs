@@ -13,7 +13,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use tracing::warn;
 
 use crate::{
-    cli::chat::{ChatReadTypeArg, MessageStyleArg},
+    cli::chat::{ChatReadTypeArg, MessageStyleArg, TransportArg},
     output::{Output, OutputFormat},
 };
 
@@ -285,6 +285,14 @@ pub enum FileCommands {
         #[arg(long)]
         text: Option<String>,
 
+        /// sort results by property key (for example `name` or `last_modified_date`)
+        #[arg(long, value_name = "PROPERTY")]
+        sort: Option<String>,
+
+        /// sort in descending order (default ascending); requires --sort
+        #[arg(long, requires = "sort")]
+        desc: bool,
+
         #[command(flatten)]
         pagination: PaginationArgs,
 
@@ -327,10 +335,13 @@ pub enum FileCommands {
         /// id of file object to delete
         object_id: String,
 
-        /// use the REST HTTP API instead of gRPC
+        /// permanently delete the file, bypassing the bin
         #[arg(long)]
-        http: bool,
+        permanent: bool,
     },
+    /// Download a file's bytes over the REST HTTP API, writing them in the anyr
+    /// process to `--file`, into `--dir`, or to `<object_id>` in the current
+    /// directory. This is the default download path.
     #[command(
         alias = "down",
         group = ArgGroup::new("download_destination")
@@ -338,6 +349,9 @@ pub enum FileCommands {
             .multiple(false)
     )]
     Download {
+        /// space id or name
+        space: String,
+
         /// id of file object to download
         object_id: String,
 
@@ -349,30 +363,156 @@ pub enum FileCommands {
         #[arg(short = 'f', long, value_name = "FILE")]
         file: Option<PathBuf>,
 
-        /// space id or name (required with --http)
-        #[arg(long)]
-        space: Option<String>,
+        /// pre-rendered image variant width in pixels
+        #[arg(long, value_name = "PIXELS")]
+        width: Option<u32>,
 
-        /// use the REST HTTP API instead of gRPC
+        /// HTTP byte range, e.g. `bytes=0-499`
+        #[arg(long, value_name = "HTTP_RANGE")]
+        range: Option<String>,
+
+        /// `If-Match` precondition entity tag
+        #[arg(long, value_name = "ETAG")]
+        if_match: Option<String>,
+
+        /// `If-None-Match` cache validator entity tag
+        #[arg(long, value_name = "ETAG")]
+        if_none_match: Option<String>,
+
+        /// `If-Modified-Since` HTTP-date
+        #[arg(long, value_name = "HTTP_DATE")]
+        if_modified_since: Option<String>,
+
+        /// `If-Unmodified-Since` HTTP-date precondition
+        #[arg(long, value_name = "HTTP_DATE")]
+        if_unmodified_since: Option<String>,
+
+        /// `If-Range` validator for a ranged request
+        #[arg(long, value_name = "VALUE")]
+        if_range: Option<String>,
+    },
+    /// Fetch file HTTP metadata with a REST `HEAD` request (no body).
+    #[command(alias = "meta")]
+    Metadata {
+        /// space id or name
+        space: String,
+
+        /// id of file object to inspect
+        object_id: String,
+
+        /// pre-rendered image variant width in pixels
+        #[arg(long, value_name = "PIXELS")]
+        width: Option<u32>,
+
+        /// `If-Match` precondition entity tag
+        #[arg(long, value_name = "ETAG")]
+        if_match: Option<String>,
+
+        /// `If-None-Match` cache validator entity tag
+        #[arg(long, value_name = "ETAG")]
+        if_none_match: Option<String>,
+
+        /// `If-Modified-Since` HTTP-date
+        #[arg(long, value_name = "HTTP_DATE")]
+        if_modified_since: Option<String>,
+
+        /// `If-Unmodified-Since` HTTP-date precondition
+        #[arg(long, value_name = "HTTP_DATE")]
+        if_unmodified_since: Option<String>,
+    },
+    #[command(
+        alias = "up",
+        group = ArgGroup::new("upload_source")
+            .args(["file", "url", "stdin"])
+            .required(true)
+            .multiple(false)
+    )]
+    Upload {
+        /// space id or name
+        space: String,
+
+        /// input file path (REST unless a gRPC-only option is set)
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: Option<PathBuf>,
+
+        /// remote URL to fetch and upload (selects the gRPC backend)
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+
+        /// read the file bytes from stdin (requires --name)
+        #[arg(long, requires = "name")]
+        stdin: bool,
+
+        /// file name to record for a --stdin upload (only used with --stdin)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// MIME type used by a REST (path/stdin) upload
+        #[arg(long, value_name = "MIME")]
+        mime: Option<String>,
+
+        /// file type hint (selects the gRPC backend)
+        #[arg(long, value_enum)]
+        file_type: Option<FileTypeArg>,
+
+        /// file style: auto, link, or embed (selects the gRPC backend)
+        #[arg(long, value_enum)]
+        style: Option<FileStyleArg>,
+
+        /// extra object details as JSON or `@FILE` (selects the gRPC backend)
+        #[arg(long, value_name = "JSON_OR_@FILE")]
+        details: Option<String>,
+
+        /// object id the file is created in context of (selects the gRPC backend)
+        #[arg(long, value_name = "OBJECT_ID")]
+        created_in_context: Option<String>,
+
+        /// block id the file is created in context of (selects the gRPC backend)
+        #[arg(long, value_name = "BLOCK_ID")]
+        created_in_context_ref: Option<String>,
+
+        /// (deprecated) no-op: a plain upload already uses REST; errors if combined with a gRPC-only option
         #[arg(long)]
         http: bool,
     },
-    #[command(alias = "up")]
-    Upload {
+    /// Preload a file for a later object (gRPC), returning a preload id.
+    #[command(
+        group = ArgGroup::new("preload_source")
+            .args(["file", "url"])
+            .required(true)
+            .multiple(false)
+    )]
+    Preload {
         /// space id or name
         space: String,
 
         /// input file path
         #[arg(short = 'f', long, value_name = "FILE")]
-        file: PathBuf,
+        file: Option<PathBuf>,
+
+        /// remote URL to fetch and preload
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
 
         /// file type hint
         #[arg(long, value_enum)]
         file_type: Option<FileTypeArg>,
 
-        /// use the REST HTTP API instead of gRPC (ignores --file-type)
-        #[arg(long)]
-        http: bool,
+        /// object id the file is created in context of
+        #[arg(long, value_name = "OBJECT_ID")]
+        created_in_context: Option<String>,
+
+        /// block id the file is created in context of
+        #[arg(long, value_name = "BLOCK_ID")]
+        created_in_context_ref: Option<String>,
+    },
+    /// Discard a previously preloaded file (gRPC).
+    DiscardPreload {
+        /// space id or name
+        space: String,
+
+        /// preload file id to discard
+        file_id: String,
     },
 }
 
@@ -633,6 +773,16 @@ pub enum FileTypeArg {
     Video,
     Audio,
     Pdf,
+}
+
+#[derive(Clone, ValueEnum, Debug)]
+pub enum FileStyleArg {
+    /// let the server choose how the file is embedded
+    Auto,
+    /// reference the file as a link block
+    Link,
+    /// embed the file inline
+    Embed,
 }
 
 #[derive(Args, Debug)]
@@ -957,6 +1107,13 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct ChatArgs {
+    /// transport policy for chat operations: auto (per-operation policy),
+    /// rest (reject gRPC-only operations/options), or grpc. rest's rejection
+    /// guard is enforced today; per-operation REST routing is staged for
+    /// follow-up work, so auto/grpc do not yet change the executed backend.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub transport: TransportArg,
+
     #[command(subcommand)]
     pub command: Box<ChatCommands>,
 }
@@ -973,6 +1130,10 @@ pub enum ChatCommands {
         #[arg(long)]
         text: Option<String>,
 
+        /// property filter(s); only for a space-scoped REST listing (no --text)
+        #[command(flatten)]
+        filter: FilterArgs,
+
         #[command(flatten)]
         pagination: PaginationArgs,
     },
@@ -984,6 +1145,14 @@ pub enum ChatCommands {
 
         /// chat name
         name: String,
+
+        /// icon emoji (mutually exclusive with --icon-file)
+        #[arg(long, group = "chat_icon")]
+        icon_emoji: Option<String>,
+
+        /// icon file path (mutually exclusive with --icon-emoji)
+        #[arg(long, group = "chat_icon")]
+        icon_file: Option<String>,
     },
 
     /// Get chat object
@@ -1024,6 +1193,28 @@ pub enum ChatCommands {
         last_state_id: Option<String>,
     },
 
+    /// Mark reactions as read (REST)
+    ReadReactions {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+
+        /// mark reactions read through this order id
+        #[arg(long)]
+        order_id: Option<String>,
+    },
+
+    /// Mark every message in a chat as read (REST)
+    ReadAll {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+    },
+
     /// Mark messages as unread
     Unread {
         /// space id or name
@@ -1062,6 +1253,22 @@ pub enum ChatCommands {
         /// include stream lifecycle events in output
         #[arg(long)]
         show_events: bool,
+
+        /// (REST SSE) replay the last N messages when the stream opens
+        #[arg(long)]
+        initial_limit: Option<u32>,
+
+        /// (REST SSE) heartbeat interval in seconds (1-60)
+        #[arg(long)]
+        heartbeat: Option<u32>,
+
+        /// (gRPC) subscribe to cross-chat message previews
+        #[arg(long)]
+        previews: bool,
+
+        /// (gRPC) event buffer capacity
+        #[arg(long)]
+        buffer: Option<usize>,
     },
 }
 
@@ -1131,7 +1338,7 @@ pub enum ChatMessagesCommands {
         #[arg(long, value_enum, default_value = "paragraph")]
         style: Option<MessageStyleArg>,
 
-        /// message marks (format type[:from:to[:param]])
+        /// message marks (format `type[:from:to[:param]]`)
         #[arg(long = "mark", value_name = "SPEC")]
         mark: Vec<String>,
 
@@ -1146,6 +1353,14 @@ pub enum ChatMessagesCommands {
         /// plain text message (@file, @-, or -)
         #[arg(long)]
         content_text: Option<String>,
+
+        /// reply to an existing message (id or order id)
+        #[arg(long)]
+        reply_to: Option<String>,
+
+        /// structured message blocks as a JSON array (@file, @-, or -); requires gRPC
+        #[arg(long)]
+        blocks_json: Option<String>,
 
         /// message text if --text is not provided
         #[arg(value_name = "TEXT", trailing_var_arg = true)]
@@ -1171,13 +1386,21 @@ pub enum ChatMessagesCommands {
         #[arg(long, value_enum, default_value = "paragraph")]
         style: Option<MessageStyleArg>,
 
-        /// message marks (format type[:from:to[:param]])
+        /// message marks (format `type[:from:to[:param]]`)
         #[arg(long = "mark", value_name = "SPEC")]
         mark: Vec<String>,
+
+        /// replacement attachments (format `type:target_id`); complete replacement list
+        #[arg(long = "attachment", value_name = "SPEC")]
+        attachment: Vec<String>,
 
         /// raw JSON `MessageContent` (@file, @-, or -)
         #[arg(long)]
         content_json: Option<String>,
+
+        /// structured message blocks as a JSON array (@file, @-, or -); requires gRPC
+        #[arg(long)]
+        blocks_json: Option<String>,
     },
 
     /// Delete a message
@@ -1190,6 +1413,36 @@ pub enum ChatMessagesCommands {
 
         /// message id or order id
         message_id: String,
+    },
+
+    /// Search messages in a chat (REST-only)
+    Search {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+
+        /// full-text search query
+        query: String,
+
+        #[command(flatten)]
+        pagination: PaginationArgs,
+    },
+
+    /// Toggle a reaction on a message
+    React {
+        /// space id or name
+        space: String,
+
+        /// chat id or name/title
+        chat: String,
+
+        /// message id or order id
+        message_id: String,
+
+        /// reaction emoji
+        emoji: String,
     },
 }
 

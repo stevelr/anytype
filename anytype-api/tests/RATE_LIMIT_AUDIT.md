@@ -32,25 +32,25 @@ explicit audit update.
 - Types created only to set up type update/delete/duplicate-key assertions.
 - The validation setup objects migrated by `any-ae5`.
 
-| Test source | Generic | Object create | Object update | Excluded direct |
-| --- | ---: | ---: | ---: | ---: |
-| `common/mod.rs` | 2 | 0 | 0 | 0 |
-| `../src/test_util.rs` | 4 | 0 | 0 | 0 |
-| `integration.rs` | 1 | 0 | 0 | 8 |
-| `smoke_test.rs` | 0 | 0 | 0 | 2 |
-| `test_chat_discovery.rs` | 2 | 0 | 0 | 1 |
-| `test_chat_stream.rs` | 3 | 0 | 0 | 3 |
-| `test_chats.rs` | 2 | 0 | 0 | 4 |
-| `test_files.rs` | 0 | 0 | 0 | 1 |
-| `test_filters.rs` | 0 | 24 | 0 | 0 |
-| `test_properties.rs` | 14 | 10 | 0 | 10 |
-| `test_search.rs` | 7 | 0 | 0 | 1 |
-| `test_tags.rs` | 32 | 3 | 0 | 6 |
-| `test_types.rs` | 4 | 1 | 0 | 10 |
-| `test_validation.rs` | 0 | 4 | 0 | 12 |
-| `test_views.rs` | 2 | 0 | 0 | 0 |
-| Sources without terminal mutations | 0 | 0 | 0 | 0 |
-| **Total** | **73** | **42** | **0** | **58** |
+| Test source                        | Generic | Object create | Object update | Excluded direct |
+| ---------------------------------- | ------: | ------------: | ------------: | --------------: |
+| `common/mod.rs`                    |       2 |             0 |             0 |               0 |
+| `../src/test_util.rs`              |       4 |             0 |             0 |               0 |
+| `integration.rs`                   |       1 |             0 |             0 |               8 |
+| `smoke_test.rs`                    |       0 |             0 |             0 |               2 |
+| `test_chat_discovery.rs`           |       2 |             0 |             0 |               1 |
+| `test_chat_stream.rs`              |       3 |             0 |             0 |               3 |
+| `test_chats.rs`                    |       2 |             0 |             0 |               4 |
+| `test_files.rs`                    |       0 |             0 |             0 |               1 |
+| `test_filters.rs`                  |       0 |            24 |             0 |               0 |
+| `test_properties.rs`               |      14 |            10 |             0 |              10 |
+| `test_search.rs`                   |       7 |             0 |             0 |               1 |
+| `test_tags.rs`                     |      32 |             3 |             0 |               6 |
+| `test_types.rs`                    |       4 |             1 |             0 |              10 |
+| `test_validation.rs`               |       0 |             4 |             0 |              12 |
+| `test_views.rs`                    |       2 |             0 |             0 |               0 |
+| Sources without terminal mutations |       0 |             0 |             0 |               0 |
+| **Total**                          |  **73** |        **42** |         **0** |          **58** |
 
 The 115 wrapped calls above are the complete successful fixture-setup
 inventory. The 58 direct terminal calls are deliberately excluded. The

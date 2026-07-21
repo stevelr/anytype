@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Classify the new `anytype-api` `AnytypeError::BodyGraph` variant in the
+  exhaustive error and health mappings (`ToolErrorCode::Upstream`, health
+  status `body_graph`). Plumbing only: no `any-mcp` tool can surface a body
+  read yet.
+- Design document `designs/filters.md` (any-2f0g.4.1): bounded tagged MCP
+  filter DTO model — format/condition matrix, one-to-one anytype-api mapping,
+  excluded combinations and upstream limitations, hard bounds, cursor binding
+  rules, and the shared-module conversion strategy.
+- Design document `designs/body-block-model.md` (any-2f0g.18): typed, bounded,
+  fail-closed anytype-api body block model over ObjectShow and block RPCs —
+  BodySnapshot/BodyBlock trees, closed v1 content/style/mark variants, opaque
+  unsupported reads, graph validation, context/space ownership, verified
+  mutation evidence, limits, and forward compatibility.
+
 ### Changed
 
 - Extract the `object_search` filter grammar into a shared bounded MCP DTO

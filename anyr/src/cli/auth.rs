@@ -64,7 +64,9 @@ fn logout(ctx: &AppContext) -> Result<()> {
 
 async fn status(ctx: &AppContext) -> Result<()> {
     let status = ctx.client.auth_status()?;
-    let http_ping = if status.http.is_authenticated() {
+    let http_present = status.http.is_authenticated();
+    let grpc_present = status.grpc.is_authenticated();
+    let http_ping = if http_present {
         match ctx.client.ping_http().await {
             Ok(()) => "Ping check ok".to_string(),
             Err(e) => format!("Ping failed: {e}"),
@@ -72,7 +74,7 @@ async fn status(ctx: &AppContext) -> Result<()> {
     } else {
         "(credentials required)".to_string()
     };
-    let grpc_ping = if status.grpc.is_authenticated() {
+    let grpc_ping = if grpc_present {
         match ctx.client.ping_grpc().await {
             Ok(()) => "Ping check ok".to_string(),
             Err(e) => format!("Ping failed: {e}"),
@@ -82,11 +84,40 @@ async fn status(ctx: &AppContext) -> Result<()> {
     };
     ctx.output.emit_json(&json!({
         "status": status,
+        "credentials": credentials_summary(http_present, grpc_present),
         "ping": {
             "http": http_ping,
             "grpc": grpc_ping,
         }
     }))
+}
+
+/// Summarize which credential set (HTTP versus gRPC) is present or missing.
+///
+/// The 0.5 command surface mixes REST (HTTP) and gRPC backends per command, so
+/// `auth status` reports each credential set independently: a command that
+/// routes over REST needs the HTTP token, while a gRPC-only command needs the
+/// gRPC credentials. Each side carries a `present` flag plus a `detail` string
+/// naming the command that provisions the missing set.
+fn credentials_summary(http_present: bool, grpc_present: bool) -> serde_json::Value {
+    json!({
+        "http": {
+            "present": http_present,
+            "detail": if http_present {
+                "HTTP API token present (used by REST commands)"
+            } else {
+                "HTTP API token missing (run `anyr auth login` or `anyr auth set-http`)"
+            },
+        },
+        "grpc": {
+            "present": grpc_present,
+            "detail": if grpc_present {
+                "gRPC credentials present (used by gRPC-only commands)"
+            } else {
+                "gRPC credentials missing (run `anyr auth set-grpc`)"
+            },
+        },
+    })
 }
 
 fn set_http(ctx: &AppContext) -> Result<()> {
@@ -200,5 +231,60 @@ pub async fn find_grpc_cmd(output: &crate::output::Output, program: &str) -> Res
             output.emit_json(&serde_json::json!({ "port": port }))
         }
         None => anyhow::bail!("No gRPC listener found"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::credentials_summary;
+
+    #[test]
+    fn credentials_summary_marks_both_present() {
+        let value = credentials_summary(true, true);
+        assert_eq!(value["http"]["present"], true);
+        assert_eq!(value["grpc"]["present"], true);
+        assert!(
+            value["http"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("present")
+        );
+        assert!(
+            value["grpc"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("present")
+        );
+    }
+
+    #[test]
+    fn credentials_summary_distinguishes_missing_http() {
+        // gRPC credentials present, HTTP missing: the two sets must be reported
+        // independently so a REST command's missing token is visible.
+        let value = credentials_summary(false, true);
+        assert_eq!(value["http"]["present"], false);
+        assert_eq!(value["grpc"]["present"], true);
+        let http_detail = value["http"]["detail"].as_str().unwrap();
+        assert!(http_detail.contains("missing"));
+        assert!(http_detail.contains("set-http"));
+    }
+
+    #[test]
+    fn credentials_summary_distinguishes_missing_grpc() {
+        // HTTP token present, gRPC missing: a gRPC-only command's missing
+        // credentials must be identified separately from the HTTP set.
+        let value = credentials_summary(true, false);
+        assert_eq!(value["http"]["present"], true);
+        assert_eq!(value["grpc"]["present"], false);
+        let grpc_detail = value["grpc"]["detail"].as_str().unwrap();
+        assert!(grpc_detail.contains("missing"));
+        assert!(grpc_detail.contains("set-grpc"));
+    }
+
+    #[test]
+    fn credentials_summary_marks_both_missing() {
+        let value = credentials_summary(false, false);
+        assert_eq!(value["http"]["present"], false);
+        assert_eq!(value["grpc"]["present"], false);
     }
 }

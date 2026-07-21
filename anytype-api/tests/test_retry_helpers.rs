@@ -26,7 +26,7 @@ fn only_typed_http_429_is_a_definitive_retryable_rejection() {
         api_error(408),
         api_error(500),
         AnytypeError::RateLimitExceeded {
-            header: "unparseable or exhausted retry policy".to_string(),
+            header: "unparsable or exhausted retry policy".to_string(),
             duration: Duration::ZERO,
         },
         AnytypeError::Validation {
