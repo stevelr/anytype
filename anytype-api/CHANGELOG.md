@@ -63,6 +63,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Typed, bounded, fail-closed body-block reads: `AnytypeClient::blocks()` and
+  the new public `body` module (re-exported through the prelude) expose an
+  object's rich body as a validated `BodySnapshot`/`BodyBlock` tree with exact
+  identities and child order, read via gRPC `ObjectShow` with a best-effort
+  `ObjectClose` after every successful show. Content kinds, text styles, and
+  marks are closed v1 enums; anything else reads as an explicit
+  `BlockContent::Unsupported` marker with a content-free summary. Per-request
+  `BodyLimits` clamp to hard ceilings and can only tighten. Malformed,
+  duplicate, cyclic, dangling, or oversized graphs fail the whole read with
+  the new `AnytypeError::BodyGraph` variant, whose display and `detail` carry
+  only block IDs and structural counts — never block text, URLs, or tokens —
+  and a partial or truncated snapshot is never returned
 - `AnytypeError::is_authentication()` now exposes a secret-safe,
   `anytype-api`-level classification for direct and nested gRPC authentication
   failures without requiring callers to depend on `anytype-rpc` or format

@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Classify the new `anytype-api` `AnytypeError::BodyGraph` variant in the
+  exhaustive error and health mappings (`ToolErrorCode::Upstream`, health
+  status `body_graph`). Plumbing only: no `any-mcp` tool can surface a body
+  read yet.
 - Design document `designs/filters.md` (any-2f0g.4.1): bounded tagged MCP
   filter DTO model — format/condition matrix, one-to-one anytype-api mapping,
   excluded combinations and upstream limitations, hard bounds, cursor binding

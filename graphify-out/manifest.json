@@ -390,8 +390,8 @@
     "semantic_hash": ""
   },
   "anytype-api/src/error.rs": {
-    "mtime": 1784592471.4545262,
-    "ast_hash": "d5bb33335933d32c6253368eef16485c",
+    "mtime": 1784669713.0293555,
+    "ast_hash": "86129886c4c521c79f5fb28f8af301be",
     "semantic_hash": ""
   },
   "anytype-api/src/files.rs": {
@@ -405,8 +405,8 @@
     "semantic_hash": ""
   },
   "anytype-api/src/grpc_util.rs": {
-    "mtime": 1784592471.455526,
-    "ast_hash": "50b00841da4a57efbc495bfcf7d1abfb",
+    "mtime": 1784669715.6173294,
+    "ast_hash": "02233c67e4831603d05f1704b492976e",
     "semantic_hash": ""
   },
   "anytype-api/src/http_client.rs": {
@@ -420,8 +420,8 @@
     "semantic_hash": ""
   },
   "anytype-api/src/lib.rs": {
-    "mtime": 1784592471.455526,
-    "ast_hash": "a37a36340e95c435f7655e7fdab398c8",
+    "mtime": 1784669702.4914627,
+    "ast_hash": "0ddbd51347e3a749e6d1cae4f813d1f0",
     "semantic_hash": ""
   },
   "anytype-api/src/members.rs": {
@@ -430,8 +430,8 @@
     "semantic_hash": ""
   },
   "anytype-api/src/mock.rs": {
-    "mtime": 1784592471.456526,
-    "ast_hash": "c690218fc060fe9b740b47b1c9d4d536",
+    "mtime": 1784670083.7486815,
+    "ast_hash": "71439bf078a3065dcecaa3e3ffecbf67",
     "semantic_hash": ""
   },
   "anytype-api/src/objects.rs": {
@@ -730,8 +730,8 @@
     "semantic_hash": ""
   },
   "anytype-api/CHANGELOG.md": {
-    "mtime": 1784663997.6920245,
-    "ast_hash": "a83202f0f38d25b4e6900950e3312f80",
+    "mtime": 1784670688.5148194,
+    "ast_hash": "c8ba194728b8245c0cb2e4a42837e867",
     "semantic_hash": ""
   },
   "anytype-api/Keystores.md": {
@@ -740,8 +740,8 @@
     "semantic_hash": ""
   },
   "anytype-api/README.md": {
-    "mtime": 1784663749.948331,
-    "ast_hash": "f6b377466e043213f2dbec8bc458450a",
+    "mtime": 1784670198.2968595,
+    "ast_hash": "9d909c216af8e0101da522f626c7814c",
     "semantic_hash": ""
   },
   "anytype-api/Troubleshooting.md": {
@@ -790,8 +790,8 @@
     "semantic_hash": ""
   },
   "any-mcp/CHANGELOG.md": {
-    "mtime": 1784668425.6360009,
-    "ast_hash": "813b8b3351d02a4ccf95c1fe57e541f0",
+    "mtime": 1784670691.4567933,
+    "ast_hash": "4555f1057f981ff61374b6d0d21dde36",
     "semantic_hash": ""
   },
   "any-mcp/README.md": {
@@ -820,8 +820,8 @@
     "semantic_hash": ""
   },
   "any-mcp/src/error.rs": {
-    "mtime": 1784592471.4345262,
-    "ast_hash": "06c97a73f98200e2e749496acefad0f3",
+    "mtime": 1784670286.6501856,
+    "ast_hash": "3064225ba93d9c6125c7230e7afec724",
     "semantic_hash": ""
   },
   "any-mcp/src/handler_support.rs": {
@@ -890,8 +890,8 @@
     "semantic_hash": ""
   },
   "any-mcp/src/runtime.rs": {
-    "mtime": 1784609825.046589,
-    "ast_hash": "369b0d3eb31ab57e6b239425d6de213e",
+    "mtime": 1784670289.1191664,
+    "ast_hash": "c5cf9940bf5bb967e94d770e8580d96e",
     "semantic_hash": ""
   },
   "any-mcp/src/schema.rs": {
@@ -967,6 +967,16 @@
   "any-mcp/designs/filters.md": {
     "mtime": 1784668180.879937,
     "ast_hash": "4e58c8bd16f89e3609ecb643027a3941",
+    "semantic_hash": ""
+  },
+  "anytype-api/src/body.rs": {
+    "mtime": 1784670207.062794,
+    "ast_hash": "aaafa93c24489f1c64257b9b400f8839",
+    "semantic_hash": ""
+  },
+  "anytype-api/tests/test_body.rs": {
+    "mtime": 1784670159.520145,
+    "ast_hash": "890fa958447752521f4634d169ff82dd",
     "semantic_hash": ""
   }
 }

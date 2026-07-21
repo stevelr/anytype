@@ -307,6 +307,7 @@ dependencies = [
  "linux-keyutils-keyring-store",
  "parking_lot",
  "png",
+ "prost",
  "prost-types",
  "reqwest",
  "serde",

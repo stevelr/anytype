@@ -30,6 +30,7 @@ db-keystore.workspace = true
 futures.workspace = true
 keyring-core.workspace = true
 parking_lot.workspace = true
+prost.workspace = true
 prost-types.workspace = true
 reqwest.workspace = true
 serde.workspace = true

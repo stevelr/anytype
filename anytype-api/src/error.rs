@@ -226,6 +226,24 @@ pub enum AnytypeError {
     #[snafu(display("Operation requires cache to be enabled"))]
     CacheDisabled,
 
+    /// A body-block read failed graph validation (see
+    /// [`body`](crate::body)): the returned block graph was duplicate,
+    /// dangling, shared, cyclic, orphaned, oversized, or malformed. The read
+    /// fails whole; a partial tree is never returned.
+    ///
+    /// `detail` contains only block IDs and structural counts — never block
+    /// text, URLs, or tokens — and standard formatting omits it along with
+    /// the object identity.
+    #[snafu(display("Body graph validation failed: {kind} (identity redacted)"))]
+    BodyGraph {
+        /// Object whose body failed validation.
+        object_id: String,
+        /// Closed violation classification.
+        kind: crate::body::BodyGraphErrorKind,
+        /// Bounded ID-and-count-only context for explicit programmatic use.
+        detail: String,
+    },
+
     /// The previous operation could not be confirmed within the expected time interval.
     /// For more information, see the notes about eventual consistency in the project [README](../README.md).
     #[snafu(display(
@@ -347,6 +365,7 @@ impl AnytypeError {
             Self::GrpcUnavailable { .. } => ("grpc_unavailable", None, None, None),
             Self::KeyStore { .. } => ("keystore", None, None, None),
             Self::CacheDisabled => ("cache_disabled", None, None, None),
+            Self::BodyGraph { .. } => ("body_graph", None, None, None),
             Self::VerifyTimeout { .. } => ("verify_timeout", None, None, None),
             Self::Other { .. } => ("other", None, None, None),
         };
@@ -393,6 +412,7 @@ impl AnytypeError {
             | Self::RateLimitExceeded { .. }
             | Self::Validation { .. }
             | Self::CacheDisabled
+            | Self::BodyGraph { .. }
             | Self::VerifyTimeout { .. }
             | Self::Other { .. } => false,
         }

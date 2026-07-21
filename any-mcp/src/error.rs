@@ -183,6 +183,7 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::ChatSseTransport { .. }
         | AnytypeError::TooManyRetries { .. }
         | AnytypeError::Deserialization { .. }
+        | AnytypeError::BodyGraph { .. }
         | AnytypeError::VerifyTimeout { .. }
         | AnytypeError::Other { .. } => false,
     }
@@ -336,6 +337,7 @@ impl ToolError {
             | AnytypeError::RateLimitExceeded { .. }
             | AnytypeError::Grpc { .. }
             | AnytypeError::CacheDisabled
+            | AnytypeError::BodyGraph { .. }
             | AnytypeError::VerifyTimeout { .. }
             | AnytypeError::Other { .. } => ToolErrorCode::Upstream,
         };
