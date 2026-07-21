@@ -2,15 +2,21 @@
 
 - Current state
   - Scope: `mcp` label; actionable bug/chore/task priorities 0-2; Phase 1 must close before Phase 2 implementation.
-  - Default workspace is clean after the AnyR conflict resolution. Preserve the independently active `anyr-0.5` workspace.
-  - Phase 1 documents/release issue `any-83f` is integrated and closed. `any-cwi` was created for the newly identified shared harness plus spawned-stdio-to-headless E2E gap and blocks terminal verifier `any-zk6`.
+  - Preserve the independently active `anyr-0.5` workspace. It is not an MCP integration target and must not be rebased, resolved, forgotten, or deleted. Duplicate approved MCP patches onto the default line when their original changes have descendants in that workspace.
+  - Phase 1 documents/release issue `any-83f` is integrated and closed. The versioned harness contract is `any-mcp/TESTING.md`; design task `any-n3s` is closed and human review gate `any-lzn` awaits explicit sign-off.
+  - `any-ccx` is independently approved, duplicated onto default as `kpqytont` / `02a640b6`, fully gated, closed, and its isolated workspace removed. The scoped type inventory passed against the configured headless server after the operator cleared the archive in `test12`.
+  - `any-cwi` R1 was rejected for a reduced spawned sentinel, missing risk sentinels, unbound ownership strings, incomplete evidence/CI, and narrow keystore copying. R2 is in progress against the fixed `TESTING.md` contract.
+  - `any-l4s` is a Phase 1 bug discovered by the live harness. Reproduction proves a post-dispatch canonical-body mismatch rather than a stale preflight hash; an isolated worker is locating the owning layer.
+  - `any-oex` records future per-suite disposable-space isolation. Existing `anytype-api` cleanup-owned space fixtures make automation plausible, but suite-level spawned-process visibility, readiness, interrupted-job recovery, and safe deletion still require a proof.
   - Phase 2 audit completed for 13 original tickets. Added independent members (`any-ztf`), views-write (`any-kqb`), and admin (`any-thu`) review gates plus shared selector/registry foundation `any-x97`; rewired domain implementations to matching reviews and the foundation. Existing Phase 2 defers remain until Phase 1 closes.
 
 - Blockers
-  - `any-ccx` blocks `any-cwi`: cleanup-owned template fixtures reject the long-lived test space at 10,196 archived objects because of a hard 10,000 inventory cap. A dedicated anytype-api worker owns the fix.
-  - Headless credentials and server are healthy. Baseline fast suite passed 275 tests with 8 ignored; baseline live suite passed 4/5 and reproduced `any-ccx` twice.
+  - Headless credentials and server are healthy. Integrated default gates after `any-ccx`: test-util 34, any-mcp 276/8 ignored, clippy/fmt, and exact live discovery all green.
+  - Phase 1 terminal verifier `any-zk6` remains blocked by the corrected `any-cwi` harness matrix and `any-l4s` canonical body/edit defect.
   - Phase 2 design implementations remain behind human review tickets by design.
 
 - Next action
-  - Integrate/review `any-ccx`, then `any-cwi`; run fast and live gates, close both, then complete `any-zk6` terminal audit.
+  - Independently review, duplicate, and gate `any-cwi` R2; reconcile and close only the child tickets its evidence actually satisfies.
+  - Independently review and integrate `any-l4s`, retaining focused API/handler coverage plus the live sentinel.
+  - Obtain explicit human sign-off on `any-lzn`, then complete `any-zk6` production wiring and coverage-matrix audit.
   - After Phase 1 closes, clear defer dates on all original Phase 2 tickets. Immediate design roots should be `any-x90`, `any-hru`, and `any-ii5`; dispatch them in parallel.
