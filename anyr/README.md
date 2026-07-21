@@ -307,6 +307,32 @@ Table listing features for `view objects`:
 - Format dates with strftime format: `--date-format` or `ANYTYPE_DATE_FORMAT`, defaults to `%Y-%m-%d %H:%M:%S`.
 - Members names are displayed instead of member id.
 
+**Chat transport**
+
+Chat commands accept `anyr chat --transport auto|rest|grpc <command>` (default
+`auto`). This is scoped to chat operations and is separate from the root
+`--grpc URL` endpoint option. It selects the transport *policy* for each
+operation: which backend the operation is intended to use.
+
+- `auto` resolves each operation to its policy backend: REST for single-space
+  `list` and `create`, plain message `list`/`get`/`send`/`edit`/`delete` and
+  `read` in one space, and a single-chat `listen` (REST SSE); gRPC for
+  cross-space list, chat text search, rich chat-object `get`, `unread`, and
+  multi-chat `listen`.
+- `rest` rejects gRPC-only operations with an actionable error (for example
+  `anyr chat --transport rest get ...` explains that rich chat-object lookup
+  requires gRPC).
+- `grpc` selects the gRPC policy, which carries the full-fidelity 0.4 message
+  reply shape.
+
+The resolved policy backend is reported only in verbose diagnostics (`-v`),
+never injected into the JSON payload. Note that the `rest` rejection guard is
+the only part of the policy enforced today: the handlers currently dispatch
+`create` and single-space plain `list` over REST and every other operation over
+gRPC. Rerouting the REST-capable message/read/listen operations onto the REST
+backend is staged for follow-up work, so `auto` and `grpc` do not yet change
+which backend an operation executes over.
+
 **Chat order ids**
 
 Chat message order ids are converted to lowercase hex before display in table-format output, to make them easier to read and type, while preserving lexicographic order. Any argument that accepts an order id also accepts the hex form. Example: the order id `!!@,` is displayed as `2121402c`, and you can pass `2121402c` back to commands that accept an order id.

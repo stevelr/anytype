@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use anytype::{prelude::*, validation::looks_like_object_id};
 use clap::ValueEnum;
 use futures::StreamExt;
+use tracing::info;
 
 use crate::{
     cli::{
@@ -16,6 +17,22 @@ use crate::{
 
 #[allow(clippy::too_many_lines, clippy::large_stack_frames)]
 pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
+    // Resolve the transport *policy* for this operation before touching the
+    // network. Today this policy has one enforced effect: `--transport rest`
+    // rejects gRPC-only operations up front (see `resolve_transport`). The
+    // resolved backend is otherwise advisory — it is surfaced in verbose
+    // diagnostics to describe the intended per-operation transport, but the
+    // handlers below still dispatch through the unified `ctx.client` methods
+    // (create and single-space plain `list` over REST, everything else over
+    // gRPC). Rerouting REST-capable message/read/listen operations onto the
+    // REST `SpaceChatsClient` is staged for follow-up work.
+    let op = classify(&args.command);
+    let backend = resolve_transport(args.transport, &op)?;
+    info!(
+        "chat transport policy for `{}`: {backend} (requested {})",
+        op.name, args.transport
+    );
+
     match *args.command {
         super::ChatCommands::List {
             space,
@@ -632,6 +649,139 @@ impl ChatReadTypeArg {
     }
 }
 
+/// Transport requested on the command line via `anyr chat --transport ...`.
+///
+/// The selector currently drives the transport *policy* (which backend each
+/// operation is intended to use, reported in `-v` diagnostics) and the
+/// `rest` rejection guard. Per-operation REST routing for REST-capable message
+/// operations is staged for follow-up work, so `auto`/`grpc` do not yet change
+/// which backend a handler dispatches through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum TransportArg {
+    /// Resolve each operation to its policy backend from the documented table.
+    #[default]
+    #[value(name = "auto")]
+    Auto,
+    /// Reject operations and options that only gRPC can serve.
+    #[value(name = "rest")]
+    Rest,
+    /// Prefer gRPC, which carries the full-fidelity 0.4 message reply shape.
+    #[value(name = "grpc")]
+    Grpc,
+}
+
+impl std::fmt::Display for TransportArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::Rest => "rest",
+            Self::Grpc => "grpc",
+        })
+    }
+}
+
+/// Backend actually selected for a chat operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatBackend {
+    /// REST request/response.
+    Rest,
+    /// REST server-sent-events stream (single-chat listen).
+    RestSse,
+    /// gRPC request/response or stream.
+    Grpc,
+}
+
+impl std::fmt::Display for ChatBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Rest => "rest",
+            Self::RestSse => "rest-sse",
+            Self::Grpc => "grpc",
+        })
+    }
+}
+
+/// Transport policy for a single chat invocation.
+struct OpTransport {
+    /// Command path used in diagnostics and error messages (e.g. `messages get`).
+    name: &'static str,
+    /// Backend chosen when `--transport auto` is in effect.
+    auto: ChatBackend,
+    /// `Some(reason)` when REST cannot serve this invocation; `None` when it can.
+    grpc_only: Option<&'static str>,
+}
+
+/// Classifies a parsed chat command into its transport policy, following the
+/// "Chats > Transport policy" table in `docs/anyr-0.5-cli-gap-analysis.md`.
+fn classify(command: &super::ChatCommands) -> OpTransport {
+    use super::{ChatCommands as C, ChatMessagesCommands as M};
+
+    let rest = |name| OpTransport {
+        name,
+        auto: ChatBackend::Rest,
+        grpc_only: None,
+    };
+    let grpc = |name, reason| OpTransport {
+        name,
+        auto: ChatBackend::Grpc,
+        grpc_only: Some(reason),
+    };
+
+    match command {
+        C::List { space, text, .. } => {
+            if space.is_none() {
+                grpc(
+                    "list",
+                    "listing chats across all spaces requires gRPC; pass --space to list within one space",
+                )
+            } else if text.is_some() {
+                grpc("list", "chat text search uses the gRPC discovery API")
+            } else {
+                rest("list")
+            }
+        }
+        C::Create { .. } => rest("create"),
+        C::Get { .. } => grpc("get", "rich chat-object lookup requires gRPC"),
+        C::Messages(args) => match &args.command {
+            M::List { .. } => rest("messages list"),
+            M::Get { .. } => rest("messages get"),
+            M::Send { .. } => rest("messages send"),
+            M::Edit { .. } => rest("messages edit"),
+            M::Delete { .. } => rest("messages delete"),
+        },
+        C::Read { .. } => rest("read"),
+        C::Unread { .. } => grpc("unread", "marking messages unread requires gRPC"),
+        C::Listen { chats, .. } => {
+            if chats.len() > 1 {
+                grpc("listen", "streaming more than one --chat requires gRPC")
+            } else {
+                OpTransport {
+                    name: "listen",
+                    auto: ChatBackend::RestSse,
+                    grpc_only: None,
+                }
+            }
+        }
+    }
+}
+
+/// Resolves the requested transport against an operation's policy, returning an
+/// actionable error when `--transport rest` is asked for a gRPC-only operation.
+fn resolve_transport(requested: TransportArg, op: &OpTransport) -> Result<ChatBackend> {
+    match requested {
+        TransportArg::Auto => Ok(op.auto),
+        TransportArg::Grpc => Ok(ChatBackend::Grpc),
+        TransportArg::Rest => match op.grpc_only {
+            None => Ok(op.auto),
+            Some(reason) => bail!(
+                "`anyr chat {}` cannot use --transport rest: {reason}. \
+                 Use --transport grpc or --transport auto.",
+                op.name
+            ),
+        },
+    }
+}
+
 fn parse_message_content_json(value: &str) -> Result<MessageContent> {
     let contents = read_content_source(value)?;
     let content: MessageContent = serde_json::from_str(&contents)?;
@@ -869,7 +1019,222 @@ async fn load_space_names(ctx: &AppContext) -> Result<HashMap<String, String>> {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+    use crate::cli::{Cli, Commands};
+
+    /// Parses an `anyr chat ...` argv into its transport selector and command.
+    fn parse_chat(args: &[&str]) -> (TransportArg, super::super::ChatCommands) {
+        let cli = Cli::try_parse_from(args).expect("chat command parses");
+        match cli.command {
+            Commands::Chat(chat) => (chat.transport, *chat.command),
+            other => panic!("expected chat command, got {other:?}"),
+        }
+    }
+
+    /// Classifies and resolves a parsed `anyr chat ...` argv in one step.
+    fn backend_of(args: &[&str]) -> Result<ChatBackend> {
+        let (transport, command) = parse_chat(args);
+        let op = classify(&command);
+        resolve_transport(transport, &op)
+    }
+
+    #[test]
+    fn transport_defaults_to_auto() {
+        let (transport, _) = parse_chat(&["anyr", "chat", "list", "--space", "Work"]);
+        assert_eq!(transport, TransportArg::Auto);
+    }
+
+    #[test]
+    fn transport_parses_each_value() {
+        for (value, expected) in [
+            ("auto", TransportArg::Auto),
+            ("rest", TransportArg::Rest),
+            ("grpc", TransportArg::Grpc),
+        ] {
+            let (transport, _) = parse_chat(&[
+                "anyr",
+                "chat",
+                "--transport",
+                value,
+                "list",
+                "--space",
+                "Work",
+            ]);
+            assert_eq!(transport, expected);
+        }
+    }
+
+    #[test]
+    fn transport_rejects_unknown_value() {
+        let parsed = Cli::try_parse_from(["anyr", "chat", "--transport", "soap", "list"]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn auto_picks_rest_for_single_space_list() {
+        assert_eq!(
+            backend_of(&["anyr", "chat", "list", "--space", "Work"]).unwrap(),
+            ChatBackend::Rest
+        );
+    }
+
+    #[test]
+    fn auto_picks_grpc_for_cross_space_list() {
+        assert_eq!(
+            backend_of(&["anyr", "chat", "list"]).unwrap(),
+            ChatBackend::Grpc
+        );
+    }
+
+    #[test]
+    fn auto_picks_grpc_for_single_space_text_search() {
+        assert_eq!(
+            backend_of(&["anyr", "chat", "list", "--space", "Work", "--text", "hi"]).unwrap(),
+            ChatBackend::Grpc
+        );
+    }
+
+    #[test]
+    fn auto_picks_rest_for_plain_message_crud() {
+        for cmd in [
+            vec!["anyr", "chat", "messages", "list", "Work", "Ops"],
+            vec!["anyr", "chat", "messages", "get", "Work", "Ops", "m1"],
+            vec!["anyr", "chat", "messages", "send", "Work", "Ops", "hi"],
+            vec![
+                "anyr", "chat", "messages", "edit", "Work", "Ops", "m1", "--text", "hi",
+            ],
+            vec!["anyr", "chat", "messages", "delete", "Work", "Ops", "m1"],
+            vec!["anyr", "chat", "create", "Work", "Ops"],
+            vec!["anyr", "chat", "read", "Work", "Ops"],
+        ] {
+            assert_eq!(
+                backend_of(&cmd).unwrap(),
+                ChatBackend::Rest,
+                "expected REST for {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_picks_rest_sse_for_single_chat_listen() {
+        assert_eq!(
+            backend_of(&["anyr", "chat", "listen", "--chat", "Ops", "--space", "Work"]).unwrap(),
+            ChatBackend::RestSse
+        );
+    }
+
+    #[test]
+    fn auto_picks_grpc_for_multi_chat_listen() {
+        assert_eq!(
+            backend_of(&[
+                "anyr", "chat", "listen", "--chat", "Ops", "--chat", "Dev", "--space", "Work",
+            ])
+            .unwrap(),
+            ChatBackend::Grpc
+        );
+    }
+
+    // These tests cover `resolve_transport`'s policy mapping only — the backend
+    // it returns for a given `--transport`/operation pair. They do not assert
+    // anything about which transport a handler actually dispatches through
+    // (execution routing is staged for follow-up work).
+    #[test]
+    fn grpc_resolves_to_grpc_backend_even_for_rest_capable_ops() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "--transport",
+                "grpc",
+                "create",
+                "Work",
+                "Ops"
+            ])
+            .unwrap(),
+            ChatBackend::Grpc
+        );
+    }
+
+    #[test]
+    fn rest_resolves_rest_capable_ops_to_their_policy_backend() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "list",
+                "--space",
+                "Work",
+            ])
+            .unwrap(),
+            ChatBackend::Rest
+        );
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "listen",
+                "--chat",
+                "Ops",
+                "--space",
+                "Work",
+            ])
+            .unwrap(),
+            ChatBackend::RestSse
+        );
+    }
+
+    #[test]
+    fn rest_rejects_grpc_only_operations() {
+        for cmd in [
+            vec!["anyr", "chat", "--transport", "rest", "get", "Work", "Ops"],
+            vec!["anyr", "chat", "--transport", "rest", "list"],
+            vec![
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "list",
+                "--space",
+                "Work",
+                "--text",
+                "hi",
+            ],
+            vec![
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "unread",
+                "Work",
+                "Ops",
+            ],
+            vec![
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "listen",
+                "--chat",
+                "Ops",
+                "--chat",
+                "Dev",
+                "--space",
+                "Work",
+            ],
+        ] {
+            let err = backend_of(&cmd).expect_err(&format!("expected rejection for {cmd:?}"));
+            assert!(
+                err.to_string().contains("--transport rest"),
+                "error should mention --transport rest: {err}"
+            );
+        }
+    }
 
     #[test]
     fn encode_order_id_hex_basic() {

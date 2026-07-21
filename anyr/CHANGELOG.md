@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- `anyr chat --transport auto|rest|grpc` selects the transport policy for chat
+  operations (default `auto`). `rest` rejects operations that only gRPC can
+  serve (for example cross-space list, chat text search, rich `get`, `unread`,
+  and multi-chat `listen`) with an actionable error; the resolved policy backend
+  is reported in verbose diagnostics (`-v`). Per-operation REST routing for the
+  REST-capable message/read/listen operations is staged for follow-up work.
 - program used to generate test vectors for account key generation
 - `anyr type update` property-list controls (mutually exclusive with
   `--add-property`):
