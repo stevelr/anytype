@@ -10,12 +10,15 @@
 //! in order before sending one whole-body update. Match counting and
 //! replacement use the same left-to-right, non-overlapping semantics. Anytype
 //! has no atomic compare-and-swap operation, so a best-effort race remains
-//! between the precondition read and the update.
+//! between the precondition read and the update. Hashes and verification stay
+//! over the exact canonical GET body; a closed plain-line representation is
+//! inverted only for the PATCH wire form so escaped underscores are not
+//! double-escaped.
 
 use std::{borrow::Cow, fmt};
 
 use anytype::{
-    objects::Object,
+    objects::{Object, plain_markdown_representation},
     prelude::{VerifyConfig, verify_semantic},
 };
 use rmcp::{
@@ -294,11 +297,21 @@ pub async fn object_edit(
                 return Err(HandlerError::new(ToolError::conflict()).into());
             }
             let edited_body = apply_edits(current_body, &input.edits)?;
-            let expected_hash = BodySha256::digest(&edited_body);
+            let representation = plain_markdown_representation(&edited_body);
+            let expected_body = representation
+                .as_ref()
+                .map_or(edited_body.as_str(), |representation| {
+                    representation.canonical()
+                });
+            validate_complete_body(expected_body)?;
+            let write_body = representation
+                .as_ref()
+                .map_or(edited_body.as_str(), |representation| representation.wire());
+            let expected_hash = BodySha256::digest(expected_body);
 
             let request = client
                 .update_object(space_id.as_str(), object_id.as_str())
-                .body(&edited_body)
+                .body(write_body)
                 .no_verify();
             operation_progress.mark_dispatched();
             let patch_anomaly = match request.update().await {
@@ -329,7 +342,6 @@ pub async fn object_edit(
             )
             .await
             .map_err(|_| HandlerError::new(ToolError::mutation_indeterminate()))?;
-
             if patch_anomaly {
                 return Err(HandlerError::new(ToolError::mutation_indeterminate()).into());
             }
@@ -910,6 +922,14 @@ mod tests {
         assert!(structural_preflight(&input).is_ok());
         assert_eq!(apply_edits("a", &max_edits).unwrap(), "a");
         assert!(validate_complete_body(&"x".repeat(MAX_UPDATE_MARKDOWN_CHARS)).is_ok());
+
+        let raw_boundary = format!("{}_", "a".repeat(MAX_UPDATE_MARKDOWN_CHARS - 1));
+        let representation =
+            plain_markdown_representation(&raw_boundary).expect("closed boundary form");
+        assert!(
+            validate_complete_body(representation.canonical()).is_err(),
+            "canonical underscore escape and suffix must remain inside the body ceiling"
+        );
     }
 
     #[tokio::test]
@@ -1023,6 +1043,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_plain_body_with_unique_suffix_round_trips_without_double_escape() {
+        let before = "alpha arbitrary body 123\\_0   \n";
+        let after = "alpha verified body 123\\_0   \n";
+        let current = object(SPACE_ID, OBJECT_ID, before);
+        let updated = object(SPACE_ID, OBJECT_ID, after);
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(current),
+            FixtureReply::json(updated.clone()),
+            FixtureReply::json(updated),
+        ])
+        .await;
+        let result = object_edit(
+            &runtime(base_url, Duration::from_secs(1)),
+            &object_edit_tool().unwrap(),
+            MutationAccess::Allowed,
+            &edit_input(
+                before,
+                json!([{"old_text":"arbitrary","new_text":"verified"}]),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("body_sha256"))
+                .and_then(Value::as_str),
+            Some(BodySha256::digest(after).as_str())
+        );
+
+        let requests = server.await.expect("canonical edit fixture");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            request_body(&requests[1]),
+            json!({"markdown":"alpha verified body 123_0"})
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_plain_body_stale_hash_still_rejects_without_patch() {
+        let current = "alpha arbitrary body 123\\_0   \n";
+        let (base_url, server) = fixture(vec![FixtureReply::json(object(
+            SPACE_ID, OBJECT_ID, current,
+        ))])
+        .await;
+        let result = object_edit(
+            &runtime(base_url, Duration::from_secs(1)),
+            &object_edit_tool().unwrap(),
+            MutationAccess::Allowed,
+            &edit_input(
+                "stale canonical body",
+                json!([{"old_text":"arbitrary","new_text":"verified"}]),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result_code(&result), "conflict");
+        assert_ne!(
+            result_message(&result),
+            ToolError::mutation_indeterminate().message()
+        );
+        let requests = server.await.expect("canonical stale fixture");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET "));
+    }
+
+    #[tokio::test]
     async fn malformed_identity_and_oversized_current_body_never_patch() {
         let too_large = "x".repeat(MAX_UPDATE_MARKDOWN_CHARS + 1);
         for reply in [
@@ -1081,7 +1170,7 @@ mod tests {
     #[tokio::test]
     async fn verification_converges_but_exhaustion_and_malformed_results_are_indeterminate() {
         let current = object(SPACE_ID, OBJECT_ID, "old");
-        let updated = object(SPACE_ID, OBJECT_ID, "new");
+        let updated = object(SPACE_ID, OBJECT_ID, "new   \n");
         let (base_url, server) = fixture(vec![
             FixtureReply::json(current.clone()),
             FixtureReply::json(updated.clone()),

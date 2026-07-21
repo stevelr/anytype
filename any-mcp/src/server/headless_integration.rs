@@ -1128,3 +1128,88 @@ async fn headless_create_body_canonicalization_is_verified_once() {
     .await
     .expect("cleanup-safe any-uvg representative");
 }
+
+#[tokio::test]
+#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+async fn headless_exact_edit_accepts_a_converged_arbitrary_body() {
+    Box::pin(with_test_context(|ctx| {
+        Box::pin(async move {
+            let server = live_server(ctx.as_ref()).await;
+            let suffix = unique_suffix();
+            let object = create_object(
+                ctx.as_ref(),
+                "page",
+                &format!("MCP arbitrary exact edit {suffix}"),
+                "",
+            )
+            .await;
+            let requested = format!("alpha arbitrary body {suffix}");
+            ctx.client
+                .update_object(&ctx.space_id, &object.id)
+                .body(&requested)
+                .update()
+                .await
+                .expect("set arbitrary exact-edit fixture body");
+
+            let mut observed = success(
+                &server,
+                OBJECT_GET,
+                json!({
+                    "space": ctx.space_id.as_str(),
+                    "object_id": object.id.as_str(),
+                    "body": {"max_chars": 100_000}
+                }),
+            )
+            .await;
+            let mut converged = None;
+            for _ in 0..12 {
+                sleep(Duration::from_millis(100)).await;
+                let next = success(
+                    &server,
+                    OBJECT_GET,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object.id.as_str(),
+                        "body": {"max_chars": 100_000}
+                    }),
+                )
+                .await;
+                if next["body"]["text"] == observed["body"]["text"]
+                    && next["body"]["sha256"] == observed["body"]["sha256"]
+                {
+                    converged = Some(next);
+                    break;
+                }
+                observed = next;
+            }
+            let observed = converged.expect("two independent exact body reads must converge");
+            let observed_body = observed["body"]["text"]
+                .as_str()
+                .expect("complete observed body");
+            assert_eq!(observed_body.matches("arbitrary").count(), 1);
+
+            let edited = success(
+                &server,
+                OBJECT_EDIT,
+                json!({
+                    "space": ctx.space_id.as_str(),
+                    "object_id": object.id.as_str(),
+                    "edits": [{
+                        "old_text": "arbitrary",
+                        "new_text": "verified",
+                        "expected_matches": 1
+                    }],
+                    "expected_body_sha256": observed["body"]["sha256"]
+                }),
+            )
+            .await;
+            assert!(edited["body_sha256"].is_string());
+            let stored = read_body(ctx.as_ref(), &object.id).await;
+            assert_eq!(stored.matches("verified").count(), 1);
+            assert!(!stored.contains("arbitrary"));
+            Ok(())
+        })
+    }))
+    .await
+    .expect("cleanup-safe arbitrary exact-edit sentinel");
+}

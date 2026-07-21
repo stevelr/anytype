@@ -10,12 +10,13 @@
 //! form). Supplying `expected_body_sha256` checks the complete current body
 //! before the single update request. Anytype does not expose an atomic
 //! compare-and-swap operation, so a best-effort race remains between that read
-//! and the update.
+//! and the update. Supported plain-line bodies use separate safe wire and exact
+//! canonical hash forms; ambiguous Markdown remains byte-exact.
 
 use std::{borrow::Cow, collections::HashMap, fmt};
 
 use anytype::{
-    objects::Object,
+    objects::{Object, plain_markdown_representation},
     prelude::{VerifyConfig, verify_semantic},
     properties::PropertyFormat,
     types::Type,
@@ -448,7 +449,11 @@ pub async fn object_update(
                 request = request.name(name.as_str());
             }
             if let Some(body) = input.body_markdown.as_ref() {
-                request = request.body(body.as_str());
+                let representation = plain_markdown_representation(body.as_str());
+                let wire = representation
+                    .as_ref()
+                    .map_or(body.as_str(), |representation| representation.wire());
+                request = request.body(wire);
             }
             if input.r#type.as_ref().is_some() {
                 request = request.type_key(effective_type.key.as_str());
@@ -531,6 +536,14 @@ fn preflight(input: &ObjectUpdateInput) -> Result<Vec<MutationProperty>, Handler
         && let Some(explicit) = reference.as_str().strip_prefix('@')
     {
         TypeKey::new(explicit).map_err(|_| HandlerError::new(ToolError::validation()))?;
+    }
+    if input.body_markdown.as_ref().is_some_and(|body| {
+        plain_markdown_representation(body.as_str()).is_some_and(|representation| {
+            representation.canonical().len() > MAX_UPDATE_MARKDOWN_BYTES
+                || representation.canonical().chars().count() > MAX_UPDATE_MARKDOWN_CHARS
+        })
+    }) {
+        return Err(HandlerError::new(ToolError::validation()));
     }
     input
         .properties
@@ -694,7 +707,13 @@ fn expected_final_body_hash(input: &ObjectUpdateInput) -> Option<BodySha256> {
     input
         .body_markdown
         .as_ref()
-        .map(|body| BodySha256::digest(body.as_str()))
+        .map(|body| {
+            let representation = plain_markdown_representation(body.as_str());
+            let canonical = representation
+                .as_ref()
+                .map_or(body.as_str(), |representation| representation.canonical());
+            BodySha256::digest(canonical)
+        })
         .or_else(|| input.expected_body_sha256.as_ref().cloned())
 }
 
@@ -724,7 +743,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::runtime::StartupStatus;
+    use crate::{error::ToolErrorCode, runtime::StartupStatus};
 
     const SPACE_ID: &str =
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
@@ -1359,8 +1378,11 @@ mod tests {
 
     #[tokio::test]
     async fn no_hash_body_replacement_and_empty_body_clear_are_allowed() {
-        for body in ["unguarded replacement", ""] {
-            let updated = object(SPACE_ID, OBJECT_ID, "Name", body, "page");
+        for (body, canonical) in [
+            ("unguarded replacement", "unguarded replacement   \n"),
+            ("", ""),
+        ] {
+            let updated = object(SPACE_ID, OBJECT_ID, "Name", canonical, "page");
             let (base_url, server) = fixture(vec![
                 FixtureReply::json(updated.clone()),
                 FixtureReply::json(type_response("page", json!([]))),
@@ -1383,12 +1405,51 @@ mod tests {
             assert_eq!(result.is_error, Some(false));
             assert_eq!(
                 result.structured_content.as_ref().unwrap()["body_sha256"],
-                BodySha256::digest(body).as_str()
+                BodySha256::digest(canonical).as_str()
             );
             let requests = server.await.expect("unguarded fixture");
             assert_eq!(requests.len(), 4);
             assert_eq!(request_body(&requests[2]), json!({"markdown":body}));
         }
+    }
+
+    #[tokio::test]
+    async fn canonical_underscore_body_replay_uses_raw_wire_and_exact_hash() {
+        let current_body = "alpha current body   \n";
+        let requested = "alpha unique\\_0   \n";
+        let current = object(SPACE_ID, OBJECT_ID, "Before", current_body, "page");
+        let updated = object(SPACE_ID, OBJECT_ID, "Before", requested, "page");
+        let expected = BodySha256::digest(current_body);
+        let (base_url, server) = fixture(vec![
+            FixtureReply::json(current),
+            FixtureReply::json(type_response("page", json!([]))),
+            FixtureReply::json(updated.clone()),
+            FixtureReply::json(updated),
+        ])
+        .await;
+        let result = object_update(
+            &runtime(base_url, Duration::from_secs(1)),
+            &object_update_tool().unwrap(),
+            MutationAccess::Allowed,
+            &input(json!({
+                "space":SPACE_ID,
+                "object_id":OBJECT_ID,
+                "body_markdown":requested,
+                "expected_body_sha256":expected.as_str()
+            })),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["body_sha256"],
+            BodySha256::digest(requested).as_str()
+        );
+        let requests = server.await.expect("canonical update fixture");
+        assert_eq!(
+            request_body(&requests[2]),
+            json!({"markdown":"alpha unique_0"})
+        );
     }
 
     #[tokio::test]
@@ -1495,6 +1556,20 @@ mod tests {
         assert!(BodySha256::new("a".repeat(63)).is_err());
         assert!(UpdateMarkdown::new("🦀".repeat(MAX_UPDATE_MARKDOWN_CHARS)).is_ok());
         assert!(UpdateMarkdown::new("🦀".repeat(MAX_UPDATE_MARKDOWN_CHARS + 1)).is_err());
+
+        let raw_boundary = format!("{}_", "a".repeat(MAX_UPDATE_MARKDOWN_CHARS - 1));
+        let boundary_input = input(json!({
+            "space": SPACE_ID,
+            "object_id": OBJECT_ID,
+            "body_markdown": raw_boundary
+        }));
+        assert_eq!(
+            preflight(&boundary_input)
+                .expect_err("canonical escape and suffix cross the body ceiling")
+                .tool_error()
+                .code(),
+            ToolErrorCode::Validation
+        );
     }
 
     #[tokio::test]

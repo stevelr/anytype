@@ -237,6 +237,16 @@ For soft-delete workflows that reconcile uncertain responses themselves,
 request attempt. Ordinary `delete()` retains the client's replay-safe DELETE
 retry policy.
 
+Anytype's canonical Markdown read representation is not always safe to send
+back unchanged: for example, a literal underscore in a plain line is returned
+escaped. `objects::plain_markdown_representation` provides separate `wire()`
+and `canonical()` forms for the deliberately closed subset of empty bodies and
+single plain lines containing alphanumeric characters, internal ASCII spaces,
+and underscores. It accepts either raw or already-canonical values and is
+idempotent on replay. It returns `None` for punctuation, multiline Markdown,
+and ambiguous backslash forms; callers must preserve those bytes rather than
+guess at Markdown equivalence.
+
 ## Archived Object Cleanup
 
 ```rust,no_run

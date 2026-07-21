@@ -22,6 +22,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   preview. Stable and preview modes retain one handler/catalog implementation.
   Document and test released negotiation through the `2024-11-05` minimum.
 
+### Fixed
+
+- Preserve exact body verification while avoiding Anytype Markdown
+  double-escaping for the closed plain-line subset shared by `object_create`,
+  `object_update`, and `object_edit`. Raw and canonical plain bodies containing
+  underscores now use one unescaped write form and one exact canonical
+  fingerprint, body-hash, and verification form; ambiguous Markdown remains
+  byte-exact and fails closed on upstream rewrites. Canonical expansion is
+  included in body limits before I/O.
+
 ### Added
 
 - Map structurally classified nested Anytype gRPC authentication failures to
@@ -169,7 +179,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   retries of terminal indeterminate keys retain the fixed reread guidance,
   while mismatched fingerprints remain ordinary key conflicts.
 - Normalize only evidence-backed single-line plain Markdown into Anytype's
-  stable three-space/newline form before the create fingerprint and sole POST;
+  stable canonical stored form before the create fingerprint and semantic
+  expectations, then derive its separate unescaped wire form for the sole POST;
   require both the POST response and final GET to match all requested semantics.
   Keep Markdown syntax, escapes, and other whitespace exact and indeterminate
   when rewritten rather than applying broad trimming or equivalence.
