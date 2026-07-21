@@ -184,6 +184,7 @@
 #![warn(clippy::unused_async)]
 
 pub mod auth;
+pub mod body;
 pub mod cache;
 pub mod chat_stream;
 pub mod chats;
@@ -222,6 +223,16 @@ pub mod prelude {
     // Error types
     pub use crate::error::*;
     pub use crate::{
+        // Typed body-block reads
+        body::{
+            BlockContent, BlockId, BlockRef, BlockRestrictions, BlocksClient, BodyBlock,
+            BodyGraphErrorKind, BodyLimits, BodyRequest, BodySnapshot, BookmarkContent,
+            BookmarkState, CalloutIcon, ColorToken, DividerStyle, EmbedContent, EmbedProcessor,
+            FileBlockKind, FileBlockState, FileBlockStyle, FileView, HorizontalAlign, LayoutStyle,
+            LinkCard, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind, OpaqueContent,
+            OpaqueSummary, RelationView, TextContent, TextMark, TextRange, TextStyle,
+            VerticalAlign,
+        },
         // HTTP metrics
         cache::AnytypeCache,
         client::{

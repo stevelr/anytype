@@ -46,6 +46,8 @@ and callers do not need a direct `anytype-rpc` dependency.
   owning object type. Malformed rows that match the requested template name
   fail closed unless a valid row with the same stable id supplies the safe
   representative.
+- Typed, bounded body-block reads (`body` module): validated block trees with
+  exact IDs and order over gRPC `ObjectShow`
 - Nested filter expression builder
 - Parameter validation
 - Metrics
@@ -358,6 +360,35 @@ async fn follow_chat(client: AnytypeClient, chat_obj_id: &str) -> Result<(), Any
     Ok(())
 }
 ```
+
+## Body Blocks (gRPC)
+
+The `body` module reads the rich body of an object (paragraphs, headings,
+lists, callouts, tables, bookmarks, LaTeX/Mermaid/YouTube embeds) as a typed,
+bounded tree with exact block IDs and exact child order:
+
+```rust
+use anytype::prelude::*;
+
+async fn print_body(client: &AnytypeClient) -> Result<(), AnytypeError> {
+    let snapshot = client.blocks().body("space_id", "object_id").fetch().await?;
+    for block in snapshot.iter() {
+        if let BlockContent::Text(text) = &block.content {
+            println!("{:?}: {}", text.style, text.text);
+        }
+    }
+    Ok(())
+}
+```
+
+Reads are fail-closed: duplicate, cyclic, orphaned, dangling, oversized, or
+malformed block graphs fail whole with a typed `AnytypeError::BodyGraph`
+error — a partial or truncated tree is never returned. Per-request
+`BodyLimits` can tighten (never widen) the hard ceilings on block count,
+depth, fanout, text size, and mark count. Content the typed layer does not
+model (dataviews, widgets, unknown styles or marks from newer servers) reads
+as an explicit `Unsupported` marker carrying only a content-free structural
+summary, so trees from newer hearts stay complete, ordered, and honest.
 
 ## Status and Compatibility
 
