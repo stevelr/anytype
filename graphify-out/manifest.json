@@ -790,8 +790,8 @@
     "semantic_hash": ""
   },
   "any-mcp/CHANGELOG.md": {
-    "mtime": 1784667692.855168,
-    "ast_hash": "cd130486e0a0679c8047aa63e9bab52e",
+    "mtime": 1784668425.6360009,
+    "ast_hash": "813b8b3351d02a4ccf95c1fe57e541f0",
     "semantic_hash": ""
   },
   "any-mcp/README.md": {
@@ -962,6 +962,11 @@
   "any-mcp/designs/body-block-model.md": {
     "mtime": 1784667483.0111828,
     "ast_hash": "72945ccae0645e66aed785f6b1dd6119",
+    "semantic_hash": ""
+  },
+  "any-mcp/designs/filters.md": {
+    "mtime": 1784668180.879937,
+    "ast_hash": "4e58c8bd16f89e3609ecb643027a3941",
     "semantic_hash": ""
   }
 }
