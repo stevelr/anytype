@@ -70,3 +70,22 @@ fn invalid_read_only_setting_fails_before_auth_without_echoing_its_value() {
     assert!(!stderr.contains(secret_like_value));
     assert!(!stderr.contains("HTTP credentials are missing"));
 }
+
+#[test]
+fn invalid_protocol_mode_fails_before_auth_without_echoing_its_value() {
+    let secret_like_value = "secret-preview-selector";
+    let output = unauthenticated_command()
+        .env("ANY_MCP_PROTOCOL", secret_like_value)
+        .output()
+        .expect("run any-mcp test binary");
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "stdout is reserved for MCP frames"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("ANY_MCP_PROTOCOL"));
+    assert!(!stderr.contains(secret_like_value));
+    assert!(!stderr.contains("HTTP credentials are missing"));
+}

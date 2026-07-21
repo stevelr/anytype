@@ -3,13 +3,16 @@
 // SPDX-FileCopyrightText: 2026 Steve Schoettler
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dual-era stdio framing for stateless MCP 2026-07-28 and legacy clients.
+//! Explicitly selected stdio framing for stable and experimental MCP clients.
 
 use std::{collections::HashMap, io, sync::Arc};
 
 use rmcp::{
     RoleServer,
-    model::{CallToolRequestParams, ErrorData, PaginatedRequestParams, ReadResourceRequestParams},
+    model::{
+        CallToolRequestParams, ErrorData, InitializeRequestParams, PaginatedRequestParams,
+        ReadResourceRequestParams,
+    },
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::Transport,
 };
@@ -23,6 +26,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    config::ProtocolMode,
     runtime::{ServeError, serve_transport},
     server::AnyMcpServer,
 };
@@ -40,23 +44,99 @@ const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 
 type CancellationMap = Arc<Mutex<HashMap<String, CancellationToken>>>;
 
-/// Serves one stdio process in either modern or legacy mode.
+/// Serves one stdio process in its configured protocol mode.
 ///
-/// The first nonblank frame is the era probe prescribed by the modern stdio
-/// binding. An `initialize` frame is replayed byte-for-byte to rmcp's legacy
-/// service; every other frame selects the stateless 2026-07-28 adapter.
-pub(crate) async fn serve_dual_stdio(server: AnyMcpServer) -> Result<(), ServeError> {
+/// Input bytes never select the experimental adapter. Stable mode validates
+/// the pre-initialize stream and replays the accepted initialize frame
+/// byte-for-byte to rmcp. Preview mode is reachable only through explicit
+/// process configuration.
+pub(crate) async fn serve_stdio(
+    server: AnyMcpServer,
+    protocol_mode: ProtocolMode,
+) -> Result<(), ServeError> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin);
+    let reader = BufReader::new(stdin);
+    match protocol_mode {
+        ProtocolMode::Stable => serve_stable(server, reader, stdout).await,
+        ProtocolMode::Experimental20260728 => serve_preview(server, reader, stdout).await,
+    }
+}
+
+async fn serve_stable<R, W>(
+    server: AnyMcpServer,
+    mut reader: R,
+    mut writer: W,
+) -> Result<(), ServeError>
+where
+    R: AsyncBufRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    loop {
+        let frame = match read_frame(&mut reader).await {
+            Ok(Some(frame)) if frame.iter().all(u8::is_ascii_whitespace) => continue,
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                server.runtime().begin_shutdown();
+                return Ok(());
+            }
+            Err(FrameReadError::TooLarge) => {
+                write_gate_response(&mut writer, &invalid_request(Value::Null)).await?;
+                continue;
+            }
+            Err(FrameReadError::Io) => return Err(ServeError::StdioTransport),
+        };
+
+        let frame_without_bom = frame.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&frame);
+        let value = match serde_json::from_slice::<Value>(frame_without_bom) {
+            Ok(value) => value,
+            Err(_) => {
+                write_gate_response(&mut writer, &parse_error()).await?;
+                continue;
+            }
+        };
+        if is_stable_initialize(&value) {
+            return serve_transport(server, LegacyStdioTransport::new(frame, reader, writer)).await;
+        }
+        if !is_jsonrpc_notification(&value) {
+            write_gate_response(&mut writer, &invalid_request(Value::Null)).await?;
+        }
+    }
+}
+
+async fn write_gate_response<W>(writer: &mut W, response: &Value) -> Result<(), ServeError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let encoded = encode_bounded_legacy_frame(response).map_err(|_| ServeError::StdioTransport)?;
+    writer
+        .write_all(&encoded)
+        .await
+        .map_err(|_| ServeError::StdioTransport)?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|_| ServeError::StdioTransport)?;
+    writer.flush().await.map_err(|_| ServeError::StdioTransport)
+}
+
+async fn serve_preview<R, W>(
+    server: AnyMcpServer,
+    mut reader: R,
+    writer: W,
+) -> Result<(), ServeError>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let first = loop {
         match read_frame(&mut reader).await {
             Ok(Some(frame)) if frame.iter().all(u8::is_ascii_whitespace) => continue,
             Ok(frame) => break frame,
             Err(FrameReadError::TooLarge) => {
-                return serve_modern(server, reader, stdout, FirstFrame::TooLarge).await;
+                return serve_modern(server, reader, writer, FirstFrame::TooLarge).await;
             }
-            Err(FrameReadError::Io) => return Err(ServeError::ModernTransport),
+            Err(FrameReadError::Io) => return Err(ServeError::StdioTransport),
         }
     };
     let Some(first) = first else {
@@ -64,11 +144,7 @@ pub(crate) async fn serve_dual_stdio(server: AnyMcpServer) -> Result<(), ServeEr
         return Ok(());
     };
 
-    if is_legacy_initialize(&first) {
-        serve_transport(server, LegacyStdioTransport::new(first, reader, stdout)).await
-    } else {
-        serve_modern(server, reader, stdout, FirstFrame::Bytes(first)).await
-    }
+    serve_modern(server, reader, writer, FirstFrame::Bytes(first)).await
 }
 
 /// Bounded legacy line transport that preserves rmcp dispatch and lifecycle.
@@ -313,16 +389,16 @@ enum FirstFrame {
     TooLarge,
 }
 
-fn is_legacy_initialize(frame: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(frame)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("method")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .is_some_and(|method| method == "initialize")
+fn is_stable_initialize(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && object.get("method").and_then(Value::as_str) == Some("initialize")
+            && valid_id(object.get("id")).is_some()
+            && object.get("params").cloned().is_some_and(|params| {
+                serde_json::from_value::<InitializeRequestParams>(params)
+                    .is_ok_and(|params| params.protocol_version.as_str() != MODERN_VERSION)
+            })
+    })
 }
 
 async fn serve_modern<R, W>(
@@ -367,8 +443,8 @@ where
                 cancel_all(&cancellations).await;
                 requests.abort_all();
                 return match writer_result {
-                    Ok(Ok(())) => Err(ServeError::ModernTransport),
-                    Ok(Err(())) | Err(_) => Err(ServeError::ModernTransport),
+                    Ok(Ok(())) => Err(ServeError::StdioTransport),
+                    Ok(Err(())) | Err(_) => Err(ServeError::StdioTransport),
                 };
             }
             completed = requests.join_next(), if !requests.is_empty() => {
@@ -404,7 +480,7 @@ where
                         runtime.begin_shutdown();
                         cancel_all(&cancellations).await;
                         requests.abort_all();
-                        return Err(ServeError::ModernTransport);
+                        return Err(ServeError::StdioTransport);
                     }
                 }
             }
@@ -421,7 +497,7 @@ where
     match (task_failed, writer_task.await) {
         (false, Ok(Ok(()))) => Ok(()),
         (true, _) => Err(ServeError::ServiceTask),
-        (false, Ok(Err(()))) | (false, Err(_)) => Err(ServeError::ModernTransport),
+        (false, Ok(Err(()))) | (false, Err(_)) => Err(ServeError::StdioTransport),
     }
 }
 
@@ -983,14 +1059,39 @@ mod tests {
     }
 
     #[test]
-    fn first_frame_probe_selects_only_initialize_for_legacy() {
-        assert!(is_legacy_initialize(
-            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#
-        ));
-        assert!(!is_legacy_initialize(
-            br#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}"#
-        ));
-        assert!(!is_legacy_initialize(b"{malformed"));
+    fn stable_gate_accepts_only_valid_initialize_requests() {
+        assert!(is_stable_initialize(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "1.0.0"}
+            }
+        })));
+        assert!(!is_stable_initialize(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}
+        })));
+        assert!(!is_stable_initialize(&json!({
+            "jsonrpc": "1.0", "id": 1, "method": "initialize", "params": {}
+        })));
+        assert!(!is_stable_initialize(&json!({
+            "jsonrpc": "2.0", "method": "initialize", "params": {}
+        })));
+        assert!(!is_stable_initialize(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}
+        })));
+        assert!(!is_stable_initialize(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": {"name": "preview-client", "version": "1.0.0"}
+            }
+        })));
     }
 
     #[test]

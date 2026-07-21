@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- Make the latest released MCP protocol (`2025-11-25`) and its
+  initialize/initialized lifecycle the production stdio default. The stateless
+  `2026-07-28` implementation remains compiled and schema-tested, but now
+  requires exact `ANY_MCP_PROTOCOL=experimental-2026-07-28`; invalid selectors
+  fail startup without echoing their value, and input frames cannot select the
+  preview. Stable and preview modes retain one handler/catalog implementation.
+  Document and test released negotiation through the `2024-11-05` minimum.
+
 ### Added
 
 - Map structurally classified nested Anytype gRPC authentication failures to

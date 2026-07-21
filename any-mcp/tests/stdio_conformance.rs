@@ -338,6 +338,14 @@ struct ProcessOutput {
 
 impl ProtocolProcess {
     fn start(fixture: &HttpFixture, read_only: bool) -> Self {
+        Self::start_with_protocol(fixture, read_only, None)
+    }
+
+    fn start_preview(fixture: &HttpFixture, read_only: bool) -> Self {
+        Self::start_with_protocol(fixture, read_only, Some("experimental-2026-07-28"))
+    }
+
+    fn start_with_protocol(fixture: &HttpFixture, read_only: bool, protocol: Option<&str>) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
         command
             .stdin(Stdio::piped())
@@ -355,6 +363,11 @@ impl ProtocolProcess {
             .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
             .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
             .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
+        if let Some(protocol) = protocol {
+            command.env("ANY_MCP_PROTOCOL", protocol);
+        } else {
+            command.env_remove("ANY_MCP_PROTOCOL");
+        }
         let mut child = command.spawn().expect("spawn production any-mcp binary");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = child.stdout.take().expect("child stdout");
@@ -770,16 +783,25 @@ fn assert_exact_wire_catalog(result: &Value, read_only: bool) -> Vec<String> {
 }
 
 fn initialize_legacy_session(process: &mut ProtocolProcess) {
+    initialize_stable_session(process, "any-mcp-conformance", "1.0.0", "2025-11-25");
+}
+
+fn initialize_stable_session(
+    process: &mut ProtocolProcess,
+    client_name: &str,
+    client_version: &str,
+    requested_version: &str,
+) {
     let initialized = process.request(
         1,
         "initialize",
         json!({
-            "protocolVersion": "2026-07-28",
+            "protocolVersion": requested_version,
             "capabilities": {},
-            "clientInfo": {"name": "any-mcp-conformance", "version": "1.0.0"}
+            "clientInfo": {"name": client_name, "version": client_version}
         }),
     );
-    assert_eq!(initialized["result"]["protocolVersion"], "2026-07-28");
+    assert_eq!(initialized["result"]["protocolVersion"], requested_version);
     assert_eq!(initialized["result"]["serverInfo"]["name"], "any-mcp");
     assert_eq!(initialized["result"]["capabilities"]["tools"], json!({}));
     assert_eq!(
@@ -787,6 +809,26 @@ fn initialize_legacy_session(process: &mut ProtocolProcess) {
         json!({})
     );
     process.notification("notifications/initialized", json!({}));
+}
+
+#[test]
+fn production_stable_negotiates_exact_pinned_host_requests() {
+    let captures = [
+        ("codex-mcp-client", "0.144.6", "2025-06-18"),
+        ("claude-code", "2.1.214", "2025-11-25"),
+        ("inspector", "0.22.0", "2025-11-25"),
+    ];
+    for (client_name, client_version, requested_version) in captures {
+        let fixture = HttpFixture::start();
+        let mut process = ProtocolProcess::start(&fixture, true);
+        initialize_stable_session(&mut process, client_name, client_version, requested_version);
+        let ping = process.request(2, "ping", json!({}));
+        assert_eq!(ping["result"], json!({}));
+        let output = process.finish();
+        fixture.finish();
+        assert_stdout_purity(&output.stdout);
+        assert_exchange_depth(&output.stdout, 2);
+    }
 }
 
 fn modern_meta() -> Value {
@@ -930,7 +972,7 @@ fn production_stdio_read_only_mode_legacy_regression_is_bounded_and_pure() {
 
 fn run_modern_stdio_acceptance(read_only: bool) {
     let fixture = HttpFixture::start();
-    let mut process = ProtocolProcess::start(&fixture, read_only);
+    let mut process = ProtocolProcess::start_preview(&fixture, read_only);
     let discovered = process.modern_request(1, "server/discover", json!({"_meta": modern_meta()}));
     assert_eq!(discovered["result"]["resultType"], "complete");
     assert_eq!(
@@ -1194,7 +1236,7 @@ fn malformed_json_recovery_is_identical_in_normal_mode() {
 }
 
 #[test]
-fn malformed_first_frame_returns_parse_error_and_selects_modern_mode() {
+fn malformed_first_frame_returns_parse_error_without_selecting_preview() {
     let fixture = HttpFixture::start();
     let mut process = ProtocolProcess::start(&fixture, true);
 
@@ -1202,6 +1244,52 @@ fn malformed_first_frame_returns_parse_error_and_selects_modern_mode() {
     let parse_error = process.read_frame();
     assert_exact_decoder_error(&parse_error, -32700, "Parse error");
 
+    process.send(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "server/discover",
+        "params": {"_meta": modern_meta()}
+    }));
+    let rejected = process.read_frame();
+    assert_exact_decoder_error(&rejected, -32600, "Invalid request");
+    process.send(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "initialize",
+        "params": {}
+    }));
+    let malformed_initialize = process.read_frame();
+    assert_exact_decoder_error(&malformed_initialize, -32600, "Invalid request");
+    process.send(json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {},
+            "clientInfo": {"name": "preview-client", "version": "1.0.0"}
+        }
+    }));
+    let preview_initialize = process.read_frame();
+    assert_exact_decoder_error(&preview_initialize, -32600, "Invalid request");
+    initialize_legacy_session(&mut process);
+    let ping = process.request(5, "ping", json!({}));
+    assert_eq!(ping["result"], json!({}));
+
+    let output = process.finish();
+    fixture.finish();
+    assert_stdout_purity(&output.stdout);
+    assert_exchange_depth(&output.stdout, 6);
+}
+
+#[test]
+fn preview_mode_remains_directly_testable_after_malformed_first_frame() {
+    let fixture = HttpFixture::start();
+    let mut process = ProtocolProcess::start_preview(&fixture, true);
+
+    process.send_bytes(b"{malformed-json");
+    let parse_error = process.read_frame();
+    assert_exact_decoder_error(&parse_error, -32700, "Parse error");
     let discovered = process.modern_request(2, "server/discover", json!({"_meta": modern_meta()}));
     assert_eq!(discovered["result"]["resultType"], "complete");
 

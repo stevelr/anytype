@@ -31,6 +31,9 @@ Supported Anytype settings:
 
 Operational settings are bounded defensively:
 
+- `ANY_MCP_PROTOCOL` is absent or exactly `stable` for the production
+  initialize-based protocol. Exact value `experimental-2026-07-28` enables the
+  stateless preview; every other value fails startup before authentication;
 - `ANY_MCP_MAX_CONCURRENCY` defaults to 8 and has a maximum of 64;
 - `ANY_MCP_REQUEST_TIMEOUT_SECS` defaults to 30 and has a maximum of 300;
 - `ANY_MCP_STARTUP_TIMEOUT_SECS` defaults to 15 and has a maximum of 120;
@@ -79,16 +82,24 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 - [`rmcp`](https://docs.rs/rmcp/) 2.2.0 with the `server`, `macros`, `schemars`,
   and `transport-io` features;
-- a dual-era stdio adapter: a first-frame `initialize` probe is replayed to
-  rmcp 2.2.0 for current clients, while `server/discover` and direct modern
-  requests use stateless MCP `2026-07-28` with required per-request version and
-  capability metadata plus optional, validated client identity;
+- production advertises rmcp's latest released protocol, exactly `2025-11-25`,
+  and uses the standard `initialize`/`notifications/initialized` lifecycle.
+  Released revisions through the documented `2024-11-05` minimum negotiate on
+  that lifecycle. Protocol negotiation is between MCP hosts/clients and the
+  server; language models do not select a wire revision;
+- stateless MCP `2026-07-28` is compiled and schema-tested but available only
+  with `ANY_MCP_PROTOCOL=experimental-2026-07-28`. Its `server/discover`,
+  per-request version/capability metadata, optional validated client identity,
+  `-32022` fallback, result discrimination, and cache hints share the same
+  server handler/catalog implementation as stable mode. A first request can
+  never opt an ordinary process into this preview, and stable startup rejects
+  an initialize request for the compiled preview revision;
 - modern responses include `resultType: complete`; discovery and the static
   tool/resource catalogs carry positive public cache hints, while authenticated
   document reads are immediately stale and private. Unsupported versions use
   error `-32022` with exact `supported` and `requested` data;
 - newline-delimited input/output frames in both eras are capped at 2 MiB. The
-  legacy transport preserves rmcp dispatch while a cancellation-safe decoder
+  stable transport preserves rmcp dispatch while a cancellation-safe decoder
   returns one `-32700` response with explicit `id: null` per syntactically
   malformed frame and one `-32600` response per oversized or well-formed
   invalid frame. Valid JSON-RPC notification shapes never receive a response,
@@ -478,17 +489,18 @@ runtime and advertises their static capability alongside the tool catalog.
 - `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.
 - `src/view_handlers.rs` — bounded view discovery and selected-view object
   listing workflows.
-- `src/server.rs` — server identity, capabilities, and upcoming protocol
+- `src/server.rs` — server identity, capabilities, and stable protocol
   declaration.
-- `src/stdio.rs` — bounded dual-era probe and stateless 2026-07-28 adapter.
+- `src/stdio.rs` — bounded stable lifecycle and explicitly gated stateless
+  2026-07-28 adapter.
 - `src/server/headless_integration.rs` — ignored cleanup-safe production-router
   tests against an authenticated headless Anytype server.
 - `tests/snapshots/` — reviewed deterministic normal/read-only tool catalogs,
   including every schema and annotation.
 - `tests/stdio_conformance.rs` — portable production-process protocol
-  regression and modern/legacy acceptance harness.
+  regression and preview/stable acceptance harness.
 - `tests/schema/mcp-2026-07-28.json` — official draft schema used only as a
-  test oracle for actual modern requests and results.
+  test oracle for actual preview requests and results.
 - `STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client discovery
   evidence with current compatibility limits.
 
@@ -587,9 +599,10 @@ included in runtime error formatting or startup diagnostics.
 The production-process regression harness checks the complete advertised
 catalog, document resources, structured success and error results,
 cancellation, malformed and unknown requests, clean EOF, and stdout/stderr
-purity in normal and read-only modes. It also verifies modern stateless
-discovery and exact malformed-frame recovery before and after legacy
-initialization. See [stdio protocol verification](STDIO_CONFORMANCE.md)
+purity in normal and read-only modes. It also verifies preview stateless
+discovery, stable lifecycle negotiation, and exact malformed-frame recovery
+before and after stable initialization. See
+[stdio protocol verification](STDIO_CONFORMANCE.md)
 for commands, external-tool evidence, and the precise limits of the current
 compatibility claim.
 

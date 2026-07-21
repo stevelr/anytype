@@ -24,7 +24,10 @@ use rmcp::{
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::{config::RuntimeConfig, server::AnyMcpServer};
+use crate::{
+    config::{ProtocolMode, RuntimeConfig},
+    server::AnyMcpServer,
+};
 
 /// Availability established once during authenticated startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -591,9 +594,12 @@ impl std::error::Error for StartupError {}
 ///
 /// Returns a redacted [`ServeError`] for protocol initialization or service
 /// task failures. EOF, including EOF before initialization, is a clean exit.
-pub async fn serve_stdio(runtime: RuntimeContext) -> Result<(), ServeError> {
+pub async fn serve_stdio(
+    runtime: RuntimeContext,
+    protocol_mode: ProtocolMode,
+) -> Result<(), ServeError> {
     let server = AnyMcpServer::new(runtime).map_err(|_| ServeError::Catalog)?;
-    crate::stdio::serve_dual_stdio(server).await
+    crate::stdio::serve_stdio(server, protocol_mode).await
 }
 
 /// Runs an initialized handler over an arbitrary rmcp transport.
@@ -676,8 +682,8 @@ pub enum ServeError {
     Initialization,
     /// The rmcp service task failed.
     ServiceTask,
-    /// The bounded modern stdio adapter could not read or write a frame.
-    ModernTransport,
+    /// The bounded stdio adapter could not read or write a frame.
+    StdioTransport,
 }
 
 impl fmt::Display for ServeError {
@@ -686,7 +692,7 @@ impl fmt::Display for ServeError {
             Self::Catalog => formatter.write_str("MCP static catalog construction failed"),
             Self::Initialization => formatter.write_str("MCP stdio initialization failed"),
             Self::ServiceTask => formatter.write_str("MCP stdio service task failed"),
-            Self::ModernTransport => formatter.write_str("MCP modern stdio transport failed"),
+            Self::StdioTransport => formatter.write_str("MCP stdio transport failed"),
         }
     }
 }
@@ -920,7 +926,7 @@ mod tests {
 
         writer
             .write_all(
-                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"cancel-test","version":"0.0.0"}}}
+                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cancel-test","version":"0.0.0"}}}
 "#,
             )
             .await
@@ -1437,7 +1443,7 @@ mod tests {
         let mut reader = BufReader::new(reader);
         writer
             .write_all(
-                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"runtime-test","version":"0.0.0"}}}
+                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"runtime-test","version":"0.0.0"}}}
 "#,
             )
             .await
@@ -1450,7 +1456,7 @@ mod tests {
             .expect("initialize response deadline")
             .expect("read initialize response");
         assert!(response.contains("\"id\":1"));
-        assert!(response.contains("\"protocolVersion\":\"2026-07-28\""));
+        assert!(response.contains("\"protocolVersion\":\"2025-11-25\""));
         assert_eq!(
             response.lines().count(),
             1,
