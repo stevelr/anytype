@@ -176,34 +176,6 @@ pub async fn handle(ctx: &AppContext, args: FileArgs) -> Result<()> {
             };
             download_http(ctx, &object_id, &space, dir, file, opts).await
         }
-        FileCommands::DownloadViaHeart {
-            object_id,
-            dir,
-            file,
-        } => {
-            let mut request = ctx.client.files().download(&object_id);
-            match (&dir, &file) {
-                (Some(path), None) => {
-                    request = request.to_dir(path);
-                }
-                (None, Some(path)) => {
-                    request = request.to_file(path);
-                }
-                (None, None) => {}
-                (Some(_), Some(_)) => {
-                    anyhow::bail!("--dir and --file are mutually exclusive");
-                }
-            }
-            let download_path = request.download().await?;
-            if ctx.output.format() == OutputFormat::Table {
-                return ctx
-                    .output
-                    .emit_text(&format!("{}", download_path.display()));
-            }
-            ctx.output.emit_json(&json!({
-                "path": download_path,
-            }))
-        }
         FileCommands::Metadata {
             space,
             object_id,
@@ -1005,30 +977,10 @@ mod tests {
     }
 
     #[test]
-    fn download_via_heart_parses_object_and_destination() {
-        let command = file_command(&[
-            "anyr",
-            "file",
-            "download-via-heart",
-            "file-1",
-            "--dir",
-            "/tmp",
-        ])
-        .expect("legacy gRPC download parses");
-        match command {
-            FileCommands::DownloadViaHeart { object_id, dir, .. } => {
-                assert_eq!(object_id, "file-1");
-                assert_eq!(dir.as_deref(), Some(std::path::Path::new("/tmp")));
-            }
-            other => panic!("expected download-via-heart command, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn download_via_heart_takes_no_space_positional() {
-        // The legacy path is keyed only by file id (0.4 behavior), so a second
-        // positional must be rejected.
-        assert!(file_command(&["anyr", "file", "download-via-heart", "space", "file-1"]).is_err());
+    fn download_rejects_removed_via_heart_subcommand() {
+        // The legacy gRPC Heart download path was removed; REST is the only
+        // download command, so `download-via-heart` must no longer parse.
+        assert!(file_command(&["anyr", "file", "download-via-heart", "file-1"]).is_err());
     }
 
     #[test]

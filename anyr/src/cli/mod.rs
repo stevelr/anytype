@@ -391,25 +391,6 @@ pub enum FileCommands {
         #[arg(long, value_name = "VALUE")]
         if_range: Option<String>,
     },
-    /// Download a file via the legacy Heart-side gRPC path, letting the Heart
-    /// process write the bytes to its own destination path (0.4 behavior).
-    #[command(
-        group = ArgGroup::new("heart_download_destination")
-            .args(["dir", "file"])
-            .multiple(false)
-    )]
-    DownloadViaHeart {
-        /// id of file object to download
-        object_id: String,
-
-        /// output directory (optional)
-        #[arg(long, value_name = "DIR")]
-        dir: Option<PathBuf>,
-
-        /// output file path (optional)
-        #[arg(short = 'f', long, value_name = "FILE")]
-        file: Option<PathBuf>,
-    },
     /// Fetch file HTTP metadata with a REST `HEAD` request (no body).
     #[command(alias = "meta")]
     Metadata {

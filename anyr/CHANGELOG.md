@@ -65,8 +65,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - `anyr file download SPACE FILE` gained REST options: `--width`, `--range`, and
   the conditional headers `--if-match`, `--if-none-match`, `--if-modified-since`,
   `--if-unmodified-since`, and `--if-range`.
-- `anyr file download-via-heart FILE_ID` performs a legacy gRPC (anytype-heart)
-  download, writing bytes with `--dir`/`--file` destinations.
 
 ### Changed
 
@@ -85,8 +83,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   reports `{status, written, path, bytes, metadata}` (previously `{path}`), and
   table output is now `status N PATH` (previously the bare path); a
   `304`/`412`/`416` response leaves the destination file untouched and reports
-  `written: false`. The legacy gRPC (anytype-heart) download moved to the
-  separate `anyr file download-via-heart FILE_ID` subcommand.
+  `written: false`. The legacy gRPC (anytype-heart) download command has been
+  removed; REST is now the sole download path.
 - `anyr file upload --http` is now a deprecated no-op (a plain upload already
   uses REST); it prints a deprecation warning and is rejected when combined with
   any gRPC-only option (`--url`, `--file-type`, `--style`, `--details`, or a
