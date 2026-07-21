@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Design document `designs/body-block-model.md` (any-2f0g.18): typed, bounded,
+  fail-closed anytype-api body block model over ObjectShow and block RPCs —
+  BodySnapshot/BodyBlock trees, closed v1 content/style/mark variants, opaque
+  unsupported reads, graph validation, context/space ownership, verified
+  mutation evidence, limits, and forward compatibility.
+
 ### Changed
 
 - Complete the prerelease documentation contract with current stable/preview

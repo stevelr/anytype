@@ -790,8 +790,8 @@
     "semantic_hash": ""
   },
   "any-mcp/CHANGELOG.md": {
-    "mtime": 1784609825.045589,
-    "ast_hash": "471f49b4ca044e052422c46151e615db",
+    "mtime": 1784667692.855168,
+    "ast_hash": "cd130486e0a0679c8047aa63e9bab52e",
     "semantic_hash": ""
   },
   "any-mcp/README.md": {
@@ -957,6 +957,11 @@
   "anytype-api/tests/RATE_LIMIT_AUDIT.md": {
     "mtime": 1784609825.052589,
     "ast_hash": "f98038ad3f9ac78797bcf5750488cba2",
+    "semantic_hash": ""
+  },
+  "any-mcp/designs/body-block-model.md": {
+    "mtime": 1784667483.0111828,
+    "ast_hash": "72945ccae0645e66aed785f6b1dd6119",
     "semantic_hash": ""
   }
 }
