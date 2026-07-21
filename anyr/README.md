@@ -227,9 +227,7 @@ anyr file discard-preload "Personal" <PRELOAD_FILE_ID>
 `anyr file download SPACE FILE_ID` fetches the bytes over REST in the anyr
 process and emits `status`, `written`, `path`, `bytes`, and the HTTP `metadata`
 fields as JSON. A `304 Not Modified` or a failed precondition leaves the
-destination file untouched. Use `anyr file download-via-heart FILE_ID` for the
-legacy 0.4 gRPC path where the Heart process writes the bytes to its own
-destination path.
+destination file untouched. REST is the only download path.
 
 ```sh
 # REST download of a 128px image variant, only if the cache validator changed
@@ -239,9 +237,6 @@ anyr file download "Personal" <FILE_OBJECT_ID> \
 # ranged REST download
 anyr file download "Personal" <FILE_OBJECT_ID> \
   --file /tmp/part --range bytes=0-499
-
-# legacy gRPC download (Heart writes the bytes)
-anyr file download-via-heart <FILE_OBJECT_ID> --dir /tmp
 
 # metadata only (HEAD): status + headers, no body written
 anyr file metadata "Personal" <FILE_OBJECT_ID> --width 128
