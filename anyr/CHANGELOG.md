@@ -11,9 +11,33 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - `anyr chat --transport auto|rest|grpc` selects the transport policy for chat
   operations (default `auto`). `rest` rejects operations that only gRPC can
   serve (for example cross-space list, chat text search, rich `get`, `unread`,
-  and multi-chat `listen`) with an actionable error; the resolved policy backend
-  is reported in verbose diagnostics (`-v`). Per-operation REST routing for the
-  REST-capable message/read/listen operations is staged for follow-up work.
+  structured `--blocks-json` send/edit, and multi-chat `listen`) with an
+  actionable error, and `grpc` rejects the REST-only `messages search`; the
+  resolved policy backend is reported in verbose diagnostics (`-v`). Under
+  `auto`, REST-capable operations (single-space `list`, `create`, `messages
+  list|get|send|edit|delete|search|react`, `read`/`read-reactions`/`read-all`,
+  and single-`--chat` `listen` with `--space`) route through the REST
+  `SpaceChatsClient`; everything else falls back to gRPC.
+- `anyr chat list --filter KEY=VALUE` applies property filters to a space-scoped
+  REST listing (no `--text`).
+- `anyr chat create` gained `--icon-emoji` / `--icon-file` (mutually exclusive)
+  to set the new chat object's icon.
+- `anyr chat messages send` gained `--reply-to MESSAGE` (reply to an existing
+  message by id or order id) and `--blocks-json JSON` (structured message blocks
+  as a JSON array via `@file`, `@-`, or `-`; routes through gRPC). `messages
+  edit` likewise gained `--blocks-json`.
+- `anyr chat messages search SPACE CHAT QUERY` runs a REST-only full-text search
+  over a chat's messages; `anyr chat messages react SPACE CHAT MESSAGE EMOJI`
+  toggles a reaction on a message.
+- `anyr chat read-reactions SPACE CHAT` marks reactions read (optionally through
+  an order id), and `anyr chat read-all SPACE CHAT` marks every message in a
+  chat as read (both REST).
+- `anyr chat listen` gained a REST SSE listener for a single `--chat` with
+  `--space`: `--initial-limit N` replays the last N messages when the stream
+  opens and `--heartbeat SECONDS` (1-60) sets the keep-alive interval. The
+  gRPC-only options `--include-history`, `--after`, `--previews`, and `--buffer`
+  (and a `--chat`-only listen without `--space`) route through the reconnecting
+  gRPC listener.
 - program used to generate test vectors for account key generation
 - `anyr type update` property-list controls (mutually exclusive with
   `--add-property`):

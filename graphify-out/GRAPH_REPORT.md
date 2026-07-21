@@ -1,16 +1,16 @@
 # Graph Report - anyr-0.5  (2026-07-21)
 
 ## Corpus Check
-- 187 files · ~501,377 words
+- 187 files · ~504,227 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 8121 nodes · 24528 edges · 243 communities (229 shown, 14 thin omitted)
-- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 680 edges (avg confidence: 0.8)
+- 8151 nodes · 24597 edges · 248 communities (227 shown, 21 thin omitted)
+- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 681 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `4ff55f48`
+- Built from commit: `0620a0d1`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -167,9 +167,17 @@
 - $defs
 - ViewMatchAccumulator
 - Account
+- Widget
+- test_rest_file_upload_download_and_delete
 - discovery.rs
+- EmailVerificationStatus
+- InviteType
 - AnytypeGrpcClient
 - Text
+- PeriodType
+- Processor
+- SpaceType
+- SyncStatus
 - view.rs
 - TestAnyrCommands
 - validation.rs
@@ -199,13 +207,11 @@
 - TestResultTracker
 - Message
 - anyback
-- handle
 - AnyMcpServer
 - object_create.rs
 - init-cli-keys.sh
 - Changelog
 - Anytype gRPC client
-- init_tracing
 - render_table
 - verify.rs
 - main
@@ -230,7 +236,6 @@
 - properties
 - properties
 - Result
-- FilesClient<'a>
 - protocol.rs
 - runtime.rs
 - properties
@@ -255,7 +260,7 @@
 - README.md
 
 ## God Nodes (most connected - your core abstractions)
-1. `Result` - 1444 edges
+1. `Result` - 1448 edges
 2. `Request` - 418 edges
 3. `Response` - 399 edges
 4. `ClientCommandsClient<T>` - 343 edges
@@ -285,11 +290,11 @@
 - **Authentication and Keystore Flow** — anytype_api_readme_anytype_api_client, anytype_api_keystores_interactive_authentication, anytype_api_keystores_authentication_token_storage, anytype_api_keystores_endpoint_specific_tokens [EXTRACTED 1.00]
 - **gRPC Feature Surface** — anytype_api_changelog_grpc_backend, anytype_api_readme_grpc_api_extensions, anytype_api_readme_files_api, anytype_api_readme_chat_streaming, anytype_api_examples_readme_grpc_examples [EXTRACTED 1.00]
 
-## Communities (243 total, 14 thin omitted)
+## Communities (248 total, 21 thin omitted)
 
 ### Community 0 - "Chat Mock Server"
-Cohesion: 0.12
-Nodes (15): DataModel, authorize_template_resource(), collection_fixture_ownership_error(), complete_type_object_id_snapshot(), generic_pre_registered_id_cannot_claim_collection_provenance(), registered_spaces(), BTreeSet, Mutex (+7 more)
+Cohesion: 0.08
+Nodes (25): DataModel, authorize_template_resource(), cleanup_template_resource(), collection_fixture_ownership_error(), complete_type_object_id_snapshot(), delete_space_fixture(), generic_pre_registered_id_cannot_claim_collection_provenance(), registered_spaces() (+17 more)
 
 ### Community 1 - "File Transfer API"
 Cohesion: 0.01
@@ -301,39 +306,39 @@ Nodes (51): App, build_yaml_front_matter(), CachedObject, clamp_scroll(), detail
 
 ### Community 3 - "Integration Test Suite"
 Cohesion: 0.04
-Nodes (10): Block, ClientCommandsClient<T>, AppInfo, Placeholder, Request, Response, Status, View (+2 more)
+Nodes (8): Block, ClientCommandsClient<T>, Request, Response, Status, View, IntoRequest, Params
 
 ### Community 4 - "Authentication API"
 Cohesion: 0.08
 Nodes (124): add_to_list(), archive_file_paths(), archive_markdown_blob(), archive_object_ids(), archive_payload_file_paths(), assert_non_tty_output_clean(), backup_selected_ids(), ChatMessageTokenCleanupGuard (+116 more)
 
 ### Community 5 - "Chat Stream Builder"
-Cohesion: 0.22
-Nodes (6): AnytypeClient, delete_archived_best_effort(), ListArchivedRequest<'a>, AsRef, ExportFormat, run_archived_search()
+Cohesion: 0.17
+Nodes (14): AnytypeClient, archived_search_request(), dataview_filter_type_in(), delete_archived_best_effort(), DeleteAllArchivedResult, DeleteBestEffortResult, ListArchivedRequest, ListArchivedRequest<'a> (+6 more)
 
 ### Community 6 - "Filtering and Sorting"
-Cohesion: 0.22
-Nodes (21): cancellation_releases_permit_for_next_operation(), concurrency_limit_bounds_waiting_operations(), eof_before_initialize_is_a_clean_shutdown(), execute_applies_end_to_end_timeout(), execute_honors_request_cancellation(), initialized_transport_shuts_down_cleanly_on_eof(), operation_diagnostic_classifies_every_outcome(), operation_diagnostic_contains_only_safe_bounded_context() (+13 more)
+Cohesion: 0.18
+Nodes (22): cancellation_releases_permit_for_next_operation(), concurrency_limit_bounds_waiting_operations(), eof_before_initialize_is_a_clean_shutdown(), execute_applies_end_to_end_timeout(), execute_honors_request_cancellation(), initialized_transport_shuts_down_cleanly_on_eof(), operation_diagnostic_classifies_every_outcome(), operation_diagnostic_contains_only_safe_bounded_context() (+14 more)
 
 ### Community 7 - "Object Models Utilities"
-Cohesion: 0.14
-Nodes (7): BackupSpaceRequest, dataview_filter_checkbox_equal(), ListSpacesRequest, Filter, IntoIterator, PathBuf, Self
+Cohesion: 0.10
+Nodes (10): BackupExportOptions, BackupExportFormat, BackupSpaceRequest, NewSpaceRequest, Arc, ExportFormat, PathBuf, Self (+2 more)
 
 ### Community 8 - "Pagination Core"
-Cohesion: 0.07
-Nodes (22): chat_message_path(), ChatAddMessageRequest, ChatEditMessageRequest, ChatHttpAddMessageRequest, ChatHttpEditMessageRequest, ChatHttpListRequest, ChatSendTextRequest, grpc_message_content() (+14 more)
+Cohesion: 0.14
+Nodes (12): ChatAddMessageRequest, ChatEditMessageRequest, MessageBlock, MessageContent, AsRef, Color, MessageBlockEditorQuote, MessageBlockEmbed (+4 more)
 
 ### Community 9 - "Client Configuration"
 Cohesion: 0.07
-Nodes (79): ArchiveObjectInfo, build_archive_object_index(), convert_archive_object_pb_to_markdown(), convert_archive_object_to_markdown(), convert_archive_snapshot_to_markdown(), convert_pb_json_snapshot_to_markdown(), convert_pb_snapshot_to_markdown(), convert_sample_pb_json_object_to_markdown_contains_headings() (+71 more)
+Nodes (80): ArchiveObjectInfo, build_archive_object_index(), convert_archive_object_pb_to_markdown(), convert_archive_object_to_markdown(), convert_archive_snapshot_to_markdown(), convert_pb_json_snapshot_to_markdown(), convert_pb_snapshot_to_markdown(), convert_sample_pb_json_object_to_markdown_contains_headings() (+72 more)
 
 ### Community 10 - "Member Integration Tests"
-Cohesion: 0.08
-Nodes (23): description, required, type, anyOf, description, $ref, description, type (+15 more)
+Cohesion: 0.17
+Nodes (12): description, properties, required, type, CancelledNotificationParams, reason, requestId, description (+4 more)
 
 ### Community 11 - "Type Request Models"
-Cohesion: 0.27
-Nodes (9): AnytypeClient, ChatTarget, fixture_client_with_grpc(), public_chat_resolution_composes_bounded_http_and_grpc_discovery(), resolve_message_id_maps_order_id_and_passes_ids_through(), Option, String, Vec (+1 more)
+Cohesion: 0.04
+Nodes (34): Account, Cafe, Code, Device, DeviceState, Done, Groups, IsHeader (+26 more)
 
 ### Community 12 - "Property Setter Tests"
 Cohesion: 0.13
@@ -345,23 +350,23 @@ Nodes (30): AnytypeClient, Color, CreateObjectRequestBody, Icon, ListObjectsRequ
 
 ### Community 14 - "Client Cache"
 Cohesion: 0.04
-Nodes (107): Align, Align, Amend, Auth, AutoArchive, AutoRestore, Avatar, BackgroundColor (+99 more)
+Nodes (112): Align, Align, Amend, Auth, AutoArchive, AutoRestore, Avatar, BackgroundColor (+104 more)
 
 ### Community 15 - "Process Watcher"
-Cohesion: 0.11
-Nodes (13): diagnostic_path(), diagnostic_path_keeps_only_bounded_non_control_path_context(), has_invalid_percent_encoding(), HttpMetricsSnapshot, HttpRequest, log_http_transport(), parse_diagnostic_target(), Display (+5 more)
+Cohesion: 0.10
+Nodes (22): all_http_trace_levels_remain_metadata_only(), diagnostic_path(), diagnostic_path_keeps_only_bounded_non_control_path_context(), has_invalid_percent_encoding(), HttpRequest, log_http_status(), log_http_transport(), log_request() (+14 more)
 
 ### Community 16 - "Changelog Concepts"
-Cohesion: 0.35
-Nodes (8): default_platform_keyring(), init_keystore(), parse_keystore(), Arc, HashMap, Path, store_from_env(), CredentialStore
+Cohesion: 0.40
+Nodes (7): default_platform_keyring(), init_keystore(), parse_keystore(), Arc, HashMap, store_from_env(), CredentialStore
 
 ### Community 17 - "Chat Resolution Client"
-Cohesion: 0.15
-Nodes (10): ambiguity_error_exposes_only_bounded_candidates(), bare_chat_id_discovery_has_one_global_space_and_chat_budget(), domain_candidates_deduplicate_space_type_view_chat_and_property_rows(), later_direct_view_id_wins_over_earlier_name_ambiguity(), MatchAccumulator<T>, resolution_limit(), ResolutionScanBudget, Self (+2 more)
+Cohesion: 0.08
+Nodes (24): chat_details_keys(), chat_message_path(), ChatHttpAddMessageRequest, ChatHttpEditMessageRequest, ChatHttpEvent, ChatMessage, ChatSendTextRequest, filter_unread_messages() (+16 more)
 
 ### Community 18 - "Tag API"
-Cohesion: 0.06
-Nodes (51): Account, AnytypeClient, BackoffPolicy, call_subscribe_last_messages(), chat_events_from_event(), chat_events_respect_sub_ids(), ChatEvent, ChatEventStream (+43 more)
+Cohesion: 0.16
+Nodes (19): chat_events_from_event(), chat_events_respect_sub_ids(), ChatEvent, ChatEventStream, ChatStreamControl, ChatStreamHandle, ChatSubscription, ControlMessage (+11 more)
 
 ### Community 19 - "Property Value Models"
 Cohesion: 0.07
@@ -372,52 +377,52 @@ Cohesion: 0.15
 Nodes (13): Authenticated stdio runtime, Document resources, Exact-match object edit workflow, Object archive workflow, Object create workflow, Object discovery and reads, Object update workflow, Phase 1 foundations (+5 more)
 
 ### Community 21 - "Member Models"
-Cohesion: 0.16
+Cohesion: 0.18
 Nodes (7): GrpcCredentials, HttpCredentials, Into, Option, Self, String, Zeroize
 
 ### Community 22 - "View Models"
-Cohesion: 0.33
-Nodes (8): optional_body_schema(), optional_icon_schema(), optional_idempotency_schema(), optional_name_schema(), optional_properties_schema(), optional_template_schema(), Schema, SchemaGenerator
+Cohesion: 0.15
+Nodes (14): CreateName, CreateReference, optional_body_schema(), optional_icon_schema(), optional_idempotency_schema(), optional_name_schema(), optional_properties_schema(), optional_template_schema() (+6 more)
 
 ### Community 23 - "Identifier Resolution"
 Cohesion: 0.04
-Nodes (87): F, with_test_context_unit(), test_collect_all(), test_create_custom_property(), test_create_multiple_objects(), test_create_with_empty_name(), test_global_search(), test_invalid_object_id() (+79 more)
+Nodes (85): F, with_test_context_unit(), test_collect_all(), test_create_custom_property(), test_create_multiple_objects(), test_create_with_empty_name(), test_global_search(), test_invalid_object_id() (+77 more)
 
 ### Community 24 - "Property Request Builder"
 Cohesion: 0.33
 Nodes (5): Added, Changed, Changed, Changelog, [Unreleased]
 
 ### Community 25 - "HTTP Retry Client"
-Cohesion: 0.04
-Nodes (60): assert_backup_args_equal(), AuthArgs, backup_export_options(), backup_export_options_maps_include_flags_and_pb_json(), backup_export_options_maps_markdown_include_properties(), backup_target_always_uses_zip_extension_for_generated_name(), backup_target_dest_must_not_exist(), backup_target_dir_must_exist() (+52 more)
+Cohesion: 0.03
+Nodes (76): archive_basename(), assert_backup_args_equal(), AuthArgs, AuthCommands, backup_export_options(), backup_export_options_maps_include_flags_and_pb_json(), backup_export_options_maps_markdown_include_properties(), backup_target_always_uses_zip_extension_for_generated_name() (+68 more)
 
 ### Community 26 - "Property Lookup Helpers"
 Cohesion: 0.07
 Nodes (96): invalid_catalog_profile_fails_before_auth_without_echoing_its_value(), invalid_operational_setting_does_not_echo_its_value(), invalid_protocol_mode_fails_before_auth_without_echoing_its_value(), invalid_read_only_setting_fails_before_auth_without_echoing_its_value(), startup_auth_failure_is_nonzero_stderr_only_and_redacted(), unauthenticated_command(), add_to_list(), alpha_suffix() (+88 more)
 
 ### Community 27 - "Chat RPC Responses"
-Cohesion: 0.04
-Nodes (89): append_sse_byte(), chat_layout_filter(), chat_stream_diagnostic_omits_url_credentials_query_and_fragment(), chat_stream_diagnostic_path(), ChatEditTextRequest, ChatHttpEvent, ChatHttpSseState, ChatMessage (+81 more)
+Cohesion: 0.07
+Nodes (53): append_sse_byte(), chat_stream_diagnostic_omits_url_credentials_query_and_fragment(), chat_stream_diagnostic_path(), ChatEditTextRequest, ChatMessageSearchResult, collect_sse_frames(), current_http_message_schema_preserves_available_fields(), delimiter_free_megabyte_uses_incremental_boundary_detection() (+45 more)
 
 ### Community 28 - "Object Creation Builder"
-Cohesion: 0.22
-Nodes (20): ServeError, bounded_reader_recovers_at_the_next_line(), drain_frame(), encode_bounded_legacy_frame(), FirstFrame, FrameReadError, read_frame(), R (+12 more)
+Cohesion: 0.18
+Nodes (23): ServeError, bounded_reader_recovers_at_the_next_line(), cancel_all(), drain_frame(), encode_bounded_legacy_frame(), FirstFrame, FrameReadError, is_jsonrpc_notification() (+15 more)
 
 ### Community 29 - "Search API"
-Cohesion: 0.02
-Nodes (47): AutofillMode, Change, ChangeNoSnapshot, Code, Content, Context, DetailsSet, DeviceAdd (+39 more)
+Cohesion: 0.05
+Nodes (29): AutofillMode, Change, ChangeNoSnapshot, Content, Context, DetailsSet, DeviceAdd, DocumentCreate (+21 more)
 
 ### Community 30 - "Chat Attachments Reactions"
-Cohesion: 0.43
-Nodes (4): ObjectResourceRead, ReadResourceResult, text(), Resource
+Cohesion: 0.17
+Nodes (10): convert_object(), ObjectResourceRead, ResourceConversionError, ResourceOperationError, Display, Formatter, Object, ReadResourceResult (+2 more)
 
 ### Community 31 - "Message Content Formatting"
 Cohesion: 0.07
 Nodes (27): AnytypeClient, CreateTypeProperty, CreateTypeRequestBody, deserialize_vec_properties_or_null(), ListTypesRequest, NewTypeRequest, prime_cache_types(), Arc (+19 more)
 
 ### Community 32 - "Input Validation"
-Cohesion: 0.23
-Nodes (11): ambiguous(), not_found(), Into, IntoIterator, Type, starts_with_uppercase(), type_and_property_key_resolution_bypass_cache_prime_paths(), TypeMatchMode (+3 more)
+Cohesion: 0.11
+Nodes (16): ChatHttpEventStream, ChatHttpSseState, eof_finalization_moves_event_buffer_out_of_terminal_state(), grpc_attachments(), grpc_message_content(), grpc_message_conversion_retains_rich_state(), BoxStream, Bytes (+8 more)
 
 ### Community 33 - "Template API"
 Cohesion: 0.05
@@ -429,15 +434,15 @@ Nodes (79): active_and_archived_scans_stop_at_explicit_page_and_item_bounds(), a
 
 ### Community 35 - "Cache Controls"
 Cohesion: 0.12
-Nodes (14): QueryWithFilters, Arc<HttpClient>, deserialize_json(), HttpClient, HttpMetrics, RawHttpResponse, AtomicU64, Bytes (+6 more)
+Nodes (12): QueryWithFilters, Arc<HttpClient>, deserialize_json(), HttpClient, HttpMetrics, AtomicU64, HeaderMap, T (+4 more)
 
 ### Community 36 - "Object Payload Models"
 Cohesion: 0.67
 Nodes (3): main(), Box, run()
 
 ### Community 37 - "Availability Verification"
-Cohesion: 0.06
-Nodes (45): Groups, BlockParticipant, ChangePayload, Dataview, DataviewRestrictions, DetailsSet, Filter, Group (+37 more)
+Cohesion: 0.07
+Nodes (39): BlockParticipant, ChangePayload, Dataview, DataviewRestrictions, DetailsSet, Filter, Group, HistorySize (+31 more)
 
 ### Community 38 - "Object Accessors"
 Cohesion: 0.20
@@ -452,28 +457,28 @@ Cohesion: 0.09
 Nodes (64): archive_file_listing(), archive_signature(), AttachmentCaseBatch, BatchArtifacts, choose_writable_chat_space(), choose_writable_spaces(), cleanup_by_prefix(), cleanup_source_ids() (+56 more)
 
 ### Community 41 - "HTTP Request Methods"
-Cohesion: 0.12
-Nodes (22): bool_field(), ChatHttpEventStream, ChatState, HttpMessageWriteAttachment, HttpMessageWriteBody, HttpMessageWriteMark, last_modified_date(), number_field() (+14 more)
+Cohesion: 0.16
+Nodes (19): bool_field(), ChatMessagesPage, ChatState, HttpMessageWriteAttachment, HttpMessageWriteBody, HttpMessageWriteMark, last_modified_date(), number_field() (+11 more)
 
 ### Community 42 - "object_edit.rs"
 Cohesion: 0.07
 Nodes (72): apply_edits(), bounded_result(), checked_space_id(), contract_is_closed_bounded_destructive_and_defaults_match_count(), edit_input(), edited_state_matches(), EditExecution, EditInputError (+64 more)
 
 ### Community 43 - "HTTP Metrics Reporting"
-Cohesion: 0.07
-Nodes (40): &'a mut PaginatedResponse<T>, &'a PagedResult<T>, &'a PaginatedResponse<T>, create_test_request(), next_response_iter(), PagedResult, PagedResult<T>, PaginatedResponse (+32 more)
+Cohesion: 0.10
+Nodes (31): create_test_request(), next_response_iter(), PagedResult<T>, PaginatedResponse, Arc, BoxStream, Ok, Option (+23 more)
 
 ### Community 44 - "object_edit.rs"
 Cohesion: 0.24
 Nodes (4): Self, String, Vec, TestResultTracker
 
 ### Community 45 - "Object Layout Tests"
-Cohesion: 0.08
-Nodes (45): Account, Add, BlockField, Cafe, ChatPreview, Config, Details, Device (+37 more)
+Cohesion: 0.10
+Nodes (28): Add, BlockField, ChatPreview, Config, Details, Field, Fields, Filter (+20 more)
 
 ### Community 46 - "object_edit.rs"
-Cohesion: 0.19
-Nodes (14): malformed_template_resolution(), MatchAccumulator, MatchClassification, object_candidate(), Fn, HashSet, Object, T (+6 more)
+Cohesion: 0.17
+Nodes (10): AnytypeClient, BackoffPolicy, ChatStreamBuilder, get_messages_after(), AnytypeClient, Default, Duration, Pin (+2 more)
 
 ### Community 47 - "String"
 Cohesion: 0.25
@@ -485,27 +490,27 @@ Nodes (8): any-mcp, Build, Headless integration tests, License, Protocol channel
 
 ### Community 49 - "Object CRUD Requests"
 Cohesion: 0.03
-Nodes (28): Align, Block, BlockMetaOnly, CardStyle, Condition, Config, DataviewRestriction, DateFormat (+20 more)
+Nodes (27): Align, Block, BlockMetaOnly, CardStyle, Condition, Config, DataviewRestriction, DateFormat (+19 more)
 
 ### Community 51 - "Chat Read State"
-Cohesion: 0.20
-Nodes (9): KeyStoreError, From, PathBuf, Self, VarError, KeyStore, AsRef, test_file_storage_save_and_load() (+1 more)
+Cohesion: 0.18
+Nodes (10): KeyStoreError, From, PathBuf, Self, VarError, KeyStore, AsRef, Path (+2 more)
 
 ### Community 52 - "Object List Pagination"
-Cohesion: 0.11
-Nodes (41): AuthArgs, AuthCommand, AuthStatusArgs, build_yaml_export(), ConfigFile, ExportHeaderFormat, get_i64(), int_list() (+33 more)
+Cohesion: 0.09
+Nodes (46): AuthArgs, AuthCommand, AuthSource, AuthStatusArgs, build_yaml_export(), ConfigFile, detect_scope(), ExportHeaderFormat (+38 more)
 
 ### Community 53 - "Example Table Rendering"
 Cohesion: 0.03
-Nodes (23): ActionType, DataSource, DeviceNetworkType, FileIndexingStatus, Format, ImageKind, InviteType, LinkType (+15 more)
+Nodes (21): AttachmentType, Description, ErrorCode, FileIndexingStatus, Format, IconSize, ImageKind, LinkType (+13 more)
 
 ### Community 54 - "Object"
 Cohesion: 0.33
 Nodes (6): Automated harness, Client configuration evidence, Current status, External tool evidence, Released compatibility matrix, Stdio protocol verification
 
 ### Community 55 - "String"
-Cohesion: 0.32
-Nodes (10): ControlledOperationError, log_classified_operation(), OperationContext, C, CancellationToken, D, F, Fn (+2 more)
+Cohesion: 0.22
+Nodes (13): ControlledFailureKind, ControlledOperationError, default_control_failure_diagnostic(), log_classified_operation(), OperationContext, OperationFailureDiagnostic, C, CancellationToken (+5 more)
 
 ### Community 56 - "Self"
 Cohesion: 0.27
@@ -513,23 +518,23 @@ Nodes (9): canonical_returned_date(), MutationCompareError, returned_id(), retur
 
 ### Community 57 - "Chat CRUD Tests"
 Cohesion: 0.05
-Nodes (36): AddChatMessageResponse, AnytypeClient, chat_details_keys(), chat_search(), chat_search_space(), ChatClient<'a>, ChatCreateRequest, ChatDeleteMessageRequest (+28 more)
+Nodes (36): AddChatMessageResponse, AnytypeClient, chat_search(), chat_search_space(), ChatClient<'a>, ChatCreateRequest, ChatDeleteMessageRequest, ChatGetMessageRequest (+28 more)
 
 ### Community 58 - "Agenda Example"
 Cohesion: 0.07
 Nodes (65): cleanup_by_ids(), cleanup_by_name_prefix(), create_object_once(), create_object_with_retry(), generate_fixture(), GeneratedFixture, GeneratedObject, AnytypeClient (+57 more)
 
 ### Community 59 - "mod.rs"
-Cohesion: 0.09
-Nodes (27): checked_tag_count(), convert_property_summary(), DiscoveryReference, finish_property_page(), property_format(), PropertyFormatSummary, PropertyListInput, PropertyPageItem (+19 more)
+Cohesion: 0.25
+Nodes (10): call_subscribe_last_messages(), ChatStreamWorker, AnytypeGrpcClient, HashMap, Option, subscribe_previews(), unsubscribe_chat(), unsubscribe_previews() (+2 more)
 
 ### Community 60 - "Value"
-Cohesion: 0.29
-Nodes (10): controlled_error(), error_code(), exact_template_is_typed_and_resources_list_never_enumerates_objects(), reject_cursor(), resource_error(), ErrorData, ListResourcesResult, ListResourceTemplatesResult (+2 more)
+Cohesion: 0.12
+Nodes (16): $ref, description, properties, required, type, description, format, type (+8 more)
 
 ### Community 61 - "Value"
-Cohesion: 0.25
-Nodes (6): Checkbox, Date, Detail, Status, Tag, Value
+Cohesion: 0.22
+Nodes (7): Checkbox, Date, Detail, Placeholder, Status, Tag, Value
 
 ### Community 62 - "File Example"
 Cohesion: 0.67
@@ -549,31 +554,31 @@ Nodes (20): AnytypeClient, ClientConfig, extract_port(), find_grpc(), lsof_liste
 
 ### Community 66 - "Value"
 Cohesion: 0.20
-Nodes (15): all_property_object_value(), all_property_type_value(), is_canonical_plain_body(), is_plain_body_line(), normalize_create_body(), object_inner(), object_value(), page() (+7 more)
+Nodes (16): all_property_object_value(), all_property_type_value(), contract_is_strict_bounded_non_null_and_uses_create_annotations(), is_canonical_plain_body(), is_plain_body_line(), normalize_create_body(), object_create_tool(), object_inner() (+8 more)
 
 ### Community 67 - "stdio.rs"
-Cohesion: 0.17
-Nodes (25): add_cache(), add_complete(), cancel_all(), decode(), dispatch_modern(), encode_result(), error_response(), handle_cancellation() (+17 more)
+Cohesion: 0.18
+Nodes (25): add_cache(), add_complete(), decode(), dispatch_modern(), encode_result(), error_response(), internal_error(), invalid_params() (+17 more)
 
 ### Community 68 - "Type Property Example"
-Cohesion: 0.09
-Nodes (32): clone_collection_view(), collection_matches_fixture_provenance(), collection_view_fixture_api_error(), collection_view_fixture_clone_changes_only_id_and_name(), collection_view_fixture_code_error(), collection_view_ids_are_unique(), collection_view_snapshot_matches(), CollectionViewFixture (+24 more)
+Cohesion: 0.07
+Nodes (56): clone_collection_view(), collection_fixture_transport_error(), collection_fixture_transport_error_redacts_tonic_status(), collection_matches_fixture_provenance(), collection_view_fixture_accepts_exact_new_event_identity(), collection_view_fixture_binds_object_show_root_and_exact_block(), collection_view_fixture_clone_changes_only_id_and_name(), collection_view_fixture_code_error() (+48 more)
 
 ### Community 69 - "stdio.rs"
 Cohesion: 0.14
 Nodes (26): application_profile_parser_is_exact_and_secret_safe(), config(), ConfigError, default_document_budget_is_routed_to_anytype_client(), defaults_are_bounded_and_reuse_anyr_keystore_service(), errors_name_the_variable_without_echoing_its_value(), maps_supported_anytype_environment_settings(), non_empty() (+18 more)
 
 ### Community 70 - "Consistency Retry Example"
-Cohesion: 0.29
-Nodes (7): LegacyStdioTransport, ListParams, JoinHandle, Option, PaginatedRequestParams, PhantomData, Sender
+Cohesion: 0.18
+Nodes (14): handle_cancellation(), handle_frame(), LegacyStdioTransport, ListParams, Arc, JoinHandle, Option, PaginatedRequestParams (+6 more)
 
 ### Community 71 - "stdio.rs"
-Cohesion: 0.24
-Nodes (9): encode_legacy_message(), is_jsonrpc_notification(), LegacyStdioTransport<R, W>, Future, Output, RoleServer, RxJsonRpcMessage, Transport (+1 more)
+Cohesion: 0.22
+Nodes (10): encode_legacy_message(), invalid_request(), LegacyStdioTransport<R, W>, parse_error(), Future, Output, RoleServer, RxJsonRpcMessage (+2 more)
 
 ### Community 72 - "Space Search Example"
-Cohesion: 0.09
-Nodes (52): unique_suffix(), with_test_context(), TestResult, test_rest_file_upload_download_and_delete(), is_expected_member_lookup_error(), String, TestResult, test_active_member_exists() (+44 more)
+Cohesion: 0.11
+Nodes (46): with_test_context(), is_expected_member_lookup_error(), String, TestResult, test_active_member_exists(), test_get_member_by_id(), test_get_member_invalid_space(), test_get_nonexistent_member() (+38 more)
 
 ### Community 73 - "p1_cross_space.rs"
 Cohesion: 0.38
@@ -584,36 +589,36 @@ Cohesion: 0.13
 Nodes (38): ArchiveIndex, build_preview(), build_preview_is_stable_and_compact(), build_preview_preserves_markdown_lines_without_truncating_headings(), collect_link_candidates(), collect_preview_strings(), collect_user_properties(), collect_user_properties_includes_array_and_object_values() (+30 more)
 
 ### Community 75 - "p1_cross_space.rs"
-Cohesion: 0.23
-Nodes (13): format_since_display(), parse_local_naive(), parse_local_since(), parse_since(), parse_since_accepts_local_time_without_timezone(), parse_since_accepts_partial_date_variants_equivalently(), parse_since_accepts_plus_zero_suffix(), parse_since_accepts_rfc3339_with_offset() (+5 more)
+Cohesion: 0.19
+Nodes (11): CreateInputError, fingerprint_v1_is_domain_separated_golden_and_semantically_canonical(), input_with_body(), no_request_fixture(), plain_canonical_expansion_overflow_fails_before_io(), read_request(), Display, Formatter (+3 more)
 
 ### Community 76 - "String"
-Cohesion: 0.18
-Nodes (11): AnytypeClient, conditional_not_modified_status_is_preserved(), file_path(), FileDeleteRequest, FileGetRequest, FilesClient, head_returns_file_metadata_without_a_body(), mock_file_client() (+3 more)
+Cohesion: 0.16
+Nodes (10): conditional_not_modified_status_is_preserved(), FileContentRequest, FilesClient, head_returns_file_metadata_without_a_body(), mock_file_client(), ranged_download_sends_width_and_conditional_headers(), AnytypeClient, JoinHandle (+2 more)
 
 ### Community 77 - ".new"
-Cohesion: 0.19
-Nodes (14): ChatClient, ChatHttpMessageStreamRequest, dropping_stream_cancels_incomplete_transport(), mock_http_client(), one_transport_chunk_can_carry_multiple_exact_limit_events(), opening_transport_failure_discards_raw_url_and_source(), overflowing_stream_terminates_and_releases_transport_state(), rest_chat_stream_rejects_invalid_configuration_before_connecting() (+6 more)
+Cohesion: 0.20
+Nodes (15): ChatClient, ChatHttpMessageStreamRequest, dropping_stream_cancels_incomplete_transport(), mock_http_client(), one_transport_chunk_can_carry_multiple_exact_limit_events(), opening_transport_failure_discards_raw_url_and_source(), overflowing_stream_terminates_and_releases_transport_state(), rest_add_message_sends_current_wire_shape() (+7 more)
 
 ### Community 78 - "with_test_context_unit"
-Cohesion: 0.32
-Nodes (11): meta(), MetaError, modern_metadata_requires_capabilities_and_accepts_optional_identity(), ResourceReadParams, Map, ReadResourceRequestParams, String, ToolCallParams (+3 more)
+Cohesion: 0.25
+Nodes (10): ChatBackend, classify(), classify_messages(), OpTransport, resolve_transport(), Display, Formatter, Self (+2 more)
 
 ### Community 79 - "files.rs"
-Cohesion: 0.12
-Nodes (29): file_from_details(), file_from_http_upload(), FileObject, filter_id_equal(), filter_not_empty(), filter_to_dataview(), grpc_filter_condition(), json_to_struct() (+21 more)
+Cohesion: 0.10
+Nodes (35): file_from_details(), file_from_http_upload(), FileObject, FileSource, FileStyle, filter_id_equal(), filter_to_dataview(), grpc_file_style() (+27 more)
 
 ### Community 80 - "TestContext"
-Cohesion: 0.08
-Nodes (41): collection_fixture_transport_error(), collection_fixture_transport_error_redacts_tonic_status(), collection_object(), collection_type_details(), collection_type_fixture_details_use_the_canonical_heart_layout(), collection_view_fixture_accepts_exact_new_event_identity(), collection_view_fixture_binds_object_show_root_and_exact_block(), collection_view_fixture_cross_checks_every_rest_visible_field() (+33 more)
+Cohesion: 0.10
+Nodes (18): collection_object(), collection_type_details(), collection_type_fixture_details_use_the_canonical_heart_layout(), collection_view_fixture_rejects_missing_default_without_indexing_it(), current_space_create_response_never_enters_deletion_registry(), example_space_id(), malformed_create_response_never_enters_deletion_registry(), rest_view() (+10 more)
 
 ### Community 82 - "decode.rs"
-Cohesion: 0.12
-Nodes (46): build_expanded_entry_from_details(), derive_layout_name(), detail_value(), ExpandedSnapshotEntry, format_datetime_display(), format_datetime_with_tz(), format_last_modified(), format_utc_datetime_with_tz() (+38 more)
+Cohesion: 0.14
+Nodes (41): build_expanded_entry_from_details(), derive_layout_name(), detail_value(), ExpandedSnapshotEntry, format_datetime_display(), format_datetime_with_tz(), format_last_modified(), format_utc_datetime_with_tz() (+33 more)
 
 ### Community 83 - "Option"
-Cohesion: 0.31
-Nodes (14): explicit_type_id_resolution_rejects_safe_mismatched_identity(), fixture_client(), paged_fixture_server(), public_space_resolution_deduplicates_across_http_pages(), public_view_resolution_preserves_later_direct_id_across_pages(), Value, template_direct_id_uses_one_get_and_revalidates_identity(), template_page() (+6 more)
+Cohesion: 0.18
+Nodes (10): chat_layout_filter(), ChatHttpListRequest, filter_id_equal(), filter_name_equal(), HttpChatEventEnvelope, request_json(), Filter, Value (+2 more)
 
 ### Community 84 - "mod.rs"
 Cohesion: 0.21
@@ -624,8 +629,8 @@ Cohesion: 0.13
 Nodes (39): create_object_with_retry(), ensure_properties_and_type(), is_key_already_exists_error(), lookup_property_tag_with_retry(), F, Object, Tag, TestResult (+31 more)
 
 ### Community 86 - "PaginatedResponse<T>"
-Cohesion: 0.10
-Nodes (25): CreateFingerprintV1, CreateInputError, CreateName, CreateReference, fingerprint_hex(), fingerprint_v1_is_domain_separated_golden_and_semantically_canonical(), FingerprintField, FingerprintField<'a, T> (+17 more)
+Cohesion: 0.20
+Nodes (11): CreateFingerprintV1, fingerprint_hex(), FingerprintField, FingerprintField<'a, T>, NormalizedCreate, ObjectCreateInput, MutationProperties, Option (+3 more)
 
 ### Community 87 - "find_list_object"
 Cohesion: 0.26
@@ -633,19 +638,19 @@ Nodes (5): FixtureReply, ObjectCreateHandlers, D, Duration, Self
 
 ### Community 88 - "NewTagRequest"
 Cohesion: 0.11
-Nodes (20): AnytypeClient, CreateTagRequest, ListTagsRequest, NewTagRequest, Arc, Color, Filter, Into (+12 more)
+Nodes (21): AnytypeClient, CreateTagRequest, ListTagsRequest, NewTagRequest, refresh_cached_property_tags(), Arc, Color, Filter (+13 more)
 
 ### Community 89 - "unique_test_name"
-Cohesion: 0.13
-Nodes (44): retry_definitive_rate_limit(), unique_test_name(), TestResult, test_create_custom_property(), test_create_property_duplicate_key(), test_create_property_invalid_name(), test_delete_property(), test_property_key_stability() (+36 more)
+Cohesion: 0.12
+Nodes (46): retry_definitive_rate_limit(), unique_test_name(), TestResult, test_create_custom_property(), test_create_property_duplicate_key(), test_create_property_invalid_name(), test_delete_property(), test_property_key_stability() (+38 more)
 
 ### Community 90 - "Widget"
-Cohesion: 0.22
+Cohesion: 0.21
 Nodes (9): file_http_metadata(), FileContentResponse, FileHttpMetadata, header_string(), insert_optional_header(), HeaderMap, Method, StatusCode (+1 more)
 
 ### Community 91 - "QuickOption"
-Cohesion: 0.05
-Nodes (29): Amount, AttachmentType, Cart, CartProduct, Code, CryptoCheckout, Data, EmailVerificationStatus (+21 more)
+Cohesion: 0.06
+Nodes (26): ActionType, Amount, Cart, CartProduct, Code, CryptoCheckout, Data, DataSource (+18 more)
 
 ### Community 92 - "Style"
 Cohesion: 0.27
@@ -653,7 +658,7 @@ Nodes (3): AnytypeClient, F, Into
 
 ### Community 93 - "VerticalAlign"
 Cohesion: 0.28
-Nodes (5): ResourceOperationError, default_control_failure_diagnostic(), OperationFailureDiagnostic, upstream_diagnostic_uses_variants_and_status_code_only(), UpstreamDiagnostic
+Nodes (3): set_property_tags(), resolve_verify(), verify_available()
 
 ### Community 94 - "TestResult"
 Cohesion: 0.30
@@ -668,76 +673,76 @@ Cohesion: 0.22
 Nodes (7): CancellationToolServer, Arc, Notify, RequestContext, ServerHandler, ServerInfo, McpError
 
 ### Community 97 - "ResolveCandidate"
-Cohesion: 0.13
-Nodes (15): AnyMcpServer, assert_catalog_contracts(), assert_valid_representative(), Arc, Display, Formatter, Self, ServerHandler (+7 more)
+Cohesion: 0.21
+Nodes (6): Display, Formatter, Self, Tool, ServerBuildError, validate_catalog()
 
 ### Community 98 - "chat.rs"
-Cohesion: 0.07
-Nodes (44): backend_of(), ChatBackend, ChatReadTypeArg, classify(), decode_order_id_arg(), decode_order_id_hex_roundtrip(), decode_order_id_non_hex_passthrough(), emit_message_rows() (+36 more)
+Cohesion: 0.05
+Nodes (49): backend_of(), blocks_json_rejected_with_transport_rest(), create_chat_object(), decode_order_id_arg(), decode_order_id_hex_roundtrip(), decode_order_id_non_hex_passthrough(), emit_message_rows(), encode_order_id_hex() (+41 more)
 
 ### Community 99 - "ViewListObjectsRequest"
 Cohesion: 0.12
 Nodes (23): AnytypeClient, deserialize_vec_filter_or_null(), deserialize_vec_sort_or_null(), fixture_client(), ListViewsRequest, Arc, D, Filter (+15 more)
 
 ### Community 100 - "Vec"
-Cohesion: 0.06
-Nodes (67): MarkRange, Field, Account, Auth, Bookmark, Chat, ChatState, Content (+59 more)
+Cohesion: 0.05
+Nodes (78): Account, AppInfo, Attachment, Auth, Bookmark, Chat, ChatMessage, ChatState (+70 more)
 
 ### Community 101 - "view_handlers.rs"
-Cohesion: 0.07
-Nodes (48): ambiguous_view_name_returns_actionable_bounded_candidates(), convert_view_object_page(), convert_view_page(), fixture_client(), fixture_server(), object(), page(), read_request() (+40 more)
+Cohesion: 0.08
+Nodes (46): ambiguous_view_name_returns_actionable_bounded_candidates(), convert_view_page(), fixture_client(), fixture_server(), object(), page(), read_request(), references_and_tool_schemas_are_strict_and_bounded() (+38 more)
 
 ### Community 102 - "mock.rs"
 Cohesion: 0.05
 Nodes (85): authenticate(), broadcast_event(), build_chat_state(), build_event(), chat_add_value(), chat_delete_value(), chat_details(), chat_state_update_value() (+77 more)
 
 ### Community 103 - "ProcessWatcher"
-Cohesion: 0.14
-Nodes (23): matches_process_kind(), next_test_addr(), open_session_events(), ProcessCompletionFallback, ProcessKind, ProcessWatchCancelToken, ProcessWatcher, ProcessWatcherTimeouts (+15 more)
+Cohesion: 0.13
+Nodes (25): Account, matches_process_kind(), next_test_addr(), open_session_events(), ProcessCompletionFallback, ProcessKind, ProcessWatchCancelToken, ProcessWatcher (+17 more)
 
 ### Community 104 - "stdio_conformance.rs"
 Cohesion: 0.08
 Nodes (51): assert_compact_wire_catalog(), assert_exact_decoder_error(), assert_exact_wire_catalog(), assert_exchange_depth(), assert_official_modern_request(), assert_official_modern_response(), assert_stdout_purity(), assert_structured_result() (+43 more)
 
 ### Community 105 - ".new"
-Cohesion: 0.07
-Nodes (28): additionalProperties, description, type, description, properties, required, type, description (+20 more)
+Cohesion: 0.09
+Nodes (22): additionalProperties, description, type, description, properties, required, type, description (+14 more)
 
 ### Community 106 - ".create_template_fixtures"
-Cohesion: 0.13
-Nodes (32): cleanup_template_resource(), complete_global_template_owners(), complete_space_id_snapshot(), complete_space_object_ids(), complete_template_ids(), complete_template_objects(), complete_template_ownership_snapshot(), complete_type_inventory() (+24 more)
+Cohesion: 0.17
+Nodes (23): complete_global_template_owners(), complete_space_id_snapshot(), complete_space_object_ids(), complete_template_ids(), complete_template_objects(), complete_template_ownership_snapshot(), complete_type_inventory(), CompleteTypeInventory (+15 more)
 
 ### Community 107 - "Member"
 Cohesion: 0.10
 Nodes (17): AnytypeClient, ListMembersRequest, make_member(), Member, MemberRequest, MemberResponse, MemberRole, MemberStatus (+9 more)
 
 ### Community 108 - "result.rs"
-Cohesion: 0.22
-Nodes (7): error_contains_stable_structured_and_compact_json_content(), ResultEncodingError, Display, Formatter, SummaryInput, SummaryResult, tool_error()
+Cohesion: 0.14
+Nodes (13): result_code(), result_code(), result_message(), error_contains_stable_structured_and_compact_json_content(), ResultEncodingError, Display, Formatter, SummaryInput (+5 more)
 
 ### Community 109 - "Cli"
-Cohesion: 0.31
-Nodes (7): definitive_rate_limit_retry_delay(), Duration, api_error(), definitive_rate_limit_backoff_is_finite_and_bounded(), definitive_rate_limit_retry_exhausts_at_the_finite_attempt_cap(), indeterminate_failure_is_never_retried(), only_typed_http_429_is_a_definitive_retryable_rejection()
+Cohesion: 0.27
+Nodes (7): FileDownloadDestination, FileHttpUploadRequest, FileUploadResponse, http_upload_file(), Bytes, Option, PathBuf
 
 ### Community 110 - "pagination_limit"
-Cohesion: 0.09
-Nodes (32): handle(), list_command(), list_objects_accepts_view(), list_objects_requires_view(), AppContext, ListArgs, handle(), AppContext (+24 more)
+Cohesion: 0.07
+Nodes (39): handle(), list_command(), list_objects_accepts_view(), list_objects_requires_view(), AppContext, ListArgs, handle(), AppContext (+31 more)
 
 ### Community 111 - "FilePreloadRequest"
-Cohesion: 0.21
-Nodes (6): NewSpaceRequest, Arc, Into, String, SpaceRequest, UpdateSpaceRequest
+Cohesion: 0.31
+Nodes (3): GrpcSession, open_session_events(), Streaming
 
 ### Community 112 - "enum"
-Cohesion: 0.25
-Nodes (8): type, stopSequences, supportedVersions, items, type, description, items, type
+Cohesion: 0.28
+Nodes (4): dataview_filter_checkbox_equal(), ListSpacesRequest, Filter, IntoIterator
 
 ### Community 113 - "main.rs"
 Cohesion: 0.16
 Nodes (29): init_logging(), auth_login(), auth_logout(), AuthCommand, check_auth_status(), Cli, Commands, copy_link_command() (+21 more)
 
 ### Community 114 - "String"
-Cohesion: 0.09
-Nodes (57): AppContext, AuthArgs, AuthCommands, build_client(), ChatArgs, ChatCommands, ChatMessagesArgs, ChatMessagesCommands (+49 more)
+Cohesion: 0.08
+Nodes (64): ChatReadTypeArg, AppContext, AuthArgs, AuthCommands, build_client(), ChatArgs, ChatCommands, ChatMessagesArgs (+56 more)
 
 ### Community 115 - "FileTypeArg"
 Cohesion: 0.36
@@ -745,19 +750,19 @@ Nodes (6): FileStyle, FileType, From, Self, FileStyleArg, FileTypeArg
 
 ### Community 116 - "spaces.rs"
 Cohesion: 0.11
-Nodes (19): archived_object_from_search_result(), archived_relation_not_found(), archived_search_request(), CreateSpaceRequestBody, dataview_filter_type_in(), normalized_search_result_id(), prime_cache_spaces(), Icon (+11 more)
+Nodes (18): PagedResult, archived_object_from_search_result(), archived_relation_not_found(), CreateSpaceRequestBody, normalized_search_result_id(), prime_cache_spaces(), Icon, Object (+10 more)
 
 ### Community 117 - "resources.rs"
-Cohesion: 0.14
-Nodes (35): AnytypeResources, body_above_100k_chars_fails_without_silent_truncation(), cancellation_aborts_a_delayed_resource_read(), canonical_search_get_and_write_uri_type_round_trips_strictly(), convert_object(), document_response_byte_ceiling_is_exact_before_conversion(), exact_get_returns_complete_100k_unicode_body_and_bounded_metadata(), fixture() (+27 more)
+Cohesion: 0.15
+Nodes (36): AnytypeResources, body_above_100k_chars_fails_without_silent_truncation(), cancellation_aborts_a_delayed_resource_read(), canonical_search_get_and_write_uri_type_round_trips_strictly(), controlled_error(), document_response_byte_ceiling_is_exact_before_conversion(), error_code(), exact_get_returns_complete_100k_unicode_body_and_bounded_metadata() (+28 more)
 
 ### Community 118 - "main"
-Cohesion: 0.33
-Nodes (8): all_http_trace_levels_remain_metadata_only(), log_http_status(), log_request(), log_response(), malformed_targets_fail_closed_across_standard_http_diagnostics(), non_whitespace_controls_fail_closed_across_aggregated_http_surfaces(), retry_for_status(), StatusCode
+Cohesion: 0.43
+Nodes (4): FixtureReply, Duration, Self, Value
 
 ### Community 119 - "route_aware_type_server"
-Cohesion: 0.29
-Nodes (9): candidate_is_safe(), candidate_selection_filters_invalid_values_before_its_cap(), compare_candidates(), compare_duplicate_representatives(), insert_bounded_candidate(), property_candidate(), ResolveCandidate, Property (+1 more)
+Cohesion: 0.33
+Nodes (3): file_path(), FileDeleteRequest, permanent_delete_sets_skip_bin_query()
 
 ### Community 120 - "ViewMatchAccumulator"
 Cohesion: 0.29
@@ -772,8 +777,8 @@ Cohesion: 0.06
 Nodes (25): BoundedText<MAX>, DomainValueError, LastModified, LastModifiedError, object_summary_serializes_with_canonical_resource_uri(), ObjectResourceUri, ObjectSummary, AsRef (+17 more)
 
 ### Community 123 - "ArchiveReader"
-Cohesion: 0.13
-Nodes (20): ArchiveFileEntry, ArchiveReader, ArchiveSourceKind, infer_object_id_from_snapshot_path(), infer_object_ids_from_files(), looks_like_content_id(), reader_lists_and_reads_directory_archive(), reader_lists_and_reads_zip_archive() (+12 more)
+Cohesion: 0.12
+Nodes (22): ArchiveFileEntry, ArchiveReader, ArchiveSourceKind, infer_object_id_from_snapshot_path(), infer_object_ids_from_files(), looks_like_content_id(), reader_lists_and_reads_directory_archive(), reader_lists_and_reads_zip_archive() (+14 more)
 
 ### Community 124 - "ui.rs"
 Cohesion: 0.15
@@ -792,8 +797,8 @@ Cohesion: 0.07
 Nodes (54): BooleanTrueInput, BooleanTrueSchema, contains_keyword(), EmptyNestedInput, EmptySchema, FreeFormMapInput, FreeFormValueInput, has_only_keywords() (+46 more)
 
 ### Community 128 - "TagColorArg"
-Cohesion: 0.27
-Nodes (9): AuthSource, detect_scope(), Channel, Display, Formatter, Status, to_status(), try_list_apps() (+1 more)
+Cohesion: 0.29
+Nodes (3): PaginatedResponse<T>, Iter, IterMut
 
 ### Community 129 - "Processor"
 Cohesion: 0.21
@@ -804,8 +809,8 @@ Cohesion: 0.61
 Nodes (8): initialize_protocol(), read_frame(), request(), write_frame(), BufReader, DuplexStream, ReadHalf, WriteHalf
 
 ### Community 131 - "Self"
-Cohesion: 0.13
-Nodes (6): FileListRequest, FileSearchRequest, Filter, IntoIterator, Self, size_filter()
+Cohesion: 0.14
+Nodes (8): file_type_filter(), file_type_from_mime(), FileListRequest, FileType, filter_not_empty(), Filter, Self, size_filter()
 
 ### Community 132 - "deserialize_vec_or_null"
 Cohesion: 0.67
@@ -813,19 +818,11 @@ Nodes (3): deserialize_vec_or_null(), D, T
 
 ### Community 133 - "Description"
 Cohesion: 0.33
-Nodes (6): ChatMessage, IdentityList, Reactions, HashMap, MessageBlock, MessageContent
+Nodes (5): description, required, type, CallToolRequestParams, _meta
 
 ### Community 134 - "auth.rs"
 Cohesion: 0.26
 Nodes (11): AuthStatus, CreateApiKeyRequest, CreateApiKeyResponse, CreateChallengeRequest, CreateChallengeResponse, GrpcStatus, HttpStatus, KeyStoreStatus (+3 more)
-
-### Community 135 - "Key"
-Cohesion: 0.40
-Nodes (5): empty_page_server(), explicit_type_id_resolution_uses_one_direct_get_with_cache_enabled(), route_aware_type_server(), JoinHandle, Sender
-
-### Community 136 - "Platform"
-Cohesion: 0.40
-Nodes (5): DeleteAllArchivedResult, DeleteBestEffortResult, ListArchivedRequest, AnytypeClient, Vec
 
 ### Community 137 - "auth.rs"
 Cohesion: 0.12
@@ -834,6 +831,14 @@ Nodes (32): create_local_link_challenge(), create_session(), create_session_toke
 ### Community 138 - "File"
 Cohesion: 0.11
 Nodes (16): Bookmark, Description, FaviconHash, File, Hash, ImageHash, Mime, Name (+8 more)
+
+### Community 139 - "SyncStatus"
+Cohesion: 0.33
+Nodes (4): &'a mut PaginatedResponse<T>, &'a PagedResult<T>, &'a PaginatedResponse<T>, IntoIterator
+
+### Community 140 - "HttpMetricsSnapshot"
+Cohesion: 0.40
+Nodes (4): CursorBinding, S, Serialize, Value
 
 ### Community 141 - "object_output.rs"
 Cohesion: 0.07
@@ -844,8 +849,8 @@ Cohesion: 0.33
 Nodes (4): F, T, InterceptedService, Uri
 
 ### Community 143 - "execute_object_import_batches"
-Cohesion: 0.08
-Nodes (52): ObjectDescriptor, apply_import_response(), archive_basename(), ArchiveCmpChanged, ArchiveCmpObject, ArchiveCmpReport, AuthCommands, BackupSelection (+44 more)
+Cohesion: 0.07
+Nodes (53): ObjectDescriptor, apply_import_response(), ArchiveCmpChanged, ArchiveCmpObject, ArchiveCmpReport, BackupSelection, build_archive_cmp_report(), build_import_plan() (+45 more)
 
 ### Community 145 - "MutationNumber"
 Cohesion: 0.70
@@ -853,27 +858,31 @@ Nodes (3): canonical_returned_number(), MutationNumber, Number
 
 ### Community 146 - "main"
 Cohesion: 0.50
-Nodes (4): main(), MessageContent, Object, status_color()
+Nodes (4): find_list_object(), main(), Object, Option
 
 ### Community 147 - "ListTemplatesRequest"
 Cohesion: 0.19
 Nodes (12): AnytypeClient, ListTemplatesRequest, Arc, Filter, Into, Object, Option, Self (+4 more)
 
 ### Community 148 - "Result"
-Cohesion: 0.23
-Nodes (28): exit_code(), main(), Box, T, with_token(), auth_status(), connect(), disable_sharing() (+20 more)
+Cohesion: 0.20
+Nodes (32): exit_code(), main(), Box, T, with_token(), auth_status(), connect(), disable_sharing() (+24 more)
 
 ### Community 149 - "$defs"
-Cohesion: 0.05
-Nodes (50): description, properties, type, description, properties, type, description, properties (+42 more)
+Cohesion: 0.04
+Nodes (68): description, properties, type, description, properties, type, description, properties (+60 more)
 
 ### Community 150 - "ViewMatchAccumulator"
-Cohesion: 0.70
-Nodes (3): View, view_candidate(), ViewMatchAccumulator
+Cohesion: 0.67
+Nodes (3): TestResult, test_collect_all_matches_total(), test_stream_matches_collect_all()
+
+### Community 152 - "Widget"
+Cohesion: 0.50
+Nodes (4): Limit, ViewId, Widget, Layout
 
 ### Community 154 - "discovery.rs"
-Cohesion: 0.07
-Nodes (71): assert_error(), concise_summaries_preserve_closed_fields_only(), convert_space_summary(), convert_tag_summary(), convert_type_summary(), cursor_from(), DiscoveryHandlers, domain_handler_error() (+63 more)
+Cohesion: 0.06
+Nodes (81): assert_error(), checked_tag_count(), concise_summaries_preserve_closed_fields_only(), convert_property_summary(), convert_space_summary(), convert_tag_summary(), convert_type_summary(), cursor_from() (+73 more)
 
 ### Community 157 - "AnytypeGrpcClient"
 Cohesion: 0.19
@@ -904,8 +913,8 @@ Cohesion: 0.07
 Nodes (34): apply_file_filters_list(), apply_file_filters_search(), delete_accepts_permanent(), delete_defaults_to_non_permanent(), discard_preload_parses_space_and_file_id(), download_http(), download_parses_rest_options_with_http(), file_command() (+26 more)
 
 ### Community 173 - "views.rs"
-Cohesion: 0.17
-Nodes (21): BlockDataview, ClientCommandsClient, authenticated_request(), fetch_grid_view_columns(), find_dataview_block(), GridViewColumn, GridViewInfo, invalid_view_token_is_preserved_as_typed_auth_error() (+13 more)
+Cohesion: 0.16
+Nodes (22): BlockDataview, ClientCommandsClient, RelationFormat, authenticated_request(), fetch_grid_view_columns(), find_dataview_block(), GridViewColumn, GridViewInfo (+14 more)
 
 ### Community 179 - "chat_messages.rs"
 Cohesion: 0.23
@@ -928,12 +937,12 @@ Cohesion: 0.17
 Nodes (20): credentials_summary(), credentials_summary_distinguishes_missing_grpc(), credentials_summary_distinguishes_missing_http(), credentials_summary_marks_both_missing(), credentials_summary_marks_both_present(), find_grpc_cmd(), handle(), HeadlessConfig (+12 more)
 
 ### Community 190 - "FileContentResponse"
-Cohesion: 0.15
-Nodes (6): FileContentRequest, FileDiscardPreloadRequest, FilesClient<'a>, ranged_download_sends_width_and_conditional_headers(), Into, String
+Cohesion: 0.13
+Nodes (10): AnytypeClient, FileDiscardPreloadRequest, FileGetRequest, FilePreloadRequest, FilesClient<'a>, FileSearchRequest, FileUploadRequest, Into (+2 more)
 
 ### Community 198 - "AnytypeError"
 Cohesion: 0.04
-Nodes (35): main(), main(), main(), main(), main(), main(), main(), main() (+27 more)
+Nodes (40): main(), MessageContent, Object, status_color(), main(), main(), main(), main() (+32 more)
 
 ### Community 199 - "error.rs"
 Cohesion: 0.07
@@ -953,7 +962,7 @@ Nodes (9): chat_stream_receives_messages(), chat_stream_reconnects_after_disconn
 
 ### Community 214 - "handler_support.rs"
 Cohesion: 0.07
-Nodes (64): assert_error(), begin_page(), BoundedResult, continuation_advances_by_upstream_window_not_sparse_item_count(), contract(), ControlledFailurePolicy, conversion_and_encoding_failures_emit_one_safe_failure_diagnostic(), cursor_binding_includes_tool_limit_and_normalized_non_cursor_params() (+56 more)
+Nodes (62): assert_error(), begin_page(), BoundedResult, continuation_advances_by_upstream_window_not_sparse_item_count(), contract(), ControlledFailurePolicy, conversion_and_encoding_failures_emit_one_safe_failure_diagnostic(), cursor_binding_includes_tool_limit_and_normalized_non_cursor_params() (+54 more)
 
 ### Community 216 - "Changelog"
 Cohesion: 0.15
@@ -976,8 +985,8 @@ Cohesion: 0.06
 Nodes (41): Ambiguous Resolution Error, Archived Object Management, Changelog, DB Keystore Migration, gRPC Backend, Process Watcher, Resolve Module, Semantic Versioning (+33 more)
 
 ### Community 227 - "FileDownloadRequest"
-Cohesion: 0.16
-Nodes (12): FileDownloadDestination, FileDownloadRequest, FileHttpUploadRequest, FileUploadResponse, http_upload_file(), rich_and_url_uploads_select_grpc(), AsRef, Bytes (+4 more)
+Cohesion: 0.27
+Nodes (5): FileDownloadRequest, rich_and_url_uploads_select_grpc(), AsRef, Path, simple_path_and_byte_uploads_select_rest()
 
 ### Community 228 - "ImageResizeSchema"
 Cohesion: 0.35
@@ -992,24 +1001,20 @@ Cohesion: 0.07
 Nodes (34): cursor_binding_tampering_and_process_expiry(), cursor_parts(), cursor_registry_evicts_oldest_state_at_its_cap(), CursorStore, CursorStoreError, CursorToken, hex(), hex_nibble() (+26 more)
 
 ### Community 241 - "Message"
-Cohesion: 0.14
-Nodes (13): BlockUpdate, DropFiles, Export, Import, Limit, Message, Migration, PreloadFile (+5 more)
+Cohesion: 0.22
+Nodes (9): BlockUpdate, DropFiles, Export, Import, Message, Migration, PreloadFile, Value (+1 more)
 
 ### Community 249 - "anyback"
 Cohesion: 0.22
 Nodes (8): anyback, Commands, Development, Features, Integrity Testing, Library Crate, Restore Transport, Usage Notes
 
-### Community 250 - "handle"
-Cohesion: 0.20
-Nodes (13): must_have_body(), resolve_icon_exists(), AsRef, Icon, Into, Path, handle(), merge_properties() (+5 more)
-
 ### Community 251 - "AnyMcpServer"
-Cohesion: 0.15
-Nodes (18): compact_omissions_are_unknown_while_read_only_edit_fails_closed(), compact_status_reports_profile_read_only_and_stable_toolsets(), decode_arguments(), invalid_arguments(), reject_static_cursor(), CancellationToken, ErrorData, JsonObject (+10 more)
+Cohesion: 0.16
+Nodes (20): AnyMcpServer, decode_arguments(), invalid_arguments(), reject_static_cursor(), Arc, CancellationToken, ErrorData, JsonObject (+12 more)
 
 ### Community 253 - "object_create.rs"
-Cohesion: 0.28
-Nodes (25): all_shared_property_and_icon_forms_reach_one_canonical_create_payload(), first_postdispatch_failures_are_fixed_and_key_retry_never_posts_twice(), fixture(), identical_sequential_and_concurrent_keyed_calls_create_once(), input(), mismatched_key_reuse_and_read_only_cached_call_do_no_io(), named_space_type_and_template_are_bounded_and_revalidated_before_create(), no_request_fixture() (+17 more)
+Cohesion: 0.33
+Nodes (22): all_shared_property_and_icon_forms_reach_one_canonical_create_payload(), first_postdispatch_failures_are_fixed_and_key_retry_never_posts_twice(), fixture(), identical_sequential_and_concurrent_keyed_calls_create_once(), input(), mismatched_key_reuse_and_read_only_cached_call_do_no_io(), named_space_type_and_template_are_bounded_and_revalidated_before_create(), plain_body_normalizes_before_fingerprint_post_and_both_verifications() (+14 more)
 
 ### Community 257 - "init-cli-keys.sh"
 Cohesion: 0.32
@@ -1023,17 +1028,13 @@ Nodes (6): 0.1.0 - 2026-02-10, [0.3.0 - alpha] - anyback - 2026-02-16, [0.4.0-al
 Cohesion: 0.29
 Nodes (6): Anytype gRPC client, Building, Compatibility, License, Related projects, Status and plan
 
-### Community 271 - "init_tracing"
-Cohesion: 0.15
-Nodes (14): Formatter, build_client(), Cli, ColorArg, handle_manifest(), ManifestArgs, resolve_space(), AnytypeClient (+6 more)
-
 ### Community 272 - "render_table"
 Cohesion: 0.60
 Nodes (5): format_row(), format_separator(), render_table(), String, Vec
 
 ### Community 274 - "verify.rs"
-Cohesion: 0.09
-Nodes (33): set_property_tags(), refresh_cached_property_tags(), api_error(), availability_wrapper_preserves_first_success_behavior(), config(), dropped_verifier_drops_in_flight_fetch_without_retaining_value(), exact_attempt_cap_is_enforced_for_zero_delay(), legacy_availability_retry_classifier_preserves_exact_parity() (+25 more)
+Cohesion: 0.12
+Nodes (29): api_error(), availability_wrapper_preserves_first_success_behavior(), config(), dropped_verifier_drops_in_flight_fetch_without_retaining_value(), exact_attempt_cap_is_enforced_for_zero_delay(), legacy_availability_retry_classifier_preserves_exact_parity(), legacy_retryable(), next_delay() (+21 more)
 
 ### Community 289 - "logging.rs"
 Cohesion: 0.09
@@ -1044,68 +1045,64 @@ Cohesion: 0.67
 Nodes (3): EDITOR_COMMAND, notify(), raycast-edit-anytype.sh script
 
 ### Community 297 - ".new"
-Cohesion: 0.07
-Nodes (54): ObjectOutput, checkbox_and_number_filters_are_forwarded_without_rewriting(), chunked_get_hashes_complete_unicode_body_without_leaking_remainder(), contracts_are_strict_bounded_and_body_is_optional_non_null(), convert_search_page(), convert_search_response(), decode_and_dispatch_search(), filter_depth_value_and_empty_array_bounds_are_enforced() (+46 more)
+Cohesion: 0.09
+Nodes (44): ObjectOutput, checkbox_and_number_filters_are_forwarded_without_rewriting(), chunked_get_hashes_complete_unicode_body_without_leaking_remainder(), contracts_are_strict_bounded_and_body_is_optional_non_null(), convert_search_page(), convert_search_response(), decode_and_dispatch_search(), filter_depth_value_and_empty_array_bounds_are_enforced() (+36 more)
 
 ### Community 301 - "server.rs"
-Cohesion: 0.14
-Nodes (30): ApplicationProfile, audit_schema(), canonical_json(), capabilities_are_static_complete_and_never_advertise_list_changed(), catalog_entries_equal_the_original_typed_contracts(), catalog_snapshot(), compact_canonical_json(), duplex_protocol_exposes_exact_tools_resources_and_clean_eof() (+22 more)
+Cohesion: 0.13
+Nodes (31): ApplicationProfile, assert_catalog_contracts(), assert_valid_representative(), audit_schema(), capabilities_are_static_complete_and_never_advertise_list_changed(), catalog_entries_equal_the_original_typed_contracts(), catalog_snapshot(), compact_omissions_are_unknown_while_read_only_edit_fails_closed() (+23 more)
 
 ### Community 314 - "test_collect_all_matches_total"
-Cohesion: 0.16
-Nodes (19): array_condition(), ArrayCondition, checkbox_condition(), CheckboxCondition, date_condition(), DateCondition, number_condition(), NumberCondition (+11 more)
+Cohesion: 0.09
+Nodes (29): array_condition(), ArrayCondition, checkbox_condition(), CheckboxCondition, date_condition(), DateCondition, number_condition(), NumberCondition (+21 more)
 
 ### Community 315 - "PageLimit"
-Cohesion: 0.09
-Nodes (18): PageRequest, non_null_cursor_schema(), page_omits_terminal_cursor_from_json(), Page<T>, PageLimit, PageOffset, PaginationInput, Cow (+10 more)
+Cohesion: 0.06
+Nodes (30): DiscoveryReference, PropertyListInput, PropertyPageParams, Cow, Deserialize, JsonSchema, Option, Schema (+22 more)
 
 ### Community 322 - "properties.rs"
 Cohesion: 0.05
 Nodes (61): property(), AnytypeClient, assert_malformed_tag_pagination(), CreatePropertyRequestBody, deserialize_vec_string_or_null(), deserialize_vec_tag_or_null(), direct_property_get_is_cache_independent_and_exactly_scoped(), direct_property_get_validates_both_ids_before_io() (+53 more)
 
 ### Community 366 - ".new"
-Cohesion: 0.18
-Nodes (21): ambiguous_scans_also_fail_when_candidate_completeness_exceeds_the_limit(), candidate_membership_is_independent_of_input_order(), chat_id_with_space_passes_through(), classify_matches(), distinct_stable_ids_produce_deterministic_candidates(), duplicate_rows_for_one_stable_id_resolve_uniquely(), invalid_candidates_before_a_valid_match_do_not_hide_it(), match_classification_preserves_zero_and_one_items() (+13 more)
+Cohesion: 0.05
+Nodes (95): ambiguity_error_exposes_only_bounded_candidates(), ambiguous(), ambiguous_scans_also_fail_when_candidate_completeness_exceeds_the_limit(), AnytypeClient, bare_chat_id_discovery_has_one_global_space_and_chat_budget(), candidate_is_safe(), candidate_selection_filters_invalid_values_before_its_cap(), chat_id_with_space_passes_through() (+87 more)
 
 ### Community 377 - "properties"
-Cohesion: 0.07
-Nodes (32): description, properties, type, description, enum, type, description, $ref (+24 more)
+Cohesion: 0.06
+Nodes (36): description, properties, type, description, enum, type, properties, description (+28 more)
 
 ### Community 387 - ".new"
 Cohesion: 0.06
-Nodes (100): HandlerError, Display, From, BodySha256, checked_effective_type(), checked_space_id(), checked_type_key(), closed_property_type_and_icon_values_are_sent_and_verified() (+92 more)
+Nodes (98): HandlerError, Display, From, BodySha256, checked_effective_type(), checked_space_id(), checked_type_key(), closed_property_type_and_icon_values_are_sent_and_verified() (+90 more)
 
 ### Community 388 - "properties"
-Cohesion: 0.06
-Nodes (31): description, properties, required, type, CreateMessageRequestParams, description, enum, type (+23 more)
+Cohesion: 0.05
+Nodes (39): description, properties, required, type, CreateMessageRequestParams, description, enum, type (+31 more)
 
 ### Community 401 - "headless_integration.rs"
-Cohesion: 0.23
-Nodes (26): active_contains(), archived_contains(), arguments(), assert_archive_evidence(), assert_collection_view_continuation(), assert_cursor_continuation(), assert_fixture_space_continuation(), assert_fixture_template_continuation() (+18 more)
+Cohesion: 0.21
+Nodes (27): active_contains(), archived_contains(), arguments(), assert_archive_evidence(), assert_collection_view_continuation(), assert_cursor_continuation(), assert_fixture_space_continuation(), assert_fixture_template_continuation() (+19 more)
 
 ### Community 402 - "_meta"
 Cohesion: 0.10
 Nodes (21): description, properties, required, type, description, properties, required, type (+13 more)
 
 ### Community 403 - "properties"
-Cohesion: 0.11
-Nodes (20): required, required, description, required, type, description, required, type (+12 more)
+Cohesion: 0.13
+Nodes (17): required, required, description, required, type, CompleteResult, DiscoverResult, description (+9 more)
 
 ### Community 419 - "properties"
-Cohesion: 0.07
-Nodes (30): description, properties, type, description, items, type, items, Annotations (+22 more)
+Cohesion: 0.08
+Nodes (26): description, properties, type, description, items, type, items, Annotations (+18 more)
 
 ### Community 422 - "Result"
 Cohesion: 0.12
 Nodes (15): BoundedText, AnytypeReference, FilterNumber, FilterNumberError, AsRef, Cow, D, Deserialize (+7 more)
 
-### Community 427 - "FilesClient<'a>"
-Cohesion: 0.17
-Nodes (12): file_type_filter(), file_type_from_mime(), FilePreloadRequest, FileSource, FileStyle, FileType, FileUploadRequest, grpc_file_style() (+4 more)
-
 ### Community 441 - "protocol.rs"
 Cohesion: 0.09
-Nodes (29): all_discovery_contracts_are_strict_bounded_read_tools(), property_list_tool(), server_status_tool(), space_list_tool(), tag_list_tool(), template_list_tool(), type_list_tool(), contract_is_strict_bounded_non_null_and_uses_create_annotations() (+21 more)
+Nodes (29): all_discovery_contracts_are_strict_bounded_read_tools(), property_list_tool(), server_status_tool(), space_list_tool(), tag_list_tool(), template_list_tool(), type_list_tool(), Page (+21 more)
 
 ### Community 442 - "runtime.rs"
 Cohesion: 0.11
@@ -1116,8 +1113,8 @@ Cohesion: 0.08
 Nodes (25): $ref, description, properties, type, ClientCapabilities, description, properties, type (+17 more)
 
 ### Community 444 - "type"
-Cohesion: 0.07
-Nodes (31): description, required, type, properties, required, type, type, AudioContent (+23 more)
+Cohesion: 0.09
+Nodes (25): properties, required, type, type, BooleanSchema, type, additionalProperties, default (+17 more)
 
 ### Community 454 - "Self"
 Cohesion: 0.18
@@ -1128,32 +1125,32 @@ Cohesion: 0.13
 Nodes (16): comparison_classifies_bounded_and_malformed_upstream_values(), dates_are_bounded_rfc3339_and_canonical_utc(), ids_cap_raw_input_before_sorting_and_deduplication(), MutationContractInput, normalized_properties(), normalized_values_serialize_deterministically_for_future_fingerprints(), only_documented_empty_values_compare_as_missing_clears(), properties_are_bounded_sorted_and_duplicate_keys_reject() (+8 more)
 
 ### Community 474 - "execute_create"
-Cohesion: 0.26
-Nodes (13): HandlerOperationError, execute_create(), indeterminate_operation(), EntityId, Object, ObjectId, SpaceId, Type (+5 more)
+Cohesion: 0.24
+Nodes (14): HandlerOperationError, execute_create(), indeterminate_operation(), CancellationToken, EntityId, Object, ObjectId, SpaceId (+6 more)
 
 ### Community 477 - "execute_object_import_batches"
-Cohesion: 0.12
-Nodes (28): aggregate_import_responses(), AppContext, build_import_plan_infers_ids_without_manifest_from_zip(), execute_object_import(), execute_object_import_batches(), execute_object_import_path(), handle_restore_apply(), import_event_timeouts_from_env() (+20 more)
+Cohesion: 0.10
+Nodes (35): aggregate_import_responses(), AppContext, build_import_plan_infers_ids_without_manifest_from_zip(), collect_import_snapshots(), dir_contains_pb_or_json(), execute_object_import(), execute_object_import_batches(), execute_object_import_path() (+27 more)
 
 ### Community 478 - "Result"
 Cohesion: 0.03
-Nodes (19): Formatter, Path, run_inspector(), init_tracing(), main(), run(), main(), Into (+11 more)
+Nodes (22): Formatter, Formatter, Path, run_inspector(), init_tracing(), main(), run(), init_tracing() (+14 more)
 
 ### Community 491 - "Attempt"
-Cohesion: 0.19
-Nodes (16): Attempt, BeginAttempt, CreateDisposition, CreateExecution, finish_supervised_execution(), IdempotencyStore, ObjectCreateOutput, Arc (+8 more)
+Cohesion: 0.20
+Nodes (16): Attempt, BeginAttempt, CreateDisposition, CreateExecution, finish_supervised_execution(), IdempotencyKey, IdempotencyStore, Arc (+8 more)
 
 ### Community 493 - "Result"
-Cohesion: 0.33
-Nodes (9): numeric_boundary(), HashMap, HashSet, Map, String, Value, SchemaAudit, SchemaAudit<'root> (+1 more)
+Cohesion: 0.26
+Nodes (13): canonical_json(), compact_canonical_json(), numeric_boundary(), HashMap, HashSet, Map, String, Value (+5 more)
 
 ### Community 518 - "CompleteResult"
 Cohesion: 0.17
 Nodes (12): properties, description, type, hasMore, total, values, description, type (+4 more)
 
 ### Community 552 - ".call_tool"
-Cohesion: 0.18
-Nodes (12): Any, Future, Option, Output, RoleServer, RxJsonRpcMessage, Transport, TxJsonRpcMessage (+4 more)
+Cohesion: 0.17
+Nodes (13): Any, Future, Option, Output, RoleServer, RxJsonRpcMessage, Transport, TxJsonRpcMessage (+5 more)
 
 ### Community 553 - "ElicitRequestFormParams"
 Cohesion: 0.12
@@ -1164,16 +1161,16 @@ Cohesion: 0.30
 Nodes (15): required, required, required, required, required, required, required, required (+7 more)
 
 ### Community 595 - "properties"
-Cohesion: 0.08
-Nodes (24): $ref, properties, description, format, type, properties, required, type (+16 more)
+Cohesion: 0.14
+Nodes (14): description, format, type, properties, required, type, BlobResourceContents, blob (+6 more)
 
 ### Community 597 - "run_smoke_tests"
-Cohesion: 0.15
+Cohesion: 0.17
 Nodes (16): Instant, Iter, TestContext, TestResults, run_smoke_tests(), smoke_test(), test_filters(), test_members_api() (+8 more)
 
 ### Community 631 - "CancelledNotificationParams"
-Cohesion: 0.07
-Nodes (28): properties, properties, anyOf, description, type, properties, description, type (+20 more)
+Cohesion: 0.08
+Nodes (25): properties, anyOf, description, type, description, properties, required, type (+17 more)
 
 ### Community 655 - "load_headless_config"
 Cohesion: 0.39
@@ -1186,21 +1183,21 @@ Nodes (3): Deliberate exclusions, Live-test mutation rate-limit audit, Retried s
 ## Knowledge Gaps
 - **685 isolated node(s):** `EDITOR_COMMAND`, `AuthCommand`, `EnabledToolset`, `EmptyPageParams`, `SpacePageParams` (+680 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **14 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **21 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Result` connect `Result` to `Space Pagination`, `Integration Test Suite`, `Authentication API`, `Chat Stream Builder`, `Filtering and Sorting`, `Pagination Core`, `Client Configuration`, `Type Request Models`, `Test Retry Helpers`, `Process Watcher`, `Changelog Concepts`, `Chat Resolution Client`, `Tag API`, `Property Value Models`, `Member Models`, `HTTP Retry Client`, `Property Lookup Helpers`, `Chat RPC Responses`, `Object Creation Builder`, `Message Content Formatting`, `Input Validation`, `Template API`, `Type Models`, `Cache Controls`, `Object Payload Models`, `Availability Verification`, `.call_tool`, `Object Update Examples`, `object_edit.rs`, `HTTP Request Methods`, `HTTP Metrics Reporting`, `object_edit.rs`, `Object CRUD Requests`, `Chat Read State`, `Object List Pagination`, `String`, `Self`, `Chat CRUD Tests`, `Agenda Example`, `mod.rs`, `Value`, `Basic Filters Example`, `Interactive Auth Example`, `Value`, `stdio.rs`, `Type Property Example`, `stdio.rs`, `Consistency Retry Example`, `stdio.rs`, `p1_cross_space.rs`, `index.rs`, `p1_cross_space.rs`, `String`, `with_test_context_unit`, `files.rs`, `decode.rs`, `Option`, `mod.rs`, `PaginatedResponse<T>`, `find_list_object`, `NewTagRequest`, `unique_test_name`, `Widget`, `Style`, `CancelledNotificationParams`, `ResolveCandidate`, `chat.rs`, `ViewListObjectsRequest`, `Vec`, `view_handlers.rs`, `mock.rs`, `ProcessWatcher`, `stdio_conformance.rs`, `.create_template_fixtures`, `Member`, `result.rs`, `pagination_limit`, `main.rs`, `String`, `spaces.rs`, `resources.rs`, `ViewMatchAccumulator`, `ObjectSummary`, `ArchiveReader`, `String`, `schema.rs`, `TagColorArg`, `Processor`, `deserialize_vec_or_null`, `auth.rs`, `object_output.rs`, `execute_object_import_batches`, `load_headless_config`, `MutationNumber`, `main`, `ListTemplatesRequest`, `Result`, `discovery.rs`, `AnytypeGrpcClient`, `view.rs`, `validation.rs`, `handle`, `views.rs`, `chat_messages.rs`, `.backup_space`, `parse_filters`, `auth.rs`, `FileContentResponse`, `AnytypeError`, `error.rs`, `handle`, `crypto.rs`, `test_chat_stream.rs`, `handler_support.rs`, `FileDownloadRequest`, `fix_doc_list_indents`, `TestResultTracker`, `handle`, `AnyMcpServer`, `object_create.rs`, `init_tracing`, `verify.rs`, `main`, `main`, `logging.rs`, `.new`, `server.rs`, `test_collect_all_matches_total`, `PageLimit`, `properties.rs`, `.listen_session_events`, `.new`, `.new`, `Result`, `FilesClient<'a>`, `protocol.rs`, `runtime.rs`, `Self`, `mutation_value.rs`, `execute_create`, `execute_object_import_batches`, `Result`?**
-  _High betweenness centrality (0.632) - this node is a cross-community bridge._
-- **Why does `CallToolResult` connect `discovery.rs` to `CancelledNotificationParams`, `Type Models`, `.new`, `view_handlers.rs`, `.new`, `object_edit.rs`, `Attempt`, `result.rs`, `Member Integration Tests`, `headless_integration.rs`, `properties`, `handler_support.rs`, `CancelledNotificationParams`, `protocol.rs`, `AnyMcpServer`, `object_create.rs`?**
+- **Why does `Result` connect `Result` to `Space Pagination`, `Integration Test Suite`, `Authentication API`, `Chat Stream Builder`, `Filtering and Sorting`, `Object Models Utilities`, `Client Configuration`, `Test Retry Helpers`, `Process Watcher`, `Changelog Concepts`, `Chat Resolution Client`, `Tag API`, `Property Value Models`, `Member Models`, `HTTP Retry Client`, `Property Lookup Helpers`, `Chat RPC Responses`, `Object Creation Builder`, `Chat Attachments Reactions`, `Message Content Formatting`, `Input Validation`, `Template API`, `Type Models`, `Cache Controls`, `Object Payload Models`, `Availability Verification`, `.call_tool`, `Object Update Examples`, `object_edit.rs`, `HTTP Metrics Reporting`, `object_edit.rs`, `Object CRUD Requests`, `Chat Read State`, `Object List Pagination`, `String`, `Self`, `Chat CRUD Tests`, `Agenda Example`, `mod.rs`, `Basic Filters Example`, `Interactive Auth Example`, `Value`, `stdio.rs`, `Type Property Example`, `stdio.rs`, `Consistency Retry Example`, `stdio.rs`, `p1_cross_space.rs`, `index.rs`, `p1_cross_space.rs`, `String`, `with_test_context_unit`, `files.rs`, `TestContext`, `decode.rs`, `mod.rs`, `PaginatedResponse<T>`, `find_list_object`, `NewTagRequest`, `unique_test_name`, `Widget`, `Style`, `VerticalAlign`, `CancelledNotificationParams`, `ResolveCandidate`, `chat.rs`, `ViewListObjectsRequest`, `Vec`, `view_handlers.rs`, `mock.rs`, `ProcessWatcher`, `stdio_conformance.rs`, `.create_template_fixtures`, `Member`, `result.rs`, `Cli`, `pagination_limit`, `FilePreloadRequest`, `main.rs`, `String`, `spaces.rs`, `resources.rs`, `route_aware_type_server`, `ViewMatchAccumulator`, `ObjectSummary`, `ArchiveReader`, `String`, `schema.rs`, `Processor`, `deserialize_vec_or_null`, `Key`, `Platform`, `auth.rs`, `HttpMetricsSnapshot`, `object_output.rs`, `execute_object_import_batches`, `load_headless_config`, `MutationNumber`, `main`, `ListTemplatesRequest`, `Result`, `discovery.rs`, `AnytypeGrpcClient`, `view.rs`, `validation.rs`, `handle`, `views.rs`, `chat_messages.rs`, `.backup_space`, `parse_filters`, `auth.rs`, `FileContentResponse`, `AnytypeError`, `error.rs`, `handle`, `crypto.rs`, `test_chat_stream.rs`, `handler_support.rs`, `fix_doc_list_indents`, `TestResultTracker`, `AnyMcpServer`, `object_create.rs`, `verify.rs`, `main`, `main`, `logging.rs`, `.new`, `server.rs`, `test_collect_all_matches_total`, `PageLimit`, `properties.rs`, `.listen_session_events`, `.new`, `.new`, `Result`, `protocol.rs`, `runtime.rs`, `Self`, `mutation_value.rs`, `execute_create`, `execute_object_import_batches`, `Result`?**
+  _High betweenness centrality (0.650) - this node is a cross-community bridge._
+- **Why does `CallToolResult` connect `result.rs` to `CancelledNotificationParams`, `Type Models`, `.new`, `view_handlers.rs`, `.new`, `object_edit.rs`, `Attempt`, `headless_integration.rs`, `properties`, `$defs`, `handler_support.rs`, `CancelledNotificationParams`, `protocol.rs`, `discovery.rs`, `AnyMcpServer`, `object_create.rs`?**
   _High betweenness centrality (0.079) - this node is a cross-community bridge._
-- **Why does `$defs` connect `Member Integration Tests` to `properties`, `properties`, `.new`, `ElicitRequestFormParams`, `_meta`, `properties`, `properties`, `$defs`, `properties`, `discovery.rs`, `properties`, `type`?**
-  _High betweenness centrality (0.059) - this node is a cross-community bridge._
+- **Why does `$defs` connect `$defs` to `properties`, `properties`, `Description`, `.new`, `Member Integration Tests`, `ElicitRequestFormParams`, `result.rs`, `Value`, `_meta`, `properties`, `properties`, `CancelledNotificationParams`, `properties`, `properties`, `type`?**
+  _High betweenness centrality (0.060) - this node is a cross-community bridge._
 - **What connects `EDITOR_COMMAND`, `AuthCommand`, `EnabledToolset` to the rest of the system?**
   _685 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Chat Mock Server` be split into smaller, more focused modules?**
-  _Cohesion score 0.12315270935960591 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.07890070921985816 - nodes in this community are weakly interconnected._
 - **Should `File Transfer API` be split into smaller, more focused modules?**
   _Cohesion score 0.006172839506172839 - nodes in this community are weakly interconnected._
 - **Should `Space Pagination` be split into smaller, more focused modules?**

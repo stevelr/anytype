@@ -12,24 +12,23 @@ use crate::{
         common::{MemberCache, load_member_cache, resolve_member_name},
         pagination_limit, pagination_offset,
     },
+    filter::parse_filters,
     output::{OutputFormat, render_table_dynamic},
 };
 
 #[allow(clippy::too_many_lines, clippy::large_stack_frames)]
 pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
-    // Resolve the transport *policy* for this operation before touching the
-    // network. Today this policy has one enforced effect: `--transport rest`
-    // rejects gRPC-only operations up front (see `resolve_transport`). The
-    // resolved backend is otherwise advisory — it is surfaced in verbose
-    // diagnostics to describe the intended per-operation transport, but the
-    // handlers below still dispatch through the unified `ctx.client` methods
-    // (create and single-space plain `list` over REST, everything else over
-    // gRPC). Rerouting REST-capable message/read/listen operations onto the
-    // REST `SpaceChatsClient` is staged for follow-up work.
+    // Resolve the transport backend for this operation before touching the
+    // network. `resolve_transport` both enforces the rejection guards
+    // (`--transport rest` on gRPC-only operations, `--transport grpc` on
+    // REST-only ones) and returns the backend each handler dispatches on:
+    // REST-capable operations run through `SpaceChatsClient` when the resolved
+    // backend is `Rest`/`RestSse`, and gRPC otherwise. The backend is also
+    // surfaced in verbose diagnostics.
     let op = classify(&args.command);
     let backend = resolve_transport(args.transport, &op)?;
     info!(
-        "chat transport policy for `{}`: {backend} (requested {})",
+        "chat transport backend for `{}`: {backend} (requested {})",
         op.name, args.transport
     );
 
@@ -37,11 +36,18 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
         super::ChatCommands::List {
             space,
             text,
+            filter,
             pagination,
         } => {
+            let filters = parse_filters(&filter.filters)?;
             let (space_id, result) = if let Some(space) = space.as_deref() {
                 let space_id = ctx.client.resolve_space_id(space).await?;
                 if let Some(text) = text {
+                    if !filters.is_empty() {
+                        bail!(
+                            "--filter cannot be combined with --text; chat text search uses the gRPC discovery API"
+                        );
+                    }
                     let mut request = ctx
                         .client
                         .chats()
@@ -54,18 +60,29 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     }
                     (Some(space_id), request.search().await?)
                 } else {
+                    // Space-scoped plain listing routes through the REST chat
+                    // builder so `--filter` can be applied server-side.
                     let mut request = ctx
                         .client
                         .chats()
-                        .list_chats_in(&space_id)
+                        .in_space(&space_id)
+                        .list()
                         .limit(pagination_limit(&pagination))
                         .offset(pagination_offset(&pagination));
-                    if pagination.all {
-                        request = request.limit(1000).offset(0);
+                    for filter in filters {
+                        request = request.filter(filter);
                     }
-                    (Some(space_id), request.list().await?)
+                    let items = if pagination.all {
+                        request.list().await?.collect_all().await?
+                    } else {
+                        request.list().await?.into_response().items
+                    };
+                    (Some(space_id), ChatListResult { items })
                 }
             } else if let Some(text) = text {
+                if !filters.is_empty() {
+                    bail!("--filter requires --space (single-space REST listing)");
+                }
                 let mut request = ctx
                     .client
                     .chats()
@@ -78,6 +95,9 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 }
                 (None, request.search().await?)
             } else {
+                if !filters.is_empty() {
+                    bail!("--filter requires --space (single-space REST listing)");
+                }
                 let mut request = ctx
                     .client
                     .chats()
@@ -118,22 +138,34 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 _ => ctx.output.emit_json(&result),
             }
         }
-        super::ChatCommands::Create { space, name } => {
+        super::ChatCommands::Create {
+            space,
+            name,
+            icon_emoji,
+            icon_file,
+        } => {
             let space_id = ctx.client.resolve_space_id(&space).await?;
-            let chat_type_key = match ctx.client.resolve_type_key(&space_id, "Chat").await {
-                Ok(key) => key,
-                Err(first_err) => ctx
-                    .client
-                    .resolve_type_key(&space_id, "chat")
-                    .await
-                    .map_err(|_| first_err)?,
+            let icon = match (icon_emoji, icon_file) {
+                (Some(emoji), None) => Some(Icon::Emoji { emoji }),
+                (None, Some(file)) => Some(Icon::File { file }),
+                (None, None) => None,
+                // clap's `chat_icon` group already rejects supplying both.
+                (Some(_), Some(_)) => bail!("--icon-emoji and --icon-file are mutually exclusive"),
             };
-            let chat = ctx
-                .client
-                .new_object(&space_id, chat_type_key)
-                .name(name)
-                .create()
-                .await?;
+            // The dedicated REST chat builder always attaches an icon, so it is
+            // used when REST is selected and an icon is supplied; otherwise fall
+            // back to the generic REST object create (which needs no icon).
+            let chat = match (backend, icon) {
+                (ChatBackend::Rest, Some(icon)) => {
+                    ctx.client
+                        .chats()
+                        .in_space(&space_id)
+                        .create(name, icon)
+                        .create()
+                        .await?
+                }
+                (_, icon) => create_chat_object(ctx, &space_id, name, icon).await?,
+            };
             ctx.output.emit_json(&chat)
         }
         super::ChatCommands::Get { space, chat } => {
@@ -280,6 +312,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 attachment,
                 content_json,
                 content_text,
+                reply_to,
+                blocks_json,
                 text_args,
             } => {
                 let space_id = ctx.client.resolve_space_id(&space).await?;
@@ -289,38 +323,71 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     .await?
                     .chat_id;
                 let attachments = parse_message_attachments(&attachment)?;
+                let reply_to_id = match reply_to {
+                    Some(reply) => Some(resolve_message_id_for_order(ctx, &chat_id, &reply).await?),
+                    None => None,
+                };
 
-                let message_id = if let Some(content_json) = content_json {
-                    let content = parse_message_content_json(&content_json)?;
-                    ctx.client
+                let message_id = if backend == ChatBackend::Rest {
+                    // REST plain-message send. `--blocks-json` is gRPC-only, so
+                    // the transport policy routes any blocks send to gRPC.
+                    let content = if let Some(content_json) = content_json {
+                        parse_message_content_json(&content_json)?
+                    } else {
+                        let text = resolve_message_text(text, content_text, &text_args)?
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "message text is required (use --text, positional TEXT, or --content-text)"
+                                )
+                            })?;
+                        MessageContent {
+                            text,
+                            style: style.unwrap_or_default().to_style(),
+                            marks: parse_message_marks(&mark)?,
+                        }
+                    };
+                    let mut request = ctx
+                        .client
+                        .chats()
+                        .in_space(&space_id)
+                        .add_message(&chat_id, content)
+                        .attachments(attachments);
+                    if let Some(reply_to_id) = reply_to_id {
+                        request = request.reply_to(reply_to_id);
+                    }
+                    request.send().await?
+                } else {
+                    let blocks = match blocks_json {
+                        Some(blocks_json) => parse_message_blocks_json(&blocks_json)?,
+                        None => Vec::new(),
+                    };
+                    let content = if let Some(content_json) = content_json {
+                        parse_message_content_json(&content_json)?
+                    } else {
+                        match resolve_message_text(text, content_text, &text_args)? {
+                            Some(text) => MessageContent {
+                                text,
+                                style: style.unwrap_or_default().to_style(),
+                                marks: parse_message_marks(&mark)?,
+                            },
+                            // Blocks can carry the body on their own.
+                            None if !blocks.is_empty() => MessageContent::default(),
+                            None => bail!(
+                                "message text is required (use --text, positional TEXT, --content-text, or --blocks-json)"
+                            ),
+                        }
+                    };
+                    let mut request = ctx
+                        .client
                         .chats()
                         .add_message(&chat_id)
                         .content(content)
                         .attachments(attachments)
-                        .send()
-                        .await?
-                } else {
-                    let text = if let Some(content_text) = content_text {
-                        read_content_text(&content_text)?
-                    } else if let Some(text) = text {
-                        text
-                    } else if !text_args.is_empty() {
-                        text_args.join(" ")
-                    } else {
-                        bail!(
-                            "message text is required (use --text, positional TEXT, or --content-text)"
-                        );
-                    };
-                    let style = style.unwrap_or_default().to_style();
-                    let marks = parse_message_marks(&mark)?;
-                    ctx.client
-                        .chats()
-                        .send_text(&chat_id, text)
-                        .style(style)
-                        .marks(marks)
-                        .attachments(attachments)
-                        .send()
-                        .await?
+                        .blocks(blocks);
+                    if let Some(reply_to_id) = reply_to_id {
+                        request = request.reply_to(reply_to_id);
+                    }
+                    request.send().await?
                 };
 
                 ctx.output.emit_json(&MessageIdOutput { id: message_id })
@@ -332,7 +399,9 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 text,
                 style,
                 mark,
+                attachment,
                 content_json,
+                blocks_json,
             } => {
                 let space_id = ctx.client.resolve_space_id(&space).await?;
                 let chat_id = ctx
@@ -341,24 +410,53 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     .await?
                     .chat_id;
                 let message_id = resolve_message_id_for_order(ctx, &chat_id, &message_id).await?;
+                // Supplied `--attachment` values are the complete replacement list.
+                let attachments = parse_message_attachments(&attachment)?;
 
-                if let Some(content_json) = content_json {
-                    let content = parse_message_content_json(&content_json)?;
+                if backend == ChatBackend::Rest {
+                    let content = if let Some(content_json) = content_json {
+                        parse_message_content_json(&content_json)?
+                    } else {
+                        let text = text.ok_or_else(|| anyhow!("--text is required"))?;
+                        MessageContent {
+                            text,
+                            style: style.unwrap_or_default().to_style(),
+                            marks: parse_message_marks(&mark)?,
+                        }
+                    };
+                    ctx.client
+                        .chats()
+                        .in_space(&space_id)
+                        .edit_message(&chat_id, &message_id, content)
+                        .attachments(attachments)
+                        .send()
+                        .await?;
+                } else {
+                    let blocks = match blocks_json {
+                        Some(blocks_json) => parse_message_blocks_json(&blocks_json)?,
+                        None => Vec::new(),
+                    };
+                    let content = if let Some(content_json) = content_json {
+                        parse_message_content_json(&content_json)?
+                    } else {
+                        match text {
+                            Some(text) => MessageContent {
+                                text,
+                                style: style.unwrap_or_default().to_style(),
+                                marks: parse_message_marks(&mark)?,
+                            },
+                            None if !blocks.is_empty() => MessageContent::default(),
+                            None => bail!(
+                                "--text is required (or provide --content-json or --blocks-json)"
+                            ),
+                        }
+                    };
                     ctx.client
                         .chats()
                         .edit_message(&chat_id, &message_id)
                         .content(content)
-                        .send()
-                        .await?;
-                } else {
-                    let text = text.ok_or_else(|| anyhow!("--text is required"))?;
-                    let style = style.unwrap_or_default().to_style();
-                    let marks = parse_message_marks(&mark)?;
-                    ctx.client
-                        .chats()
-                        .edit_text(&chat_id, &message_id, text)
-                        .style(style)
-                        .marks(marks)
+                        .attachments(attachments)
+                        .blocks(blocks)
                         .send()
                         .await?;
                 }
@@ -384,6 +482,88 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     .await?;
                 ctx.output.emit_json(&ResultOutput { result: true })
             }
+            super::ChatMessagesCommands::Search {
+                space,
+                chat,
+                query,
+                pagination,
+            } => {
+                let space_id = ctx.client.resolve_space_id(&space).await?;
+                let chat_id = ctx
+                    .client
+                    .resolve_chat_target(Some(&space_id), &chat)
+                    .await?
+                    .chat_id;
+                let mut request = ctx
+                    .client
+                    .chats()
+                    .in_space(&space_id)
+                    .search_messages(&chat_id, query)
+                    .limit(pagination_limit(&pagination))
+                    .offset(pagination_offset(&pagination));
+                if pagination.all {
+                    request = request.limit(1000).offset(0);
+                }
+                let mut page = request.search().await?;
+                for result in &mut page.items {
+                    result.message.order_id = encode_order_id_hex(&result.message.order_id);
+                }
+                match ctx.output.format() {
+                    OutputFormat::Table => {
+                        let headers = vec![
+                            "order_id".to_string(),
+                            "score".to_string(),
+                            "highlight".to_string(),
+                        ];
+                        let rows = page
+                            .items
+                            .iter()
+                            .map(|result| {
+                                vec![
+                                    result.message.order_id.clone(),
+                                    result.score.to_string(),
+                                    result.highlight.clone(),
+                                ]
+                            })
+                            .collect::<Vec<_>>();
+                        let table = render_table_dynamic(&headers, &rows);
+                        ctx.output.emit_text(&table)
+                    }
+                    _ => ctx.output.emit_json(&page),
+                }
+            }
+            super::ChatMessagesCommands::React {
+                space,
+                chat,
+                message_id,
+                emoji,
+            } => {
+                let space_id = ctx.client.resolve_space_id(&space).await?;
+                let chat_id = ctx
+                    .client
+                    .resolve_chat_target(Some(&space_id), &chat)
+                    .await?
+                    .chat_id;
+                let message_id = resolve_message_id_for_order(ctx, &chat_id, &message_id).await?;
+                let added = if backend == ChatBackend::Rest {
+                    // REST toggle does not report the resulting on/off state.
+                    ctx.client
+                        .chats()
+                        .in_space(&space_id)
+                        .toggle_reaction(&chat_id, &message_id, emoji)
+                        .await?;
+                    None
+                } else {
+                    Some(
+                        ctx.client
+                            .chats()
+                            .toggle_reaction(&chat_id, &message_id, emoji)
+                            .send()
+                            .await?,
+                    )
+                };
+                ctx.output.emit_json(&ReactionOutput { added })
+            }
         },
         super::ChatCommands::Read {
             space,
@@ -399,20 +579,83 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 .resolve_chat_target(Some(&space_id), &chat)
                 .await?
                 .chat_id;
-            let mut request = ctx.client.chats().read_messages(&chat_id);
-            if let Some(read_type) = read_type {
-                request = request.read_type(read_type.to_read_type());
+            let read_type = read_type.map(ChatReadTypeArg::to_read_type);
+            let after = after.map(|order| decode_order_id_arg(&order)).transpose()?;
+            let before = before
+                .map(|order| decode_order_id_arg(&order))
+                .transpose()?;
+            if backend == ChatBackend::Rest {
+                // Route to the space-scoped REST read builder.
+                let mut request = ctx
+                    .client
+                    .chats()
+                    .in_space(&space_id)
+                    .read_messages(&chat_id);
+                if let Some(read_type) = read_type {
+                    request = request.read_type(read_type);
+                }
+                if let Some(after) = after {
+                    request = request.after(after);
+                }
+                if let Some(before) = before {
+                    request = request.before(before);
+                }
+                if let Some(last_state_id) = last_state_id {
+                    request = request.last_state_id(last_state_id);
+                }
+                request.mark_read().await?;
+            } else {
+                let mut request = ctx.client.chats().read_messages(&chat_id);
+                if let Some(read_type) = read_type {
+                    request = request.read_type(read_type);
+                }
+                if let Some(after) = after {
+                    request = request.after(after);
+                }
+                if let Some(before) = before {
+                    request = request.before(before);
+                }
+                if let Some(last_state_id) = last_state_id {
+                    request = request.last_state_id(last_state_id);
+                }
+                request.mark_read().await?;
             }
-            if let Some(after) = after {
-                request = request.after(decode_order_id_arg(&after)?);
-            }
-            if let Some(before) = before {
-                request = request.before(decode_order_id_arg(&before)?);
-            }
-            if let Some(last_state_id) = last_state_id {
-                request = request.last_state_id(last_state_id);
+            ctx.output.emit_json(&ResultOutput { result: true })
+        }
+        super::ChatCommands::ReadReactions {
+            space,
+            chat,
+            order_id,
+        } => {
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let chat_id = ctx
+                .client
+                .resolve_chat_target(Some(&space_id), &chat)
+                .await?
+                .chat_id;
+            let mut request = ctx
+                .client
+                .chats()
+                .in_space(&space_id)
+                .read_reactions(&chat_id);
+            if let Some(order_id) = order_id {
+                request = request.through(decode_order_id_arg(&order_id)?);
             }
             request.mark_read().await?;
+            ctx.output.emit_json(&ResultOutput { result: true })
+        }
+        super::ChatCommands::ReadAll { space, chat } => {
+            let space_id = ctx.client.resolve_space_id(&space).await?;
+            let chat_id = ctx
+                .client
+                .resolve_chat_target(Some(&space_id), &chat)
+                .await?
+                .chat_id;
+            ctx.client
+                .chats()
+                .in_space(&space_id)
+                .read_all(&chat_id)
+                .await?;
             ctx.output.emit_json(&ResultOutput { result: true })
         }
         super::ChatCommands::Unread {
@@ -443,7 +686,44 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             include_history,
             after,
             show_events,
+            initial_limit,
+            heartbeat,
+            previews,
+            buffer,
         } => {
+            if backend == ChatBackend::RestSse {
+                if include_history.is_some() {
+                    bail!(
+                        "--include-history is a gRPC listener option; use --initial-limit for REST SSE"
+                    );
+                }
+                if after.is_some() {
+                    bail!(
+                        "--after is a gRPC listener option; REST SSE replays via --initial-limit"
+                    );
+                }
+                return listen_rest_sse(
+                    ctx,
+                    space.as_deref(),
+                    &chats,
+                    initial_limit,
+                    heartbeat,
+                    show_events,
+                )
+                .await;
+            }
+
+            // gRPC reconnecting listener path.
+            if initial_limit.is_some() {
+                bail!("--initial-limit only applies to the REST SSE listener (single --chat)");
+            }
+            if heartbeat.is_some() {
+                bail!("--heartbeat only applies to the REST SSE listener (single --chat)");
+            }
+            if buffer == Some(0) {
+                bail!("--buffer must be at least 1");
+            }
+
             let space_id = match space.as_deref() {
                 Some(space) => Some(ctx.client.resolve_space_id(space).await?),
                 None => None,
@@ -487,6 +767,12 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
             let mut builder = ctx.client.chat_stream();
             for chat_id in &chat_ids {
                 builder = builder.subscribe_chat(chat_id);
+            }
+            if previews {
+                builder = builder.subscribe_previews();
+            }
+            if let Some(buffer) = buffer {
+                builder = builder.buffer(buffer);
             }
             let ChatStreamHandle { mut events, .. } = builder.build();
 
@@ -576,6 +862,144 @@ struct ResultOutput {
 #[derive(serde::Serialize)]
 struct MessageIdOutput {
     id: String,
+}
+
+#[derive(serde::Serialize)]
+struct ReactionOutput {
+    /// Resulting reaction state when the backend reports it (gRPC toggle).
+    /// `None` for REST, whose toggle response carries no state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    added: Option<bool>,
+}
+
+/// Resolves the message text from the `--text`, positional `TEXT`, or
+/// `--content-text` inputs, returning `None` when none were supplied.
+fn resolve_message_text(
+    text: Option<String>,
+    content_text: Option<String>,
+    text_args: &[String],
+) -> Result<Option<String>> {
+    if let Some(content_text) = content_text {
+        return Ok(Some(read_content_text(&content_text)?));
+    }
+    if let Some(text) = text {
+        return Ok(Some(text));
+    }
+    if !text_args.is_empty() {
+        return Ok(Some(text_args.join(" ")));
+    }
+    Ok(None)
+}
+
+/// Parses a JSON array of structured [`MessageBlock`] values from a `@file`,
+/// `@-`, or `-` source.
+fn parse_message_blocks_json(value: &str) -> Result<Vec<MessageBlock>> {
+    let contents = read_content_source(value)?;
+    let blocks: Vec<MessageBlock> = serde_json::from_str(&contents)?;
+    Ok(blocks)
+}
+
+/// Creates a chat as a generic space object (no dedicated icon builder).
+async fn create_chat_object(
+    ctx: &AppContext,
+    space_id: &str,
+    name: String,
+    icon: Option<Icon>,
+) -> Result<Object> {
+    let chat_type_key = match ctx.client.resolve_type_key(space_id, "Chat").await {
+        Ok(key) => key,
+        Err(first_err) => ctx
+            .client
+            .resolve_type_key(space_id, "chat")
+            .await
+            .map_err(|_| first_err)?,
+    };
+    let mut request = ctx.client.new_object(space_id, chat_type_key).name(name);
+    if let Some(icon) = icon {
+        request = request.icon(icon);
+    }
+    request.create().await.map_err(Into::into)
+}
+
+/// Streams one chat over the REST Server-Sent Events endpoint.
+async fn listen_rest_sse(
+    ctx: &AppContext,
+    space: Option<&str>,
+    chats: &[String],
+    initial_limit: Option<u32>,
+    heartbeat: Option<u32>,
+    show_events: bool,
+) -> Result<()> {
+    let space = space.ok_or_else(|| anyhow!("--space is required for a REST SSE listen"))?;
+    let [chat] = chats else {
+        bail!("REST SSE listen requires exactly one --chat");
+    };
+    let space_id = ctx.client.resolve_space_id(space).await?;
+    let chat_id = ctx
+        .client
+        .resolve_chat_target(Some(&space_id), chat)
+        .await?
+        .chat_id;
+    let member_cache = Some(load_member_cache(ctx, &space_id).await?);
+    let chat_label = ctx
+        .client
+        .resolve_chat_name(Some(&space_id), &chat_id)
+        .await?;
+
+    let mut request = ctx
+        .client
+        .chats()
+        .in_space(&space_id)
+        .message_stream(&chat_id);
+    if let Some(limit) = initial_limit {
+        request = request.limit(limit);
+    }
+    if let Some(seconds) = heartbeat {
+        request = request.heartbeat_seconds(seconds);
+    }
+    let mut events = request.open().await?;
+
+    while let Some(event) = events.next().await {
+        match event? {
+            ChatHttpEvent::MessageAdded { message } | ChatHttpEvent::MessageUpdated { message } => {
+                emit_message_rows(
+                    ctx,
+                    Some(&chat_label),
+                    &[message],
+                    false,
+                    Some(&space_id),
+                    member_cache.as_ref(),
+                )?;
+            }
+            ChatHttpEvent::MessageDeleted { message_id } => {
+                if show_events {
+                    ctx.output
+                        .emit_text(&format!("message deleted: {chat_label} {message_id}"))?;
+                }
+            }
+            ChatHttpEvent::ReactionsUpdated {
+                message_id,
+                reactions,
+            } => {
+                if show_events {
+                    let summary = reactions
+                        .iter()
+                        .map(|reaction| reaction.emoji.clone())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    ctx.output.emit_text(&format!(
+                        "reactions updated: {chat_label} {message_id} {summary}"
+                    ))?;
+                }
+            }
+            ChatHttpEvent::Unknown { event_type, .. } => {
+                if show_events {
+                    ctx.output.emit_text(&format!("event: {event_type}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -709,23 +1133,48 @@ struct OpTransport {
     auto: ChatBackend,
     /// `Some(reason)` when REST cannot serve this invocation; `None` when it can.
     grpc_only: Option<&'static str>,
+    /// `Some(reason)` when gRPC cannot serve this invocation; `None` when it can.
+    rest_only: Option<&'static str>,
+}
+
+impl OpTransport {
+    /// Policy for an operation both transports serve, defaulting to REST.
+    fn rest(name: &'static str) -> Self {
+        Self {
+            name,
+            auto: ChatBackend::Rest,
+            grpc_only: None,
+            rest_only: None,
+        }
+    }
+
+    /// Policy for an operation only gRPC can serve.
+    fn grpc(name: &'static str, reason: &'static str) -> Self {
+        Self {
+            name,
+            auto: ChatBackend::Grpc,
+            grpc_only: Some(reason),
+            rest_only: None,
+        }
+    }
+
+    /// Policy for an operation only REST can serve.
+    fn rest_only(name: &'static str, reason: &'static str) -> Self {
+        Self {
+            name,
+            auto: ChatBackend::Rest,
+            grpc_only: None,
+            rest_only: Some(reason),
+        }
+    }
 }
 
 /// Classifies a parsed chat command into its transport policy, following the
 /// "Chats > Transport policy" table in `docs/anyr-0.5-cli-gap-analysis.md`.
 fn classify(command: &super::ChatCommands) -> OpTransport {
-    use super::{ChatCommands as C, ChatMessagesCommands as M};
-
-    let rest = |name| OpTransport {
-        name,
-        auto: ChatBackend::Rest,
-        grpc_only: None,
-    };
-    let grpc = |name, reason| OpTransport {
-        name,
-        auto: ChatBackend::Grpc,
-        grpc_only: Some(reason),
-    };
+    use super::ChatCommands as C;
+    use OpTransport as T;
+    let (rest, grpc, rest_only) = (T::rest, T::grpc, T::rest_only);
 
     match command {
         C::List { space, text, .. } => {
@@ -742,35 +1191,103 @@ fn classify(command: &super::ChatCommands) -> OpTransport {
         }
         C::Create { .. } => rest("create"),
         C::Get { .. } => grpc("get", "rich chat-object lookup requires gRPC"),
-        C::Messages(args) => match &args.command {
-            M::List { .. } => rest("messages list"),
-            M::Get { .. } => rest("messages get"),
-            M::Send { .. } => rest("messages send"),
-            M::Edit { .. } => rest("messages edit"),
-            M::Delete { .. } => rest("messages delete"),
-        },
+        C::Messages(args) => classify_messages(&args.command),
         C::Read { .. } => rest("read"),
+        C::ReadReactions { .. } => rest_only(
+            "read-reactions",
+            "marking chat reactions read is a REST-only operation",
+        ),
+        C::ReadAll { .. } => rest_only(
+            "read-all",
+            "marking every chat message read is a REST-only operation",
+        ),
         C::Unread { .. } => grpc("unread", "marking messages unread requires gRPC"),
-        C::Listen { chats, .. } => {
+        C::Listen {
+            chats,
+            space,
+            include_history,
+            after,
+            previews,
+            buffer,
+            ..
+        } => {
             if chats.len() > 1 {
                 grpc("listen", "streaming more than one --chat requires gRPC")
+            } else if space.is_none() {
+                // REST SSE requires a space to scope the stream; a single-chat
+                // listen without --space (e.g. `--chat <chat-id>` or a
+                // space-name target) is served by the gRPC listener, matching
+                // pre-transport behaviour.
+                grpc(
+                    "listen",
+                    "the REST SSE listener requires --space; listening without it uses gRPC",
+                )
+            } else if include_history.is_some() {
+                grpc("listen", "--include-history requires the gRPC listener")
+            } else if after.is_some() {
+                grpc("listen", "--after requires the gRPC listener")
+            } else if *previews {
+                grpc("listen", "--previews requires the gRPC listener")
+            } else if buffer.is_some() {
+                grpc("listen", "--buffer requires the gRPC listener")
             } else {
                 OpTransport {
                     name: "listen",
                     auto: ChatBackend::RestSse,
                     grpc_only: None,
+                    rest_only: None,
                 }
             }
         }
     }
 }
 
+/// Classifies a parsed `chat messages` subcommand into its transport policy;
+/// split from [`classify`] to keep each classifier readable.
+fn classify_messages(command: &super::ChatMessagesCommands) -> OpTransport {
+    use super::ChatMessagesCommands as M;
+    use OpTransport as T;
+
+    match command {
+        M::List { .. } => T::rest("messages list"),
+        M::Get { .. } => T::rest("messages get"),
+        M::Send { blocks_json, .. } => {
+            if blocks_json.is_some() {
+                T::grpc("messages send", "structured --blocks-json requires gRPC")
+            } else {
+                T::rest("messages send")
+            }
+        }
+        M::Edit { blocks_json, .. } => {
+            if blocks_json.is_some() {
+                T::grpc("messages edit", "structured --blocks-json requires gRPC")
+            } else {
+                T::rest("messages edit")
+            }
+        }
+        M::Delete { .. } => T::rest("messages delete"),
+        M::Search { .. } => T::rest_only(
+            "messages search",
+            "chat message search is a REST-only operation",
+        ),
+        M::React { .. } => T::rest("messages react"),
+    }
+}
+
 /// Resolves the requested transport against an operation's policy, returning an
-/// actionable error when `--transport rest` is asked for a gRPC-only operation.
+/// actionable error when a transport is asked for an operation only the other
+/// transport can serve.
 fn resolve_transport(requested: TransportArg, op: &OpTransport) -> Result<ChatBackend> {
     match requested {
         TransportArg::Auto => Ok(op.auto),
-        TransportArg::Grpc => Ok(ChatBackend::Grpc),
+        TransportArg::Grpc => match op.rest_only {
+            None => Ok(ChatBackend::Grpc),
+            Some(reason) => bail!(
+                "`anyr chat {}` cannot use --transport grpc: {reason}. \
+                 Use --transport rest or --transport auto.",
+                op.name
+            ),
+        },
         TransportArg::Rest => match op.grpc_only {
             None => Ok(op.auto),
             Some(reason) => bail!(
@@ -1136,10 +1653,10 @@ mod tests {
         );
     }
 
-    // These tests cover `resolve_transport`'s policy mapping only — the backend
-    // it returns for a given `--transport`/operation pair. They do not assert
-    // anything about which transport a handler actually dispatches through
-    // (execution routing is staged for follow-up work).
+    // These tests cover `resolve_transport`'s policy mapping — the backend it
+    // returns for a given `--transport`/operation pair. The handlers now
+    // dispatch on that resolved backend (REST builders vs gRPC), so the mapping
+    // is what selects the executed transport.
     #[test]
     fn grpc_resolves_to_grpc_backend_even_for_rest_capable_ops() {
         assert_eq!(
@@ -1257,5 +1774,385 @@ mod tests {
     #[test]
     fn decode_order_id_invalid_utf8() {
         assert!(decode_order_id_arg("ff").is_err());
+    }
+
+    // any-8bk: list filters and create icon options.
+    #[test]
+    fn create_icon_options_are_mutually_exclusive() {
+        let parsed = Cli::try_parse_from([
+            "anyr",
+            "chat",
+            "create",
+            "Work",
+            "Ops",
+            "--icon-emoji",
+            "x",
+            "--icon-file",
+            "i.png",
+        ]);
+        assert!(
+            parsed.is_err(),
+            "--icon-emoji and --icon-file must conflict"
+        );
+    }
+
+    #[test]
+    fn create_accepts_a_single_icon_option() {
+        for cmd in [
+            vec!["anyr", "chat", "create", "Work", "Ops", "--icon-emoji", "x"],
+            vec![
+                "anyr",
+                "chat",
+                "create",
+                "Work",
+                "Ops",
+                "--icon-file",
+                "i.png",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&cmd).is_ok(), "should parse: {cmd:?}");
+        }
+    }
+
+    #[test]
+    fn space_scoped_list_with_filter_is_rest() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "list",
+                "--space",
+                "Work",
+                "--filter",
+                "name==Ops"
+            ])
+            .unwrap(),
+            ChatBackend::Rest
+        );
+    }
+
+    #[test]
+    fn create_with_icon_stays_rest_under_auto() {
+        assert_eq!(
+            backend_of(&["anyr", "chat", "create", "Work", "Ops", "--icon-emoji", "x"]).unwrap(),
+            ChatBackend::Rest
+        );
+    }
+
+    // any-amp: reply-to, blocks-json, and edit attachment replacement.
+    #[test]
+    fn send_and_edit_blocks_json_forces_grpc() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "messages",
+                "send",
+                "Work",
+                "Ops",
+                "--blocks-json",
+                "@b.json",
+                "--text",
+                "hi",
+            ])
+            .unwrap(),
+            ChatBackend::Grpc
+        );
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "messages",
+                "edit",
+                "Work",
+                "Ops",
+                "m1",
+                "--blocks-json",
+                "@b.json",
+                "--text",
+                "hi",
+            ])
+            .unwrap(),
+            ChatBackend::Grpc
+        );
+    }
+
+    #[test]
+    fn blocks_json_rejected_with_transport_rest() {
+        for cmd in [
+            vec![
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "messages",
+                "send",
+                "Work",
+                "Ops",
+                "--blocks-json",
+                "@b.json",
+                "--text",
+                "hi",
+            ],
+            vec![
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "messages",
+                "edit",
+                "Work",
+                "Ops",
+                "m1",
+                "--blocks-json",
+                "@b.json",
+                "--text",
+                "hi",
+            ],
+        ] {
+            let err = backend_of(&cmd).expect_err(&format!("expected rejection for {cmd:?}"));
+            assert!(
+                err.to_string().contains("--transport rest"),
+                "error should mention --transport rest: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_send_with_reply_to_is_rest() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "messages",
+                "send",
+                "Work",
+                "Ops",
+                "--reply-to",
+                "m0",
+                "--text",
+                "hi",
+            ])
+            .unwrap(),
+            ChatBackend::Rest
+        );
+    }
+
+    #[test]
+    fn edit_accepts_replacement_attachments() {
+        assert!(
+            Cli::try_parse_from([
+                "anyr",
+                "chat",
+                "messages",
+                "edit",
+                "Work",
+                "Ops",
+                "m1",
+                "--text",
+                "hi",
+                "--attachment",
+                "file:obj1",
+                "--attachment",
+                "image:obj2",
+            ])
+            .is_ok()
+        );
+    }
+
+    // any-nth: search (REST-only) and react (both transports).
+    #[test]
+    fn search_is_rest_and_rejects_grpc() {
+        assert_eq!(
+            backend_of(&["anyr", "chat", "messages", "search", "Work", "Ops", "hello"]).unwrap(),
+            ChatBackend::Rest
+        );
+        let err = backend_of(&[
+            "anyr",
+            "chat",
+            "--transport",
+            "grpc",
+            "messages",
+            "search",
+            "Work",
+            "Ops",
+            "hello",
+        ])
+        .expect_err("grpc search should reject");
+        assert!(
+            err.to_string().contains("--transport grpc"),
+            "error should mention --transport grpc: {err}"
+        );
+    }
+
+    #[test]
+    fn react_defaults_rest_and_allows_grpc() {
+        assert_eq!(
+            backend_of(&[
+                "anyr", "chat", "messages", "react", "Work", "Ops", "m1", "x"
+            ])
+            .unwrap(),
+            ChatBackend::Rest
+        );
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "--transport",
+                "grpc",
+                "messages",
+                "react",
+                "Work",
+                "Ops",
+                "m1",
+                "x",
+            ])
+            .unwrap(),
+            ChatBackend::Grpc
+        );
+    }
+
+    // any-9nx: read-state REST ops; unread stays gRPC-only.
+    #[test]
+    fn read_state_ops_are_rest() {
+        for cmd in [
+            vec!["anyr", "chat", "read-reactions", "Work", "Ops"],
+            vec![
+                "anyr",
+                "chat",
+                "read-reactions",
+                "Work",
+                "Ops",
+                "--order-id",
+                "abc",
+            ],
+            vec!["anyr", "chat", "read-all", "Work", "Ops"],
+        ] {
+            assert_eq!(backend_of(&cmd).unwrap(), ChatBackend::Rest, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn read_all_allowed_under_rest_unread_is_not() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "--transport",
+                "rest",
+                "read-all",
+                "Work",
+                "Ops"
+            ])
+            .unwrap(),
+            ChatBackend::Rest
+        );
+        let err = backend_of(&[
+            "anyr",
+            "chat",
+            "--transport",
+            "rest",
+            "unread",
+            "Work",
+            "Ops",
+        ])
+        .expect_err("unread over rest should reject");
+        assert!(
+            err.to_string().contains("--transport rest"),
+            "error should mention --transport rest: {err}"
+        );
+    }
+
+    // any-rcr: listen backends and flags.
+    #[test]
+    fn listen_previews_or_buffer_forces_grpc() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "listen",
+                "--chat",
+                "Ops",
+                "--space",
+                "Work",
+                "--previews",
+            ])
+            .unwrap(),
+            ChatBackend::Grpc
+        );
+        assert_eq!(
+            backend_of(&[
+                "anyr", "chat", "listen", "--chat", "Ops", "--space", "Work", "--buffer", "32",
+            ])
+            .unwrap(),
+            ChatBackend::Grpc
+        );
+    }
+
+    #[test]
+    fn listen_rest_sse_accepts_initial_limit_and_heartbeat() {
+        assert_eq!(
+            backend_of(&[
+                "anyr",
+                "chat",
+                "listen",
+                "--chat",
+                "Ops",
+                "--space",
+                "Work",
+                "--initial-limit",
+                "5",
+                "--heartbeat",
+                "30",
+            ])
+            .unwrap(),
+            ChatBackend::RestSse
+        );
+    }
+
+    #[test]
+    fn listen_previews_rejected_with_transport_rest() {
+        let err = backend_of(&[
+            "anyr",
+            "chat",
+            "--transport",
+            "rest",
+            "listen",
+            "--chat",
+            "Ops",
+            "--space",
+            "Work",
+            "--previews",
+        ])
+        .expect_err("previews over rest should reject");
+        assert!(
+            err.to_string().contains("--transport rest"),
+            "error should mention --transport rest: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_message_text_precedence() {
+        assert_eq!(
+            resolve_message_text(Some("explicit".into()), None, &[]).unwrap(),
+            Some("explicit".into())
+        );
+        assert_eq!(
+            resolve_message_text(None, None, &["a".into(), "b".into()]).unwrap(),
+            Some("a b".into())
+        );
+        assert_eq!(resolve_message_text(None, None, &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_message_blocks_json_round_trips() {
+        let blocks = vec![MessageBlock::Text(MessageBlockText::default())];
+        let json = serde_json::to_string(&blocks).expect("serialize blocks");
+        let path = std::env::temp_dir().join(format!("anyr_blocks_{}.json", std::process::id()));
+        std::fs::write(&path, &json).expect("write temp blocks");
+        let parsed =
+            parse_message_blocks_json(&format!("@{}", path.display())).expect("parse blocks json");
+        assert_eq!(parsed.len(), 1);
+        std::fs::remove_file(&path).ok();
     }
 }
