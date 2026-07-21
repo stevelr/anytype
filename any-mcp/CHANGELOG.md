@@ -24,6 +24,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Make profile admission truthful about transport dependencies: standard
+  read-write now requires authenticated HTTP and gRPC before advertising its
+  fixed fourteen-tool catalog, while compact and read-only catalogs may start
+  HTTP-only. Configured-but-unhealthy gRPC still fails every selection,
+  `server_status` no longer reports omitted mutation toolsets in read-only
+  mode, and stable/preview startup share the same admission policy.
 - Require independent, finite active-absence and original-type-scoped archived
   readback before every `object_archive` success. The single non-replayed DELETE
   response is dispatch evidence only; matching, malformed, mismatched, and

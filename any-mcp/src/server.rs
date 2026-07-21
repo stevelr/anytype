@@ -144,9 +144,17 @@ impl AnyMcpServer {
     ///
     /// # Errors
     ///
-    /// Returns [`ServerBuildError`] if a typed schema, cursor store, or exact
-    /// static inventory cannot be constructed safely.
+    /// Returns [`ServerBuildError`] if required startup availability is absent,
+    /// or if a typed schema, cursor store, or exact static inventory cannot be
+    /// constructed safely.
     pub fn new(runtime: RuntimeContext) -> Result<Self, ServerBuildError> {
+        let availability = runtime.startup_status();
+        if !availability.http_available
+            || (runtime.profile().requires_grpc(runtime.is_read_only())
+                && !availability.grpc_available)
+        {
+            return Err(ServerBuildError);
+        }
         let cursors = Arc::new(CursorStore::new().map_err(ServerBuildError::cursor)?);
         let discovery = DiscoveryHandlers::new(runtime.clone(), cursors.clone());
         let object_read = ObjectReadHandlers::new(runtime.clone(), cursors.clone())
@@ -620,6 +628,23 @@ mod tests {
         profile: ApplicationProfile,
         read_only: bool,
     ) -> RuntimeContext {
+        runtime_at_with_availability(
+            base_url,
+            profile,
+            read_only,
+            StartupStatus {
+                http_available: true,
+                grpc_available: profile.requires_grpc(read_only),
+            },
+        )
+    }
+
+    fn runtime_at_with_availability(
+        base_url: String,
+        profile: ApplicationProfile,
+        read_only: bool,
+        startup_status: StartupStatus,
+    ) -> RuntimeContext {
         let client = AnytypeClient::with_config(ClientConfig {
             base_url: Some(base_url),
             keystore: Some("env".to_string()),
@@ -633,10 +658,7 @@ mod tests {
             client,
             1,
             Duration::from_secs(1),
-            StartupStatus {
-                http_available: true,
-                grpc_available: false,
-            },
+            startup_status,
             profile,
             read_only,
         )
@@ -678,6 +700,42 @@ mod tests {
             "{}\n",
             serde_json::to_string_pretty(&value).expect("serialize static catalog")
         )
+    }
+
+    #[test]
+    fn server_build_admission_matches_profile_access_transport_requirements() {
+        for protocol_profile in [ApplicationProfile::Compact, ApplicationProfile::Standard] {
+            for read_only in [false, true] {
+                for grpc_available in [false, true] {
+                    let runtime = runtime_at_with_availability(
+                        "http://127.0.0.1:1".to_owned(),
+                        protocol_profile,
+                        read_only,
+                        StartupStatus {
+                            http_available: true,
+                            grpc_available,
+                        },
+                    );
+                    let expected = !protocol_profile.requires_grpc(read_only) || grpc_available;
+                    assert_eq!(
+                        AnyMcpServer::new(runtime).is_ok(),
+                        expected,
+                        "profile={protocol_profile:?} read_only={read_only} grpc={grpc_available}"
+                    );
+                }
+
+                let missing_http = runtime_at_with_availability(
+                    "http://127.0.0.1:1".to_owned(),
+                    protocol_profile,
+                    read_only,
+                    StartupStatus {
+                        http_available: false,
+                        grpc_available: true,
+                    },
+                );
+                assert!(AnyMcpServer::new(missing_http).is_err());
+            }
+        }
     }
 
     fn compact_canonical_json(value: Value) -> String {

@@ -72,8 +72,8 @@ impl RuntimeContext {
     /// the mandatory startup health checks exactly once.
     ///
     /// HTTP credentials and ping success are required. gRPC is checked when
-    /// gRPC credentials are configured; absent gRPC credentials do not prevent
-    /// the deliberately REST-backed Phase 1 default toolset from starting.
+    /// gRPC credentials are configured, and is additionally required when the
+    /// selected profile/access catalog cannot fulfill its contracts over HTTP.
     ///
     /// # Errors
     ///
@@ -89,6 +89,7 @@ impl RuntimeContext {
         let startup_status = verify_startup_probes(
             auth.http.is_authenticated(),
             auth.grpc.is_authenticated(),
+            config.profile.requires_grpc(config.read_only),
             config.startup_timeout,
             || client.ping_http(),
             || client.ping_grpc(),
@@ -315,6 +316,7 @@ impl RuntimeContext {
 async fn verify_startup_probes<FH, FG, HH, HG, EH, EG>(
     http_configured: bool,
     grpc_configured: bool,
+    grpc_required: bool,
     timeout: Duration,
     http_probe: FH,
     grpc_probe: FG,
@@ -334,6 +336,10 @@ where
             StartupCheckError::Timeout => StartupError::HttpTimeout,
             StartupCheckError::Unavailable => StartupError::HttpUnavailable,
         })?;
+
+    if grpc_required && !grpc_configured {
+        return Err(StartupError::MissingRequiredGrpcCredentials);
+    }
 
     let grpc_available = if grpc_configured {
         startup_check(timeout, grpc_probe())
@@ -583,6 +589,8 @@ pub enum StartupError {
     CredentialLookup,
     /// No HTTP token was present in the configured keystore.
     MissingHttpCredentials,
+    /// The selected catalog requires gRPC, but no gRPC credentials were present.
+    MissingRequiredGrpcCredentials,
     /// The authenticated HTTP ping failed.
     HttpUnavailable,
     /// The authenticated HTTP ping exceeded its deadline.
@@ -604,6 +612,9 @@ impl fmt::Display for StartupError {
             }
             Self::MissingHttpCredentials => formatter.write_str(
                 "Anytype HTTP credentials are missing; configure the existing anyr keystore or env keystore",
+            ),
+            Self::MissingRequiredGrpcCredentials => formatter.write_str(
+                "selected Anytype MCP catalog requires configured gRPC credentials",
             ),
             Self::HttpUnavailable => formatter.write_str("authenticated Anytype HTTP ping failed"),
             Self::HttpTimeout => formatter.write_str("authenticated Anytype HTTP ping timed out"),
@@ -798,7 +809,7 @@ mod tests {
             timeout,
             StartupStatus {
                 http_available: true,
-                grpc_available: false,
+                grpc_available: true,
             },
         )
     }
@@ -822,6 +833,7 @@ mod tests {
         let result = verify_startup_probes(
             false,
             true,
+            false,
             Duration::from_secs(1),
             || async {
                 http_calls.fetch_add(1, Ordering::SeqCst);
@@ -845,6 +857,7 @@ mod tests {
         let grpc_calls = AtomicUsize::new(0);
         let http_only = verify_startup_probes(
             true,
+            false,
             false,
             Duration::from_secs(1),
             || async {
@@ -871,6 +884,7 @@ mod tests {
         let both = verify_startup_probes(
             true,
             true,
+            false,
             Duration::from_secs(1),
             || async {
                 http_calls.fetch_add(1, Ordering::SeqCst);
@@ -895,9 +909,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_rejects_http_only_when_selected_catalog_requires_grpc() {
+        let http_calls = AtomicUsize::new(0);
+        let grpc_calls = AtomicUsize::new(0);
+        let result = verify_startup_probes(
+            true,
+            false,
+            true,
+            Duration::from_secs(1),
+            || async {
+                http_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+            || async {
+                grpc_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+        )
+        .await;
+
+        assert_eq!(result, Err(StartupError::MissingRequiredGrpcCredentials));
+        assert_eq!(http_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_neither_transport_without_running_probes() {
+        let http_calls = AtomicUsize::new(0);
+        let grpc_calls = AtomicUsize::new(0);
+        let result = verify_startup_probes(
+            false,
+            false,
+            true,
+            Duration::from_secs(1),
+            || async {
+                http_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+            || async {
+                grpc_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+        )
+        .await;
+
+        assert_eq!(result, Err(StartupError::MissingHttpCredentials));
+        assert_eq!(http_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn startup_fails_when_a_mandatory_configured_probe_fails() {
         let http_failure = verify_startup_probes(
             true,
+            false,
             false,
             Duration::from_secs(1),
             || async { Err::<(), _>(()) },
@@ -909,6 +974,7 @@ mod tests {
         let grpc_failure = verify_startup_probes(
             true,
             true,
+            false,
             Duration::from_secs(1),
             || async { Ok::<_, ()>(()) },
             || async { Err::<(), _>(()) },

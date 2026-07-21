@@ -84,10 +84,13 @@ tool and resource catalog, and bounded wire contracts for every workflow.
 The server keeps one authenticated `anytype-api` client alive for the process
 and serves MCP over stdin/stdout. At startup it loads credentials using the
 same environment and keystore configuration as `anyr`, requires a successful
-HTTP ping, and checks gRPC when gRPC credentials are configured. HTTP-only
-startup is deliberate because the Phase 1 default tools are REST-backed; gRPC
-becomes mandatory only when configured credentials select gRPC capability.
-Startup failures exit non-zero with a concise diagnostic on stderr.
+HTTP ping, and checks gRPC whenever gRPC credentials are configured. The
+standard read-write catalog additionally requires configured, healthy gRPC
+because `object_archive` proves archived presence through Anytype's gRPC search
+surface. Compact read-write and both read-only catalogs can start HTTP-only.
+Configured-but-unhealthy gRPC always fails startup, even for an HTTP-complete
+catalog. Startup failures exit non-zero before protocol output with a concise
+diagnostic on stderr.
 
 Supported Anytype settings:
 
@@ -261,6 +264,12 @@ Read-only mode removes `object_edit` from compact and `object_create`,
 `object_update`, `object_edit`, and `object_archive` from standard. Every
 retained tool keeps the identical complete contract and handler.
 
+Standard read-write startup requires both HTTP and gRPC availability. Missing
+gRPC fails admission rather than dynamically omitting `object_archive`, so all
+four catalog inventories remain exact: compact read-write 4, compact read-only
+3, standard read-write 14, and standard read-only 10. Missing HTTP fails every
+selection.
+
 `tools/list` is a static, cursor-free catalog selected once at startup with
 `ANY_MCP_PROFILE`. The default `compact` profile advertises the coherent
 existing-document workflow `server_status`, `object_search`, `object_get`, and
@@ -291,8 +300,8 @@ The discovery handlers are exposed as typed production tools. `server_status`
 returns only the selected application profile, read-only state, a parsed and
 redacted HTTP endpoint, API revision, startup probe availability, and enabled
 toolsets. Compact reports `core` and `documents`; standard additionally reports
-`discovery`, `create`, `advanced_mutations`, `properties`, `templates`, and
-`views`. URL user information, passwords, query
+`discovery`, `properties`, `templates`, and `views`; read-write standard also
+reports `create` and `advanced_mutations`. URL user information, passwords, query
 parameters, and fragments are removed before encoding.
 
 `space_list`, `type_list`, `property_list`, `tag_list`, and `template_list`
