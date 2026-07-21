@@ -4,10 +4,10 @@
   - Scope: label `mcp`; actionable bug/chore/task priorities 0-2; preserve protected `anyr-0.5` exactly and never rebase/forget/delete it.
   - Phase 1 is complete. `any-lzn`, every `any-cwi` child/parent, and terminal verifier `any-zk6` are closed; final live gates were direct 13/13 and spawned 8/8.
   - Phase 2 dependency audit is complete. Common/schema design `any-x90` is independently approved/integrated as `2c18f2fb`; files design `any-hru` R4 is approved/integrated as `4510a93e`.
-  - Chats design `any-ii5` R3 (`69da0614`) was rejected for annotation/cursor/anchor/idempotency/list-shape gaps; R4 is assigned in `mcp-ii5`.
-  - Disposable isolation parent `any-oex` was split into design `any-sxbs`, human review `any-zhpr`, helper `any-1bpb`, live sentinel `any-rawn`, and final review `any-ngn5`. Tracked design path is `any-mcp/designs/disposable-space-isolation.md` because root `docs/` is ignored.
-  - Disposable implementation R1 (`b98a99df`) passed quick/live gates but independent destructive-safety review rejected masked cleanup failures, unknown-ID indeterminate creates, and weak inventory validation. R2 is assigned in `mcp-oex`; do not integrate R1.
-  - Live headless use is serialized. The last disposable sentinel released the reservation; both created IDs were independently absent. No live rerun is authorized while R2 is under construction.
+  - Chats design `any-ii5` R5 is independently approved/integrated as `695adeed`; six REST-first tools are frozen and human gate `any-dml` is ready.
+  - Disposable isolation design `any-sxbs` R4 is independently approved/integrated through `d86f8fe3`. It owns tracked `any-mcp/designs/disposable-space-isolation.md`; human gate `any-zhpr` is ready.
+  - Disposable implementation R1 (`b98a99df`) was rejected. R2 (`d162d3e8`) passed fast gates but predates approved design R4 and is also not accepted/integrated. Preserve `mcp-oex` for an R3 only after `any-zhpr` approval.
+  - Live headless use is serialized. The last disposable sentinel released the reservation; both created IDs were independently absent. Do not rerun until the approved design is implemented.
 
 - Blockers
   - Human gates after designs freeze: `any-hjn` common/schema, `any-ztf` members, `any-kqb` views-write, `any-thu` admin, `any-ldk` files, `any-dml` chats, and `any-zhpr` disposable isolation.
@@ -15,6 +15,6 @@
   - P3 OFIs retained: `any-3rt`, `any-h94e`, `any-b7a3`, `any-93eo`, `any-e7ei`, and captured-server-log gap `any-slrb`.
 
 - Next action
-  - Obtain clean fixed-revision reviews for chats R4, disposable design, and disposable implementation R2; integrate only approved revisions.
-  - Present all seven human review gates together with exact tracked documents and retained/deferred surfaces. Do not start dependent implementation before explicit approval.
-  - After approval, close design review gates, reconcile `any-sxbs`/`any-1bpb`/`any-rawn`/`any-ngn5`/`any-oex`, decompose approved umbrellas, and continue Phase 2 implementation via isolated subagent workspaces.
+  - Present all seven human review gates together with exact tracked documents and retained/deferred surfaces. The filtered actionable queue is empty; do not start dependent implementation before explicit approval.
+  - After approval, close the corresponding review gates, implement disposable R3 against design R4, then reconcile `any-1bpb`/`any-rawn`/`any-ngn5`/`any-oex`.
+  - Decompose approved schema/files/chats umbrellas and continue Phase 2 implementation via isolated subagent workspaces.
