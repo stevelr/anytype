@@ -16,6 +16,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - `--clear-properties` removes all non-featured recommended properties.
 - `anyr file delete --permanent` deletes a file object permanently (skips the
   bin) instead of moving it to the bin.
+- `anyr file search` sorting: `--sort PROPERTY` orders results by a property key
+  (for example `name` or `last_modified_date`), and `--desc` selects descending
+  order (requires `--sort`).
+- `anyr file upload` gained richer sources and gRPC-only options:
+  - `--url URL` uploads a remote file, `--stdin` uploads bytes read from stdin
+    (requires `--name`), and `--mime` sets the MIME type for a REST upload.
+  - `--file-type`, `--style`, `--details JSON_OR_@FILE`, `--created-in-context`,
+    and `--created-in-context-ref` route the upload through the gRPC backend.
+- `anyr file preload SPACE -f FILE` preloads a file (gRPC) and returns a preload
+  file id; `anyr file discard-preload SPACE FILE_ID` discards one.
+- `anyr file metadata SPACE FILE` issues a REST `HEAD` request and reports the
+  HTTP status plus the header metadata (etag, content-type, content-length,
+  last-modified, ...) in both JSON and table output; supports `--width` and the
+  conditional headers (`--if-match`, `--if-none-match`, `--if-modified-since`,
+  `--if-unmodified-since`).
+- `anyr file download --http` gained REST options: `--width`, `--range`, and the
+  conditional headers `--if-match`, `--if-none-match`, `--if-modified-since`,
+  `--if-unmodified-since`, and `--if-range`.
 
 ### Changed
 
@@ -24,9 +42,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - **Breaking**: `anyr file delete` no longer accepts `--http`; the flag has been
   removed and deletion now uses the REST files client (add `--permanent` to skip
   the bin).
+- **Breaking**: `anyr file download --http` output changed. JSON now reports
+  `{status, written, path, bytes, metadata}` (previously `{path}`), and table
+  output is now `status N PATH` (previously the bare path). A `304`/`412`/`416`
+  response leaves the destination file untouched and reports `written: false`.
 - `anyr file upload --http` is now a deprecated no-op (a plain upload already
   uses REST); it prints a deprecation warning and is rejected when combined with
-  `--file-type`, since `--file-type` selects the gRPC transport.
+  any gRPC-only option (`--url`, `--file-type`, `--style`, `--details`, or a
+  `--created-in-context*` option), since those select the gRPC transport. The
+  REST-only options `--mime` and `--stdin` are likewise rejected up front when
+  combined with a gRPC-only option instead of being silently dropped.
 - `anyr property update` now requires at least one of `--name` or `--key` and
   rejects a no-flag invocation before any network I/O. A key-only update reuses
   the property's current name so it still satisfies the REST contract.
