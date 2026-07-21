@@ -461,6 +461,14 @@ impl HttpClient {
         self.response_limits.document_bytes
     }
 
+    pub(crate) const fn file_response_limit(&self) -> u64 {
+        self.response_limits.file_bytes
+    }
+
+    pub(crate) const fn error_response_limit(&self) -> u64 {
+        self.response_limits.error_bytes
+    }
+
     /// Incrementally buffers one response up to `limit` bytes.
     ///
     /// A truthful oversized `Content-Length` is rejected before reading. The
@@ -875,6 +883,66 @@ impl HttpClient {
         query: &[(String, String)],
         headers: HeaderMap,
     ) -> Result<RawHttpResponse> {
+        self.file_request_with_limits(
+            method,
+            path,
+            query,
+            headers,
+            self.response_limits.file_bytes,
+            self.response_limits.error_bytes,
+            crate::files::DEFAULT_FILE_HEADER_EVIDENCE_BYTES,
+            1,
+        )
+        .await
+    }
+
+    /// Makes an authenticated file request under caller-specific finite limits.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) async fn file_request_with_limits(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        headers: HeaderMap,
+        success_body_limit: u64,
+        error_body_limit: u64,
+        header_evidence_limit: u64,
+        max_attempts: u32,
+    ) -> Result<RawHttpResponse> {
+        if success_body_limit == 0 || success_body_limit > self.response_limits.file_bytes {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "file response limit must be between 1 and {} bytes",
+                    self.response_limits.file_bytes
+                ),
+            });
+        }
+        if error_body_limit == 0 || error_body_limit > self.response_limits.error_bytes {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "file error response limit must be between 1 and {} bytes",
+                    self.response_limits.error_bytes
+                ),
+            });
+        }
+        if header_evidence_limit == 0
+            || header_evidence_limit > crate::files::MAX_FILE_HEADER_EVIDENCE_BYTES
+        {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "file header evidence limit must be between 1 and {} bytes",
+                    crate::files::MAX_FILE_HEADER_EVIDENCE_BYTES
+                ),
+            });
+        }
+        if max_attempts == 0 || max_attempts > crate::files::MAX_FILE_REQUEST_ATTEMPTS {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "file request attempts must be between 1 and {}",
+                    crate::files::MAX_FILE_REQUEST_ATTEMPTS
+                ),
+            });
+        }
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
@@ -883,72 +951,131 @@ impl HttpClient {
         };
         let full_url = format!("{}{}", self.base_url, path);
         debug!(method = %method, path = %diagnostic_path(path), "file_request");
-        self.metrics.increment_requests();
-        let response = self
-            .client
-            .request(method.clone(), &full_url)
-            .query(query)
-            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
-            .bearer_auth(token)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .map_err(|source| AnytypeError::Http {
-                method: method.as_str().to_owned(),
-                url: path.to_owned(),
-                source,
-            })?;
-        let status = response.status();
-        let response_headers = response.headers().clone();
-        let allowed_control_status = matches!(
-            status,
-            StatusCode::NOT_MODIFIED
-                | StatusCode::PRECONDITION_FAILED
-                | StatusCode::RANGE_NOT_SATISFIABLE
-        );
-        let body = if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
-            // HEAD and 304 legitimately carry representation metadata such as
-            // a Content-Length while having no response body to buffer.
-            Bytes::new()
-        } else {
-            let body_limit = if status.is_success() {
-                self.response_limits.file_bytes
-            } else {
-                self.response_limits.error_bytes
-            };
-            match self
-                .read_bounded(response, body_limit, method.as_str(), path)
+        let replay_safe = matches!(method, Method::GET | Method::HEAD);
+        let mut attempts = 0_u32;
+        loop {
+            attempts += 1;
+            self.metrics.increment_requests();
+            let sent = self
+                .client
+                .request(method.clone(), &full_url)
+                .query(query)
+                .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+                .bearer_auth(token)
+                .headers(headers.clone())
+                .send()
                 .await
-            {
-                Ok(body) => body,
-                Err(error) => {
-                    self.metrics.increment_errors();
-                    return Err(error);
+                .map_err(reqwest::Error::without_url);
+            let response = match sent {
+                Ok(response) => response,
+                Err(source)
+                    if replay_safe
+                        && attempts < max_attempts
+                        && (source.is_connect() || source.is_timeout()) =>
+                {
+                    self.metrics.increment_retries();
+                    log_and_backoff(attempts - 1, "file transport failure").await;
+                    continue;
                 }
+                Err(source) => {
+                    self.metrics.increment_errors();
+                    return Err(AnytypeError::Http {
+                        method: method.as_str().to_owned(),
+                        url: path.to_owned(),
+                        source,
+                    });
+                }
+            };
+            let status = response.status();
+            // Enforce the allowlisted-header evidence budget before any retry
+            // decision or body read. Every physical response is independently
+            // bounded, including intermediate 429 and retryable-status frames.
+            crate::files::retained_file_header_bytes(
+                response.headers(),
+                status,
+                header_evidence_limit,
+            )?;
+
+            if replay_safe && attempts < max_attempts && status == StatusCode::TOO_MANY_REQUESTS {
+                let ParsedRetry { header, duration } = parse_retry_after(response.headers())?;
+                if duration > Duration::from_secs(RATE_LIMIT_WAIT_MAX_SECS) {
+                    self.metrics.increment_errors();
+                    return Err(AnytypeError::RateLimitExceeded { header, duration });
+                }
+                // Bound and discard every retry response before replaying. This
+                // keeps per-attempt evidence within the caller's error policy.
+                if method != Method::HEAD {
+                    self.read_bounded(response, error_body_limit, method.as_str(), path)
+                        .await?;
+                }
+                self.metrics.increment_rate_limit_errors();
+                self.metrics.increment_retries();
+                self.metrics.add_rate_limit_delay(duration.as_secs());
+                tokio::time::sleep(duration).await;
+                continue;
             }
-        };
 
-        if status.is_success() {
-            self.metrics.increment_success();
-        } else {
-            self.metrics.increment_errors();
-        }
+            if replay_safe && attempts < max_attempts && retry_for_status(status) {
+                if method != Method::HEAD {
+                    self.read_bounded(response, error_body_limit, method.as_str(), path)
+                        .await?;
+                }
+                self.metrics.increment_errors();
+                self.metrics.increment_retries();
+                log_and_backoff(attempts - 1, "retryable file HTTP status").await;
+                continue;
+            }
 
-        if !(status.is_success() || allowed_control_status) {
-            return Err(AnytypeError::ApiError {
-                code: status.as_u16(),
-                method: method.as_str().to_ascii_lowercase(),
-                url: path.to_string(),
-                message: String::from_utf8_lossy(&body).into_owned(),
+            let response_headers = response.headers().clone();
+            let allowed_control_status = matches!(
+                status,
+                StatusCode::NOT_MODIFIED
+                    | StatusCode::PRECONDITION_FAILED
+                    | StatusCode::RANGE_NOT_SATISFIABLE
+            );
+            let body = if method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+                // HEAD and 304 legitimately carry representation metadata such as
+                // a Content-Length while having no response body to buffer.
+                Bytes::new()
+            } else {
+                let body_limit = if status.is_success() {
+                    success_body_limit
+                } else {
+                    error_body_limit
+                };
+                match self
+                    .read_bounded(response, body_limit, method.as_str(), path)
+                    .await
+                {
+                    Ok(body) => body,
+                    Err(error) => {
+                        self.metrics.increment_errors();
+                        return Err(error);
+                    }
+                }
+            };
+
+            if status.is_success() {
+                self.metrics.increment_success();
+            } else {
+                self.metrics.increment_errors();
+            }
+
+            if !(status.is_success() || allowed_control_status) {
+                return Err(AnytypeError::ApiError {
+                    code: status.as_u16(),
+                    method: method.as_str().to_ascii_lowercase(),
+                    url: path.to_string(),
+                    message: String::from_utf8_lossy(&body).into_owned(),
+                });
+            }
+
+            return Ok(RawHttpResponse {
+                status,
+                headers: response_headers,
+                body,
             });
         }
-
-        Ok(RawHttpResponse {
-            status,
-            headers: response_headers,
-            body,
-        })
     }
 
     /// Makes an authenticated `multipart/form-data` POST request.
