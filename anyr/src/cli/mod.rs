@@ -561,6 +561,11 @@ pub enum TypeCommands {
         #[arg(short = 'p', long = "prop", alias = "property", value_name = "SPEC")]
         properties: Vec<String>,
     },
+    #[command(
+        group = ArgGroup::new("type_property_mode")
+            .args(["add_properties", "set_properties", "clear_properties"])
+            .multiple(false)
+    )]
     Update {
         /// space id or name
         space: String,
@@ -588,9 +593,17 @@ pub enum TypeCommands {
         #[arg(long, value_enum)]
         layout: Option<TypeLayoutArg>,
 
-        /// add property to type by name, key, or id
+        /// add property to type by name, key, or id (read/merge into current list)
         #[arg(long = "add-property", value_name = "PROP_NAME_OR_ID")]
         add_properties: Vec<String>,
+
+        /// replace the complete non-featured property list (KEY:FORMAT:NAME)
+        #[arg(long = "set-property", value_name = "KEY:FORMAT:NAME")]
+        set_properties: Vec<String>,
+
+        /// remove all non-featured recommended properties
+        #[arg(long = "clear-properties")]
+        clear_properties: bool,
     },
     Delete {
         /// space id or name
@@ -1189,9 +1202,9 @@ pub enum ListCommands {
         /// list or collection id, or type id/name/key
         list_id: String,
 
-        /// optional view name or id
+        /// view name or id (required)
         #[arg(long)]
-        view: Option<String>,
+        view: String,
 
         #[command(flatten)]
         pagination: PaginationArgs,
