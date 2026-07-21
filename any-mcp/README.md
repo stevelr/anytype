@@ -1,31 +1,42 @@
 # any-mcp
 
-A bounded, workflow-oriented Model Context Protocol server for Anytype.
+A workflow-oriented Model Context Protocol server for Anytype.
 
-`any-mcp` is designed for reliable agent workflows such as discovering,
-reading, and safely editing documents. It is intentionally not a one-for-one
-mirror of the Anytype API.
+`any-mcp` is designed for reliable agent workflows such as discovering, reading, and safely editing documents.
+
+**Status: Pre-release, under active development. Only tested on Linux and MacOS.**
+
+This is not intended to replace [anytype-mcp, the official MCP server](https://github.com/anyproto/anytype-mcp)
+which wraps the OpenAPI. They are complementary.
+
+Use anytype-mcp for:
+
+- simplicity
+- official distribution and low-friction installation
+- breadth (currently)
+- one-shot operations
+
+Use any-mcp (this) for:
+
+- reliable workflows
+  - safer mutations
+  - concurrency, timeouts, cancellation
+  - pagination and response-size limits
+  - more specific errors
+- more stable/predictable token costs
+- multiple catalogs - select based on your model's context limits
+- functionality only available through APIs
+- stronger credential handling
 
 ## Quick start
 
-Build the current workspace prerelease and confirm that the existing `anyr`
-credentials can reach Anytype:
+Install by downloading the `any-mcp` release from the github releases page.
+
+Confirm that the existing `anyr` credentials can reach Anytype:
 
 ```sh
-cargo build -p any-mcp
 anyr auth status --pretty
-realpath target/debug/any-mcp
 ```
-
-The last command prints the absolute path to the binary built in this checkout.
-Replace `/absolute/path/to/anytype/target/debug/any-mcp` in both examples below
-with that platform-specific absolute path; the workspace build does not install
-`any-mcp` on `PATH`. On Windows, resolve `target\debug\any-mcp.exe` and prefer
-the JSON/TOML-safe forward-slash form, for example
-`C:/repo/target/debug/any-mcp.exe`. If native backslashes are retained, double
-every backslash in either quoted format, for example
-`C:\\repo\\target\\debug\\any-mcp.exe`; a single backslash can be parsed as an
-escape.
 
 An MCP host starts that binary and communicates with it over stdio.
 The server does not perform login or print credentials. It reuses the endpoint
@@ -37,19 +48,19 @@ explicitly:
 
 ```json
 {
-  "mcpServers": {
-    "anytype": {
-      "command": "/absolute/path/to/anytype/target/debug/any-mcp",
-      "env": {
-        "ANY_MCP_PROTOCOL": "stable",
-        "ANY_MCP_PROFILE": "compact",
-        "ANY_MCP_READ_ONLY": "1",
-        "ANYTYPE_URL": "http://127.0.0.1:31009",
-        "ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
-        "ANYTYPE_KEYSTORE_SERVICE": "anyr"
-      }
-    }
-  }
+	"mcpServers": {
+		"anytype": {
+			"command": "/absolute/path/to/any-mcp",
+			"env": {
+				"ANY_MCP_PROTOCOL": "stable",
+				"ANY_MCP_PROFILE": "compact",
+				"ANY_MCP_READ_ONLY": "1",
+				"ANYTYPE_URL": "http://127.0.0.1:31009",
+				"ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
+				"ANYTYPE_KEYSTORE_SERVICE": "anyr"
+			}
+		}
+	}
 }
 ```
 
@@ -64,9 +75,14 @@ existing non-secret selectors:
 
 ```toml
 [mcp_servers.anytype]
-command = "/absolute/path/to/anytype/target/debug/any-mcp"
+command = "/absolute/path/to/any-mcp"
 env = { ANY_MCP_PROTOCOL = "stable", ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
-env_vars = ["ANYTYPE_URL", "ANYTYPE_GRPC_ENDPOINT", "ANYTYPE_KEYSTORE", "ANYTYPE_KEYSTORE_SERVICE"]
+env_vars = [
+  "ANYTYPE_URL",
+  "ANYTYPE_GRPC_ENDPOINT",
+  "ANYTYPE_KEYSTORE",
+  "ANYTYPE_KEYSTORE_SERVICE",
+]
 ```
 
 See [stdio protocol verification](STDIO_CONFORMANCE.md) for the tested Codex,
@@ -238,27 +254,27 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 ### Production catalog profiles and read-only mode
 
-| Startup selection | Read-write tools | Read-only tools |
-| --- | ---: | ---: |
-| default / `ANY_MCP_PROFILE=compact` | 4 | 3 |
-| `ANY_MCP_PROFILE=standard` | 14 | 10 |
+| Startup selection                   | Read-write tools | Read-only tools |
+| ----------------------------------- | ---------------: | --------------: |
+| default / `ANY_MCP_PROFILE=compact` |                4 |               3 |
+| `ANY_MCP_PROFILE=standard`          |               14 |              10 |
 
-| Tool | Compact | Standard | Bounded workflow |
-| --- | :---: | :---: | --- |
-| `server_status` | ✓ | ✓ | Redacted endpoint, selected profile/access, startup availability, and stable enabled toolsets |
-| `object_search` | ✓ | ✓ | One checked page of summaries with bounded filters, projection, and cursor |
-| `object_get` | ✓ | ✓ | One exact object with bounded properties and optional body chunk/full-body hash |
-| `object_edit` | ✓ | ✓ | Ordered exact-match whole-body edit with required hash and one PATCH |
-| `space_list` |  | ✓ | One checked page of space summaries |
-| `type_list` |  | ✓ | One checked page of types in one resolved space |
-| `property_list` |  | ✓ | One checked property page, optionally scoped to a resolved type |
-| `tag_list` |  | ✓ | One checked tag-option page for one resolved select property |
-| `template_list` |  | ✓ | One checked page of body-free template summaries |
-| `view_list` |  | ✓ | One checked page of views for one list object |
-| `view_object_list` |  | ✓ | One selected view page with explicit bounded projection |
-| `object_create` |  | ✓ | One POST, bounded verification, and optional process-lifetime idempotency key |
-| `object_update` |  | ✓ | Explicit whole-field replacement with optional body-hash precondition and one update |
-| `object_archive` |  | ✓ | One soft-delete dispatch with bounded state confirmation |
+| Tool               | Compact | Standard | Bounded workflow                                                                              |
+| ------------------ | :-----: | :------: | --------------------------------------------------------------------------------------------- |
+| `server_status`    |    ✓    |    ✓     | Redacted endpoint, selected profile/access, startup availability, and stable enabled toolsets |
+| `object_search`    |    ✓    |    ✓     | One checked page of summaries with bounded filters, projection, and cursor                    |
+| `object_get`       |    ✓    |    ✓     | One exact object with bounded properties and optional body chunk/full-body hash               |
+| `object_edit`      |    ✓    |    ✓     | Ordered exact-match whole-body edit with required hash and one PATCH                          |
+| `space_list`       |         |    ✓     | One checked page of space summaries                                                           |
+| `type_list`        |         |    ✓     | One checked page of types in one resolved space                                               |
+| `property_list`    |         |    ✓     | One checked property page, optionally scoped to a resolved type                               |
+| `tag_list`         |         |    ✓     | One checked tag-option page for one resolved select property                                  |
+| `template_list`    |         |    ✓     | One checked page of body-free template summaries                                              |
+| `view_list`        |         |    ✓     | One checked page of views for one list object                                                 |
+| `view_object_list` |         |    ✓     | One selected view page with explicit bounded projection                                       |
+| `object_create`    |         |    ✓     | One POST, bounded verification, and optional process-lifetime idempotency key                 |
+| `object_update`    |         |    ✓     | Explicit whole-field replacement with optional body-hash precondition and one update          |
+| `object_archive`   |         |    ✓     | One soft-delete dispatch with bounded state confirmation                                      |
 
 Read-only mode removes `object_edit` from compact and `object_create`,
 `object_update`, `object_edit`, and `object_archive` from standard. Every
