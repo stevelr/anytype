@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- `type update` gains `--set-property KEY:FORMAT:NAME` (replaces the complete
+  non-featured property list) and `--clear-properties` (removes all non-featured
+  recommended properties); `--add-property`, `--set-property`, and
+  `--clear-properties` are mutually exclusive.
 - program used to generate test vectors for account key generation
 - `anyr type update` property-list controls (mutually exclusive with
   `--add-property`):
@@ -17,11 +21,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
-- **Breaking**: `anyr list objects` now requires `--view` (view name or id); it
-  is no longer optional.
+- **Breaking**: `anyr list objects` now requires `--view` (view name or id); a
+  missing view is rejected at parse time instead of failing client-side.
 - `anyr property update` now requires at least one of `--name` or `--key` and
-  rejects a no-flag invocation before any network I/O. A key-only update reuses
-  the property's current name so it still satisfies the REST contract.
+  rejects a no-flag invocation before any network I/O; when `--name` is omitted
+  it reuses the property's current name so a key-only update still satisfies
+  the REST contract.
 - Normalized spellchecker configuration formatting.
 - name and id resolution (space, type, chat, view, property) moved into the
   anytype crate (`anytype::resolve`); anyr now calls the shared
