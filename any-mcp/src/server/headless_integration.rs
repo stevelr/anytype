@@ -7,6 +7,8 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    future::Future,
+    pin::Pin,
     time::Duration,
 };
 
@@ -22,6 +24,11 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::runtime::{RuntimeContext, StartupStatus};
 
+#[path = "../../tests/support/live_scenario.rs"]
+mod live_scenario;
+
+use live_scenario::{McpDriver, ScenarioEvidence, ScenarioId, run_scenario};
+
 fn arguments(value: Value) -> JsonObject {
     value
         .as_object()
@@ -30,6 +37,14 @@ fn arguments(value: Value) -> JsonObject {
 }
 
 async fn live_server(ctx: &TestContext) -> AnyMcpServer {
+    live_server_with(ctx, ApplicationProfile::Standard, false).await
+}
+
+async fn live_server_with(
+    ctx: &TestContext,
+    profile: ApplicationProfile,
+    read_only: bool,
+) -> AnyMcpServer {
     ctx.client
         .ping_http()
         .await
@@ -38,7 +53,7 @@ async fn live_server(ctx: &TestContext) -> AnyMcpServer {
         .ping_grpc()
         .await
         .expect("live suite requires authenticated gRPC");
-    let runtime = RuntimeContext::from_parts(
+    let runtime = RuntimeContext::from_parts_with_profile(
         ctx.client.clone(),
         1,
         Duration::from_secs(30),
@@ -46,6 +61,8 @@ async fn live_server(ctx: &TestContext) -> AnyMcpServer {
             http_available: true,
             grpc_available: true,
         },
+        profile,
+        read_only,
     );
     AnyMcpServer::new(runtime).expect("production MCP catalog")
 }
@@ -73,6 +90,113 @@ async fn failure(server: &AnyMcpServer, name: &'static str, value: Value) -> Val
     result
         .structured_content
         .expect("failed tool result has structured content")
+}
+
+struct DirectRouterDriver<'a> {
+    server: &'a AnyMcpServer,
+}
+
+impl McpDriver for DirectRouterDriver<'_> {
+    fn call_tool<'a>(
+        &'a mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(async move {
+            let result = call(self.server, name, arguments).await;
+            if result.is_error == Some(true) {
+                let code = result
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value["code"].as_str())
+                    .unwrap_or("missing");
+                return Err(format!("{name} returned tool error {code}"));
+            }
+            result
+                .structured_content
+                .ok_or_else(|| format!("{name} success omitted structured content"))
+        })
+    }
+
+    fn call_tool_error<'a>(
+        &'a mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+        Box::pin(async move {
+            let result = call(self.server, name, arguments).await;
+            if result.is_error != Some(true) {
+                return Err(format!("{name} unexpectedly succeeded"));
+            }
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value["code"].as_str())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| format!("{name} error omitted code"))
+        })
+    }
+
+    fn list_tools<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>> {
+        Box::pin(async move {
+            Ok(self
+                .server
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect())
+        })
+    }
+
+    fn list_resources<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(async move {
+            self.server
+                .list_resources_wire(None)
+                .map_err(|_| "resources/list protocol error".to_owned())
+                .and_then(|result| {
+                    serde_json::to_value(result)
+                        .map_err(|error| format!("serialize resources/list result: {error}"))
+                })
+        })
+    }
+
+    fn list_resource_templates<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(async move {
+            self.server
+                .list_resource_templates_wire(None)
+                .map_err(|_| "resources/templates/list protocol error".to_owned())
+                .and_then(|result| {
+                    serde_json::to_value(result).map_err(|error| {
+                        format!("serialize resources/templates/list result: {error}")
+                    })
+                })
+        })
+    }
+
+    fn read_resource<'a>(
+        &'a mut self,
+        uri: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(async move {
+            self.server
+                .read_resource_wire(
+                    ReadResourceRequestParams::new(uri),
+                    &CancellationToken::new(),
+                )
+                .await
+                .map_err(|_| "resources/read protocol error".to_owned())
+                .and_then(|result| {
+                    serde_json::to_value(result)
+                        .map_err(|error| format!("serialize resources/read result: {error}"))
+                })
+        })
+    }
 }
 
 fn item_id(item: &Value) -> Option<&Value> {
@@ -683,6 +807,23 @@ async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
     Box::pin(with_test_context(|ctx| {
         Box::pin(async move {
             let server = live_server(ctx.as_ref()).await;
+            let listed_resources = serde_json::to_value(
+                server
+                    .list_resources_wire(None)
+                    .expect("production resources/list"),
+            )
+            .expect("serialize resources/list");
+            assert_eq!(listed_resources["resources"], json!([]));
+            let listed_templates = serde_json::to_value(
+                server
+                    .list_resource_templates_wire(None)
+                    .expect("production resources/templates/list"),
+            )
+            .expect("serialize resources/templates/list");
+            assert_eq!(
+                listed_templates["resourceTemplates"][0]["uriTemplate"],
+                "anytype://spaces/{space_id}/objects/{object_id}"
+            );
             let collection_type = ctx
                 .create_collection_type_fixture(format!("MCP collection type {}", unique_suffix()))
                 .await
@@ -1212,4 +1353,139 @@ async fn headless_exact_edit_accepts_a_converged_arbitrary_body() {
     }))
     .await
     .expect("cleanup-safe arbitrary exact-edit sentinel");
+}
+
+#[test]
+fn advertised_catalog_has_exact_live_scenario_ownership() {
+    live_scenario::validate_live_ownership(
+        ALL_TOOL_NAMES.as_slice(),
+        &[
+            "resources/list",
+            "resources/read",
+            "resources/templates/list",
+        ],
+    )
+    .expect("complete typed executable live ownership");
+}
+
+async fn run_direct_baseline(scenario: ScenarioId) {
+    let failure = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured = failure.clone();
+    let cleanup = Box::pin(with_test_context(move |ctx| {
+        Box::pin(async move {
+            let server = live_server(ctx.as_ref()).await;
+            let before = ctx.client.http_metrics();
+            let mut driver = DirectRouterDriver { server: &server };
+            let mut evidence = ScenarioEvidence::new(scenario);
+            if let Err(error) = run_scenario(
+                scenario,
+                &mut driver,
+                ctx.as_ref(),
+                &mut evidence,
+            )
+            .await
+            {
+                let after = ctx.client.http_metrics();
+                *captured.lock().expect("failure evidence lock") = Some(format!(
+                    "scenario={} fixtures={:?} error={} http_before={before:?} http_after={after:?}",
+                    evidence.scenario.as_str(),
+                    evidence.fixture_ids,
+                    evidence.sanitize(&error)
+                ));
+            }
+            Ok(())
+        })
+    }))
+    .await;
+    if let Some(failure) = failure.lock().expect("failure evidence lock").take() {
+        panic!(
+            "{failure} cleanup={}",
+            if cleanup.is_ok() { "success" } else { "failed" }
+        );
+    }
+    cleanup.expect("cleanup-safe direct baseline scenario");
+}
+
+macro_rules! direct_baseline_test {
+    ($name:ident, $scenario:expr) => {
+        #[tokio::test]
+        #[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+        async fn $name() {
+            run_direct_baseline($scenario).await;
+        }
+    };
+}
+
+direct_baseline_test!(headless_direct_standard_discovery, ScenarioId::Discovery);
+direct_baseline_test!(headless_direct_standard_documents, ScenarioId::Documents);
+direct_baseline_test!(headless_direct_standard_views, ScenarioId::Views);
+direct_baseline_test!(headless_direct_standard_mutations, ScenarioId::Mutations);
+direct_baseline_test!(headless_direct_standard_archive, ScenarioId::Archive);
+
+#[tokio::test]
+#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+async fn headless_direct_compact_read_sentinel() {
+    Box::pin(with_test_context(|ctx| {
+        Box::pin(async move {
+            let object =
+                create_object(ctx.as_ref(), "page", "MCP compact sentinel", "sentinel").await;
+            let server = live_server_with(ctx.as_ref(), ApplicationProfile::Compact, false).await;
+            let mut driver = DirectRouterDriver { server: &server };
+            assert_eq!(
+                driver.list_tools().await.expect("compact catalog"),
+                [
+                    "object_edit",
+                    "object_get",
+                    "object_search",
+                    "server_status"
+                ]
+            );
+            driver
+                .call_tool(
+                    "object_get",
+                    json!({"space": ctx.space_id, "object_id": object.id}),
+                )
+                .await
+                .expect("compact real-headless read");
+            Ok(())
+        })
+    }))
+    .await
+    .expect("cleanup-safe compact sentinel");
+}
+
+#[tokio::test]
+#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+async fn headless_direct_read_only_sentinel() {
+    Box::pin(with_test_context(|ctx| {
+        Box::pin(async move {
+            let object =
+                create_object(ctx.as_ref(), "page", "MCP read-only sentinel", "sentinel").await;
+            let server = live_server_with(ctx.as_ref(), ApplicationProfile::Standard, true).await;
+            let mut driver = DirectRouterDriver { server: &server };
+            let tools = driver.list_tools().await.expect("read-only catalog");
+            assert!(!tools.iter().any(|name| matches!(
+                name.as_str(),
+                OBJECT_CREATE | OBJECT_UPDATE | OBJECT_EDIT | OBJECT_ARCHIVE
+            )));
+            driver
+                .call_tool(
+                    "object_get",
+                    json!({"space": ctx.space_id, "object_id": object.id}),
+                )
+                .await
+                .expect("read-only real-headless read");
+            let rejected = failure(&server, OBJECT_EDIT, json!({})).await;
+            assert_eq!(rejected["code"], "validation");
+            assert!(
+                rejected["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("read-only")),
+                "direct mutation dispatch reaches the read-only guard"
+            );
+            Ok(())
+        })
+    }))
+    .await
+    .expect("cleanup-safe read-only sentinel");
 }
