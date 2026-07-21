@@ -388,6 +388,16 @@ property clear forms. Select, number, date, checkbox, name, and icon clearing
 are not advertised because the upstream object-update API has no distinct
 supported clear form.
 
+Anytype's canonical read form is distinct from its safe write form for a
+closed plain-line subset. Across create, update, and exact edit, empty bodies
+and single lines containing Unicode alphanumeric characters, internal ASCII
+spaces, and underscores are mapped to one unescaped write form and one exact
+canonical form (escaped underscores plus `"   \n"`). Raw and already-canonical
+inputs therefore share the same verified body and do not double-escape on
+replay. Canonical expansion counts against both body ceilings before I/O.
+Punctuation, multiline Markdown, and ambiguous backslash forms remain
+byte-exact; a server rewrite of those unsupported forms fails closed.
+
 Before writing, the handler resolves the complete effective object type,
 rejects archived or malformed type metadata, and requires every supplied
 property key and format to match its schema exactly. Property assignments are
@@ -467,26 +477,26 @@ sorted and deduplicated, and all eleven current property formats and three icon
 forms are bounded. Markdown input accepts at most 100,000 Unicode scalar
 values.
 
-Headless Anytype serializes a nonempty plain Markdown line with exactly three
-trailing ASCII spaces and one newline. `object_create` pre-normalizes only a
-closed, evidence-backed class: a single line containing Unicode alphanumeric
-characters and internal ASCII spaces, or that same line already carrying the
-exact `"   \n"` suffix. Empty bodies stay empty. The suffix is included in the
-100,000-character stored-body ceiling; an expansion that would cross it fails
-validation before I/O. Leading or trailing spaces, other newline forms,
-Markdown punctuation, underscores, backslashes, escapes, and multiline bodies
-remain byte-exact. If Anytype rewrites one of those unproven forms, verification
+The shared plain-line representation contract described above also governs
+create normalization and idempotency. Create stores the exact expected
+canonical form in its normalized input before fingerprinting and semantic
+verification, then derives the separate unescaped wire form immediately before
+the POST. Leading or trailing spaces, other newline forms, Markdown
+punctuation, ambiguous backslashes or escapes, and multiline bodies remain
+byte-exact. If Anytype rewrites one of those unproven forms, verification
 returns the fixed post-dispatch conflict instead of trimming whitespace or
 weakening Markdown meaning.
 
 An optional caller-generated `idempotency_key` deduplicates the explicit,
 domain-separated version-1 canonical create fingerprint for the process
-lifetime. The fingerprint uses the body form actually sent, so a supported raw
-plain line and its exact already-canonical form join the same cohort; meaningful
-near-misses remain distinct. Identical sequential or concurrent calls share one supervised
-in-flight attempt without holding the registry mutex across network waits, and
-verified successes are returned from the finite cache without I/O. Key reuse
-with different parameters conflicts before a write. Safe pre-POST failures and
+lifetime. The fingerprint uses the expected canonical stored-body
+representation, not the separate wire form sent by POST. A supported raw plain
+line and its exact already-canonical form therefore join the same cohort;
+meaningful near-misses remain distinct. Identical sequential or concurrent
+calls share one supervised in-flight attempt without holding the registry mutex
+across network waits, and verified successes are returned from the finite cache
+without I/O. Key reuse with different parameters conflicts before a write.
+Safe pre-POST failures and
 definitive 4xx/validation/authentication rejections free the entry for retry.
 After possible acceptance, timeout, cancellation, transport/server failure,
 oversized or malformed response, identity mismatch, verifier exhaustion, task
@@ -649,7 +659,7 @@ the explicit regeneration and review procedure in
 internal 200,000-token compatibility-policy floor), with 577 tokens of
 headroom. Its 2% material-growth boundary is 9,612 tokens, retaining 388 tokens
 of headroom. Compact read-only is 8,134 tokens. Exact reviewed baselines also
-measure explicit standard (22,639) and standard read-only (15,408), plus
+measure explicit standard (22,664) and standard read-only (15,408), plus
 schema-valid representative search/get results; any
 count drift fails, and growth of at least 2% requires a recorded material-growth
 rationale. Then run:

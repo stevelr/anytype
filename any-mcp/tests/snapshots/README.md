@@ -29,7 +29,7 @@ The internal compatibility-policy floor is a 200,000-token model context. The
 complete default compact `tools/list` result is 9,423 tokens, leaving 577
 tokens below the strict 10,000-token ceiling (5% of that support floor).
 Compact read-only is 8,134 tokens; explicit standard and standard read-only are
-22,639 and 15,408. The schema-valid representative `object_search` and
+22,664 and 15,408. The schema-valid representative `object_search` and
 `object_get` results are 421 and 316 tokens. The compact catalog's 2% growth
 boundary is 9,612 tokens and retains 388 tokens below the ceiling.
 The earlier 14-tool baseline was 22,496 tokens; a rejected global annotation

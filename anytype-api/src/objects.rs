@@ -56,7 +56,7 @@
 //! - [`UpdateObjectRequest`] - Builder for updating existing objects
 //! - [`ListObjectsRequest`] - Builder for listing objects with filters
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use crate::grpc_util::{grpc_status, with_token_request};
 use anytype_rpc::anytype::rpc::object::share_by_link;
@@ -74,6 +74,96 @@ use crate::{
     prelude::*,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
 };
+
+/// Exact suffix emitted by Anytype for a nonempty plain Markdown line.
+pub const ANYTYPE_PLAIN_MARKDOWN_SUFFIX: &str = "   \n";
+
+/// Separate wire and expected stored forms for supported plain Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlainMarkdownRepresentation<'a> {
+    wire: Cow<'a, str>,
+    canonical: Cow<'a, str>,
+}
+
+impl PlainMarkdownRepresentation<'_> {
+    /// Borrows the body representation to send to Anytype.
+    #[must_use]
+    pub fn wire(&self) -> &str {
+        self.wire.as_ref()
+    }
+
+    /// Borrows the exact canonical body expected from PATCH/GET responses.
+    #[must_use]
+    pub fn canonical(&self) -> &str {
+        self.canonical.as_ref()
+    }
+}
+
+/// Derives separate write and expected stored forms for a closed plain-line subset.
+///
+/// The supported subset is nonempty Unicode alphanumeric text with internal ASCII
+/// spaces and literal underscores. Anytype escapes underscores and appends exactly
+/// three spaces plus a newline. An already-canonical value is converted back to its
+/// unescaped wire form without changing the expected canonical value. Empty input has
+/// identical empty forms. Other Markdown, including every ambiguous backslash form,
+/// is intentionally rejected with `None`; callers must preserve those bytes and treat
+/// server rewrites as a distinct representation rather than guessing at equivalence.
+#[must_use]
+pub fn plain_markdown_representation(value: &str) -> Option<PlainMarkdownRepresentation<'_>> {
+    if value.is_empty() {
+        return Some(PlainMarkdownRepresentation {
+            wire: Cow::Borrowed(value),
+            canonical: Cow::Borrowed(value),
+        });
+    }
+    if let Some(core) = value.strip_suffix(ANYTYPE_PLAIN_MARKDOWN_SUFFIX)
+        && let Some(wire) = canonical_plain_core_to_write(core)
+    {
+        return Some(PlainMarkdownRepresentation {
+            wire: Cow::Owned(wire),
+            canonical: Cow::Borrowed(value),
+        });
+    }
+    if value.starts_with(' ') || value.ends_with(' ') {
+        return None;
+    }
+
+    let mut canonical = String::with_capacity(
+        value
+            .len()
+            .saturating_add(ANYTYPE_PLAIN_MARKDOWN_SUFFIX.len()),
+    );
+    for character in value.chars() {
+        match character {
+            ' ' => canonical.push(character),
+            '_' => canonical.push_str(r"\_"),
+            character if character.is_alphanumeric() => canonical.push(character),
+            _ => return None,
+        }
+    }
+    canonical.push_str(ANYTYPE_PLAIN_MARKDOWN_SUFFIX);
+    Some(PlainMarkdownRepresentation {
+        wire: Cow::Borrowed(value),
+        canonical: Cow::Owned(canonical),
+    })
+}
+
+fn canonical_plain_core_to_write(core: &str) -> Option<String> {
+    if core.is_empty() || core.starts_with(' ') || core.ends_with(' ') {
+        return None;
+    }
+    let mut write = String::with_capacity(core.len());
+    let mut characters = core.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            ' ' => write.push(character),
+            '\\' if characters.next() == Some('_') => write.push('_'),
+            character if character.is_alphanumeric() => write.push(character),
+            _ => return None,
+        }
+    }
+    Some(write)
+}
 
 /// returns web url to object
 pub fn object_link(space_id: &str, object_id: &str) -> String {
@@ -1359,6 +1449,57 @@ impl AnytypeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_markdown_representation_is_closed_and_idempotent() {
+        for (input, wire, canonical) in [
+            ("", "", ""),
+            (
+                "alpha stable body",
+                "alpha stable body",
+                "alpha stable body   \n",
+            ),
+            ("alpha suffix_0", "alpha suffix_0", "alpha suffix\\_0   \n"),
+            (
+                "alpha stable body   \n",
+                "alpha stable body",
+                "alpha stable body   \n",
+            ),
+            (
+                "alpha suffix\\_0   \n",
+                "alpha suffix_0",
+                "alpha suffix\\_0   \n",
+            ),
+            ("alpha café body", "alpha café body", "alpha café body   \n"),
+        ] {
+            let representation = plain_markdown_representation(input).expect("supported form");
+            assert_eq!(representation.wire(), wire);
+            assert_eq!(representation.canonical(), canonical);
+            let replay = plain_markdown_representation(representation.canonical())
+                .expect("canonical form is replayable");
+            assert_eq!(replay.wire(), wire);
+            assert_eq!(replay.canonical(), canonical);
+        }
+
+        for ambiguous in [
+            " alpha",
+            "alpha ",
+            "alpha  ",
+            "alpha\n",
+            "alpha  \n",
+            "under\\_score",
+            "under\\\\_score   \n",
+            "\\*escaped\\*",
+            "# Heading",
+            "line one\nline two",
+            "plain.",
+        ] {
+            assert!(
+                plain_markdown_representation(ambiguous).is_none(),
+                "ambiguous form must stay out of the special path: {ambiguous:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_object_layout_default() {

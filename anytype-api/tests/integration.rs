@@ -142,7 +142,9 @@ mod property_formats {
 // =============================================================================
 
 mod object_crud {
-    use anytype::test_util::*;
+    use std::time::Duration;
+
+    use anytype::{objects::plain_markdown_representation, test_util::*};
 
     use super::common::unique_test_name;
 
@@ -297,6 +299,100 @@ mod object_crud {
                 read.markdown.is_some() || read.snippet.is_some(),
                 "Should have content (markdown or snippet)"
             );
+        })
+        .await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an authenticated headless Anytype server"]
+    async fn test_object_body_update_converges_before_exact_followup() -> TestResult<()> {
+        with_test_context(|ctx| async move {
+            let suffix = unique_suffix();
+            let object = ctx
+                .client
+                .new_object(&ctx.space_id, "page")
+                .name(format!("Body convergence {suffix}"))
+                .create()
+                .await?;
+            ctx.register_object(&object.id);
+
+            let requested = format!("alpha arbitrary body marker_{suffix}");
+            let initial = plain_markdown_representation(&requested)
+                .expect("test body is in the supported plain-line subset");
+            let initial_wire = initial.wire().to_owned();
+            let initial_canonical = initial.canonical().to_owned();
+            let returned = ctx
+                .client
+                .update_object(&ctx.space_id, &object.id)
+                .body(&initial_wire)
+                .update()
+                .await?;
+            assert_eq!(
+                returned.markdown.as_deref(),
+                Some(initial_canonical.as_str())
+            );
+
+            let mut consecutive_matches = 0;
+            for _ in 0..12 {
+                let observed = ctx
+                    .client
+                    .object(&ctx.space_id, &object.id)
+                    .get()
+                    .await?
+                    .markdown
+                    .unwrap_or_default();
+                if observed == initial_canonical {
+                    consecutive_matches += 1;
+                    if consecutive_matches == 2 {
+                        break;
+                    }
+                } else {
+                    consecutive_matches = 0;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                consecutive_matches, 2,
+                "body did not converge to two consecutive exact canonical reads"
+            );
+
+            let replacement = initial_canonical.replacen("arbitrary", "verified", 1);
+            let replacement_forms = plain_markdown_representation(&replacement)
+                .expect("canonical plain body can be replayed safely");
+            assert_eq!(replacement_forms.canonical(), replacement);
+            let replacement_wire = replacement_forms.wire().to_owned();
+            let returned = ctx
+                .client
+                .update_object(&ctx.space_id, &object.id)
+                .body(&replacement_wire)
+                .update()
+                .await?;
+            assert_eq!(returned.markdown.as_deref(), Some(replacement.as_str()));
+
+            let mut consecutive_matches = 0;
+            for _ in 0..12 {
+                let observed = ctx
+                    .client
+                    .object(&ctx.space_id, &object.id)
+                    .get()
+                    .await?
+                    .markdown
+                    .unwrap_or_default();
+                if observed == replacement {
+                    consecutive_matches += 1;
+                    if consecutive_matches == 2 {
+                        break;
+                    }
+                } else {
+                    consecutive_matches = 0;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                consecutive_matches, 2,
+                "follow-up body did not converge to two exact canonical reads"
+            );
+            Ok(())
         })
         .await
     }

@@ -16,7 +16,7 @@ use std::{
 };
 
 use anytype::{
-    objects::Object,
+    objects::{Object, plain_markdown_representation},
     prelude::{VerifyConfig, verify_semantic},
 };
 use rmcp::{
@@ -54,8 +54,6 @@ use crate::{
 pub const MAX_CREATE_REFERENCE_CHARS: usize = 512;
 /// Maximum Unicode scalar values accepted in one document body.
 pub const MAX_CREATE_BODY_CHARS: usize = 100_000;
-/// Stable suffix emitted by Anytype for one plain Markdown line.
-const ANYTYPE_PLAIN_BODY_SUFFIX: &str = "   \n";
 /// Maximum Unicode scalar values accepted in an idempotency key.
 pub const MAX_IDEMPOTENCY_KEY_CHARS: usize = 256;
 /// Maximum retained idempotency entries in one handler instance.
@@ -213,9 +211,10 @@ pub struct ObjectCreateInput {
     #[serde(default)]
     #[schemars(schema_with = "optional_name_schema")]
     name: Omittable<CreateName>,
-    /// Optional complete Markdown body. Explicit null is rejected. One plain
-    /// alphanumeric line is sent in Anytype's stable trailing-space form;
-    /// Markdown syntax and all other whitespace remain exact.
+    /// Optional complete Markdown body. Explicit null is rejected. Supported
+    /// plain-line input is fingerprinted and verified in Anytype's exact
+    /// canonical stored form, then its unescaped wire form is derived for the
+    /// POST. Other Markdown and whitespace remain byte-exact.
     #[serde(default)]
     #[schemars(schema_with = "optional_body_schema")]
     body_markdown: Omittable<CreateBody>,
@@ -291,7 +290,7 @@ impl std::error::Error for CreateInputError {}
 pub fn object_create_tool() -> Result<WorkflowTool<ObjectCreateOutput>, SchemaContractError> {
     workflow_tool::<ObjectCreateInput, ObjectCreateOutput>(
         "object_create",
-        "Create one object, verify it by reading it back, and return only bounded metadata. Optional fields must be omitted rather than null. A plain alphanumeric body line is sent in Anytype's stable trailing-space form; Markdown syntax and other whitespace remain exact. A retry key deduplicates identical verified creates for this server process; timeout or cancellation can leave mutation outcome uncertain.",
+        "Create one object, verify it by reading it back, and return only bounded metadata. Optional fields must be omitted rather than null. Supported plain-line bodies are fingerprinted and verified in Anytype's exact canonical stored form, with an unescaped POST wire form; other Markdown and whitespace remain byte-exact. A retry key deduplicates identical verified creates for this server process; timeout or cancellation can leave mutation outcome uncertain.",
         ToolProfile::Create,
     )
 }
@@ -506,30 +505,11 @@ impl NormalizedCreate {
 }
 
 fn normalize_create_body(body: CreateBody) -> Result<CreateBody, HandlerError> {
-    let value = body.as_str();
-    if value.is_empty() || is_canonical_plain_body(value) {
+    let Some(representation) = plain_markdown_representation(body.as_str()) else {
         return Ok(body);
-    }
-    if !is_plain_body_line(value) {
-        return Ok(body);
-    }
-    BoundedText::new(format!("{value}{ANYTYPE_PLAIN_BODY_SUFFIX}"))
+    };
+    BoundedText::new(representation.canonical())
         .map_err(|_| HandlerError::new(ToolError::validation()))
-}
-
-fn is_canonical_plain_body(value: &str) -> bool {
-    value
-        .strip_suffix(ANYTYPE_PLAIN_BODY_SUFFIX)
-        .is_some_and(is_plain_body_line)
-}
-
-fn is_plain_body_line(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with(' ')
-        && !value.ends_with(' ')
-        && value
-            .chars()
-            .all(|character| character == ' ' || character.is_alphanumeric())
 }
 
 const CREATE_FINGERPRINT_DOMAIN: &str = "any-mcp/object-create";
@@ -740,7 +720,11 @@ async fn execute_create(
                 request = request.name(name.as_str());
             }
             if let Some(body) = &input.body_markdown {
-                request = request.body(body.as_str());
+                let wire = plain_markdown_representation(body.as_str())
+                    .map_or(Cow::Borrowed(body.as_str()), |representation| {
+                        Cow::Owned(representation.wire().to_owned())
+                    });
+                request = request.body(wire.as_ref());
             }
             if let Some(icon) = &input.icon {
                 request = request.icon(icon.to_anytype());
@@ -1453,7 +1437,9 @@ mod tests {
             ("", ""),
             ("alpha stable body", "alpha stable body   \n"),
             ("alpha café body", "alpha café body   \n"),
+            ("alpha suffix_0", "alpha suffix\\_0   \n"),
             ("alpha stable body   \n", "alpha stable body   \n"),
+            ("alpha suffix\\_0   \n", "alpha suffix\\_0   \n"),
         ] {
             let normalized = normalize_create_body(BoundedText::new(requested).unwrap()).unwrap();
             assert_eq!(normalized.as_str(), expected, "requested {requested:?}");
@@ -1465,7 +1451,6 @@ mod tests {
             "alpha  ",
             "alpha\n",
             "alpha  \n",
-            "under_score",
             r"under\_score",
             r"\*escaped\*",
             "# Heading",
@@ -1682,7 +1667,45 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(request_body(&requests[1])["body"], canonical);
+        assert_eq!(request_body(&requests[1])["body"], "alpha stable body");
+    }
+
+    #[tokio::test]
+    async fn underscore_plain_body_replay_uses_one_unescaped_wire_form() {
+        let raw = "alpha unique_0";
+        let canonical = "alpha unique\\_0   \n";
+        let replies = vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, canonical, "Q3")),
+            FixtureReply::json(object_value(OBJECT_ID, canonical, "Q3")),
+        ];
+        let (base_url, server) = fixture(replies).await;
+        let handlers = ObjectCreateHandlers::with_verify_config(
+            runtime(base_url, Duration::from_secs(2)),
+            test_verify_config(),
+        )
+        .unwrap();
+
+        let first = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input_with_body(Some("underscore-cohort"), raw),
+                &CancellationToken::new(),
+            )
+            .await;
+        let replay = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input_with_body(Some("underscore-cohort"), canonical),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(first.is_error, Some(false));
+        assert_eq!(first, replay);
+
+        let requests = server.await.expect("underscore canonical create fixture");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(request_body(&requests[1])["body"], raw);
     }
 
     #[tokio::test]

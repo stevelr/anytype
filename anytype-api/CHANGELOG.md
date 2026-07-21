@@ -63,6 +63,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add `objects::plain_markdown_representation`, a documented closed contract
+  that separates the safe Anytype write form from the exact canonical read form
+  for empty bodies and single plain lines containing alphanumeric characters,
+  spaces, and underscores. Canonical replay is idempotent; ambiguous Markdown
+  and backslash forms are rejected instead of broadly unescaped.
 - `AnytypeError::is_authentication()` now exposes a secret-safe,
   `anytype-api`-level classification for direct and nested gRPC authentication
   failures without requiring callers to depend on `anytype-rpc` or format
