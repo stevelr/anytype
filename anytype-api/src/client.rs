@@ -420,7 +420,7 @@ impl AnytypeClient {
 
     /// Returns a gRPC client authorized using credentials stored in the keystore.
     ///
-    /// Requires the "grpc" feature and gRPC credentials saved to the keystore.
+    /// Requires gRPC credentials saved to the keystore.
     pub async fn grpc_client(&self) -> Result<AnytypeGrpcClient> {
         let guard = self.grpc.lock().await;
         if let Some(client) = guard.as_ref() {
