@@ -67,6 +67,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a cache-independent type-property classification read that reconciles
+  the flattened REST type representation with Heart's separate featured and
+  ordinary recommended source lists. It exposes the exact non-featured set
+  replaced or cleared by type updates, preserves exact featured IDs even when
+  REST omits a system definition, caps source evidence at 1,000 links, and
+  fails closed on malformed or cross-transport-inconsistent evidence.
 - REST file request builders now support caller-specific success/error body
   limits, bounded allowlisted-header evidence, checked byte ranges, and one
   cumulative physical-attempt ceiling. File metadata and validators are
