@@ -1,0 +1,46 @@
+excludes = ["**/*-lock.json", "*-lock.json", "*.lock", "**/*.lock"]
+on-unmatched = "debug"
+
+[formatter.biome]
+command = "biome"
+includes = [
+  "*.css",
+  "*.html",
+  "*.htm",
+  "*.graphql",
+  "*.gql",
+  "*.js",
+  "*.mjs",
+  "*.cjs",
+  "*.jsx",
+  "*.ts",
+  "*.mts",
+  "*.cts",
+  "*.tsx",
+  "*.vue",
+]
+options = ["format", "--write", "--config-path=@GATE_BIOME_CONFIG@"]
+
+[formatter.dprint]
+command = "dprint"
+includes = ["*.json", "*.jsonc", "*.json5", "*.md", "*.markdown", "*.toml", "*.yaml", "*.yml", "*.kdl"]
+options = ["fmt", "--config", "@GATE_DPRINT_CONFIG@"]
+
+[formatter.just]
+command = "just"
+includes = ["justfile", ".justfile", "*.just"]
+options = ["--unstable", "--fmt", "-f"]
+
+[formatter.nixfmt]
+command = "nixfmt"
+includes = ["*.nix"]
+
+[formatter.ruff]
+command = "ruff"
+includes = ["*.py", "*.pyi"]
+options = ["format"]
+
+[formatter.rustfmt]
+command = "rustfmt"
+includes = ["*.rs"]
+options = ["--edition", "2024"]
