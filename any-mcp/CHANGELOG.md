@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add ignored serial production-stdio disposable lifecycle sentinels that
+  prove exact create/read object and space identity, registered fallible child
+  shutdown, cleanup before a deliberate callback panic resumes, and exact
+  absence from a fresh cache-disabled complete space inventory.
 - Add an ignored serial tier-2 production-router scenario proving live numeric
   and checkbox filter matches by exact identity, with continuation derived from
   checked upstream pagination and no client-side post-pagination emulation.
