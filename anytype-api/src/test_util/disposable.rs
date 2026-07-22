@@ -120,6 +120,7 @@ fn failure_category_from_anytype(error: &AnytypeError) -> DisposableFailureCateg
         AnytypeError::BodyMutationIndeterminate { .. } => {
             DisposableFailureCategory::BodyMutationIndeterminate
         }
+        AnytypeError::BodyRpcLifecycle { .. } => DisposableFailureCategory::BodyRpcLifecycle,
         AnytypeError::CollectionMembershipEvidence { .. } => {
             DisposableFailureCategory::CollectionMembershipEvidence
         }
