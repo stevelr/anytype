@@ -269,13 +269,16 @@ pub mod prelude {
         tags::{CreateTagRequest, Tag},
         // Type objects
         types::{
-            CreateTypeProperty, MAX_TYPE_PROPERTY_LINKS, Type, TypeLayout,
-            TypePropertyClassification,
+            CreateTypeProperty, MAX_TYPE_PROPERTY_LINKS, MAX_TYPE_PROPERTY_RPC_TIMEOUT, Type,
+            TypeLayout, TypePropertyClassification, TypePropertyClassificationErrorKind,
+            TypePropertyClassificationMetricsSnapshot,
         },
         // Validation
         validation::ValidationLimits,
         // Verify
-        verify::{MAX_VERIFY_ATTEMPTS, VerifyConfig, verify_semantic},
+        verify::{
+            MAX_VERIFY_ATTEMPTS, VerifyConfig, verify_semantic, verify_semantic_with_remaining,
+        },
         // Views (Lists, Collections, Queries)
         views::{
             CollectionMembershipContinuation, CollectionMembershipEvidenceKind,

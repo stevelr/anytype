@@ -35,6 +35,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   acceptance uses cleanup-registered disposable spaces on an authenticated
   real server. Pure tests lock the reviewed 61/133 ceilings; inducing exact
   retry maxima and transport faults remains deferred to the P4 fault injector.
+- Add the production-unlinked schema type slice with exact `type_get`,
+  `type_create`, and `type_update` contracts. The handlers enforce strict
+  20-item property bounds, process-local create idempotency, cache-independent
+  preflight, finite owned classification, omission/preserve versus explicit
+  ordered replacement/clear, featured-vector stability, semantic no-ops, one
+  non-replayed mutation, minimized results, and direct/preview-stdio parity on
+  cleanup-owned disposable real-server types while leaving `schema` absent
+  from production. Separate exact HTTP and Show/Close/fallback budgets,
+  metadata-plus-recommendation parity, read-only/authentication/error cases,
+  cancellation cleanup, zero-I/O boundary rejection, and catalog/input/result
+  token snapshots replace semantic mocks; transport-fault injection remains
+  deferred to the P4 follow-up.
 - Add the production-unlinked `files` read slice through `anytype-api` only:
   bounded exact-ID metadata and ranged byte reads, strong-validator and HTTP
   evidence reconciliation, native MCP image/audio/text/blob content selected

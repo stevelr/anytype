@@ -591,6 +591,9 @@ impl UpstreamDiagnostic {
             AnytypeError::CollectionMembershipEvidence { .. } => {
                 Self::new("collection_membership_evidence")
             }
+            AnytypeError::TypePropertyClassification { .. } => {
+                Self::new("type_property_classification")
+            }
             AnytypeError::BodyMutationIndeterminate { .. } => {
                 Self::new("body_mutation_indeterminate")
             }

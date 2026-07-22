@@ -336,17 +336,6 @@ Only `compact` and `standard` application profiles exist. The optional
 selectable in this release. Their names become valid selectors only when a
 complete independently reviewed production registry is linked.
 
-The approved `schema` design now includes bounded complete replacement or
-clearing of non-featured type recommendations after the API gained a
-cache-independent featured/recommended classification. Omission preserves the
-current set, an explicit empty list clears it, and at most 20 unique-key
-property specifications replace it while exact featured evidence remains
-unchanged. Before implementation, the API classification operation must gain
-finite per-RPC deadlines and cancellation-resilient owned `ObjectClose`
-cleanup. This design requires both HTTP and gRPC when the future complete
-`schema` registry is selected; it does not make the incomplete selector
-available in this release.
-
 The production-unlinked schema-space slice implements `space_create` and
 `space_update` for later composition into that complete `schema` registry.
 Both workflows use `anytype-api` only and return just a validated space ID,
@@ -363,6 +352,31 @@ Direct-router and spawned preview-stdio happy paths are exercised against
 cleanup-registered disposable spaces on an authenticated real server. Tests
 that must induce latency, connection faults, malformed responses, or exact
 worst-case retries remain deferred to the external P4 fault-injection design.
+
+The approved `schema` design includes bounded complete replacement or clearing
+of non-featured type recommendations after the API gained a cache-independent
+featured/recommended classification. Omission preserves the current set, an
+explicit empty list clears it, and at most 20 unique-key property
+specifications replace it while exact featured evidence remains unchanged. The
+API classification operation now has finite per-RPC deadlines and
+cancellation-resilient owned `ObjectClose` cleanup. The production-unlinked
+schema-type slice implements cache-independent `type_get`, verified and
+idempotent `type_create`, and one-write `type_update` with semantic no-ops,
+complete ordered preserve/replace/clear behavior, exact featured-vector
+protection, and conservative post-dispatch uncertainty. This slice requires
+both HTTP and gRPC in its test registry but does not make the incomplete
+`schema` selector available in this release.
+
+Direct-router and preview-stdio parity runs those type workflows only against
+cleanup-registered disposable real-server types using the production
+classifier. The acceptance matrix measures HTTP and Show/Close work, covers
+the separate 24/144 no-op and 45/265 write HTTP ceilings, exact successful
+Show/Close/fallback counters, metadata-plus-recommendation replacement,
+read-only and authentication parity, ambiguity and scope/layout rejection,
+cancellation cleanup, 20-item create/update boundaries with zero-I/O 21-item
+rejection, and catalog, adversarial-input, and maximum-result token snapshots.
+Synthetic transport failures remain deferred to the external P4
+fault-injection work.
 
 The production-unlinked `files` read slice now provides the reusable internal
 contracts and handlers for that eventual registry. `file_metadata` performs an
