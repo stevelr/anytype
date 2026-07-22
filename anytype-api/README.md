@@ -47,7 +47,8 @@ and callers do not need a direct `anytype-rpc` dependency.
   fail closed unless a valid row with the same stable id supplies the safe
   representative.
 - Typed, bounded body-block reads (`body` module): validated block trees with
-  exact IDs and order over gRPC `ObjectShow`
+  exact IDs and order over gRPC `ObjectShow`, plus verified typed create,
+  append, update, delete, move, and bounded non-transactional batch operations
 - Nested filter expression builder
 - Parameter validation
 - Metrics
@@ -415,6 +416,42 @@ depth, fanout, text size, and mark count. Content the typed layer does not
 model (dataviews, widgets, unknown styles or marks from newer servers) reads
 as an explicit `Unsupported` marker carrying only a content-free structural
 summary, so trees from newer hearts stay complete, ordered, and honest.
+
+Mutations start from a snapshot and accept only typed constructors and targets
+that belong to that snapshot. Every write is sent once, then a bounded fresh
+`ObjectShow` read must prove the exact ID, rich state, and sibling/parent
+position before success is returned:
+
+```rust,no_run
+use anytype::prelude::*;
+
+async fn append_checked_item(
+    client: &AnytypeClient,
+    snapshot: &BodySnapshot,
+) -> Result<BlockMutation, AnytypeError> {
+    snapshot
+        .edit(client)
+        .append(NewBlock::checkbox("verified task", false)?)
+        .await
+}
+```
+
+`apply_all` is explicitly non-transactional: it returns verified receipts for
+the completed prefix, the first failure, and the untouched suffix. Timeout,
+transport uncertainty, or verification exhaustion returns
+`BodyMutationIndeterminate` with the last complete snapshot when available;
+callers must reread before retrying. Bookmark creation has an SSRF-safe policy:
+it validates and stores an unfetched absolute HTTP(S) URL but never invokes the
+server's URL-fetch RPC. YouTube embeds accept only canonicalizable HTTPS
+`youtube.com`/`youtu.be` video URLs. Divider style and the complete link-card
+appearance (card style, icon size, description mode, and bounded relation-key
+list) are typed updates. System singleton, file, table-structural, unsupported,
+and operation-restricted targets are rejected before dispatch.
+That fail-closed anchor policy also applies to a sibling target's parent and
+the existing first child used to encode a first-child insertion. Verified
+table creation proves the canonical ordered columns/rows layout regions,
+direct column and row membership, dimensions, and exact first-row header state;
+aggregate descendant counts are never accepted as table evidence.
 
 ## Type Property Classification (REST + gRPC)
 

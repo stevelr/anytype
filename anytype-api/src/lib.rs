@@ -185,6 +185,7 @@
 
 pub mod auth;
 pub mod body;
+pub mod body_mutation;
 pub mod cache;
 pub mod chat_stream;
 pub mod chats;
@@ -232,6 +233,10 @@ pub mod prelude {
             LinkCard, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind, OpaqueContent,
             OpaqueSummary, RelationView, TextContent, TextMark, TextRange, TextStyle,
             VerticalAlign,
+        },
+        body_mutation::{
+            BlockChange, BlockMutation, BodyBatchOutcome, BodyEditor, BodyOp, FailedBodyOp,
+            InsertPosition, NewBlock,
         },
         // HTTP metrics
         cache::AnytypeCache,
