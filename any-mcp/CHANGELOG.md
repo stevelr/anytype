@@ -24,6 +24,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   acceptance covers a stale edit sentinel, direct deletion, a test-owned
   spawned stdio process, exact absence, and registered cleanup. Transport
   faults and latency remain deferred to the P4 fault-injection design.
+- Link the complete default-off `views-write` production registry. Read-write
+  mode exposes exactly `collection_member_list`, `collection_member_add`, and
+  `collection_member_remove`; read-only mode retains only the list workflow.
+  The immutable descriptor requires authenticated HTTP and gRPC through the
+  shared `anytype-api` client, owns the reviewed direct/stdio/headless
+  scenarios, preserves default Phase 1 discovery byte-for-byte, and keeps the
+  approved 3,000-domain/3,500-selected catalog ceilings and 61-item maximum
+  result snapshot. The shared disposable A/B/C scenario covers direct,
+  stable-stdio, and preview-stdio parity, canonical pagination, saved-view
+  independence, no-op writes, cursor/query rejection, concurrency, cleanup,
+  and exact work counters without a mock or fault server. Genuine viewer 403
+  mutation evidence remains externally blocked because the available
+  read-only fixture is not cleanup-safe to mutate; the fixed classifier and
+  zero-I/O parity tests remain explicit non-substitutes.
 - Design a separate default-off `discussions` registry with one read-only
   `object_discussion_get` workflow. The closed result distinguishes normal
   absence from an attached `discussion_id`, binds the exact space and Basic or
@@ -84,8 +98,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   cover the exact nine-tool inventory and cleanup without mock or fault
   servers; independent property-scoped API reads verify the created and updated
   tag IDs, names, colors, and ownership rather than trusting MCP output alone.
-- Add the production-unlinked `collection_member_list`,
-  `collection_member_add`, and `collection_member_remove` slice for the future
+- Add the `collection_member_list`, `collection_member_add`, and
+  `collection_member_remove` workflows that comprise the production
   `views-write` registry. The strict list tool resolves one space, binds an
   opaque cursor to the exact resolved space, collection, limit, registry, and
   operation, and delegates one page to `anytype-api`'s canonical direct
@@ -96,9 +110,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   locked maximum result is 33,650 bytes and 31,770 `o200k_base` tokens; 62 is
   rejected. Direct-router tests and a feature-gated, test-only spawned stdio
   child use an authenticated disposable collection whose saved view hides one
-  still-listed member. The child runs the real stdio server path without
-  linking `views-write` into the shipped binary, which still rejects that
-  selector before protocol input or credential I/O. The two desired-state mutations accept only exact collection and
+  still-listed member. The child runs the real stdio server path with
+  deterministic acceptance seams around the same handlers; it neither replaces
+  nor alters the immutable production registry inventory. The two desired-state mutations accept only exact collection and
   object IDs, use the independent canonical observer for preflight and
   verification, return zero-write success when already desired, and otherwise
   dispatch one non-replayed POST or one logical replay-safe DELETE. Successful

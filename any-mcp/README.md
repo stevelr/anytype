@@ -147,7 +147,8 @@ stated maximum.
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
   fail closed without being echoed. The linked production names are `members`,
-  `files`, and `schema`; incomplete registries such as `chats` remain rejected;
+  `files`, `schema`, and `views-write`; incomplete registries such as `chats`
+  remain rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
@@ -330,11 +331,12 @@ and resource names return method-not-found before argument decoding or I/O.
 Stable and experimental protocol modes use the same composed catalog.
 
 Only `compact` and `standard` application profiles exist. The optional
-`members`, `files`, and `schema` registries are linked and can be selected
-explicitly or combined in one comma-separated `ANY_MCP_TOOLSETS` value; they
-are absent by default. Proposed `views-write`, `chats`, and `admin` toolsets are
-not selectable in this release. Their names become valid selectors only when a
-complete independently reviewed production registry is linked.
+`members`, `files`, `schema`, and `views-write` registries are linked and can
+be selected explicitly or combined in one comma-separated
+`ANY_MCP_TOOLSETS` value; they are absent by default. Proposed `chats` and
+`admin` toolsets are not selectable in this release. Their names become valid
+selectors only when a complete independently reviewed production registry is
+linked.
 
 The production `schema` registry includes `space_create` and `space_update`.
 Both workflows use `anytype-api` only and return just a validated space ID,
@@ -407,7 +409,7 @@ permission coverage remains an external acceptance blocker. Deterministic latenc
 connection-fault, and retry-maximum cases remain deferred to the P4
 fault-injection design.
 
-The production-unlinked `views-write` slice implements
+The production `views-write` registry implements
 `collection_member_list`, `collection_member_add`, and
 `collection_member_remove` through `anytype-api`'s canonical direct-membership
 operations. The list input is exactly `space`, `collection_id`, and optional non-null
@@ -434,14 +436,15 @@ Only 400, 401, 403, 404, 409, and 422 are definitive rejections. Redirects,
 408, 410, 425, 429, every other 4xx, every 5xx, transport failures, and
 malformed or incomplete success responses remain indeterminate.
 
-The slice remains absent from production discovery until the complete
-independently reviewed `views-write` registry is linked by `any-uda.4`.
+The registry is default-off and contributes exactly the three membership tools
+in read-write mode and only `collection_member_list` in read-only mode.
+Selecting it requires authenticated HTTP and gRPC through `anytype-api`.
 Authenticated disposable acceptance defines one shared scenario for the actual
 `AnyMcpServer` router and separately spawned stable and preview stdio children.
-All three drivers install the reviewed production-unlinked handlers through a
-feature-gated test registry; the spawned acceptance binary is not the shipped
-`any-mcp` binary and is not built by default. The shipped binary still rejects
-`views-write` before protocol decode or credential I/O. The child appends
+All three drivers use the same reviewed handlers as the immutable production
+descriptor. Deterministic cancellation and concurrency seams remain confined
+to a feature-gated acceptance registry; the spawned acceptance binary is not
+the shipped `any-mcp` binary and is not built by default. The child appends
 payload-free counter snapshots to a private metrics file. The scenario seeds
 only A, leaves B absent as the mutation target, and keeps C absent as a control.
 It applies list, add, and remove to a Set/query object, rejects limit and

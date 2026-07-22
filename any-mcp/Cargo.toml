@@ -26,8 +26,8 @@ required-features = ["acceptance-harness"]
 
 [features]
 default = []
-# Builds a test-only stdio child that composes the reviewed, production-unlinked
-# views-write slice. This is not a supported server binary or registry link.
+# Builds a test-only stdio child with deterministic acceptance seams around the
+# same collection-membership handlers used by the linked views-write registry.
 acceptance-harness = []
 
 [dependencies]

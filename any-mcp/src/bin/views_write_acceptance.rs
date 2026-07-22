@@ -3,7 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Steve Schoettler
 // SPDX-License-Identifier: Apache-2.0
 
-//! Test-only spawned stdio entrypoint for the production-unlinked views-write slice.
+//! Test-only spawned stdio entrypoint for views-write acceptance seams.
 
 #[tokio::main]
 async fn main() {

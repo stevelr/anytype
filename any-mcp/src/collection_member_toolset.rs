@@ -5,8 +5,8 @@
 
 //! Canonical, presentation-independent collection membership workflows.
 //!
-//! This module provides the production-unlinked collection membership slice
-//! for the eventual `views-write` optional registry. It enumerates and changes
+//! This module provides the complete default-off `views-write` production
+//! registry. It enumerates and changes
 //! direct manual-collection membership through `anytype-api`; it never reads
 //! or mutates a saved view, filter, layout, sort, or Kanban column.
 
@@ -39,7 +39,10 @@ use crate::{
         execute_mutation_handler, execute_prepared_handler, page_query_fingerprint,
         require_mutation_access, validate_page_binding_size,
     },
-    optional_toolsets::OptionalRegistryTool,
+    optional_toolsets::{
+        OptionalRegistryFuture, OptionalRegistryTool, OptionalToolsetMetadata,
+        OptionalToolsetRegistry,
+    },
     pagination::{DEFAULT_PAGE_LIMIT, PageLimit, PageOffset},
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
@@ -75,10 +78,75 @@ pub const COLLECTION_MEMBER_REMOVE_HTTP_LOGICAL_CEILING: usize = 34;
 pub const COLLECTION_MEMBER_REMOVE_HTTP_PHYSICAL_CEILING: usize = 204;
 /// Reviewed maximum gRPC calls for one collection-member removal.
 pub const COLLECTION_MEMBER_REMOVE_GRPC_CEILING: usize = 96;
-/// Reviewed incremental catalog ceiling for the complete future registry.
+/// Reviewed incremental catalog ceiling for the complete production registry.
 pub const VIEWS_WRITE_CATALOG_TOKEN_CEILING: usize = 3_000;
 
-const VIEWS_WRITE_REGISTRY: &str = "views-write";
+/// Exact production selector for collection membership workflows.
+pub const VIEWS_WRITE_TOOLSET_NAME: &str = "views-write";
+
+const SCRIPTED_SCENARIOS: &[&str] = &[
+    "collection_member_acceptance_direct",
+    "collection_member_acceptance_stdio",
+];
+const HEADLESS_SCENARIOS: &[&str] = &["collection_member_acceptance_headless"];
+
+#[derive(Debug)]
+struct ViewsWriteRegistry;
+
+static VIEWS_WRITE_REGISTRY_IMPL: ViewsWriteRegistry = ViewsWriteRegistry;
+
+/// Complete production descriptor for the `views-write` registry.
+pub static VIEWS_WRITE_REGISTRY: &dyn OptionalToolsetRegistry = &VIEWS_WRITE_REGISTRY_IMPL;
+
+/// Returns the complete production `views-write` registry.
+#[must_use]
+pub fn views_write_registry() -> &'static dyn OptionalToolsetRegistry {
+    VIEWS_WRITE_REGISTRY
+}
+
+impl OptionalToolsetRegistry for ViewsWriteRegistry {
+    fn metadata(&self) -> OptionalToolsetMetadata {
+        OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)
+    }
+
+    fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
+        collection_member_tools()
+    }
+
+    fn scripted_scenario_ids(&self) -> &'static [&'static str] {
+        SCRIPTED_SCENARIOS
+    }
+
+    fn headless_scenario_ids(&self) -> &'static [&'static str] {
+        HEADLESS_SCENARIOS
+    }
+
+    fn catalog_token_ceiling(&self) -> usize {
+        VIEWS_WRITE_CATALOG_TOKEN_CEILING
+    }
+
+    fn call_tool<'a>(
+        &'a self,
+        request: CallToolRequestParams,
+        runtime: &'a RuntimeContext,
+        cursors: &'a CursorStore,
+        _protocol_version: &'a rmcp::model::ProtocolVersion,
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        Box::pin(async move {
+            if !matches!(
+                request.name.as_ref(),
+                COLLECTION_MEMBER_LIST | COLLECTION_MEMBER_ADD | COLLECTION_MEMBER_REMOVE
+            ) {
+                return Err(ErrorData::method_not_found::<CallToolRequestMethod>());
+            }
+            let handlers = CollectionMemberHandlers::new().map_err(|_| {
+                ErrorData::internal_error("Collection membership contracts unavailable.", None)
+            })?;
+            Box::pin(handlers.call_tool(request, runtime, cursors, cancellation)).await
+        })
+    }
+}
 
 #[cfg(feature = "acceptance-harness")]
 struct ViewsWriteAcceptanceRegistry {
@@ -208,7 +276,7 @@ impl std::fmt::Debug for ViewsWriteAcceptanceRegistry {
 #[cfg(feature = "acceptance-harness")]
 impl crate::optional_toolsets::OptionalToolsetRegistry for ViewsWriteAcceptanceRegistry {
     fn metadata(&self) -> crate::optional_toolsets::OptionalToolsetMetadata {
-        crate::optional_toolsets::OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)
+        crate::optional_toolsets::OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -334,9 +402,9 @@ impl ViewsWriteAcceptanceDirect {
             runtime::StartupStatus,
         };
 
-        let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)];
+        let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)];
         let selection =
-            OptionalToolsetSelection::parse(Some(VIEWS_WRITE_REGISTRY.to_owned()), &metadata)?;
+            OptionalToolsetSelection::parse(Some(VIEWS_WRITE_TOOLSET_NAME.to_owned()), &metadata)?;
         let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
             client.clone(),
             2,
@@ -366,13 +434,12 @@ impl ViewsWriteAcceptanceDirect {
 
     pub async fn call(&self, name: &'static str, arguments: serde_json::Value) -> CallToolResult {
         let arguments = arguments.as_object().cloned().unwrap_or_default();
-        self.server
-            .dispatch_tool(
-                CallToolRequestParams::new(name).with_arguments(arguments),
-                &CancellationToken::new(),
-            )
-            .await
-            .unwrap_or_else(|_| tool_error(&ToolError::upstream()))
+        Box::pin(self.server.dispatch_tool(
+            CallToolRequestParams::new(name).with_arguments(arguments),
+            &CancellationToken::new(),
+        ))
+        .await
+        .unwrap_or_else(|_| tool_error(&ToolError::upstream()))
     }
 
     /// Dispatches two calls concurrently through the actual reviewed router.
@@ -491,13 +558,13 @@ pub async fn serve_acceptance_stdio_from_env() -> Result<(), Box<dyn std::error:
         ),
         _ => return Err("acceptance harness mode is invalid".into()),
     };
-    let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)];
+    let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)];
     let mut config = RuntimeConfig::from_env_with_optional_metadata(&metadata)?;
     if !config.optional_toolsets.is_empty() {
         return Err("acceptance harness does not accept a registry selector".into());
     }
     config.optional_toolsets = crate::optional_toolsets::OptionalToolsetSelection::parse(
-        Some(VIEWS_WRITE_REGISTRY.to_owned()),
+        Some(VIEWS_WRITE_TOOLSET_NAME.to_owned()),
         &metadata,
     )?;
     config.protocol_mode = protocol;
@@ -848,7 +915,7 @@ pub fn collection_member_tools() -> Result<Vec<OptionalRegistryTool>, SchemaCont
     ])
 }
 
-/// Transport-neutral handler for the production-unlinked membership list slice.
+/// Transport-neutral handler for the production membership-list workflow.
 #[derive(Clone, Debug)]
 pub struct CollectionMemberListHandlers {
     contract: WorkflowTool<CollectionMemberListPage>,
@@ -894,7 +961,7 @@ impl CollectionMemberListHandlers {
             COLLECTION_MEMBER_LIST,
             common_limit,
             &RawPageParams {
-                registry: VIEWS_WRITE_REGISTRY,
+                registry: VIEWS_WRITE_TOOLSET_NAME,
                 space: input.space.as_str(),
                 collection_id: input.collection_id.as_str(),
             },
@@ -912,7 +979,7 @@ impl CollectionMemberListHandlers {
                 COLLECTION_MEMBER_LIST,
                 common_limit,
                 &ResolvedPageParams {
-                    registry: VIEWS_WRITE_REGISTRY,
+                    registry: VIEWS_WRITE_TOOLSET_NAME,
                     space_id: &space_id,
                     collection_id: &collection_id,
                 },
@@ -1208,7 +1275,7 @@ impl CollectionMemberMutationHandlers {
     }
 }
 
-/// Combined list and mutation dispatcher for the complete future registry.
+/// Combined list and mutation dispatcher for the production registry.
 #[derive(Clone, Debug)]
 pub struct CollectionMemberHandlers {
     list: CollectionMemberListHandlers,
@@ -1216,7 +1283,7 @@ pub struct CollectionMemberHandlers {
 }
 
 impl CollectionMemberHandlers {
-    /// Creates the complete production-unlinked collection-membership dispatcher.
+    /// Creates the complete production collection-membership dispatcher.
     pub fn new() -> Result<Self, SchemaContractError> {
         Ok(Self {
             list: CollectionMemberListHandlers::new()?,
@@ -1553,7 +1620,7 @@ mod tests {
             COLLECTION_MEMBER_LIST,
             PageLimit::new(limit).expect("valid common limit"),
             &ResolvedPageParams {
-                registry: VIEWS_WRITE_REGISTRY,
+                registry: VIEWS_WRITE_TOOLSET_NAME,
                 space_id,
                 collection_id,
             },
@@ -1808,7 +1875,7 @@ mod tests {
             binding(SPACE_ID, COLLECTION_ID, 2),
             QueryFingerprint::from_normalized(&json!({
                 "tool":"different",
-                "registry":VIEWS_WRITE_REGISTRY,
+                "registry":VIEWS_WRITE_TOOLSET_NAME,
                 "space_id":SPACE_ID,
                 "collection_id":COLLECTION_ID,
                 "limit":1
@@ -2086,22 +2153,22 @@ mod tests {
         let compact = snapshot_server(
             ApplicationProfile::Compact,
             false,
-            Some(VIEWS_WRITE_REGISTRY),
+            Some(VIEWS_WRITE_TOOLSET_NAME),
         );
         let compact_read_only = snapshot_server(
             ApplicationProfile::Compact,
             true,
-            Some(VIEWS_WRITE_REGISTRY),
+            Some(VIEWS_WRITE_TOOLSET_NAME),
         );
         let standard = snapshot_server(
             ApplicationProfile::Standard,
             false,
-            Some(VIEWS_WRITE_REGISTRY),
+            Some(VIEWS_WRITE_TOOLSET_NAME),
         );
         let standard_read_only = snapshot_server(
             ApplicationProfile::Standard,
             true,
-            Some(VIEWS_WRITE_REGISTRY),
+            Some(VIEWS_WRITE_TOOLSET_NAME),
         );
         let with_members = snapshot_server(
             ApplicationProfile::Compact,
@@ -2146,7 +2213,7 @@ mod tests {
         };
         json!({
             "tokenizer":"tiktoken o200k_base (tiktoken-rs 0.12.0)",
-            "selected":[VIEWS_WRITE_REGISTRY],
+            "selected":[VIEWS_WRITE_TOOLSET_NAME],
             "views_write_domain_ceiling_tokens":VIEWS_WRITE_CATALOG_TOKEN_CEILING,
             "views_write_selected_ceiling_tokens":3500,
             "per_tool_tokens":per_tool,
@@ -2176,7 +2243,7 @@ mod tests {
             actual, reviewed,
             "collection-membership token budget drifted"
         );
-        assert_eq!(actual["selected"], json!([VIEWS_WRITE_REGISTRY]));
+        assert_eq!(actual["selected"], json!([VIEWS_WRITE_TOOLSET_NAME]));
         let domain_tokens = actual["per_tool_tokens"]
             .as_object()
             .expect("per-tool tokens")
@@ -2309,7 +2376,7 @@ mod tests {
 
     impl OptionalToolsetRegistry for TestRegistry {
         fn metadata(&self) -> OptionalToolsetMetadata {
-            OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)
+            OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -2361,9 +2428,9 @@ mod tests {
         })
         .expect("no-I/O client");
         client.set_api_key(HttpCredentials::new("unused-no-io-token"));
-        let available = [OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)];
+        let available = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)];
         let selection = OptionalToolsetSelection::parse(
-            selected.then(|| VIEWS_WRITE_REGISTRY.to_owned()),
+            selected.then(|| VIEWS_WRITE_TOOLSET_NAME.to_owned()),
             &available,
         )
         .expect("views-write selection");
@@ -2381,8 +2448,26 @@ mod tests {
         )
     }
 
-    fn test_server(selected: bool, read_only: bool) -> AnyMcpServer {
-        server_with_runtime(no_io_runtime(selected, read_only))
+    fn production_server(selected: bool, read_only: bool) -> AnyMcpServer {
+        let client = snapshot_client();
+        let selection = OptionalToolsetSelection::parse(
+            selected.then(|| VIEWS_WRITE_TOOLSET_NAME.to_owned()),
+            &production_optional_metadata(),
+        )
+        .expect("production views-write selection");
+        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            client,
+            1,
+            Duration::from_secs(2),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            ApplicationProfile::Compact,
+            read_only,
+            selection,
+        );
+        AnyMcpServer::new(runtime).expect("production views-write server")
     }
 
     fn server_with_runtime(runtime: RuntimeContext) -> AnyMcpServer {
@@ -2418,16 +2503,11 @@ mod tests {
         read_only: bool,
         selected: Option<&str>,
     ) -> AnyMcpServer {
-        let registry: &'static TestRegistry = Box::leak(Box::new(TestRegistry {
-            handlers: CollectionMemberHandlers::new().expect("snapshot handlers"),
-        }));
-        let registries: &'static [&'static dyn OptionalToolsetRegistry] = Box::leak(
-            vec![
-                crate::member_toolset::MEMBERS_REGISTRY,
-                registry as &dyn OptionalToolsetRegistry,
-            ]
-            .into_boxed_slice(),
-        );
+        static REGISTRIES: [&dyn OptionalToolsetRegistry; 2] = [
+            crate::member_toolset::MEMBERS_REGISTRY,
+            VIEWS_WRITE_REGISTRY,
+        ];
+        let registries: &'static [&'static dyn OptionalToolsetRegistry] = &REGISTRIES;
         let metadata = registries
             .iter()
             .map(|candidate| candidate.metadata())
@@ -2474,8 +2554,8 @@ mod tests {
 
     fn live_runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
-            Some(VIEWS_WRITE_REGISTRY.to_owned()),
-            &[OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)],
+            Some(VIEWS_WRITE_TOOLSET_NAME.to_owned()),
+            &[OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)],
         )
         .expect("views-write selection");
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(
@@ -3143,22 +3223,38 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_grpc_gated_read_only_and_production_unlinked() {
-        let metadata = TestRegistry {
-            handlers: CollectionMemberHandlers::new().expect("handlers"),
-        }
-        .metadata();
-        assert_eq!(metadata.name, VIEWS_WRITE_REGISTRY);
+    fn production_registry_is_exact_grpc_gated_and_read_only_projected() {
+        let metadata = VIEWS_WRITE_REGISTRY.metadata();
+        assert_eq!(metadata.name, VIEWS_WRITE_TOOLSET_NAME);
         assert!(metadata.requires_grpc);
         assert!(
-            !production_optional_metadata()
+            production_optional_metadata()
                 .iter()
-                .any(|entry| entry.name == VIEWS_WRITE_REGISTRY)
+                .any(|entry| entry == &metadata)
+        );
+        assert_eq!(
+            VIEWS_WRITE_REGISTRY.tools().expect("registry tools").len(),
+            3
+        );
+        assert_eq!(
+            VIEWS_WRITE_REGISTRY.scripted_scenario_ids(),
+            [
+                "collection_member_acceptance_direct",
+                "collection_member_acceptance_stdio"
+            ]
+        );
+        assert_eq!(
+            VIEWS_WRITE_REGISTRY.headless_scenario_ids(),
+            ["collection_member_acceptance_headless"]
+        );
+        assert_eq!(
+            VIEWS_WRITE_REGISTRY.catalog_token_ceiling(),
+            VIEWS_WRITE_CATALOG_TOKEN_CEILING
         );
 
-        let base = test_server(false, false);
-        let selected = test_server(true, false);
-        let read_only = test_server(true, true);
+        let base = production_server(false, false);
+        let selected = production_server(true, false);
+        let read_only = production_server(true, true);
         let names = |server: &AnyMcpServer| {
             server
                 .tools()
@@ -3182,10 +3278,37 @@ mod tests {
                 .any(|name| name == COLLECTION_MEMBER_LIST)
         );
         assert_eq!(selected.tools().len(), read_only.tools().len() + 3);
+        assert_eq!(
+            names(&selected)
+                .iter()
+                .filter(|name| name.as_str() == "optional_toolset_status")
+                .count(),
+            1
+        );
         for mutation in [COLLECTION_MEMBER_ADD, COLLECTION_MEMBER_REMOVE] {
             assert!(names(&selected).iter().any(|name| name == mutation));
             assert!(!names(&read_only).iter().any(|name| name == mutation));
         }
+        for absent in [
+            "view_create",
+            "view_update",
+            "view_delete",
+            "view_filter_set",
+            "view_sort_set",
+            "kanban_column_move",
+            "collection_member_reorder",
+        ] {
+            assert!(!names(&selected).iter().any(|name| name == absent));
+        }
+        let selected_names = names(&selected);
+        assert!(selected_names.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            selected_names
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            selected_names.len()
+        );
 
         let tokenizer = o200k_base().expect("pinned o200k_base");
         let tool = selected
@@ -3206,11 +3329,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_only_mutations_reject_before_decode_and_io() {
-        let runtime = no_io_runtime(true, true);
-        let client = runtime.client().clone();
+    async fn absent_production_registry_rejects_before_decode_or_io() {
+        let server = production_server(false, false);
+        let client = server.runtime().client().clone();
         let before = metric_counts(&client);
-        let server = server_with_runtime(runtime);
+        for name in [
+            COLLECTION_MEMBER_LIST,
+            COLLECTION_MEMBER_ADD,
+            COLLECTION_MEMBER_REMOVE,
+        ] {
+            let error = server
+                .dispatch_tool(
+                    CallToolRequestParams::new(name).with_arguments(arguments(json!({
+                        "secret-invalid": "must-not-decode"
+                    }))),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("absent production tool");
+            assert_eq!(
+                error.code,
+                ErrorData::method_not_found::<CallToolRequestMethod>().code
+            );
+        }
+        assert_zero_membership_io(before, metric_counts(&client));
+    }
+
+    #[tokio::test]
+    async fn no_selection_is_byte_identical_without_views_write_descriptor() {
+        static WITHOUT_VIEWS_WRITE: [&dyn OptionalToolsetRegistry; 3] = [
+            crate::member_toolset::MEMBERS_REGISTRY,
+            &crate::file_content::FILE_CONTENT_REGISTRY,
+            crate::schema_toolset::SCHEMA_REGISTRY,
+        ];
+        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            snapshot_client(),
+            1,
+            Duration::from_secs(2),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            ApplicationProfile::Compact,
+            false,
+            OptionalToolsetSelection::default(),
+        );
+        let production = AnyMcpServer::new(runtime.clone()).expect("production no-selection");
+        let without = AnyMcpServer::new_with_optional_registries(runtime, &WITHOUT_VIEWS_WRITE)
+            .expect("pre-views-write no-selection");
+        assert_eq!(
+            serde_json::to_vec(&ListToolsResult::with_all_items(
+                production.tools().to_vec()
+            ))
+            .expect("production catalog bytes"),
+            serde_json::to_vec(&ListToolsResult::with_all_items(without.tools().to_vec()))
+                .expect("pre-views-write catalog bytes")
+        );
+        let production_status = production
+            .dispatch_tool(
+                CallToolRequestParams::new("server_status"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("production server status");
+        let without_status = without
+            .dispatch_tool(
+                CallToolRequestParams::new("server_status"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("pre-views-write server status");
+        assert_eq!(
+            serde_json::to_vec(&production_status).expect("production status bytes"),
+            serde_json::to_vec(&without_status).expect("pre-views-write status bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_mutations_reject_before_decode_and_io() {
+        let server = production_server(true, true);
+        let client = server.runtime().client().clone();
+        let before = metric_counts(&client);
         for name in [COLLECTION_MEMBER_ADD, COLLECTION_MEMBER_REMOVE] {
             let result = server
                 .dispatch_tool(CallToolRequestParams::new(name), &CancellationToken::new())
@@ -3247,11 +3446,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_router_dispatches_all_three_contracts_in_both_protocols() {
+        let server = production_server(true, false);
+        let client = server.runtime().client().clone();
+        let before = metric_counts(&client);
+        for protocol in [
+            rmcp::model::ProtocolVersion::V_2025_11_25,
+            rmcp::model::ProtocolVersion::V_2026_07_28,
+        ] {
+            for name in [
+                COLLECTION_MEMBER_LIST,
+                COLLECTION_MEMBER_ADD,
+                COLLECTION_MEMBER_REMOVE,
+            ] {
+                let error = server
+                    .dispatch_tool_for_protocol(
+                        CallToolRequestParams::new(name).with_arguments(arguments(json!({}))),
+                        &protocol,
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .expect_err("selected contract reaches strict decoder");
+                assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            }
+        }
+        assert_zero_membership_io(before, metric_counts(&client));
+    }
+
+    #[tokio::test]
     async fn direct_and_preview_stdio_catalog_schemas_are_identical() {
         for read_only in [false, true] {
-            let direct = test_server(true, read_only);
+            let direct = production_server(true, read_only);
             let expected = tools_list_value(&direct);
-            let stdio = preview_stdio_tools(test_server(true, read_only)).await;
+            let stdio = preview_stdio_tools(production_server(true, read_only)).await;
             assert_eq!(stdio["result"]["tools"], expected["tools"]);
             assert_eq!(stdio["result"]["resultType"], "complete");
             assert_eq!(stdio["result"]["cacheScope"], "public");
