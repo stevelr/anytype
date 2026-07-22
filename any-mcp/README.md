@@ -341,7 +341,9 @@ clearing of non-featured type recommendations after the API gained a
 cache-independent featured/recommended classification. Omission preserves the
 current set, an explicit empty list clears it, and at most 20 unique-key
 property specifications replace it while exact featured evidence remains
-unchanged. This design requires both HTTP and gRPC when the future complete
+unchanged. Before implementation, the API classification operation must gain
+finite per-RPC deadlines and cancellation-resilient owned `ObjectClose`
+cleanup. This design requires both HTTP and gRPC when the future complete
 `schema` registry is selected; it does not make the incomplete selector
 available in this release.
 
