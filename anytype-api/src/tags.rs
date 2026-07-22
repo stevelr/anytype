@@ -91,7 +91,12 @@ async fn refresh_cached_property_tags(
     limits: &ValidationLimits,
     space_id: &str,
     property_id: &str,
+    refresh_cache: bool,
 ) -> Result<()> {
+    if !refresh_cache {
+        cache.clear_properties(Some(space_id));
+        return Ok(());
+    }
     if !cache.has_properties(space_id) {
         return Ok(());
     }
@@ -191,6 +196,7 @@ impl TagRequest {
             &self.limits,
             &self.space_id,
             &self.property_id,
+            true,
         )
         .await?;
         Ok(response.tag)
@@ -210,6 +216,7 @@ pub struct NewTagRequest {
     verify_policy: VerifyPolicy,
     verify_config: Option<VerifyConfig>,
     cache: Arc<AnytypeCache>,
+    refresh_cache: bool,
 }
 
 impl NewTagRequest {
@@ -232,6 +239,7 @@ impl NewTagRequest {
             verify_policy: VerifyPolicy::Default,
             verify_config,
             cache,
+            refresh_cache: true,
         }
     }
 
@@ -278,6 +286,17 @@ impl NewTagRequest {
         self
     }
 
+    /// Avoids post-write tag pagination and invalidates the space's property cache.
+    ///
+    /// This cache-independent path bounds the mutation independently of a
+    /// previously primed cache. Callers can perform their own bounded tag page
+    /// readback after the write.
+    #[must_use]
+    pub fn no_cache_refresh(mut self) -> Self {
+        self.refresh_cache = false;
+        self
+    }
+
     /// Creates the tag.
     pub async fn create(self) -> Result<Tag> {
         self.limits.validate_id(&self.space_id, "space_id")?;
@@ -313,6 +332,7 @@ impl NewTagRequest {
             &self.limits,
             &self.space_id,
             &self.property_id,
+            self.refresh_cache,
         )
         .await?;
         if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {
@@ -349,6 +369,7 @@ pub struct UpdateTagRequest {
     verify_policy: VerifyPolicy,
     verify_config: Option<VerifyConfig>,
     cache: Arc<AnytypeCache>,
+    refresh_cache: bool,
 }
 
 impl UpdateTagRequest {
@@ -373,6 +394,7 @@ impl UpdateTagRequest {
             verify_policy: VerifyPolicy::Default,
             verify_config,
             cache,
+            refresh_cache: true,
         }
     }
 
@@ -419,6 +441,17 @@ impl UpdateTagRequest {
         self
     }
 
+    /// Avoids post-write tag pagination and invalidates the space's property cache.
+    ///
+    /// This cache-independent path bounds the mutation independently of a
+    /// previously primed cache. A later cached property read will repopulate
+    /// explicitly.
+    #[must_use]
+    pub fn no_cache_refresh(mut self) -> Self {
+        self.refresh_cache = false;
+        self
+    }
+
     /// Applies the update.
     pub async fn update(self) -> Result<Tag> {
         self.limits.validate_id(&self.space_id, "space_id")?;
@@ -459,6 +492,7 @@ impl UpdateTagRequest {
             &self.limits,
             &self.space_id,
             &self.property_id,
+            self.refresh_cache,
         )
         .await?;
         if let Some(config) = resolve_verify(self.verify_policy, self.verify_config.as_ref()) {

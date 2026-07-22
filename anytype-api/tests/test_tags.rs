@@ -19,8 +19,104 @@
 
 mod common;
 
-use anytype::{prelude::*, test_util::with_test_context_unit};
+use anytype::{
+    prelude::*,
+    test_util::{TestResult, with_test_context, with_test_context_unit},
+};
 use common::{create_object_with_retry, retry_definitive_rate_limit, unique_test_name};
+
+#[tokio::test]
+#[test_log::test]
+async fn test_cache_independent_property_and_tag_mutations_are_one_request() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        ctx.client.enable_cache();
+
+        async fn prime_property_cache(client: &AnytypeClient, space_id: &str) -> TestResult<()> {
+            let before = client.http_metrics();
+            let _ = client.properties(space_id).list().await?;
+            let after = client.http_metrics();
+            assert!(
+                after.logical_operations > before.logical_operations,
+                "invalidated property cache must be repopulated explicitly"
+            );
+            Ok(())
+        }
+
+        fn assert_one_request(client: &AnytypeClient, before: HttpMetricsSnapshot) {
+            let after = client.http_metrics();
+            assert_eq!(after.logical_operations - before.logical_operations, 1);
+            assert_eq!(after.physical_attempts - before.physical_attempts, 1);
+        }
+
+        prime_property_cache(&ctx.client, &ctx.space_id).await?;
+        let suffix = anytype::test_util::unique_suffix().replace('-', "_");
+        let property_name = format!("Bounded cache property {suffix}");
+        let before = ctx.client.http_metrics();
+        let property = ctx
+            .client
+            .new_property(&ctx.space_id, &property_name, PropertyFormat::Select)
+            .key(format!("bounded_cache_property_{suffix}"))
+            .tag("Initial", Some(format!("initial_{suffix}")), Color::Blue)
+            .no_verify()
+            .no_cache_refresh()
+            .create()
+            .await?;
+        assert_one_request(&ctx.client, before);
+        ctx.register_property(&property.id);
+
+        prime_property_cache(&ctx.client, &ctx.space_id).await?;
+        let updated_name = format!("Bounded cache property updated {suffix}");
+        let before = ctx.client.http_metrics();
+        let updated = ctx
+            .client
+            .update_property(&ctx.space_id, &property.id)
+            .name(&updated_name)
+            .no_verify()
+            .no_cache_refresh()
+            .update()
+            .await?;
+        assert_one_request(&ctx.client, before);
+        assert_eq!(updated.name, updated_name);
+
+        prime_property_cache(&ctx.client, &ctx.space_id).await?;
+        let before = ctx.client.http_metrics();
+        let tag = ctx
+            .client
+            .new_tag(&ctx.space_id, &property.id)
+            .name(format!("Bounded tag {suffix}"))
+            .key(format!("bounded_tag_{suffix}"))
+            .color(Color::Teal)
+            .no_verify()
+            .no_cache_refresh()
+            .create()
+            .await?;
+        assert_one_request(&ctx.client, before);
+
+        prime_property_cache(&ctx.client, &ctx.space_id).await?;
+        let before = ctx.client.http_metrics();
+        let updated_tag = ctx
+            .client
+            .update_tag(&ctx.space_id, &property.id, &tag.id)
+            .name(format!("Bounded tag updated {suffix}"))
+            .no_verify()
+            .no_cache_refresh()
+            .update()
+            .await?;
+        assert_one_request(&ctx.client, before);
+        assert_eq!(updated_tag.id, tag.id);
+
+        let bounded_tags = ctx
+            .client
+            .tags(&ctx.space_id, &property.id)
+            .limit(20)
+            .list()
+            .await?;
+        assert!(!bounded_tags.pagination.has_more);
+        assert!(bounded_tags.iter().any(|candidate| candidate.id == tag.id));
+        Ok(())
+    })
+    .await
+}
 
 // =============================================================================
 // Tag Listing Tests

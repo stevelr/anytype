@@ -44,6 +44,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Property and tag create/update builders now offer a cache-independent
+  `no_cache_refresh()` path. It invalidates a primed space-property cache after
+  the write instead of silently collecting every tag page, so mutation request
+  counts remain independent of cache state and callers can own one explicitly
+  bounded readback page.
+
 - Empty-filter integration coverage now creates and cleanup-registers its own
   exact object instead of assuming the ambient test space is nonempty.
 - Space creation now rejects an empty name through configured client limits

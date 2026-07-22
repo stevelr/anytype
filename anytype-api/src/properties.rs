@@ -1000,6 +1000,7 @@ pub struct NewPropertyRequest {
     cache: Arc<AnytypeCache>,
     verify_policy: VerifyPolicy,
     verify_config: Option<VerifyConfig>,
+    refresh_cache: bool,
 }
 
 impl NewPropertyRequest {
@@ -1024,6 +1025,7 @@ impl NewPropertyRequest {
             cache,
             verify_policy: VerifyPolicy::Default,
             verify_config,
+            refresh_cache: true,
         }
     }
 
@@ -1087,6 +1089,18 @@ impl NewPropertyRequest {
         self
     }
 
+    /// Avoids post-write tag pagination and invalidates the space's property cache.
+    ///
+    /// This cache-independent path keeps the mutation's request count bounded
+    /// even when the property cache was already primed. Callers that need tags
+    /// can issue an explicitly bounded [`AnytypeClient::tags`] request after
+    /// the mutation.
+    #[must_use]
+    pub fn no_cache_refresh(mut self) -> Self {
+        self.refresh_cache = false;
+        self
+    }
+
     /// Creates the property with the configured settings.
     ///
     /// # Returns
@@ -1130,13 +1144,15 @@ impl NewPropertyRequest {
             .await?;
 
         // replace cached property, including tags
-        if self.cache.has_properties(&self.space_id) {
+        if self.refresh_cache && self.cache.has_properties(&self.space_id) {
             let mut property = response.property.clone();
             if create_with_tags {
                 set_property_tags(&self.client, &self.limits, &self.space_id, &mut property)
                     .await?;
             }
             self.cache.set_property(&self.space_id, property);
+        } else if !self.refresh_cache {
+            self.cache.clear_properties(Some(&self.space_id));
         }
 
         let property = response.property;
@@ -1184,6 +1200,7 @@ pub struct UpdatePropertyRequest {
     cache: Arc<AnytypeCache>,
     verify_policy: VerifyPolicy,
     verify_config: Option<VerifyConfig>,
+    refresh_cache: bool,
 }
 
 impl UpdatePropertyRequest {
@@ -1206,6 +1223,7 @@ impl UpdatePropertyRequest {
             cache,
             verify_policy: VerifyPolicy::Default,
             verify_config,
+            refresh_cache: true,
         }
     }
 
@@ -1251,6 +1269,16 @@ impl UpdatePropertyRequest {
     #[must_use]
     pub fn no_verify(mut self) -> Self {
         self.verify_policy = VerifyPolicy::Disabled;
+        self
+    }
+
+    /// Avoids post-write tag pagination and invalidates the space's property cache.
+    ///
+    /// This cache-independent path bounds the mutation independently of cache
+    /// state. A later cached property read will repopulate explicitly.
+    #[must_use]
+    pub fn no_cache_refresh(mut self) -> Self {
+        self.refresh_cache = false;
         self
     }
 
@@ -1301,10 +1329,12 @@ impl UpdatePropertyRequest {
             .await?;
 
         // update property in cache
-        if self.cache.has_properties(&self.space_id) {
+        if self.refresh_cache && self.cache.has_properties(&self.space_id) {
             let mut property = response.property.clone();
             set_property_tags(&self.client, &self.limits, &self.space_id, &mut property).await?;
             self.cache.set_property(&self.space_id, property);
+        } else if !self.refresh_cache {
+            self.cache.clear_properties(Some(&self.space_id));
         }
 
         let property = response.property;
