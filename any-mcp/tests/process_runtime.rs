@@ -147,6 +147,24 @@ fn linked_schema_registry_reaches_auth_without_echoing_selector() {
 }
 
 #[test]
+fn linked_body_blocks_registry_reaches_auth_without_echoing_selector() {
+    let output = unauthenticated_command()
+        .env("ANY_MCP_TOOLSETS", "body-blocks")
+        .output()
+        .expect("run any-mcp test binary");
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "stdout is reserved for MCP frames"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("HTTP credentials are missing"));
+    assert!(!stderr.contains("body-blocks"));
+    assert!(!stderr.contains("unsupported optional toolset selector"));
+}
+
+#[test]
 fn linked_views_write_registry_reaches_auth_without_echoing_selector() {
     let output = unauthenticated_command()
         .env("ANY_MCP_TOOLSETS", "views-write")

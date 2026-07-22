@@ -8,6 +8,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Link the default-off `body-blocks` registry with one bounded list workflow
+  and five mutation workflows for typed block creation, targeted update,
+  confirmed subtree deletion, same-object movement, and finite rich-page
+  plans. The tools use `anytype-api` only, return exact block identities and a
+  canonical snapshot hash, fail closed on read restrictions and malformed
+  bodies, and require fresh snapshot evidence before mutation. Process-local
+  create idempotency, exact write-dispatch observation, semantic readback,
+  digest-bound pagination, and complete/partial/indeterminate rich receipts
+  prevent unsafe replay or false success. Read-only mode retains only the list
+  tool; callers cannot provide bookmark fetches, raw URLs, protobufs, or opaque
+  mutations. Direct, protocol, spawned-stdio, schema, token, and disposable
+  real-server verification accompany the registry without a mock server;
+  deterministic transport faults remain deferred to the P4 fault-injection
+  design. The exact six-tool schema snapshot is 23,476 `o200k_base` tokens,
+  below the independently reviewed 25,000-token domain ceiling. Production
+  gates count canonical request and dual-encoded result tokens, enforce
+  complete-frame bytes, reject maximum dense legal values above their
+  operation ceilings, and admit exact greatest-under boundary fixtures while
+  keeping accepted paired exchanges below the 200K context floor.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection

@@ -146,8 +146,9 @@ stated maximum.
 - `ANY_MCP_TOOLSETS` is absent by default. A present selector is an exact,
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
-  fail closed without being echoed. The linked production names are `chats`,
-  `files`, `members`, `schema`, and `views-write`; acceptance-blocked
+  fail closed without being echoed. The linked production names are
+  `body-blocks`, `chats`, `files`, `members`, `schema`, and `views-write`;
+  acceptance-blocked
   `discussions` remains rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
@@ -160,6 +161,15 @@ cannot be changed by MCP input after startup. Before any nonempty optional
 selection can authenticate or perform I/O, its effective
 `ANYTYPE_RATE_LIMIT_MAX_RETRIES` value must be in `1..=5`; empty-selection
 Phase 1 startup retains the existing `anytype-api` behavior.
+
+The default-off `body-blocks` registry exposes `body_block_list` plus five
+write workflows for one-block create, update, delete, move, and bounded rich
+page creation. It uses the typed `anytype-api` body model only. Reads return
+exact block identity, document order, and a canonical snapshot hash; mutations
+require that hash and verify their result. Rich page construction is a finite
+flat plan and reports complete, partial, or indeterminate evidence without
+claiming transactionality. Read-only mode retains only `body_block_list`.
+The tools never fetch caller URLs, expose protobufs, or use a mock server.
 
 ### Object-tag exclusion policy status
 
@@ -353,14 +363,14 @@ and resource names return method-not-found before argument decoding or I/O.
 Stable and experimental protocol modes use the same composed catalog.
 
 Only `compact` and `standard` application profiles exist. The optional
-`chats`, `members`, `files`, `schema`, and `views-write` registries are linked
-and can be selected explicitly or combined in one comma-separated
-`ANY_MCP_TOOLSETS` value; they are absent by default. Acceptance-blocked
-`body-blocks` and `discussions`, plus proposed `admin`, are not selectable in
-this release. Their names become valid selectors only when a complete independently reviewed
-production registry is linked.
+`body-blocks`, `chats`, `members`, `files`, `schema`, and `views-write`
+registries are linked and can be selected explicitly or combined in one
+comma-separated `ANY_MCP_TOOLSETS` value; they are absent by default.
+Acceptance-blocked `discussions`, plus proposed `admin`, are not selectable in
+this release. Their names become valid selectors only when a complete,
+independently reviewed production registry is linked.
 
-The pending `body-blocks` R4 design defines six workflow tools for stable typed
+The `body-blocks` R4 registry provides six workflow tools for stable typed
 body pages, verified single-block create/update/delete/move, and finite rich
 page construction; read-only mode retains only body listing. All schemas use
 closed nonrecursive variants, fail opaque and read-restricted content closed,
@@ -369,8 +379,7 @@ omit bookmark/network fetching, and accept YouTube creation only as an exact
 construction is explicitly non-atomic and returns bounded applied, failed, and
 not-attempted evidence without compensation or automatic write resumption.
 
-Production linkage is blocked on `any-2f0g.35` and independent review
-`any-2f0g.36`. The finite `anytype-api` body lifecycle caps decoded Show at
+The finite `anytype-api` body lifecycle caps decoded Show at
 4,194,304 bytes and every non-Show body gRPC response—including foreground and
 fallback ObjectClose—at 65,536 bytes, owns cancellation-resilient bounded
 cleanup, shares one absolute deadline, and exposes the exact first-write-poll
