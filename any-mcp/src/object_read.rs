@@ -153,7 +153,7 @@ impl ObjectReadHandlers {
             cursors,
             search_contract: workflow_tool::<ObjectSearchInput, Page<ObjectOutput>>(
                 "object_search",
-                "Search one bounded Anytype page. Returns summaries and only explicitly projected properties, never document bodies. Boolean and numeric filters are passed through unchanged and may fail due to upstream anytype-heart#2879.",
+                "Search one bounded Anytype page. Returns summaries and only explicitly projected properties, never document bodies. Boolean and numeric filters are passed through unchanged and pagination follows the checked upstream page.",
                 ToolProfile::Read,
             )?,
             get_contract: workflow_tool::<ObjectGetInput, ObjectGetOutput>(

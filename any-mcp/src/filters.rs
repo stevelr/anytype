@@ -269,9 +269,9 @@ impl std::error::Error for FilterNumberError {}
 ///
 /// The tagged form prevents ambiguous free-form JSON and maps one-to-one to
 /// the supported [`anytype::filters::Filter`] variants. Checkbox and numeric
-/// filters are forwarded exactly as supplied. They are currently affected by
-/// upstream `anytype-heart#2879`; this server does not rewrite them into a
-/// query with different semantics.
+/// filters are forwarded exactly as supplied. Live conformance verifies the
+/// configured backend's behavior; this server never rewrites them or filters
+/// returned pages locally.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "format", rename_all = "snake_case", deny_unknown_fields)]
 pub enum McpFilter {
@@ -773,18 +773,210 @@ const fn checkbox_condition(condition: CheckboxCondition) -> Condition {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
     use rmcp::schemars::schema_for;
     use serde_json::{Number, Value, json};
 
     use super::*;
     use crate::{
-        cursor::QueryFingerprint,
+        cursor::{CursorStore, QueryFingerprint},
+        pagination::PageOffset,
         schema::input_schema,
-        validation::{MAX_FILTER_DEPTH, MAX_FILTER_VALUES},
+        validation::{MAX_FILTER_DEPTH, MAX_FILTER_VALUES, ValidationCode},
     };
 
+    #[derive(Clone)]
+    struct AcceptedCase {
+        format: &'static str,
+        condition: Option<&'static str>,
+        input: Value,
+        expected: Value,
+    }
+
+    fn scalar_cases(
+        format: &'static str,
+        property_key: &'static str,
+        api_field: &'static str,
+        value: Value,
+        conditions: &[(&'static str, &'static str)],
+    ) -> Vec<AcceptedCase> {
+        conditions
+            .iter()
+            .map(|&(condition, api_condition)| {
+                let mut input = json!({
+                    "format": format,
+                    "property_key": property_key,
+                    "condition": condition,
+                    "value": value,
+                });
+                let mut expected = json!({
+                    "condition": api_condition,
+                    "property_key": property_key,
+                });
+                expected
+                    .as_object_mut()
+                    .expect("expected filter object")
+                    .insert(api_field.to_owned(), value.clone());
+                input["value"] = value.clone();
+                AcceptedCase {
+                    format,
+                    condition: Some(condition),
+                    input,
+                    expected,
+                }
+            })
+            .collect()
+    }
+
+    fn set_cases(
+        format: &'static str,
+        property_key: &'static str,
+        api_field: &'static str,
+        values: Value,
+        conditions: &[(&'static str, &'static str)],
+    ) -> Vec<AcceptedCase> {
+        conditions
+            .iter()
+            .map(|&(condition, api_condition)| {
+                let input = json!({
+                    "format": format,
+                    "property_key": property_key,
+                    "condition": condition,
+                    "values": values,
+                });
+                let api_value = if format == "select" {
+                    Value::String("alpha,beta".to_owned())
+                } else {
+                    values.clone()
+                };
+                let mut expected = json!({
+                    "condition": api_condition,
+                    "property_key": property_key,
+                });
+                expected
+                    .as_object_mut()
+                    .expect("expected filter object")
+                    .insert(api_field.to_owned(), api_value);
+                AcceptedCase {
+                    format,
+                    condition: Some(condition),
+                    input,
+                    expected,
+                }
+            })
+            .collect()
+    }
+
+    fn accepted_cases() -> Vec<AcceptedCase> {
+        let text_conditions = [
+            ("eq", "eq"),
+            ("ne", "ne"),
+            ("contains", "contains"),
+            ("not_contains", "ncontains"),
+        ];
+        let mut cases = scalar_cases("text", "name", "text", json!("road"), &text_conditions);
+        cases.extend(scalar_cases(
+            "number",
+            "priority",
+            "number",
+            json!(2.5),
+            &[
+                ("eq", "eq"),
+                ("ne", "ne"),
+                ("lt", "lt"),
+                ("lte", "lte"),
+                ("gt", "gt"),
+                ("gte", "gte"),
+            ],
+        ));
+        cases.extend(set_cases(
+            "select",
+            "tag",
+            "select",
+            json!(["alpha", "beta"]),
+            &[("in", "in"), ("not_in", "nin")],
+        ));
+        for (format, property_key, api_field, values) in [
+            (
+                "multi_select",
+                "tags",
+                "multi_select",
+                json!(["alpha", "beta"]),
+            ),
+            ("files", "attachments", "files", json!(["file-1", "file-2"])),
+            (
+                "objects",
+                "links",
+                "objects",
+                json!(["object-1", "object-2"]),
+            ),
+        ] {
+            cases.extend(set_cases(
+                format,
+                property_key,
+                api_field,
+                values,
+                &[("in", "in"), ("not_in", "nin"), ("all_in", "all_in")],
+            ));
+        }
+        cases.extend(scalar_cases(
+            "date",
+            "due",
+            "date",
+            json!("2026-07-21T00:00:00Z"),
+            &[
+                ("eq", "eq"),
+                ("lt", "lt"),
+                ("lte", "lte"),
+                ("gt", "gt"),
+                ("gte", "gte"),
+                ("in", "in"),
+            ],
+        ));
+        cases.extend(scalar_cases(
+            "checkbox",
+            "done",
+            "checkbox",
+            json!(false),
+            &[("eq", "eq"), ("ne", "ne")],
+        ));
+        for (format, api_field, value) in [
+            ("url", "url", "https://example.invalid"),
+            ("email", "email", "agent@example.invalid"),
+            ("phone", "phone", "+1-555-0100"),
+        ] {
+            cases.extend(scalar_cases(
+                format,
+                "contact",
+                api_field,
+                json!(value),
+                &text_conditions,
+            ));
+        }
+        cases.extend([
+            AcceptedCase {
+                format: "empty",
+                condition: None,
+                input: json!({"format":"empty","property_key":"status"}),
+                expected: json!({"condition":"empty","property_key":"status"}),
+            },
+            AcceptedCase {
+                format: "not_empty",
+                condition: None,
+                input: json!({"format":"not_empty","property_key":"status"}),
+                expected: json!({"condition":"nempty","property_key":"status"}),
+            },
+        ]);
+        cases
+    }
+
+    fn decode_filter(input: Value) -> Result<McpFilter, serde_json::Error> {
+        serde_json::from_value(input)
+    }
+
     fn assert_conversion(input: Value, expected: Value) {
-        let filter: McpFilter = serde_json::from_value(input).expect("valid MCP filter");
+        let filter = decode_filter(input).expect("valid MCP filter");
         let actual = serde_json::to_value(filter.to_anytype().expect("Anytype conversion"))
             .expect("serialize Anytype filter");
         assert_eq!(actual, expected);
@@ -792,95 +984,237 @@ mod tests {
 
     #[test]
     fn every_supported_format_and_condition_converts_one_to_one() {
-        for (condition, expected) in [
-            ("eq", "eq"),
-            ("ne", "ne"),
-            ("contains", "contains"),
-            ("not_contains", "ncontains"),
-        ] {
-            assert_conversion(
-                json!({"format":"text","property_key":"name","condition":condition,"value":"road"}),
-                json!({"condition":expected,"property_key":"name","text":"road"}),
-            );
-        }
-        for (condition, expected) in [
-            ("eq", "eq"),
-            ("ne", "ne"),
-            ("lt", "lt"),
-            ("lte", "lte"),
-            ("gt", "gt"),
-            ("gte", "gte"),
-        ] {
-            assert_conversion(
-                json!({"format":"number","property_key":"priority","condition":condition,"value":2.5}),
-                json!({"condition":expected,"property_key":"priority","number":2.5}),
-            );
-        }
-        assert_conversion(
-            json!({"format":"number","property_key":"priority","condition":"eq","value":2}),
-            json!({"condition":"eq","property_key":"priority","number":2}),
+        let cases = accepted_cases();
+        assert_eq!(cases.len(), 43, "accepted conversion inventory changed");
+        let inventory = cases
+            .iter()
+            .map(|case| (case.format, case.condition))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            inventory.len(),
+            43,
+            "accepted inventory contains duplicates"
         );
-        for (condition, expected) in [
-            ("eq", "eq"),
-            ("lt", "lt"),
-            ("lte", "lte"),
-            ("gt", "gt"),
-            ("gte", "gte"),
-            ("in", "in"),
-        ] {
-            assert_conversion(
-                json!({"format":"date","property_key":"due","condition":condition,"value":"2026-07-21T00:00:00Z"}),
-                json!({"condition":expected,"property_key":"due","date":"2026-07-21T00:00:00Z"}),
-            );
+        for case in cases {
+            assert_conversion(case.input, case.expected);
         }
-        for (condition, expected) in [("in", "in"), ("not_in", "nin")] {
-            assert_conversion(
-                json!({"format":"select","property_key":"tag","condition":condition,"values":["alpha","beta"]}),
-                json!({"condition":expected,"property_key":"tag","select":"alpha,beta"}),
-            );
+    }
+
+    fn canonical_inputs_by_format() -> HashMap<&'static str, Value> {
+        let mut inputs = HashMap::new();
+        for case in accepted_cases() {
+            inputs.entry(case.format).or_insert(case.input);
         }
-        for (condition, expected) in [("in", "in"), ("not_in", "nin"), ("all_in", "all_in")] {
-            assert_conversion(
-                json!({"format":"multi_select","property_key":"tags","condition":condition,"values":["alpha","beta"]}),
-                json!({"condition":expected,"property_key":"tags","multi_select":["alpha","beta"]}),
-            );
-            assert_conversion(
-                json!({"format":"files","property_key":"attachments","condition":condition,"values":["file-1","file-2"]}),
-                json!({"condition":expected,"property_key":"attachments","files":["file-1","file-2"]}),
-            );
-            assert_conversion(
-                json!({"format":"objects","property_key":"links","condition":condition,"values":["object-1","object-2"]}),
-                json!({"condition":expected,"property_key":"links","objects":["object-1","object-2"]}),
-            );
+        inputs
+    }
+
+    fn payload_field(format: &str) -> Option<&'static str> {
+        match format {
+            "empty" | "not_empty" => None,
+            "select" | "multi_select" | "files" | "objects" => Some("values"),
+            _ => Some("value"),
         }
-        for (condition, expected) in [("eq", "eq"), ("ne", "ne")] {
-            assert_conversion(
-                json!({"format":"checkbox","property_key":"done","condition":condition,"value":false}),
-                json!({"condition":expected,"property_key":"done","checkbox":false}),
-            );
+    }
+
+    #[test]
+    fn every_excluded_format_condition_pair_is_rejected() {
+        const ALL_CONDITIONS: [&str; 17] = [
+            "eq",
+            "ne",
+            "lt",
+            "lte",
+            "gt",
+            "gte",
+            "contains",
+            "not_contains",
+            "in",
+            "not_in",
+            "all_in",
+            "none",
+            "exists",
+            "all",
+            "not_all_in",
+            "exact_in",
+            "not_exact_in",
+        ];
+        let accepted = accepted_cases()
+            .into_iter()
+            .filter_map(|case| case.condition.map(|condition| (case.format, condition)))
+            .collect::<HashSet<_>>();
+        let inputs = canonical_inputs_by_format();
+        let mut rejected = 0;
+
+        for (format, base) in inputs {
+            for condition in ALL_CONDITIONS {
+                let mut candidate = base.clone();
+                candidate
+                    .as_object_mut()
+                    .expect("filter object")
+                    .insert("condition".to_owned(), json!(condition));
+                if accepted.contains(&(format, condition)) {
+                    assert!(
+                        decode_filter(candidate).is_ok(),
+                        "accepted {format}/{condition} was rejected"
+                    );
+                } else {
+                    rejected += 1;
+                    assert!(
+                        decode_filter(candidate).is_err(),
+                        "excluded {format}/{condition} was accepted"
+                    );
+                }
+            }
         }
-        for (format, field, value) in [
-            ("url", "url", "https://example.invalid"),
-            ("email", "email", "agent@example.invalid"),
-            ("phone", "phone", "+1-555-0100"),
-        ] {
-            let mut expected = json!({"condition":"contains","property_key":"contact"});
-            expected
+        assert_eq!(rejected, 180, "excluded conversion inventory changed");
+    }
+
+    #[test]
+    fn unknown_tags_fields_and_malformed_payloads_are_rejected_for_every_format() {
+        let inputs = canonical_inputs_by_format();
+        assert_eq!(inputs.len(), 13, "format inventory changed");
+
+        for (format, base) in inputs {
+            let mut unknown_field = base.clone();
+            unknown_field
                 .as_object_mut()
-                .unwrap()
-                .insert(field.to_owned(), json!(value));
-            assert_conversion(
-                json!({"format":format,"property_key":"contact","condition":"contains","value":value}),
-                expected,
+                .expect("filter object")
+                .insert("unexpected".to_owned(), json!(true));
+            assert!(
+                decode_filter(unknown_field).is_err(),
+                "{format} accepted an unknown field"
             );
+
+            let mut missing_property = base.clone();
+            missing_property
+                .as_object_mut()
+                .expect("filter object")
+                .remove("property_key");
+            assert!(
+                decode_filter(missing_property).is_err(),
+                "{format} accepted a missing property_key"
+            );
+            let mut null_property = base.clone();
+            null_property["property_key"] = Value::Null;
+            assert!(
+                decode_filter(null_property).is_err(),
+                "{format} accepted a null property_key"
+            );
+            let mut wrong_property = base.clone();
+            wrong_property["property_key"] = json!(7);
+            assert!(
+                decode_filter(wrong_property).is_err(),
+                "{format} accepted a non-string property_key"
+            );
+
+            if let Some(field) = payload_field(format) {
+                let mut missing_condition = base.clone();
+                missing_condition
+                    .as_object_mut()
+                    .expect("filter object")
+                    .remove("condition");
+                assert!(
+                    decode_filter(missing_condition).is_err(),
+                    "{format} accepted a missing condition"
+                );
+                let mut null_condition = base.clone();
+                null_condition["condition"] = Value::Null;
+                assert!(
+                    decode_filter(null_condition).is_err(),
+                    "{format} accepted a null condition"
+                );
+                let mut unknown_condition = base.clone();
+                unknown_condition["condition"] = json!("future_condition");
+                assert!(
+                    decode_filter(unknown_condition).is_err(),
+                    "{format} accepted an unknown condition tag"
+                );
+
+                let mut missing_payload = base.clone();
+                missing_payload
+                    .as_object_mut()
+                    .expect("filter object")
+                    .remove(field);
+                assert!(
+                    decode_filter(missing_payload).is_err(),
+                    "{format} accepted a missing {field}"
+                );
+                let mut null_payload = base.clone();
+                null_payload[field] = Value::Null;
+                assert!(
+                    decode_filter(null_payload).is_err(),
+                    "{format} accepted a null {field}"
+                );
+                let mut wrong_payload_field = base.clone();
+                wrong_payload_field
+                    .as_object_mut()
+                    .expect("filter object")
+                    .remove(field);
+                let wrong_field = if field == "value" { "values" } else { "value" };
+                wrong_payload_field
+                    .as_object_mut()
+                    .expect("filter object")
+                    .insert(wrong_field.to_owned(), json!("wrong"));
+                assert!(
+                    decode_filter(wrong_payload_field).is_err(),
+                    "{format} accepted the wrong payload field"
+                );
+                let mut wrong_payload_type = base.clone();
+                wrong_payload_type[field] = if field == "values" {
+                    json!("not-an-array")
+                } else {
+                    json!(["not-a-scalar"])
+                };
+                assert!(
+                    decode_filter(wrong_payload_type).is_err(),
+                    "{format} accepted the wrong payload type"
+                );
+            } else {
+                for (field, value) in [
+                    ("condition", json!("eq")),
+                    ("value", json!("unexpected")),
+                    ("values", json!(["unexpected"])),
+                ] {
+                    let mut candidate = base.clone();
+                    candidate
+                        .as_object_mut()
+                        .expect("filter object")
+                        .insert(field.to_owned(), value);
+                    assert!(
+                        decode_filter(candidate).is_err(),
+                        "{format} accepted forbidden {field}"
+                    );
+                }
+            }
         }
-        assert_conversion(
-            json!({"format":"empty","property_key":"status"}),
-            json!({"condition":"empty","property_key":"status"}),
+
+        assert!(
+            decode_filter(json!({
+                "format":"future_format",
+                "property_key":"name",
+                "condition":"eq",
+                "value":"road"
+            }))
+            .is_err(),
+            "unknown format tag was accepted"
         );
-        assert_conversion(
-            json!({"format":"not_empty","property_key":"status"}),
-            json!({"condition":"nempty","property_key":"status"}),
+        assert!(
+            decode_filter(json!({
+                "property_key":"name",
+                "condition":"eq",
+                "value":"road"
+            }))
+            .is_err(),
+            "missing format tag was accepted"
+        );
+        assert!(
+            decode_filter(json!({
+                "format":null,
+                "property_key":"name",
+                "condition":"eq",
+                "value":"road"
+            }))
+            .is_err(),
+            "null format tag was accepted"
         );
     }
 
@@ -946,6 +1280,19 @@ mod tests {
         }
     }
 
+    fn select_filter(prefix: &str, count: usize) -> McpFilter {
+        McpFilter::Select {
+            property_key: TypeKey::new("tag").unwrap(),
+            condition: SelectCondition::In,
+            values: FilterValueList::new(
+                (0..count)
+                    .map(|index| SelectReference::new(format!("{prefix}{index}")).unwrap())
+                    .collect(),
+            )
+            .unwrap(),
+        }
+    }
+
     #[test]
     fn aggregate_depth_value_and_nonempty_array_bounds_are_preserved() {
         let mut nested = leaf_filter();
@@ -982,14 +1329,7 @@ mod tests {
         };
         assert!(excessive_filter_count.to_anytype().is_err());
 
-        let values = (0..MAX_FILTER_VALUES)
-            .map(|index| SelectReference::new(format!("v{index}")).unwrap())
-            .collect();
-        let max_values = McpFilter::Select {
-            property_key: TypeKey::new("tag").unwrap(),
-            condition: SelectCondition::In,
-            values: FilterValueList::new(values).unwrap(),
-        };
+        let max_values = select_filter("v", MAX_FILTER_VALUES);
         assert!(max_values.to_anytype().is_ok());
         let empty_values = McpFilter::Select {
             property_key: TypeKey::new("tag").unwrap(),
@@ -997,36 +1337,153 @@ mod tests {
             values: FilterValueList::new(Vec::new()).unwrap(),
         };
         assert!(empty_values.to_anytype().is_err());
-        let aggregate_values = McpFilterExpression {
+        let maximum_aggregate_values = McpFilterExpression {
             operator: FilterOperator::And,
-            conditions: FilterList::new(vec![
-                McpFilter::Select {
-                    property_key: TypeKey::new("tag").unwrap(),
-                    condition: SelectCondition::In,
-                    values: FilterValueList::new(
-                        (0..51)
-                            .map(|index| SelectReference::new(format!("a{index}")).unwrap())
-                            .collect(),
-                    )
-                    .unwrap(),
-                },
-                McpFilter::Select {
-                    property_key: TypeKey::new("tag").unwrap(),
-                    condition: SelectCondition::In,
-                    values: FilterValueList::new(
-                        (0..50)
-                            .map(|index| SelectReference::new(format!("b{index}")).unwrap())
-                            .collect(),
-                    )
-                    .unwrap(),
-                },
-            ])
-            .unwrap(),
+            conditions: FilterList::new(vec![select_filter("a", 50), select_filter("b", 50)])
+                .unwrap(),
             filters: FilterList::new(Vec::new()).unwrap(),
         };
-        assert!(aggregate_values.to_anytype().is_err());
+        assert!(maximum_aggregate_values.to_anytype().is_ok());
+        let excessive_aggregate_values = McpFilterExpression {
+            operator: FilterOperator::And,
+            conditions: FilterList::new(vec![select_filter("a", 51), select_filter("b", 50)])
+                .unwrap(),
+            filters: FilterList::new(Vec::new()).unwrap(),
+        };
+        assert!(excessive_aggregate_values.to_anytype().is_err());
         assert!(FilterNumber::new(Number::from_f64(MAX_FILTER_NUMBER_ABS).unwrap()).is_ok());
-        assert!(FilterNumber::new(Number::from_f64(MAX_FILTER_NUMBER_ABS * 2.0).unwrap()).is_err());
+        assert!(FilterNumber::new(Number::from_f64(MAX_FILTER_NUMBER_ABS + 1.0).unwrap()).is_err());
+    }
+
+    #[test]
+    fn filter_text_date_and_property_key_boundaries_are_exact() {
+        for format in ["text", "url", "email", "phone"] {
+            for (length, accepted) in [
+                (MAX_FILTER_TEXT_CHARS, true),
+                (MAX_FILTER_TEXT_CHARS + 1, false),
+            ] {
+                let input = json!({
+                    "format":format,
+                    "property_key":"contact",
+                    "condition":"eq",
+                    "value":"é".repeat(length),
+                });
+                let converted =
+                    decode_filter(input).is_ok_and(|filter| filter.to_anytype().is_ok());
+                assert_eq!(
+                    converted, accepted,
+                    "{format} text boundary {length} had the wrong result"
+                );
+            }
+        }
+        for (length, accepted) in [
+            (MAX_FILTER_DATE_CHARS, true),
+            (MAX_FILTER_DATE_CHARS + 1, false),
+        ] {
+            let input = json!({
+                "format":"date",
+                "property_key":"due",
+                "condition":"eq",
+                "value":"é".repeat(length),
+            });
+            assert_eq!(
+                decode_filter(input).is_ok_and(|filter| filter.to_anytype().is_ok()),
+                accepted,
+                "date boundary {length} had the wrong result"
+            );
+        }
+
+        for (format, mut input) in canonical_inputs_by_format() {
+            input["property_key"] = json!("é".repeat(crate::domain::MAX_TYPE_KEY_CHARS));
+            let converted = decode_filter(input.clone())
+                .expect("maximum property key should decode")
+                .to_anytype()
+                .expect("maximum property key should convert");
+            assert_eq!(
+                serde_json::to_value(converted).unwrap()["property_key"]
+                    .as_str()
+                    .expect("serialized property key")
+                    .chars()
+                    .count(),
+                crate::domain::MAX_TYPE_KEY_CHARS,
+                "{format} did not preserve the maximum property key"
+            );
+            input["property_key"] = json!("é".repeat(crate::domain::MAX_TYPE_KEY_CHARS + 1));
+            assert!(
+                decode_filter(input).is_err(),
+                "{format} accepted an oversized property key"
+            );
+        }
+    }
+
+    #[test]
+    fn expression_and_per_group_array_boundaries_fail_closed() {
+        let leaf = json!({
+            "format":"text",
+            "property_key":"name",
+            "condition":"eq",
+            "value":"road"
+        });
+        let fifty_conditions = vec![leaf.clone(); crate::validation::MAX_FILTERS];
+        assert!(
+            serde_json::from_value::<McpFilterExpression>(json!({
+                "operator":"and",
+                "conditions":fifty_conditions,
+                "filters":[]
+            }))
+            .is_ok(),
+            "per-group condition maximum should decode"
+        );
+        assert!(
+            serde_json::from_value::<McpFilterExpression>(json!({
+                "operator":"and",
+                "conditions":vec![leaf.clone(); crate::validation::MAX_FILTERS + 1],
+                "filters":[]
+            }))
+            .is_err(),
+            "per-group condition overflow decoded"
+        );
+
+        let child = json!({
+            "operator":"and",
+            "conditions":[leaf],
+            "filters":[]
+        });
+        assert!(
+            serde_json::from_value::<McpFilterExpression>(json!({
+                "operator":"and",
+                "conditions":[],
+                "filters":vec![child.clone(); crate::validation::MAX_FILTERS]
+            }))
+            .is_ok(),
+            "per-group child maximum should decode"
+        );
+        assert!(
+            serde_json::from_value::<McpFilterExpression>(json!({
+                "operator":"and",
+                "conditions":[],
+                "filters":vec![child; crate::validation::MAX_FILTERS + 1]
+            }))
+            .is_err(),
+            "per-group child overflow decoded"
+        );
+
+        for malformed in [
+            json!({"operator":"and"}),
+            json!({"operator":"or","conditions":[],"filters":[]}),
+            json!({
+                "operator":"and",
+                "conditions":[],
+                "filters":[{"operator":"or","conditions":[],"filters":[]}]
+            }),
+        ] {
+            let expression: McpFilterExpression =
+                serde_json::from_value(malformed).expect("closed expression shape decodes");
+            assert!(
+                expression.to_anytype().is_err(),
+                "empty expression reached conversion"
+            );
+        }
     }
 
     #[test]
@@ -1096,6 +1553,66 @@ mod tests {
             }))
             .unwrap()
         );
+    }
+
+    fn expression_fingerprint(filter: Value, operator: &str) -> QueryFingerprint {
+        let expression: McpFilterExpression = serde_json::from_value(json!({
+            "operator":operator,
+            "conditions":[filter],
+            "filters":[]
+        }))
+        .expect("valid cursor filter expression");
+        QueryFingerprint::from_normalized(&expression.cursor_binding_value().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn cursor_resolution_separates_every_supported_semantic_leaf() {
+        let cases = accepted_cases();
+        assert_eq!(cases.len(), 43, "cursor inventory changed");
+        let fingerprints = cases
+            .iter()
+            .map(|case| expression_fingerprint(case.input.clone(), "and"))
+            .collect::<Vec<_>>();
+        let store = CursorStore::new().unwrap();
+
+        for (index, (case, fingerprint)) in cases.iter().zip(&fingerprints).enumerate() {
+            let token = store
+                .issue(PageOffset::new(20).unwrap(), *fingerprint)
+                .unwrap();
+            assert_eq!(store.resolve(&token, *fingerprint).unwrap().get(), 20);
+
+            for (other_index, other) in fingerprints.iter().enumerate() {
+                if index == other_index {
+                    continue;
+                }
+                assert_eq!(
+                    store.resolve(&token, *other).unwrap_err().code(),
+                    ValidationCode::CursorMismatch,
+                    "cursor did not separate inventory entries {index} and {other_index}"
+                );
+            }
+
+            let mut changed_key = case.input.clone();
+            changed_key["property_key"] = json!(format!("changed_{}", case.format));
+            assert_eq!(
+                store
+                    .resolve(&token, expression_fingerprint(changed_key, "and"))
+                    .unwrap_err()
+                    .code(),
+                ValidationCode::CursorMismatch,
+                "{} cursor did not bind the property key",
+                case.format
+            );
+            assert_eq!(
+                store
+                    .resolve(&token, expression_fingerprint(case.input.clone(), "or"))
+                    .unwrap_err()
+                    .code(),
+                ValidationCode::CursorMismatch,
+                "{} cursor did not bind the expression operator",
+                case.format
+            );
+        }
     }
 
     #[test]
