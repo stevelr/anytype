@@ -28,7 +28,8 @@ use tonic::Request;
 const RPC_TIMEOUT: Duration = Duration::from_secs(20);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn live_failure(category: &str, stage: &str) -> TestError {
+fn live_failure(category: &'static str, stage: &'static str) -> TestError {
+    eprintln!("process-watcher live {category} failure at {stage}");
     TestError::Assertion {
         message: format!("process-watcher live {category} failure at {stage}"),
     }
@@ -36,8 +37,8 @@ fn live_failure(category: &str, stage: &str) -> TestError {
 
 async fn bounded<T>(
     duration: Duration,
-    category: &str,
-    stage: &str,
+    category: &'static str,
+    stage: &'static str,
     future: impl Future<Output = T>,
 ) -> TestResult<T> {
     timeout(duration, future)
@@ -67,7 +68,7 @@ fn markdown_import_request(space_id: &str, path: &Path) -> ImportRequest {
 }
 
 #[tokio::test]
-#[ignore = "any-9h0k: requires env-only disposable credentials and complete space inventory"]
+#[ignore = "requires configured real server and disposable test admission"]
 async fn watcher_completes_on_real_import_finish_fallback() {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = callback_ran.clone();
@@ -132,18 +133,51 @@ async fn watcher_completes_on_real_import_finish_fallback() {
                     bounded(
                         EVENT_TIMEOUT,
                         "event-correlation",
-                        "fallback-wait",
+                        "process-wait",
                         watcher.wait_for_process(&grpc, &request, None),
                     )
                     .await?
-                    .map_err(|_| live_failure("event-correlation", "fallback-wait"))?;
+                    .map_err(|_| live_failure("event-correlation", "process-wait"))?;
+
+                    let process_progress = watcher.progress();
+                    if process_progress.import_finish_events == 0 {
+                        if process_progress.processes_started != 1
+                            || process_progress.processes_done != 1
+                        {
+                            eprintln!(
+                                "process-watcher live initial progress mismatch: import_finish_events={}, processes_started={}, processes_done={}",
+                                process_progress.import_finish_events,
+                                process_progress.processes_started,
+                                process_progress.processes_done,
+                            );
+                            return Err(live_failure(
+                                "event-correlation",
+                                "initial-progress",
+                            ));
+                        }
+                        bounded(
+                            EVENT_TIMEOUT,
+                            "event-correlation",
+                            "fallback-wait",
+                            watcher.wait_for_process(&grpc, &request, None),
+                        )
+                        .await?
+                        .map_err(|_| live_failure("event-correlation", "fallback-wait"))?;
+                    }
 
                     let progress = watcher.progress();
                     if progress.import_finish_events != 1
                         || progress.import_finish_objects < 1
-                        || progress.processes_started != 0
-                        || progress.processes_done != 0
+                        || progress.processes_started != process_progress.processes_started
+                        || progress.processes_done != process_progress.processes_done
                     {
+                        eprintln!(
+                            "process-watcher live fallback progress mismatch: import_finish_events={}, import_finish_objects={}, processes_started={}, processes_done={}",
+                            progress.import_finish_events,
+                            progress.import_finish_objects,
+                            progress.processes_started,
+                            progress.processes_done,
+                        );
                         return Err(live_failure("event-correlation", "fallback-progress"));
                     }
                     Ok(())
