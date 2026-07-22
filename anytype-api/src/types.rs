@@ -50,15 +50,21 @@
 //! ## Types
 //!
 //! - [`Type`] - Represents an Anytype object type
+//! - [`TypePropertyClassification`] - Separates featured properties from the
+//!   complete non-featured set replaceable by an update
 //! - [`TypeLayout`] - Layout variants for types (Basic, Profile, Action, Note)
 //! - [`TypeRequest`] - Builder for get/delete operations
 //! - [`NewTypeRequest`] - Builder for creating types
 //! - [`ListTypesRequest`] - Builder for listing types
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use anytype_rpc::anytype::rpc::object::{close as object_close, show as object_show};
+use anytype_rpc::model;
+use prost_types::value::Kind;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::prelude::*;
+use tonic::Request;
 
 use crate::{
     Result,
@@ -66,10 +72,18 @@ use crate::{
     client::AnytypeClient,
     error::{CacheDisabledSnafu, NotFoundSnafu, OtherSnafu, ValidationSnafu},
     filters::{Query, QueryWithFilters},
+    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
     http_client::{GetPaged, HttpClient},
     prelude::*,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
 };
+
+/// Maximum number of featured and ordinary recommended property links
+/// accepted by one exact type-property classification read.
+pub const MAX_TYPE_PROPERTY_LINKS: usize = 1_000;
+
+const RECOMMENDED_FEATURED_RELATIONS: &str = "recommendedFeaturedRelations";
+const RECOMMENDED_RELATIONS: &str = "recommendedRelations";
 
 /// Layout variants for types.
 ///
@@ -144,6 +158,39 @@ pub struct Type {
     /// Properties linked to the type
     #[serde(default, deserialize_with = "deserialize_vec_properties_or_null")]
     pub properties: Vec<Property>,
+}
+
+/// Source-backed classification of the properties linked to a type.
+///
+/// Anytype stores featured and ordinary recommended properties in separate
+/// source lists, while the REST `Type.properties` field combines their visible
+/// definitions and carries no classification boundary. Obtain this model with
+/// [`TypeRequest::classify_properties`].
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TypePropertyClassification {
+    /// Exact ordered IDs from Anytype's featured-property source list.
+    ///
+    /// Some system-featured properties are intentionally omitted from the REST
+    /// type representation, so not every ID necessarily has a corresponding
+    /// entry in [`featured`](Self::featured).
+    pub featured_ids: Vec<String>,
+
+    /// REST-visible featured property definitions, in source-list order.
+    pub featured: Vec<Property>,
+
+    /// Complete non-featured recommended property list, in source-list order.
+    ///
+    /// This is the exact set replaced by [`UpdateTypeRequest::properties`] or
+    /// removed by [`UpdateTypeRequest::clear_properties`].
+    pub recommended: Vec<Property>,
+}
+
+impl TypePropertyClassification {
+    /// Returns the complete property set replaceable by a type update.
+    #[must_use]
+    pub fn replaceable(&self) -> &[Property] {
+        &self.recommended
+    }
 }
 
 fn deserialize_vec_properties_or_null<'de, D>(deserializer: D) -> Result<Vec<Property>, D::Error>
@@ -237,6 +284,7 @@ struct UpdateTypeRequestBody {
 /// Obtained via [`AnytypeClient::get_type`].
 #[derive(Debug)]
 pub struct TypeRequest {
+    api: AnytypeClient,
     client: Arc<HttpClient>,
     limits: ValidationLimits,
     space_id: String,
@@ -247,18 +295,17 @@ pub struct TypeRequest {
 impl TypeRequest {
     /// Creates a new `TypeRequest`.
     pub(crate) fn new(
-        client: Arc<HttpClient>,
-        limits: ValidationLimits,
+        api: AnytypeClient,
         space_id: impl Into<String>,
         type_id: impl Into<String>,
-        cache: Arc<AnytypeCache>,
     ) -> Self {
         Self {
-            client,
-            limits,
+            client: api.client.clone(),
+            limits: api.config.limits.clone(),
             space_id: space_id.into(),
             type_id: type_id.into(),
-            cache,
+            cache: api.cache.clone(),
+            api,
         }
     }
 
@@ -316,6 +363,37 @@ impl TypeRequest {
         self.fetch_direct().await
     }
 
+    /// Reads the exact replaceable property set and its featured-property
+    /// classification without reading or priming either metadata cache.
+    ///
+    /// One direct REST type GET supplies public property definitions. One gRPC
+    /// `ObjectShow` supplies the separate source ID lists because the REST wire
+    /// model flattens them. The shown view is released with a best-effort
+    /// `ObjectClose`. The combined source-list size is capped by
+    /// [`MAX_TYPE_PROPERTY_LINKS`], and the read fails whole on duplicate,
+    /// overlapping, missing, extra, malformed, or inconsistent evidence.
+    ///
+    /// These two reads are not an atomic server snapshot. A concurrent edit or
+    /// eventual-consistency window can therefore produce an error; callers may
+    /// retry the complete read. gRPC credentials are required.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::Validation`] if either scoped ID is invalid
+    /// - [`AnytypeError::NotFound`] if the exact type is not returned
+    /// - [`AnytypeError::GrpcUnavailable`] when gRPC credentials are unavailable
+    /// - [`AnytypeError::Other`] for malformed, oversized, or inconsistent
+    ///   upstream evidence
+    pub async fn classify_properties(self) -> Result<TypePropertyClassification> {
+        self.limits.validate_id(&self.space_id, "space_id")?;
+        self.limits.validate_id(&self.type_id, "type_id")?;
+
+        let typ = self.fetch_direct().await?;
+        let (featured_ids, recommended_ids) =
+            fetch_type_property_source_ids(&self.api, &self.limits, &self.space_id, &self.type_id)
+                .await?;
+        classify_type_properties(typ.properties, featured_ids, recommended_ids)
+    }
+
     async fn fetch_direct(&self) -> Result<Type> {
         let response: TypeResponse = self
             .client
@@ -358,6 +436,203 @@ impl TypeRequest {
         }
         Ok(response.type_)
     }
+}
+
+async fn fetch_type_property_source_ids(
+    client: &AnytypeClient,
+    limits: &ValidationLimits,
+    space_id: &str,
+    type_id: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let grpc = client.grpc_client().await?;
+    let mut commands = grpc.client_commands();
+    let request = object_show::Request {
+        context_id: type_id.to_owned(),
+        object_id: type_id.to_owned(),
+        space_id: space_id.to_owned(),
+        include_relations_as_dependent_objects: false,
+        ..Default::default()
+    };
+    let request = with_token_request(Request::new(request), grpc.token())?;
+    let response = commands
+        .object_show(request)
+        .await
+        .map_err(grpc_status)?
+        .into_inner();
+    ensure_error_ok(response.error.as_ref(), "type property source read")?;
+
+    let close = object_close::Request {
+        context_id: type_id.to_owned(),
+        object_id: type_id.to_owned(),
+        space_id: space_id.to_owned(),
+    };
+    if let Ok(close) = with_token_request(Request::new(close), grpc.token()) {
+        let _ = commands.object_close(close).await;
+    }
+
+    let view = response.object_view.ok_or_else(|| AnytypeError::Other {
+        message: "type property source read returned no object view".to_owned(),
+    })?;
+    type_property_source_ids_from_view(&view, limits, type_id)
+}
+
+fn type_property_source_ids_from_view(
+    view: &model::ObjectView,
+    limits: &ValidationLimits,
+    type_id: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut matching = view.details.iter().filter(|details| details.id == type_id);
+    let first = matching.next().ok_or_else(|| AnytypeError::Other {
+        message: "type property source read omitted the requested type details".to_owned(),
+    })?;
+    let source_ids = type_property_source_ids_from_details(first, limits)?;
+    for duplicate in matching {
+        ensure!(
+            type_property_source_ids_from_details(duplicate, limits)? == source_ids,
+            OtherSnafu {
+                message: "type property source read returned conflicting type details".to_owned(),
+            }
+        );
+    }
+    Ok(source_ids)
+}
+
+fn type_property_source_ids_from_details(
+    details: &model::object_view::DetailsSet,
+    limits: &ValidationLimits,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let details = details
+        .details
+        .as_ref()
+        .ok_or_else(|| AnytypeError::Other {
+            message: "type property source read returned empty type details".to_owned(),
+        })?;
+
+    let featured = property_source_ids(details, RECOMMENDED_FEATURED_RELATIONS, limits)?;
+    let recommended = property_source_ids(details, RECOMMENDED_RELATIONS, limits)?;
+    let count = featured
+        .len()
+        .checked_add(recommended.len())
+        .ok_or_else(|| AnytypeError::Other {
+            message: "type property source link count overflowed".to_owned(),
+        })?;
+    ensure!(
+        count <= MAX_TYPE_PROPERTY_LINKS,
+        OtherSnafu {
+            message: "type property source exceeded the 1,000-link limit".to_owned(),
+        }
+    );
+    Ok((featured, recommended))
+}
+
+fn property_source_ids(
+    details: &prost_types::Struct,
+    key: &str,
+    limits: &ValidationLimits,
+) -> Result<Vec<String>> {
+    let Some(value) = details.fields.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(Kind::ListValue(list)) = value.kind.as_ref() else {
+        return OtherSnafu {
+            message: "type property source field was not a list".to_owned(),
+        }
+        .fail();
+    };
+    ensure!(
+        list.values.len() <= MAX_TYPE_PROPERTY_LINKS,
+        OtherSnafu {
+            message: "type property source exceeded the 1,000-link limit".to_owned(),
+        }
+    );
+
+    let mut ids = Vec::with_capacity(list.values.len());
+    for value in &list.values {
+        let Some(Kind::StringValue(id)) = value.kind.as_ref() else {
+            return OtherSnafu {
+                message: "type property source list contained a non-string ID".to_owned(),
+            }
+            .fail();
+        };
+        if limits.validate_id(id, "property_id").is_err() {
+            return OtherSnafu {
+                message: "type property source list contained an invalid ID".to_owned(),
+            }
+            .fail();
+        }
+        ids.push(id.clone());
+    }
+    Ok(ids)
+}
+
+fn classify_type_properties(
+    properties: Vec<Property>,
+    featured_ids: Vec<String>,
+    recommended_ids: Vec<String>,
+) -> Result<TypePropertyClassification> {
+    let mut classes =
+        HashMap::with_capacity(featured_ids.len().saturating_add(recommended_ids.len()));
+    for id in &featured_ids {
+        ensure!(
+            classes.insert(id.as_str(), true).is_none(),
+            OtherSnafu {
+                message: "type property source lists contained duplicate IDs".to_owned(),
+            }
+        );
+    }
+    for id in &recommended_ids {
+        ensure!(
+            classes.insert(id.as_str(), false).is_none(),
+            OtherSnafu {
+                message: "type property source lists overlapped or contained duplicate IDs"
+                    .to_owned(),
+            }
+        );
+    }
+
+    let mut definitions = HashMap::with_capacity(properties.len());
+    for property in properties {
+        ensure!(
+            classes.contains_key(property.id.as_str()),
+            OtherSnafu {
+                message: "REST type properties contained an unclassified property".to_owned(),
+            }
+        );
+        let id = property.id.clone();
+        ensure!(
+            definitions.insert(id, property).is_none(),
+            OtherSnafu {
+                message: "REST type properties contained a duplicate property".to_owned(),
+            }
+        );
+    }
+
+    let mut featured = Vec::with_capacity(featured_ids.len());
+    for id in &featured_ids {
+        if let Some(property) = definitions.remove(id) {
+            featured.push(property);
+        }
+    }
+
+    let mut recommended = Vec::with_capacity(recommended_ids.len());
+    for id in &recommended_ids {
+        let property = definitions.remove(id).ok_or_else(|| AnytypeError::Other {
+            message: "REST type properties omitted a replaceable property definition".to_owned(),
+        })?;
+        recommended.push(property);
+    }
+    ensure!(
+        definitions.is_empty(),
+        OtherSnafu {
+            message: "REST type properties could not be fully classified".to_owned(),
+        }
+    );
+
+    Ok(TypePropertyClassification {
+        featured_ids,
+        featured,
+        recommended,
+    })
 }
 
 /// Request builder for creating a new type.
@@ -963,13 +1238,7 @@ impl AnytypeClient {
     /// # }
     /// ```
     pub fn get_type(&self, space_id: impl Into<String>, type_id: impl Into<String>) -> TypeRequest {
-        TypeRequest::new(
-            self.client.clone(),
-            self.config.limits.clone(),
-            space_id,
-            type_id,
-            self.cache.clone(),
-        )
+        TypeRequest::new(self.clone(), space_id, type_id)
     }
 
     /// Creates a request builder for creating a new type.
@@ -1178,6 +1447,33 @@ impl AnytypeClient {
 mod tests {
     use super::*;
 
+    fn valid_id(suffix: char) -> String {
+        format!("bafyrei{}{}", "a".repeat(51), suffix)
+    }
+
+    fn property(id: &str, key: &str) -> Property {
+        serde_json::from_value(serde_json::json!({
+            "name": key,
+            "key": key,
+            "id": id,
+            "format": "text"
+        }))
+        .expect("property fixture")
+    }
+
+    fn string_list(ids: &[String]) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(Kind::ListValue(prost_types::ListValue {
+                values: ids
+                    .iter()
+                    .map(|id| prost_types::Value {
+                        kind: Some(Kind::StringValue(id.clone())),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
     fn update_property(name: &str, key: &str) -> CreateTypeProperty {
         CreateTypeProperty {
             name: name.to_string(),
@@ -1220,6 +1516,146 @@ mod tests {
         assert_eq!(
             serde_json::to_value(body).unwrap(),
             serde_json::json!({ "properties": [] })
+        );
+    }
+
+    #[test]
+    fn type_property_classification_preserves_source_order_and_hidden_featured_ids() {
+        let hidden_featured_id = valid_id('b');
+        let visible_featured_id = valid_id('c');
+        let first_id = valid_id('d');
+        let second_id = valid_id('e');
+
+        let classified = classify_type_properties(
+            vec![
+                property(&visible_featured_id, "tag"),
+                property(&first_id, "first"),
+                property(&second_id, "second"),
+            ],
+            vec![hidden_featured_id.clone(), visible_featured_id.clone()],
+            vec![first_id.clone(), second_id.clone()],
+        )
+        .expect("classification");
+
+        assert_eq!(
+            classified.featured_ids,
+            vec![hidden_featured_id, visible_featured_id]
+        );
+        assert_eq!(
+            classified
+                .featured
+                .iter()
+                .map(|property| property.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![classified.featured_ids[1].as_str()]
+        );
+        assert_eq!(
+            classified
+                .replaceable()
+                .iter()
+                .map(|property| property.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first_id.as_str(), second_id.as_str()]
+        );
+    }
+
+    #[test]
+    fn type_property_classification_rejects_incomplete_or_ambiguous_evidence() {
+        let featured_id = valid_id('b');
+        let recommended_id = valid_id('c');
+
+        assert!(
+            classify_type_properties(
+                vec![property(&featured_id, "tag")],
+                vec![featured_id.clone()],
+                vec![recommended_id],
+            )
+            .is_err()
+        );
+        assert!(
+            classify_type_properties(
+                vec![property(&featured_id, "tag")],
+                vec![featured_id.clone()],
+                vec![featured_id],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn type_property_source_view_reads_separate_lists() {
+        let type_id = valid_id('b');
+        let featured_id = valid_id('c');
+        let recommended_id = valid_id('d');
+        let details = prost_types::Struct {
+            fields: [
+                (
+                    RECOMMENDED_FEATURED_RELATIONS.to_owned(),
+                    string_list(std::slice::from_ref(&featured_id)),
+                ),
+                (
+                    RECOMMENDED_RELATIONS.to_owned(),
+                    string_list(std::slice::from_ref(&recommended_id)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let view = model::ObjectView {
+            details: vec![model::object_view::DetailsSet {
+                id: type_id.clone(),
+                details: Some(details),
+                sub_ids: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let ids = type_property_source_ids_from_view(&view, &ValidationLimits::default(), &type_id)
+            .expect("source IDs");
+        assert_eq!(ids, (vec![featured_id], vec![recommended_id]));
+    }
+
+    #[test]
+    fn type_property_source_view_rejects_malformed_and_oversized_lists() {
+        let type_id = valid_id('b');
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            RECOMMENDED_RELATIONS.to_owned(),
+            prost_types::Value {
+                kind: Some(Kind::StringValue("not-a-list".to_owned())),
+            },
+        );
+        let malformed = model::ObjectView {
+            details: vec![model::object_view::DetailsSet {
+                id: type_id.clone(),
+                details: Some(prost_types::Struct { fields }),
+                sub_ids: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            type_property_source_ids_from_view(&malformed, &ValidationLimits::default(), &type_id,)
+                .is_err()
+        );
+
+        let ids = (0..=MAX_TYPE_PROPERTY_LINKS)
+            .map(|index| valid_id(char::from(b'b' + u8::try_from(index % 25).unwrap())))
+            .collect::<Vec<_>>();
+        let oversized = model::ObjectView {
+            details: vec![model::object_view::DetailsSet {
+                id: type_id.clone(),
+                details: Some(prost_types::Struct {
+                    fields: [(RECOMMENDED_RELATIONS.to_owned(), string_list(&ids))]
+                        .into_iter()
+                        .collect(),
+                }),
+                sub_ids: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            type_property_source_ids_from_view(&oversized, &ValidationLimits::default(), &type_id,)
+                .is_err()
         );
     }
 
