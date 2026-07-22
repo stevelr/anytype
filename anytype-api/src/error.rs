@@ -264,6 +264,28 @@ pub enum AnytypeError {
         detail: String,
     },
 
+    /// A body-block write may have reached the server but its exact final
+    /// state could not be proved within finite verification bounds.
+    ///
+    /// Callers must perform a fresh body read before deciding whether any
+    /// retry is safe. Standard formatting redacts object and block identity;
+    /// `observed` is the last complete, validated snapshot when one was read.
+    #[snafu(display(
+        "Body mutation outcome is indeterminate after {attempts} verification attempts in {timeout:?} (identity redacted)"
+    ))]
+    BodyMutationIndeterminate {
+        /// Object whose body may have changed.
+        object_id: String,
+        /// Requested or server-returned affected block ID, when known.
+        block_id: Option<crate::body::BlockId>,
+        /// Number of completed fresh verification reads.
+        attempts: usize,
+        /// Finite mutation/verification timeout.
+        timeout: std::time::Duration,
+        /// Last complete validated body snapshot, when available.
+        observed: Option<Box<crate::body::BodySnapshot>>,
+    },
+
     /// The previous operation could not be confirmed within the expected time interval.
     /// For more information, see the notes about eventual consistency in the project [README](../README.md).
     #[snafu(display(
@@ -392,6 +414,9 @@ impl AnytypeError {
             Self::KeyStore { .. } => ("keystore", None, None, None),
             Self::CacheDisabled => ("cache_disabled", None, None, None),
             Self::BodyGraph { .. } => ("body_graph", None, None, None),
+            Self::BodyMutationIndeterminate { .. } => {
+                ("body_mutation_indeterminate", None, None, None)
+            }
             Self::VerifyTimeout { .. } => ("verify_timeout", None, None, None),
             Self::Other { .. } => ("other", None, None, None),
         };
@@ -441,6 +466,7 @@ impl AnytypeError {
             | Self::Validation { .. }
             | Self::CacheDisabled
             | Self::BodyGraph { .. }
+            | Self::BodyMutationIndeterminate { .. }
             | Self::VerifyTimeout { .. }
             | Self::Other { .. } => false,
         }
