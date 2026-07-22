@@ -795,6 +795,64 @@ impl Filter {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_and_checkbox_query_values_are_forwarded_without_coercion() {
+        let decimal = "-2.5"
+            .parse::<Number>()
+            .expect("finite JSON decimal fixture");
+        let cases = [
+            (Filter::number_equal("score", 5), ("score", "5")),
+            (Filter::number_not_equal("score", 5), ("score[ne]", "5")),
+            (Filter::number_less("score", 5), ("score[lt]", "5")),
+            (
+                Filter::number_less_or_equal("score", 5),
+                ("score[lte]", "5"),
+            ),
+            (
+                Filter::number_greater("score", decimal),
+                ("score[gt]", "-2.5"),
+            ),
+            (
+                Filter::number_greater_or_equal("score", 5),
+                ("score[gte]", "5"),
+            ),
+            (Filter::checkbox_equal("done", true), ("done", "true")),
+            (
+                Filter::checkbox_not_equal("done", false),
+                ("done[ne]", "false"),
+            ),
+        ];
+
+        for (filter, expected) in cases {
+            assert_eq!(
+                filter.to_query(),
+                (expected.0.to_owned(), expected.1.to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_numeric_and_checkbox_conditions_fail_validation() {
+        let number_in = Filter::Number {
+            condition: Condition::In,
+            property_key: "score".to_owned(),
+            number: Number::from(5),
+        };
+        let checkbox_in = Filter::Checkbox {
+            condition: Condition::In,
+            property_key: "done".to_owned(),
+            checkbox: true,
+        };
+
+        assert!(number_in.validate().is_some());
+        assert!(checkbox_in.validate().is_some());
+    }
+}
+
 /// Expression filters for list and search functions
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]

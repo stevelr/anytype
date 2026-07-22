@@ -36,3 +36,9 @@ This repository is a rust workspace for Anytype automation, with client librarie
 </td>
 </tr>
 </table>
+
+## Compatibility notes
+
+- [Numeric and checkbox filter status](FILTER_STATUS.md) records the
+  supported condition, value-encoding, and endpoint matrix plus the disposition
+  of the historical upstream parsing bug.

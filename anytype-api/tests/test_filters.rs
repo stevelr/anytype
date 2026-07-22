@@ -17,17 +17,27 @@
 //!
 //! ```bash
 //! source .test-env
-//! cargo test -p anytype --test test_filters
+//! ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_filters \
+//!   test_filter_number_checkbox_condition_matrix -- --ignored
 //! ```
 
 mod common;
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use anytype::{
     prelude::*,
     test_assert,
-    test_util::{TestContext, TestResult, with_test_context},
+    test_util::{
+        DisposableRun, TestContext, TestError, TestResult, with_disposable_space_context,
+        with_test_context,
+    },
 };
 use serial_test::serial;
+use tokio::time::{Duration, sleep};
 
 use crate::common::{
     create_object_with_retry, ensure_properties_and_type, lookup_property_tag_with_retry,
@@ -42,6 +52,10 @@ use crate::common::{
 async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, String)> {
     // Ensure all required properties exist before creating objects
     let type_key = ensure_properties_and_type(ctx).await?;
+    let decimal_priority =
+        serde_json::Number::from_f64(-2.5).ok_or_else(|| TestError::Assertion {
+            message: "finite decimal fixture must be representable".to_owned(),
+        })?;
     let mut objects = Vec::new();
 
     // Object 1: High priority, checked, recent date
@@ -52,7 +66,7 @@ async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, Stri
             .name(&obj1_name)
             .body("Important task")
             .set_text("description", "High priority item")
-            .set_number("priority", 1)
+            .set_number("priority", decimal_priority.clone())
             .set_checkbox("done", true)
             .create()
             .await
@@ -110,6 +124,176 @@ async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, Stri
     objects.push(obj4);
 
     Ok((objects, type_key))
+}
+
+#[derive(Clone, Copy)]
+enum NumericCheckboxCase {
+    NumberEqualInteger,
+    NumberNotEqual,
+    NumberLess,
+    NumberLessOrEqual,
+    NumberGreater,
+    NumberGreaterOrEqual,
+    NumberEqualDecimal,
+    CheckboxEqualTrue,
+    CheckboxEqualFalse,
+    CheckboxNotEqualTrue,
+    CheckboxNotEqualFalse,
+}
+
+impl NumericCheckboxCase {
+    const ALL: [Self; 11] = [
+        Self::NumberEqualInteger,
+        Self::NumberNotEqual,
+        Self::NumberLess,
+        Self::NumberLessOrEqual,
+        Self::NumberGreater,
+        Self::NumberGreaterOrEqual,
+        Self::NumberEqualDecimal,
+        Self::CheckboxEqualTrue,
+        Self::CheckboxEqualFalse,
+        Self::CheckboxNotEqualTrue,
+        Self::CheckboxNotEqualFalse,
+    ];
+
+    fn filter(self) -> TestResult<Filter> {
+        let filter = match self {
+            Self::NumberEqualInteger => Filter::number_equal("priority", 5),
+            Self::NumberNotEqual => Filter::number_not_equal("priority", 5),
+            Self::NumberLess => Filter::number_less("priority", 5),
+            Self::NumberLessOrEqual => Filter::number_less_or_equal("priority", 5),
+            Self::NumberGreater => Filter::number_greater("priority", 5),
+            Self::NumberGreaterOrEqual => Filter::number_greater_or_equal("priority", 5),
+            Self::NumberEqualDecimal => Filter::number_equal(
+                "priority",
+                serde_json::Number::from_f64(-2.5).ok_or_else(|| TestError::Assertion {
+                    message: "finite decimal filter must be representable".to_owned(),
+                })?,
+            ),
+            Self::CheckboxEqualTrue => Filter::checkbox_equal("done", true),
+            Self::CheckboxEqualFalse => Filter::checkbox_equal("done", false),
+            Self::CheckboxNotEqualTrue => Filter::checkbox_not_equal("done", true),
+            Self::CheckboxNotEqualFalse => Filter::checkbox_not_equal("done", false),
+        };
+        Ok(filter)
+    }
+
+    const fn expected_indexes(self) -> &'static [usize] {
+        match self {
+            Self::NumberEqualInteger => &[1],
+            Self::NumberNotEqual => &[0, 2],
+            Self::NumberLess => &[0],
+            Self::NumberLessOrEqual => &[0, 1],
+            Self::NumberGreater => &[2],
+            Self::NumberGreaterOrEqual => &[1, 2],
+            Self::NumberEqualDecimal => &[0],
+            Self::CheckboxEqualTrue | Self::CheckboxNotEqualFalse => &[0],
+            Self::CheckboxEqualFalse | Self::CheckboxNotEqualTrue => &[1, 2],
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::NumberEqualInteger => "number eq integer",
+            Self::NumberNotEqual => "number ne",
+            Self::NumberLess => "number lt",
+            Self::NumberLessOrEqual => "number lte",
+            Self::NumberGreater => "number gt",
+            Self::NumberGreaterOrEqual => "number gte",
+            Self::NumberEqualDecimal => "number eq negative decimal",
+            Self::CheckboxEqualTrue => "checkbox eq true",
+            Self::CheckboxEqualFalse => "checkbox eq false",
+            Self::CheckboxNotEqualTrue => "checkbox ne true",
+            Self::CheckboxNotEqualFalse => "checkbox ne false",
+        }
+    }
+}
+
+fn sorted_ids(objects: &[Object]) -> Vec<String> {
+    let mut ids = objects
+        .iter()
+        .map(|object| object.id.clone())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
+fn expected_ids(objects: &[Object], indexes: &[usize]) -> TestResult<Vec<String>> {
+    let mut ids = Vec::with_capacity(indexes.len());
+    for index in indexes {
+        let object = objects.get(*index).ok_or_else(|| TestError::Assertion {
+            message: "filter fixture index is out of bounds".to_owned(),
+        })?;
+        ids.push(object.id.clone());
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+async fn assert_filter_case(
+    ctx: &TestContext,
+    objects: &[Object],
+    type_key: &str,
+    case: NumericCheckboxCase,
+) -> TestResult<()> {
+    const MAX_INDEX_ATTEMPTS: usize = 20;
+
+    let expected = expected_ids(objects, case.expected_indexes())?;
+    let mut last_list_count = 0;
+    let mut last_search_count = 0;
+    for attempt in 1..=MAX_INDEX_ATTEMPTS {
+        let listed = ctx
+            .client
+            .objects(&ctx.space_id)
+            .filter(Filter::type_in([type_key]))
+            .filter(case.filter()?)
+            .limit(100)
+            .list()
+            .await?
+            .collect_all()
+            .await?;
+        let searched = ctx
+            .client
+            .search_in(&ctx.space_id)
+            .types([type_key])
+            .filters(FilterExpression::from(vec![case.filter()?]))
+            .limit(100)
+            .execute()
+            .await?
+            .collect_all()
+            .await?;
+
+        let listed_ids = sorted_ids(&listed);
+        let searched_ids = sorted_ids(&searched);
+        if listed_ids == expected && searched_ids == expected {
+            return Ok(());
+        }
+        last_list_count = listed_ids.len();
+        last_search_count = searched_ids.len();
+        if attempt < MAX_INDEX_ATTEMPTS {
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    Err(TestError::Assertion {
+        message: format!(
+            "{} did not converge to {} exact cleanup-owned identities: list returned {}, search returned {}",
+            case.label(),
+            expected.len(),
+            last_list_count,
+            last_search_count,
+        ),
+    })
+}
+
+fn assert_disposable_completed(outcome: DisposableRun<()>, callback_ran: &AtomicBool, suite: &str) {
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("{suite} skipped before callback: {reason:?}");
+        }
+    }
 }
 
 // =============================================================================
@@ -176,7 +360,7 @@ async fn test_filter_is_empty() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "upstream anytype-heart#2879 rejects boolean query-filter values"]
+#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
 #[serial]
 async fn test_filter_checkbox_true() -> TestResult<()> {
     with_test_context(|ctx| async move {
@@ -220,7 +404,7 @@ async fn test_filter_checkbox_true() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "upstream anytype-heart#2879 rejects boolean query-filter values"]
+#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
 #[serial]
 async fn test_filter_checkbox_false() -> TestResult<()> {
     with_test_context(|ctx| async move {
@@ -276,7 +460,7 @@ async fn test_filter_checkbox_false() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "upstream anytype-heart#2879 rejects numeric query-filter values"]
+#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
 #[serial]
 async fn test_filter_number_equal() -> TestResult<()> {
     with_test_context(|ctx| async move {
@@ -303,7 +487,7 @@ async fn test_filter_number_equal() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "upstream anytype-heart#2879 rejects numeric query-filter values"]
+#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
 #[serial]
 async fn test_filter_number_greater_than() -> TestResult<()> {
     with_test_context(|ctx| async move {
@@ -330,7 +514,7 @@ async fn test_filter_number_greater_than() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "upstream anytype-heart#2879 rejects numeric query-filter values"]
+#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
 #[serial]
 async fn test_filter_number_less_than() -> TestResult<()> {
     with_test_context(|ctx| async move {
@@ -357,7 +541,7 @@ async fn test_filter_number_less_than() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "upstream anytype-heart#2879 rejects numeric query-filter values"]
+#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
 #[serial]
 async fn test_filter_number_range() -> TestResult<()> {
     with_test_context(|ctx| async move {
@@ -386,6 +570,31 @@ async fn test_filter_number_range() -> TestResult<()> {
         Ok(())
     })
     .await
+}
+
+#[tokio::test]
+#[test_log::test]
+#[ignore = "requires configured real server and disposable test admission"]
+#[serial(disposable_anytype_api)]
+async fn test_filter_number_checkbox_condition_matrix() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "filter-number-checkbox-matrix",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let (objects, type_key) = create_test_objects(&ctx).await?;
+                for case in NumericCheckboxCase::ALL {
+                    assert_filter_case(&ctx, &objects, &type_key, case).await?;
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe numeric/checkbox filter harness");
+    assert_disposable_completed(outcome, &callback_ran, "numeric/checkbox filter matrix");
 }
 
 // =============================================================================
@@ -676,7 +885,7 @@ async fn test_filter_select_not_in() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "upstream anytype-heart#2879 rejects boolean and numeric query-filter values"]
+#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
 #[serial]
 async fn test_filter_expression_and() -> TestResult<()> {
     with_test_context(|ctx| async move {
