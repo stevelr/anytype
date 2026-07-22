@@ -162,7 +162,7 @@ impl AnyMcpServer {
         Self::new_with_optional_registries(runtime, production_optional_registries())
     }
 
-    fn new_with_optional_registries(
+    pub(crate) fn new_with_optional_registries(
         runtime: RuntimeContext,
         linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],
     ) -> Result<Self, ServerBuildError> {
@@ -329,9 +329,23 @@ impl AnyMcpServer {
         (self.state.access == MutationAccess::ReadOnly).then(|| tool_error(&ToolError::read_only()))
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "stable-version dispatch seam is used by tests")
+    )]
     pub(crate) async fn dispatch_tool(
         &self,
         request: CallToolRequestParams,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.dispatch_tool_for_protocol(request, &PROTOCOL_VERSION, cancellation)
+            .await
+    }
+
+    pub(crate) async fn dispatch_tool_for_protocol(
+        &self,
+        request: CallToolRequestParams,
+        protocol_version: &ProtocolVersion,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         let name = request.name.as_ref();
@@ -370,7 +384,13 @@ impl AnyMcpServer {
         }
         if let Some(registry) = self.state.optional_catalog.registry_for_tool(name) {
             return registry
-                .call_tool(request, &self.runtime, &self.state.cursors, cancellation)
+                .call_tool(
+                    request,
+                    &self.runtime,
+                    &self.state.cursors,
+                    protocol_version,
+                    cancellation,
+                )
                 .await;
         }
         let arguments = request.arguments;
@@ -579,7 +599,8 @@ impl ServerHandler for AnyMcpServer {
         // and is large in debug builds. Keep it off rmcp's Tokio worker stack;
         // repeated production stdio calls otherwise eventually overflow a
         // worker even when each individual operation succeeds.
-        Box::pin(self.dispatch_tool(request, &context.ct)).await
+        let protocol_version = context.protocol_version().unwrap_or(PROTOCOL_VERSION);
+        Box::pin(self.dispatch_tool_for_protocol(request, &protocol_version, &context.ct)).await
     }
 
     async fn list_resources(
@@ -926,7 +947,7 @@ mod tests {
     const MAX_AUDITED_STRING_CHARS: u64 = 100_000;
     const MAX_AUDITED_ARRAY_ITEMS: u64 = 10_000;
     const MAX_AUDITED_ENUM_VALUES: usize = 128;
-    const MAX_AUDITED_NUMBER_ABS: f64 = 1_000_000_000_000_000.0;
+    const MAX_AUDITED_NUMBER_ABS: f64 = 9_007_199_254_740_991.0;
     const MAX_AUDITED_ANNOTATION_CHARS: usize = 4_096;
 
     struct SchemaAudit<'root> {
@@ -2149,7 +2170,7 @@ mod tests {
                 "impractical number",
                 json!({
                     "type": "number",
-                    "minimum": -1_000_000_000_000_001_f64,
+                    "minimum": -9_007_199_254_740_992_f64,
                     "maximum": 1
                 }),
                 "missing or impractical numeric boundary",

@@ -628,7 +628,11 @@ pub(crate) async fn dispatch_modern(
         "tools/call" => match decode::<ToolCallParams>(params) {
             Ok(params) if params.request_state.is_none() && params.input_responses.is_none() => {
                 server
-                    .dispatch_tool(params.into_rmcp(), cancellation)
+                    .dispatch_tool_for_protocol(
+                        params.into_rmcp(),
+                        &rmcp::model::ProtocolVersion::V_2026_07_28,
+                        cancellation,
+                    )
                     .await
                     .and_then(encode_result)
                     .map(|mut result| {

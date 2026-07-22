@@ -15,8 +15,9 @@ use std::{
 
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorData, ReadResourceRequestMethod,
-        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceTemplate, Tool,
+        CallToolRequestParams, CallToolResult, ErrorData, ProtocolVersion,
+        ReadResourceRequestMethod, ReadResourceRequestParams, ReadResourceResult, Resource,
+        ResourceTemplate, Tool,
     },
     schemars::{JsonSchema, Schema, SchemaGenerator, json_schema},
 };
@@ -295,6 +296,7 @@ pub trait OptionalToolsetRegistry: fmt::Debug + Send + Sync {
         request: CallToolRequestParams,
         runtime: &'a RuntimeContext,
         cursors: &'a CursorStore,
+        protocol_version: &'a ProtocolVersion,
         cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>>;
 

@@ -8,6 +8,29 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add the production-unlinked `files` read slice through `anytype-api` only:
+  bounded exact-ID metadata and ranged byte reads, strong-validator and HTTP
+  evidence reconciliation, native MCP image/audio/text/blob content selected
+  by MIME type and negotiated revision, and canonical hash-bound
+  `anytype-file://bytes/...` resource reads. Strict schemas, frame and token
+  ceilings, scripted direct-handler coverage, and preview stdio dispatch tests
+  lock the contract without enabling the incomplete optional registry; upload,
+  bounded 1-MiB/page name resolution with caller-scoped cumulative retry and
+  error-evidence controls, real-headless acceptance, and atomic production
+  linkage remain separately tracked. Until those prerequisites land, this
+  slice rejects non-ID space references before I/O and the entire module is
+  compiled only for tests. The acceptance matrix includes exact text boundary
+  selection, four deterministic 64-KiB byte patterns, maximum-field tool and
+  resource budgets, cross-identity and refreshed-MIME resource reads,
+  cancellation/timeout, retry-attempt metrics, and diagnostic redaction.
+  Every deterministic 64-KiB corpus now uses maximum legal metadata fields and
+  round-trips decoded tool and resource payloads exactly; separate HEAD, GET,
+  and mixed 429/504/transport-close cases prove the six-attempt ceiling.
+  Preview tests lock public template caching and private zero-TTL resource
+  reads, while overrun evidence and seeded failure diagnostics remain private.
+  Oversized bodies are classified only inside successful `200`/`206` paths;
+  nonempty `412` and `416` control responses retain conflict and validation
+  semantics without emitting partial content.
 - Add a transport-neutral exported-Markdown no-op protocol scenario with fast
   exact-forwarding and lossy-repeat regressions plus ignored serial direct and
   production-stdio real-server cases. Independent stable REST exports and
