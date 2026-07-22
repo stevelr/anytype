@@ -286,6 +286,18 @@ pub enum AnytypeError {
         observed: Option<Box<crate::body::BodySnapshot>>,
     },
 
+    /// A direct collection-membership read could not establish complete,
+    /// identity-bound evidence.
+    ///
+    /// This variant never represents absence. Callers must treat it as an
+    /// indeterminate observation and must not use it to justify retrying a
+    /// preceding mutation.
+    #[snafu(display("Collection membership evidence is incomplete: {kind}"))]
+    CollectionMembershipEvidence {
+        /// Closed, payload-free classification of the failed evidence check.
+        kind: crate::views::CollectionMembershipEvidenceKind,
+    },
+
     /// The previous operation could not be confirmed within the expected time interval.
     /// For more information, see the notes about eventual consistency in the project [README](../README.md).
     #[snafu(display(
@@ -417,6 +429,9 @@ impl AnytypeError {
             Self::BodyMutationIndeterminate { .. } => {
                 ("body_mutation_indeterminate", None, None, None)
             }
+            Self::CollectionMembershipEvidence { .. } => {
+                ("collection_membership_evidence", None, None, None)
+            }
             Self::VerifyTimeout { .. } => ("verify_timeout", None, None, None),
             Self::Other { .. } => ("other", None, None, None),
         };
@@ -467,6 +482,7 @@ impl AnytypeError {
             | Self::CacheDisabled
             | Self::BodyGraph { .. }
             | Self::BodyMutationIndeterminate { .. }
+            | Self::CollectionMembershipEvidence { .. }
             | Self::VerifyTimeout { .. }
             | Self::Other { .. } => false,
         }

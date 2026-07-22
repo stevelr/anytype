@@ -4,10 +4,18 @@
 
 mod common;
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use anytype::{
     error::AnytypeError,
     prelude::*,
-    test_util::{TestError, TestResult, unique_suffix, with_test_context},
+    test_util::{
+        DisposableRun, TestError, TestResult, unique_suffix, with_disposable_space_context,
+        with_test_context,
+    },
 };
 use common::retry_definitive_rate_limit;
 use serial_test::serial;
@@ -347,4 +355,135 @@ async fn test_view_add_remove_objects_collection() -> TestResult<()> {
         Ok(())
     })
     .await
+}
+
+#[tokio::test]
+#[test_log::test]
+#[ignore = "requires configured real server and disposable test admission"]
+#[serial(disposable_anytype_api)]
+async fn test_direct_collection_membership_present_absent_and_query_rejection() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let outcome = Box::pin(with_disposable_space_context(
+        "direct-collection-membership",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let collection_type = ctx
+                    .create_collection_type_fixture(format!(
+                        "Membership Collection {}",
+                        unique_suffix()
+                    ))
+                    .await?;
+                let collection = ctx
+                    .create_collection_fixture(
+                        &collection_type,
+                        format!("Membership List {}", unique_suffix()),
+                    )
+                    .await?;
+                let object = ctx
+                    .client
+                    .new_object(&ctx.space_id, "page")
+                    .name(format!("Membership Object {}", unique_suffix()))
+                    .create()
+                    .await?;
+                ctx.register_object(&object.id);
+
+                let verify = VerifyConfig::default();
+                let absent = verify_semantic(
+                    &verify,
+                    "direct collection membership absence",
+                    &object.id,
+                    || {
+                        ctx.client.observe_collection_membership(
+                            &ctx.space_id,
+                            &collection.id,
+                            &object.id,
+                        )
+                    },
+                    |observation| observation.state == CollectionMembershipState::Absent,
+                )
+                .await?;
+                assert_eq!(absent.space_id, ctx.space_id);
+                assert_eq!(absent.collection_id, collection.id);
+                assert_eq!(absent.object_id, object.id);
+
+                ctx.client
+                    .view_add_objects(&ctx.space_id, &collection.id, [&object.id])
+                    .await?;
+                let present = verify_semantic(
+                    &verify,
+                    "direct collection membership presence",
+                    &object.id,
+                    || {
+                        ctx.client.observe_collection_membership(
+                            &ctx.space_id,
+                            &collection.id,
+                            &object.id,
+                        )
+                    },
+                    |observation| observation.state == CollectionMembershipState::Present,
+                )
+                .await?;
+                assert_eq!(present.state, CollectionMembershipState::Present);
+
+                ctx.client
+                    .view_remove_object(&ctx.space_id, &collection.id, &object.id)
+                    .await?;
+                let removed = verify_semantic(
+                    &verify,
+                    "direct collection membership removal",
+                    &object.id,
+                    || {
+                        ctx.client.observe_collection_membership(
+                            &ctx.space_id,
+                            &collection.id,
+                            &object.id,
+                        )
+                    },
+                    |observation| observation.state == CollectionMembershipState::Absent,
+                )
+                .await?;
+                assert_eq!(removed.state, CollectionMembershipState::Absent);
+
+                let types = ctx.client.types(&ctx.space_id).list().await?;
+                let set_type = types
+                    .items
+                    .iter()
+                    .find(|typ| typ.layout == ObjectLayout::Set)
+                    .ok_or_else(|| TestError::Assertion {
+                        message: "disposable space has no Set-layout type".to_owned(),
+                    })?;
+                let query = ctx
+                    .client
+                    .new_object(&ctx.space_id, &set_type.key)
+                    .name(format!("Membership Query {}", unique_suffix()))
+                    .create()
+                    .await?;
+                ctx.register_object(&query.id);
+                let error = ctx
+                    .client
+                    .observe_collection_membership(&ctx.space_id, &query.id, &object.id)
+                    .await
+                    .expect_err("Set/query objects must fail closed");
+                assert!(matches!(
+                    error,
+                    AnytypeError::CollectionMembershipEvidence {
+                        kind: CollectionMembershipEvidenceKind::NotACollection
+                    }
+                ));
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("disposable membership harness");
+
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("direct collection membership skipped before callback: {reason:?}");
+        }
+    }
 }

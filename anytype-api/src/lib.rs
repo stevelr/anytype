@@ -131,7 +131,8 @@
 //! - Naming exceptions to avoid confusion:
 //!   - `get_type()` avoids the `type` keyword (`object()` and `space()` keep the simple name).
 //!   - View-related APIs use `view_*` to disambiguate list/collection/query objects
-//!     (`list_views`, `view_list_objects`, `view_add_objects`, `view_remove_object`).
+//!     (`list_views`, `view_list_objects`, `view_add_objects`, `view_remove_object`), while
+//!     `observe_collection_membership` reads canonical direct membership without a view.
 //!
 //! ## Secret-safe HTTP diagnostics
 //!
@@ -276,7 +277,10 @@ pub mod prelude {
         // Verify
         verify::{MAX_VERIFY_ATTEMPTS, VerifyConfig, verify_semantic},
         // Views (Lists, Collections, Queries)
-        views::{View, ViewLayout},
+        views::{
+            CollectionMembershipEvidenceKind, CollectionMembershipObservation,
+            CollectionMembershipState, View, ViewLayout,
+        },
     };
     pub use crate::{
         chat_stream::{

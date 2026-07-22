@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Add a bounded direct collection-membership observation that exact-checks
+  space, collection, and object identity, rejects Set/query lists, and combines
+  a canonical collection-scoped Heart query with independent unscoped index
+  controls before and after absence. Unique client-owned subscription IDs,
+  finite RPC deadlines, and cancellation-resilient cleanup protect Heart's
+  app-global subscription registry. Only complete exact evidence returns
+  `present` or `absent`; view filters, pagination, malformed counters, and
+  incomplete index evidence cannot manufacture an absence result.
+
 ### Fixed
 
 - Body reader integration coverage now uses fresh prefix-authorized disposable
