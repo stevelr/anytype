@@ -110,6 +110,27 @@ pub enum AnytypeError {
         path: String,
     },
 
+    /// A REST or gRPC chat message contained an invalid timestamp.
+    ///
+    /// Raw timestamp values and message identities are omitted so this fixed
+    /// classification is safe for diagnostics.
+    #[snafu(display("invalid chat message timestamp: {field}"))]
+    ChatTimestamp {
+        /// Message field whose wire value could not be represented canonically.
+        field: crate::chats::ChatTimestampField,
+    },
+
+    /// An older-history REST page did not provide complete bounded evidence.
+    #[snafu(display("chat history evidence is incomplete: {kind}"))]
+    ChatHistoryEvidence {
+        /// Closed, payload-free classification of the failed evidence check.
+        kind: crate::chats::ChatHistoryEvidenceKind,
+    },
+
+    /// A supported chat edit changed content without advancing `modified_at`.
+    #[snafu(display("chat edit did not advance the modification timestamp"))]
+    ChatEditTimestampNotAdvanced,
+
     /// Encountered server error on "retryable" request, but all retry attempts failed.
     #[snafu(display("server api request: failed {n} times"))]
     TooManyRetries { n: u32 },
@@ -409,6 +430,11 @@ impl AnytypeError {
                 None,
                 Some(crate::http_client::diagnostic_path(path)),
             ),
+            Self::ChatTimestamp { .. } => ("chat_timestamp", None, None, None),
+            Self::ChatHistoryEvidence { .. } => ("chat_history_evidence", None, None, None),
+            Self::ChatEditTimestampNotAdvanced => {
+                ("chat_edit_timestamp_not_advanced", None, None, None)
+            }
             Self::TooManyRetries { .. } => ("too_many_retries", None, None, None),
             Self::Auth { .. } => ("auth", None, None, None),
             Self::Deserialization { .. } => ("deserialization", None, None, None),
@@ -471,6 +497,9 @@ impl AnytypeError {
             | Self::InvalidFileResponseHeader { .. }
             | Self::ChatSseEventTooLarge { .. }
             | Self::ChatSseTransport { .. }
+            | Self::ChatTimestamp { .. }
+            | Self::ChatHistoryEvidence { .. }
+            | Self::ChatEditTimestampNotAdvanced
             | Self::TooManyRetries { .. }
             | Self::Deserialization { .. }
             | Self::Serialization { .. }

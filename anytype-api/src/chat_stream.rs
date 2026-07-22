@@ -447,7 +447,12 @@ impl ChatStreamWorker {
                 message = stream.message() => {
                     match message {
                         Ok(Some(event)) => {
-                            self.handle_event(event).await;
+                            if let Err(error) = self.handle_event(event).await {
+                                tracing::warn!(
+                                    "chat stream: invalid event: {}",
+                                    error.diagnostic()
+                                );
+                            }
                         }
                         Ok(None) => {
                             return true;
@@ -462,20 +467,21 @@ impl ChatStreamWorker {
         }
     }
 
-    async fn handle_event(&mut self, event: Event) {
+    async fn handle_event(&mut self, event: Event) -> Result<()> {
         let active_sub_ids = self.active_sub_ids();
         let chat_id = event.context_id.clone();
         if chat_id.is_empty() {
-            return;
+            return Ok(());
         }
 
-        let events = chat_events_from_event(&chat_id, event, &active_sub_ids);
+        let events = chat_events_from_event(&chat_id, event, &active_sub_ids)?;
         for chat_event in events {
             self.update_watermark(&chat_event);
             if self.event_tx.send(chat_event).await.is_err() {
                 break;
             }
         }
+        Ok(())
     }
 
     async fn handle_control_message(
@@ -514,7 +520,9 @@ impl ChatStreamWorker {
             let response = subscribe_previews(grpc, &sub_id).await?;
             if !is_reconnect {
                 for preview in response.previews {
-                    self.emit_preview(preview).await;
+                    if let Err(error) = self.emit_preview(preview).await {
+                        tracing::warn!("chat stream: invalid preview: {}", error.diagnostic());
+                    }
                 }
             }
         }
@@ -551,7 +559,7 @@ impl ChatStreamWorker {
 
             if subscription.last_order_id.is_none() {
                 for message in response.messages {
-                    let message = chat_message_from_grpc(message);
+                    let message = chat_message_from_grpc(message)?;
                     subscription.last_order_id = Some(message.order_id.clone());
                     let _ = self
                         .event_tx
@@ -610,7 +618,7 @@ impl ChatStreamWorker {
                     .await;
             }
             for message in response.messages {
-                let message = chat_message_from_grpc(message);
+                let message = chat_message_from_grpc(message)?;
                 subscription.last_order_id = Some(message.order_id.clone());
                 let _ = self
                     .event_tx
@@ -680,7 +688,7 @@ impl ChatStreamWorker {
                 break;
             }
             for message in response.messages {
-                let message = chat_message_from_grpc(message);
+                let message = chat_message_from_grpc(message)?;
                 cursor = message.order_id.clone();
                 if let Some(subscription) = self.subscriptions.get_mut(chat_id) {
                     subscription.last_order_id = Some(message.order_id.clone());
@@ -697,9 +705,12 @@ impl ChatStreamWorker {
         Ok(())
     }
 
-    async fn emit_preview(&self, preview: subscribe_to_message_previews::response::ChatPreview) {
+    async fn emit_preview(
+        &self,
+        preview: subscribe_to_message_previews::response::ChatPreview,
+    ) -> Result<()> {
         if let Some(message) = preview.message {
-            let message = chat_message_from_grpc(message);
+            let message = chat_message_from_grpc(message)?;
             let _ = self
                 .event_tx
                 .send(ChatEvent::MessageAdded {
@@ -718,6 +729,7 @@ impl ChatStreamWorker {
                 })
                 .await;
         }
+        Ok(())
     }
 
     fn update_watermark(&mut self, event: &ChatEvent) {
@@ -792,7 +804,7 @@ fn chat_events_from_event(
     chat_id: &str,
     event: Event,
     active_sub_ids: &HashSet<String>,
-) -> Vec<ChatEvent> {
+) -> Result<Vec<ChatEvent>> {
     let mut events = Vec::new();
     for message in event.messages {
         let Some(value) = message.value else {
@@ -805,7 +817,7 @@ fn chat_events_from_event(
                 {
                     events.push(ChatEvent::MessageAdded {
                         chat_id: chat_id.to_string(),
-                        message: chat_message_from_grpc(message),
+                        message: chat_message_from_grpc(message)?,
                     });
                 }
             }
@@ -815,7 +827,7 @@ fn chat_events_from_event(
                 {
                     events.push(ChatEvent::MessageUpdated {
                         chat_id: chat_id.to_string(),
-                        message: chat_message_from_grpc(message),
+                        message: chat_message_from_grpc(message)?,
                     });
                 }
             }
@@ -854,7 +866,7 @@ fn chat_events_from_event(
             _ => {}
         }
     }
-    events
+    Ok(events)
 }
 
 fn should_emit(sub_ids: &[String], active_sub_ids: &HashSet<String>) -> bool {
@@ -1009,7 +1021,8 @@ mod tests {
 
         let mut active = HashSet::new();
         active.insert(sub_id);
-        let events = chat_events_from_event(&chat_id, event.clone(), &active);
+        let events =
+            chat_events_from_event(&chat_id, event.clone(), &active).expect("valid chat event");
         assert!(matches!(
             events.as_slice(),
             [ChatEvent::MessageAdded { chat_id: id, .. }] if id == &chat_id
@@ -1017,7 +1030,7 @@ mod tests {
 
         let mut inactive = HashSet::new();
         inactive.insert("other".to_string());
-        let events = chat_events_from_event(&chat_id, event, &inactive);
+        let events = chat_events_from_event(&chat_id, event, &inactive).expect("valid chat event");
         assert!(events.is_empty());
     }
 }

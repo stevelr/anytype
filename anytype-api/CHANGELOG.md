@@ -8,6 +8,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add evidence-backed REST chat prerequisites for bounded MCP workflows:
+  message timestamp conversion is fallible and canonical UTC milliseconds,
+  older-history pages preserve server order behind a 256-byte opaque
+  before-anchor and 12-item ceiling, and verified text/format edits require an
+  independent exact readback whose `modified_at` strictly advances. Scripted
+  transport and prefix-authorized disposable-server coverage lock routes,
+  terminal pagination, insertion stability, typed failures, and cleanup.
 - Add a bounded direct collection-membership observation that exact-checks
   space, collection, and object identity, rejects Set/query lists, and combines
   a canonical collection-scoped Heart query with independent unscoped index
