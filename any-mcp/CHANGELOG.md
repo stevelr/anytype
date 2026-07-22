@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add an ignored serial tier-2 production-router scenario proving live numeric
+  and checkbox filter matches by exact identity, with continuation derived from
+  checked upstream pagination and no client-side post-pagination emulation.
 - Classify the new `anytype-api` `AnytypeError::BodyGraph` variant in the
   exhaustive error and health mappings (`ToolErrorCode::Upstream`, health
   status `body_graph`). Plumbing only: no `any-mcp` tool can surface a body
@@ -27,8 +30,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Extract the `object_search` filter grammar into a shared bounded MCP DTO
   matching the supported `anytype-api` formats and conditions one-to-one.
   Preserve aggregate count/value/depth limits, identifier validation,
-  semantically canonical cursor bindings, and the known upstream
-  numeric/checkbox behavior without client-side post-pagination emulation.
+  semantically canonical cursor bindings, and unchanged numeric/checkbox
+  forwarding without client-side post-pagination emulation. Live tier-2
+  evidence now proves the configured backend accepts both filter shapes and
+  returns exact expected identities.
   Equivalent logical-group and set-operand permutations/duplicates now share a
   cursor identity without changing their upstream presentation, and Date
   filters include Anytype's supported `in` condition. Select operands use a

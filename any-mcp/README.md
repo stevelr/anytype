@@ -648,10 +648,11 @@ Phase 1 read path.
   1..100 values, and the recursive expression schema requires at least one
   nonempty condition or child array while retaining omission defaults.
   Select references are 1..512 Unicode scalars, preserve whitespace, and reject
-  commas because the upstream request encoding uses comma delimiters. Boolean and numeric
-  filters are passed through unchanged; they remain subject to the
-  known upstream [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
-  limitation instead of being silently rewritten with different semantics.
+  commas because the upstream request encoding uses comma delimiters. Boolean
+  and numeric filters are passed through unchanged. Tier-2 production-router
+  conformance proves the configured backend returns the exact numeric and
+  checkbox matches while continuation follows the checked upstream page;
+  `any-mcp` never rewrites the filters or scans extra pages locally.
   File and object filter operands are validated as safe bounded identifiers
   before any upstream request. Cursor identity sorts and deduplicates
   commutative condition groups, nested groups, and set-valued operands while

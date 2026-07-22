@@ -37,4 +37,5 @@ url.workspace = true
 [dev-dependencies]
 futures-util = "0.3.33"
 jsonschema = { version = "0.48.2", default-features = false }
+serial_test = "3.5.0"
 tiktoken-rs = "0.12.0"
