@@ -560,9 +560,50 @@ depth, fanout, text size, and mark count. Content the typed layer does not
 model (dataviews, widgets, unknown styles or marks from newer servers) reads
 as an explicit `Unsupported` marker carrying only a content-free structural
 summary, so trees from newer hearts stay complete, ordered, and honest.
-Every accepted `ObjectShow` is followed by a best-effort `ObjectClose`, even
-when graph validation rejects the returned view; failed shows do not issue a
-close request.
+Every possibly accepted `ObjectShow` owns bounded cleanup established before
+the show is polled. A complete foreground `ObjectClose` is required for
+success; cancellation or drop may start at most one bounded fallback close on
+the current Tokio runtime. Cleanup failure takes precedence over the show or
+application response.
+
+`BodyRpcConfig` supplies one absolute deadline, a per-RPC timeout, decoder
+limits, and a cloneable `BodyRpcMetrics` observer. `ObjectShow` is capped at
+4,194,304 decoded bytes and every mutation and close response at 65,536 bytes;
+callers may tighten but never raise those limits. Reuse one configuration for
+the body read and editor when a workflow needs one deadline and one exact set
+of payload-free counters:
+
+```rust,no_run
+use std::time::Duration;
+use anytype::prelude::*;
+
+async fn append_with_one_budget(client: &AnytypeClient) -> Result<(), AnytypeError> {
+    let rpc = BodyRpcConfig::for_timeout(Duration::from_secs(10));
+    let snapshot = client
+        .blocks()
+        .body("space_id", "object_id")
+        .rpc_config(rpc.clone())
+        .fetch()
+        .await?;
+    snapshot
+        .edit(client)
+        .rpc_config(rpc.clone())
+        .append(NewBlock::paragraph("bounded write")?)
+        .await?;
+    assert_eq!(rpc.metrics().snapshot().write_polls, 1);
+    Ok(())
+}
+```
+
+The write counter advances immediately before the one write future is first
+polled. A zero counter therefore proves that validation, authentication,
+acquisition, deadline, or cancellation stopped the operation before dispatch.
+After it advances, transport failure, timeout, malformed or oversized response,
+cleanup failure, and exhausted verification are
+`BodyMutationIndeterminate`; callers must reread before considering a retry.
+Inline emoji marks and callout emoji are 1..64 UTF-8 bytes and control-free.
+Mark start and end values are independently validated as ordered, in-bounds
+UTF-16 offsets at Unicode scalar boundaries.
 
 Mutations start from a snapshot and accept only typed constructors and targets
 that belong to that snapshot. Every write is sent once, then a bounded fresh

@@ -656,12 +656,35 @@ impl UpstreamDiagnostic {
                 Self::new("type_property_classification")
             }
             AnytypeError::AttachedDiscussion { .. } => Self::new("attached_discussion"),
+            AnytypeError::BodyRpcLifecycle { kind } => {
+                Self::new(body_rpc_diagnostic_category(*kind))
+            }
             AnytypeError::BodyMutationIndeterminate { .. } => {
                 Self::new("body_mutation_indeterminate")
             }
             AnytypeError::VerifyTimeout { .. } => Self::new("verification"),
             AnytypeError::Other { .. } => Self::new("other"),
         }
+    }
+}
+
+fn body_rpc_diagnostic_category(
+    kind: anytype::body_rpc::BodyRpcLifecycleErrorKind,
+) -> &'static str {
+    use anytype::body_rpc::BodyRpcLifecycleErrorKind;
+
+    if kind == BodyRpcLifecycleErrorKind::ShowDeadline {
+        "body_show_deadline"
+    } else if kind == BodyRpcLifecycleErrorKind::ShowResponseTooLarge {
+        "body_show_response_too_large"
+    } else if kind == BodyRpcLifecycleErrorKind::CleanupFailed {
+        "body_cleanup_failed"
+    } else if kind == BodyRpcLifecycleErrorKind::AbsoluteDeadlineExhausted {
+        "body_absolute_deadline_exhausted"
+    } else {
+        // Future non-exhaustive lifecycle kinds remain payload-free and
+        // fail closed instead of inheriting an unrelated diagnostic category.
+        "body_rpc_lifecycle"
     }
 }
 
@@ -1578,6 +1601,29 @@ mod tests {
                 kind: anytype::attached_discussions::AttachedDiscussionErrorKind::MalformedEvidence,
             });
         assert_eq!(attached_discussion.category, "attached_discussion");
+        let body_rpc_cases = [
+            (
+                anytype::body_rpc::BodyRpcLifecycleErrorKind::ShowDeadline,
+                "body_show_deadline",
+            ),
+            (
+                anytype::body_rpc::BodyRpcLifecycleErrorKind::ShowResponseTooLarge,
+                "body_show_response_too_large",
+            ),
+            (
+                anytype::body_rpc::BodyRpcLifecycleErrorKind::CleanupFailed,
+                "body_cleanup_failed",
+            ),
+            (
+                anytype::body_rpc::BodyRpcLifecycleErrorKind::AbsoluteDeadlineExhausted,
+                "body_absolute_deadline_exhausted",
+            ),
+        ];
+        for (kind, expected) in body_rpc_cases {
+            let diagnostic =
+                UpstreamDiagnostic::from_error(&AnytypeError::BodyRpcLifecycle { kind });
+            assert_eq!(diagnostic, UpstreamDiagnostic::new(expected));
+        }
         assert!(
             !format!(
                 "{api:?}{auth:?}{grpc:?}{file_headers:?}{malformed_file:?}{body_mutation:?}{attached_discussion:?}"

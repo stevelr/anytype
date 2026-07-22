@@ -39,9 +39,13 @@ use crate::{
         MAX_TABLE_ROWS, MAX_TEXT_BYTES, MarkKind, TextContent, TextMark, TextStyle, VerticalAlign,
         utf16_len,
     },
+    body_rpc::{
+        BodyRpcConfig, ResponseLimitKind, acquire_grpc, bounded_body_request, deadline_exhausted,
+        observe_first_poll, record_response_limit_rejection,
+    },
     client::AnytypeClient,
     error::AnytypeError,
-    grpc_util::{GrpcError, ensure_error_ok, with_token_request},
+    grpc_util::{GrpcError, ensure_error_ok},
     verify::VerifyConfig,
 };
 
@@ -440,6 +444,7 @@ pub struct BodyEditor<'a> {
     client: &'a AnytypeClient,
     snapshot: &'a BodySnapshot,
     verify: VerifyConfig,
+    rpc: BodyRpcConfig,
 }
 
 impl BodySnapshot {
@@ -454,15 +459,31 @@ impl BodySnapshot {
                 .get_verify_config()
                 .cloned()
                 .unwrap_or_default(),
+            rpc: BodyRpcConfig::default(),
         }
     }
 }
 
 impl BodyEditor<'_> {
+    fn bounded_request<T>(&self, request: T, token: &str) -> Result<Request<T>> {
+        bounded_body_request(Request::new(request), token, &self.rpc, self.verify.timeout)
+    }
+
     /// Overrides the finite read-after-write verification policy.
     #[must_use]
     pub fn verify_with(mut self, verify: VerifyConfig) -> Self {
         self.verify = verify;
+        self
+    }
+
+    /// Uses one finite gRPC configuration for acquisition, the write, every
+    /// verification show/close pair, and fallback cleanup.
+    ///
+    /// Pass the same configuration used by the originating body read to share
+    /// one absolute deadline and one exact metrics observer.
+    #[must_use]
+    pub fn rpc_config(mut self, config: BodyRpcConfig) -> Self {
+        self.rpc = config;
         self
     }
 
@@ -678,8 +699,8 @@ impl BodyEditor<'_> {
         target: &BlockId,
         position: model::block::Position,
     ) -> Result<BlockId> {
-        let grpc = self.client.grpc_client().await?;
-        let mut commands = grpc.client_commands();
+        let grpc = acquire_grpc(self.client, &self.rpc).await?;
+        let mut commands = self.rpc.mutation_commands(&grpc);
         let response = if let NewBlockContent::Table {
             rows,
             columns,
@@ -694,9 +715,10 @@ impl BodyEditor<'_> {
                 columns,
                 with_header_row,
             };
-            let request = with_token_request(Request::new(request), grpc.token())?;
+            let request = self.bounded_request(request, grpc.token())?;
             let response = poll_tonic_write_once(
                 &self.verify,
+                &self.rpc,
                 &self.snapshot.object_id,
                 None,
                 commands.block_table_create(request),
@@ -717,9 +739,10 @@ impl BodyEditor<'_> {
                 block: Some(block_to_proto(block)),
                 position: position as i32,
             };
-            let request = with_token_request(Request::new(request), grpc.token())?;
+            let request = self.bounded_request(request, grpc.token())?;
             let response = poll_tonic_write_once(
                 &self.verify,
+                &self.rpc,
                 &self.snapshot.object_id,
                 None,
                 commands.block_create(request),
@@ -739,8 +762,8 @@ impl BodyEditor<'_> {
     }
 
     async fn send_update(&self, id: &BlockId, change: &BlockChange) -> Result<()> {
-        let grpc = self.client.grpc_client().await?;
-        let mut commands = grpc.client_commands();
+        let grpc = acquire_grpc(self.client, &self.rpc).await?;
+        let mut commands = self.rpc.mutation_commands(&grpc);
         let context_id = self.snapshot.object_id.clone();
         let block_id = id.to_string();
         let token = grpc.token();
@@ -748,6 +771,7 @@ impl BodyEditor<'_> {
             ($future:expr, $action:literal) => {{
                 let response = poll_tonic_write_once(
                     &self.verify,
+                    &self.rpc,
                     &self.snapshot.object_id,
                     Some(id),
                     $future,
@@ -771,7 +795,7 @@ impl BodyEditor<'_> {
                     marks: Some(marks_to_proto(marks)),
                     selected_text_range: None,
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(commands.block_text_set_text(request), "block text update")
             }
             BlockChange::TextStyle(style) => {
@@ -780,7 +804,7 @@ impl BodyEditor<'_> {
                     block_id,
                     style: text_style_proto(*style),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(commands.block_text_set_style(request), "block style update")
             }
             BlockChange::Checked(checked) => {
@@ -789,7 +813,7 @@ impl BodyEditor<'_> {
                     block_id,
                     checked: *checked,
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(commands.block_text_set_checked(request), "checkbox update")
             }
             BlockChange::TextColor(color) => {
@@ -798,7 +822,7 @@ impl BodyEditor<'_> {
                     block_id,
                     color: color.as_ref().map_or_else(String::new, ToString::to_string),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(commands.block_text_set_color(request), "text color update")
             }
             BlockChange::CalloutIcon(icon) => {
@@ -809,7 +833,7 @@ impl BodyEditor<'_> {
                     icon_image,
                     icon_emoji,
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(commands.block_text_set_icon(request), "callout icon update")
             }
             BlockChange::Embed(embed) => {
@@ -819,7 +843,7 @@ impl BodyEditor<'_> {
                     text: embed.text.clone(),
                     processor: embed_processor_proto(embed.processor),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(commands.block_latex_set_text(request), "embed update")
             }
             BlockChange::DividerStyle(style) => {
@@ -828,7 +852,7 @@ impl BodyEditor<'_> {
                     block_ids: vec![block_id],
                     style: divider_style_proto(*style),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(
                     commands.block_div_list_set_style(request),
                     "divider style update"
@@ -848,7 +872,7 @@ impl BodyEditor<'_> {
                     description: link_description_proto(*description),
                     relations: relations.clone(),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(
                     commands.block_link_list_set_appearance(request),
                     "link appearance update"
@@ -860,7 +884,7 @@ impl BodyEditor<'_> {
                     block_ids: vec![block_id],
                     align: horizontal_align_proto(*align),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(
                     commands.block_list_set_align(request),
                     "horizontal alignment update"
@@ -872,7 +896,7 @@ impl BodyEditor<'_> {
                     block_ids: vec![block_id],
                     vertical_align: vertical_align_proto(*vertical_align),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(
                     commands.block_list_set_vertical_align(request),
                     "vertical alignment update"
@@ -884,7 +908,7 @@ impl BodyEditor<'_> {
                     block_ids: vec![block_id],
                     color: color.as_ref().map_or_else(String::new, ToString::to_string),
                 };
-                let request = with_token_request(Request::new(request), token)?;
+                let request = self.bounded_request(request, token)?;
                 dispatch!(
                     commands.block_list_set_background_color(request),
                     "background update"
@@ -894,15 +918,16 @@ impl BodyEditor<'_> {
     }
 
     async fn send_delete(&self, id: &BlockId) -> Result<()> {
-        let grpc = self.client.grpc_client().await?;
-        let mut commands = grpc.client_commands();
+        let grpc = acquire_grpc(self.client, &self.rpc).await?;
+        let mut commands = self.rpc.mutation_commands(&grpc);
         let request = list_delete::Request {
             context_id: self.snapshot.object_id.clone(),
             block_ids: vec![id.to_string()],
         };
-        let request = with_token_request(Request::new(request), grpc.token())?;
+        let request = self.bounded_request(request, grpc.token())?;
         let response = poll_tonic_write_once(
             &self.verify,
+            &self.rpc,
             &self.snapshot.object_id,
             Some(id),
             commands.block_list_delete(request),
@@ -923,8 +948,8 @@ impl BodyEditor<'_> {
         target: &BlockId,
         position: model::block::Position,
     ) -> Result<()> {
-        let grpc = self.client.grpc_client().await?;
-        let mut commands = grpc.client_commands();
+        let grpc = acquire_grpc(self.client, &self.rpc).await?;
+        let mut commands = self.rpc.mutation_commands(&grpc);
         let request = list_move_to_existing_object::Request {
             context_id: self.snapshot.object_id.clone(),
             block_ids: vec![id.to_string()],
@@ -932,9 +957,10 @@ impl BodyEditor<'_> {
             drop_target_id: target.to_string(),
             position: position as i32,
         };
-        let request = with_token_request(Request::new(request), grpc.token())?;
+        let request = self.bounded_request(request, grpc.token())?;
         let response = poll_tonic_write_once(
             &self.verify,
+            &self.rpc,
             &self.snapshot.object_id,
             Some(id),
             commands.block_list_move_to_existing_object(request),
@@ -956,12 +982,14 @@ impl BodyEditor<'_> {
     ) -> Result<BodySnapshot> {
         verify_snapshot_with(
             &self.verify,
+            &self.rpc,
             &self.snapshot.object_id,
             id,
             || {
                 self.client
                     .blocks()
                     .body(&self.snapshot.space_id, &self.snapshot.object_id)
+                    .rpc_config(self.rpc.clone())
                     .fetch()
             },
             ready,
@@ -980,11 +1008,21 @@ impl BodyEditor<'_> {
         else {
             return error;
         };
+        let Some(timeout) = self.rpc.timeout_for(self.verify.timeout) else {
+            return AnytypeError::BodyMutationIndeterminate {
+                object_id,
+                block_id,
+                attempts,
+                timeout,
+                observed: None,
+            };
+        };
         let observed = tokio::time::timeout(
-            self.verify.timeout,
+            timeout,
             self.client
                 .blocks()
                 .body(&self.snapshot.space_id, &self.snapshot.object_id)
+                .rpc_config(self.rpc.clone())
                 .fetch(),
         )
         .await
@@ -1003,6 +1041,7 @@ impl BodyEditor<'_> {
 
 async fn verify_snapshot_with<Fetch, Future, Ready>(
     verify: &VerifyConfig,
+    rpc: &BodyRpcConfig,
     object_id: &str,
     block_id: Option<&BlockId>,
     mut fetch: Fetch,
@@ -1019,9 +1058,13 @@ where
     let mut delay = verify.initial_delay;
     let mut observed = None;
     while attempts < max_attempts {
-        let Some(remaining) = verify.timeout.checked_sub(start.elapsed()) else {
+        let Some(verify_remaining) = verify.timeout.checked_sub(start.elapsed()) else {
             break;
         };
+        let Some(deadline_remaining) = rpc.remaining() else {
+            break;
+        };
+        let remaining = verify_remaining.min(deadline_remaining);
         if remaining.is_zero() {
             break;
         }
@@ -1033,9 +1076,13 @@ where
             break;
         }
         attempts += 1;
-        let Some(remaining) = verify.timeout.checked_sub(start.elapsed()) else {
+        let Some(verify_remaining) = verify.timeout.checked_sub(start.elapsed()) else {
             break;
         };
+        let Some(deadline_remaining) = rpc.remaining() else {
+            break;
+        };
+        let remaining = verify_remaining.min(deadline_remaining);
         if let Ok(Ok(snapshot)) = tokio::time::timeout(remaining, fetch()).await {
             if ready(&snapshot) {
                 return Ok(snapshot);
@@ -1055,6 +1102,7 @@ where
 
 async fn poll_tonic_write_once<T, Future>(
     verify: &VerifyConfig,
+    rpc: &BodyRpcConfig,
     object_id: &str,
     block_id: Option<&BlockId>,
     future: Future,
@@ -1062,10 +1110,27 @@ async fn poll_tonic_write_once<T, Future>(
 where
     Future: std::future::Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
 {
-    let response = tokio::time::timeout(verify.timeout, future)
-        .await
-        .map_err(|_| indeterminate(object_id, block_id, verify.timeout))?
-        .map_err(|_| indeterminate(object_id, block_id, verify.timeout))?;
+    if verify.timeout.is_zero() {
+        return validation("body verification timeout must be nonzero");
+    }
+    let timeout = rpc
+        .timeout_for(verify.timeout)
+        .ok_or_else(deadline_exhausted)?;
+    let response = tokio::time::timeout(
+        timeout,
+        observe_first_poll(future, || rpc.metrics().record_write_poll()),
+    )
+    .await
+    .map_err(|_| indeterminate(object_id, block_id, verify.timeout))?
+    .map_err(|status| {
+        let _ = record_response_limit_rejection(
+            rpc,
+            &status,
+            rpc.non_show_response_limit(),
+            ResponseLimitKind::Mutation,
+        );
+        indeterminate(object_id, block_id, verify.timeout)
+    })?;
     Ok(response.into_inner())
 }
 
@@ -1161,7 +1226,11 @@ fn validate_text(text: &str, marks: &[TextMark]) -> Result<()> {
     }
     let length = utf16_len(text);
     for mark in marks {
-        if mark.range.start > mark.range.end || mark.range.end > length {
+        if mark.range.start > mark.range.end
+            || mark.range.start > length
+            || mark.range.end > length
+            || mark.range.to_byte_range(text).is_none()
+        {
             return validation("text mark range is outside the UTF-16 text length");
         }
         match &mark.kind {
@@ -2458,6 +2527,71 @@ mod tests {
         assert!(NewBlock::table(1, MAX_TABLE_COLUMNS as u32 + 1, false).is_err());
         let nondefault_table = NewBlock::table(1, 1, false)?.align(HorizontalAlign::Center);
         assert!(validate_new_block_for_create(&nondefault_table).is_err());
+
+        let text = "a\u{10348}b";
+        for range in [
+            TextRange { start: 2, end: 3 },
+            TextRange { start: 1, end: 2 },
+            TextRange { start: 3, end: 1 },
+            TextRange {
+                start: 0,
+                end: u32::MAX,
+            },
+            TextRange {
+                start: u32::MAX,
+                end: u32::MAX,
+            },
+        ] {
+            assert!(
+                NewBlock::paragraph(text)?
+                    .marks(vec![TextMark {
+                        range,
+                        kind: MarkKind::Bold,
+                    }])
+                    .is_err()
+            );
+        }
+        for range in [
+            TextRange { start: 0, end: 0 },
+            TextRange { start: 4, end: 4 },
+            TextRange { start: 1, end: 3 },
+        ] {
+            assert!(
+                NewBlock::paragraph(text)?
+                    .marks(vec![TextMark {
+                        range,
+                        kind: MarkKind::Bold,
+                    }])
+                    .is_ok()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_emoji_values_enforce_exact_utf8_byte_bounds() -> Result<()> {
+        for emoji in ["x".to_owned(), "🙂".repeat(16)] {
+            assert!(NewBlock::callout("text", Some(CalloutIcon::Emoji(emoji.clone()))).is_ok());
+            assert!(
+                NewBlock::paragraph("x")?
+                    .marks(vec![TextMark {
+                        range: TextRange { start: 0, end: 1 },
+                        kind: MarkKind::Emoji { emoji },
+                    }])
+                    .is_ok()
+            );
+        }
+        for emoji in [String::new(), "\n".to_owned(), "a".repeat(65)] {
+            assert!(NewBlock::callout("text", Some(CalloutIcon::Emoji(emoji.clone()))).is_err());
+            assert!(
+                NewBlock::paragraph("x")?
+                    .marks(vec![TextMark {
+                        range: TextRange { start: 0, end: 1 },
+                        kind: MarkKind::Emoji { emoji },
+                    }])
+                    .is_err()
+            );
+        }
         Ok(())
     }
 
@@ -2536,17 +2670,25 @@ mod tests {
         }
     }
 
+    fn fault_rpc_config() -> BodyRpcConfig {
+        BodyRpcConfig::for_timeout(std::time::Duration::from_secs(1))
+            .rpc_timeout(std::time::Duration::from_millis(20))
+    }
+
     #[tokio::test]
     async fn mutation_rpc_dispatches_exactly_once() -> Result<()> {
         let dispatches = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&dispatches);
-        let value = poll_tonic_write_once(&fault_verify_config(), "object", None, async move {
-            counted.fetch_add(1, Ordering::SeqCst);
-            Ok(tonic::Response::new(7_u8))
-        })
-        .await?;
+        let rpc = fault_rpc_config();
+        let value =
+            poll_tonic_write_once(&fault_verify_config(), &rpc, "object", None, async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(tonic::Response::new(7_u8))
+            })
+            .await?;
         assert_eq!(value, 7);
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(rpc.metrics().snapshot().write_polls, 1);
         Ok(())
     }
 
@@ -2554,13 +2696,18 @@ mod tests {
     async fn mutation_rpc_timeout_after_dispatch_is_indeterminate() {
         let dispatches = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&dispatches);
-        let error =
-            poll_tonic_write_once::<(), _>(&fault_verify_config(), "object", None, async move {
+        let error = poll_tonic_write_once::<(), _>(
+            &fault_verify_config(),
+            &fault_rpc_config(),
+            "object",
+            None,
+            async move {
                 counted.fetch_add(1, Ordering::SeqCst);
                 std::future::pending().await
-            })
-            .await
-            .expect_err("pending mutation must time out");
+            },
+        )
+        .await
+        .expect_err("pending mutation must time out");
         assert!(matches!(
             error,
             AnytypeError::BodyMutationIndeterminate {
@@ -2570,6 +2717,80 @@ mod tests {
             }
         ));
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_absolute_deadline_proves_no_write_poll() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&dispatches);
+        let rpc = BodyRpcConfig::new(tokio::time::Instant::now());
+        let error = poll_tonic_write_once::<(), _>(
+            &fault_verify_config(),
+            &rpc,
+            "object",
+            None,
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(tonic::Response::new(()))
+            },
+        )
+        .await
+        .expect_err("expired deadline must fail before write polling");
+        assert!(matches!(
+            error,
+            AnytypeError::BodyRpcLifecycle {
+                kind: crate::body_rpc::BodyRpcLifecycleErrorKind::AbsoluteDeadlineExhausted
+            }
+        ));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(rpc.metrics().snapshot().write_polls, 0);
+    }
+
+    #[tokio::test]
+    async fn zero_local_budget_proves_no_write_poll() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&dispatches);
+        let rpc = fault_rpc_config();
+        let verify = VerifyConfig {
+            timeout: std::time::Duration::ZERO,
+            ..fault_verify_config()
+        };
+        let error = poll_tonic_write_once::<(), _>(&verify, &rpc, "object", None, async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(tonic::Response::new(()))
+        })
+        .await
+        .expect_err("zero local budget must fail before write polling");
+        assert!(matches!(error, AnytypeError::Validation { .. }));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(rpc.metrics().snapshot().write_polls, 0);
+    }
+
+    #[tokio::test]
+    async fn mutation_decoder_overrun_is_indeterminate_and_counted() {
+        let rpc = fault_rpc_config();
+        let limit = rpc.non_show_response_limit();
+        let status = tonic::Status::out_of_range(format!(
+            "Error, decoded message length too large: found {} bytes, the limit is: {limit} bytes",
+            limit + 1
+        ));
+        let error = poll_tonic_write_once::<(), _>(
+            &fault_verify_config(),
+            &rpc,
+            "object",
+            None,
+            async move { Err(status) },
+        )
+        .await
+        .expect_err("oversized mutation response must be indeterminate");
+        assert!(matches!(
+            error,
+            AnytypeError::BodyMutationIndeterminate { .. }
+        ));
+        let metrics = rpc.metrics().snapshot();
+        assert_eq!(metrics.write_polls, 1);
+        assert_eq!(metrics.non_show_limit_rejections, 1);
+        assert_eq!(metrics.mutation_limit_rejections, 1);
     }
 
     #[tokio::test]
@@ -2584,6 +2805,7 @@ mod tests {
             let counted = Arc::clone(&dispatches);
             let error = poll_tonic_write_once::<(), _>(
                 &fault_verify_config(),
+                &fault_rpc_config(),
                 "object",
                 None,
                 async move {
@@ -2610,11 +2832,17 @@ mod tests {
         let signal = Arc::clone(&entered);
         let notified = entered.notified();
         let task = tokio::spawn(async move {
-            poll_tonic_write_once::<(), _>(&fault_verify_config(), "object", None, async move {
-                counted.fetch_add(1, Ordering::SeqCst);
-                signal.notify_one();
-                std::future::pending().await
-            })
+            poll_tonic_write_once::<(), _>(
+                &fault_verify_config(),
+                &fault_rpc_config(),
+                "object",
+                None,
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    signal.notify_one();
+                    std::future::pending().await
+                },
+            )
             .await
         });
         notified.await;
@@ -2667,6 +2895,7 @@ mod tests {
         let stale_for_fetch = stale.clone();
         let error = verify_snapshot_with(
             &fault_verify_config(),
+            &fault_rpc_config(),
             "object",
             None,
             move || {

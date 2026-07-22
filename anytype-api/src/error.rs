@@ -307,6 +307,13 @@ pub enum AnytypeError {
         observed: Option<Box<crate::body::BodySnapshot>>,
     },
 
+    /// A finite body gRPC lifecycle failed without retaining upstream payloads.
+    #[snafu(display("Body RPC lifecycle failed: {kind}"))]
+    BodyRpcLifecycle {
+        /// Closed lifecycle classification.
+        kind: crate::body_rpc::BodyRpcLifecycleErrorKind,
+    },
+
     /// A direct collection-membership read could not establish complete,
     /// identity-bound evidence.
     ///
@@ -471,6 +478,7 @@ impl AnytypeError {
             Self::BodyMutationIndeterminate { .. } => {
                 ("body_mutation_indeterminate", None, None, None)
             }
+            Self::BodyRpcLifecycle { .. } => ("body_rpc_lifecycle", None, None, None),
             Self::CollectionMembershipEvidence { .. } => {
                 ("collection_membership_evidence", None, None, None)
             }
@@ -531,6 +539,7 @@ impl AnytypeError {
             | Self::CacheDisabled
             | Self::BodyGraph { .. }
             | Self::BodyMutationIndeterminate { .. }
+            | Self::BodyRpcLifecycle { .. }
             | Self::CollectionMembershipEvidence { .. }
             | Self::TypePropertyClassification { .. }
             | Self::AttachedDiscussion { .. }

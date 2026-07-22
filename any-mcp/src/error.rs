@@ -192,6 +192,7 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::CollectionMembershipEvidence { .. }
         | AnytypeError::TypePropertyClassification { .. }
         | AnytypeError::AttachedDiscussion { .. }
+        | AnytypeError::BodyRpcLifecycle { .. }
         | AnytypeError::BodyMutationIndeterminate { .. }
         | AnytypeError::VerifyTimeout { .. }
         | AnytypeError::Other { .. } => false,
@@ -340,6 +341,7 @@ impl ToolError {
             | AnytypeError::ResponseTooLarge { .. }
             | AnytypeError::FileHeaderEvidenceTooLarge { .. }
             | AnytypeError::ChatSseEventTooLarge { .. } => ToolErrorCode::BoundedResult,
+            AnytypeError::BodyRpcLifecycle { kind } => body_rpc_tool_error_code(*kind),
             AnytypeError::AttachedDiscussion {
                 kind: anytype::attached_discussions::AttachedDiscussionErrorKind::MalformedEvidence,
             } => ToolErrorCode::BoundedResult,
@@ -394,6 +396,17 @@ impl ToolError {
     #[must_use]
     pub fn candidates(&self) -> &[ErrorCandidate] {
         self.candidates.as_deref().unwrap_or_default()
+    }
+}
+
+fn body_rpc_tool_error_code(kind: anytype::body_rpc::BodyRpcLifecycleErrorKind) -> ToolErrorCode {
+    if kind == anytype::body_rpc::BodyRpcLifecycleErrorKind::ShowResponseTooLarge {
+        ToolErrorCode::BoundedResult
+    } else {
+        // Show/absolute deadlines and unconfirmed cleanup are safe read or
+        // prewrite upstream failures. Post-dispatch body uncertainty is
+        // represented separately by BodyMutationIndeterminate.
+        ToolErrorCode::Upstream
     }
 }
 
@@ -808,6 +821,41 @@ mod tests {
         };
         assert_eq!(mapped, ToolError::mutation_indeterminate());
         assert!(!serde_json::to_string(&mapped).unwrap().contains("SECRET"));
+    }
+
+    #[test]
+    fn body_rpc_lifecycle_mapping_is_bounded_or_fail_closed() {
+        use anytype::body_rpc::BodyRpcLifecycleErrorKind;
+
+        let cases = [
+            (
+                BodyRpcLifecycleErrorKind::ShowDeadline,
+                ToolErrorCode::Upstream,
+            ),
+            (
+                BodyRpcLifecycleErrorKind::ShowResponseTooLarge,
+                ToolErrorCode::BoundedResult,
+            ),
+            (
+                BodyRpcLifecycleErrorKind::CleanupFailed,
+                ToolErrorCode::Upstream,
+            ),
+            (
+                BodyRpcLifecycleErrorKind::AbsoluteDeadlineExhausted,
+                ToolErrorCode::Upstream,
+            ),
+        ];
+        for (kind, expected) in cases {
+            let source = anytype::error::AnytypeError::BodyRpcLifecycle { kind };
+            assert!(!mutation_rejection_is_definitive(&source));
+            let AnytypeErrorMapping::Ready(mapped) = ToolError::from_anytype(&source) else {
+                panic!("body RPC lifecycle errors never require candidates");
+            };
+            assert_eq!(mapped.code(), expected);
+            let encoded = serde_json::to_string(&mapped).expect("serialize lifecycle mapping");
+            assert!(!encoded.contains("body_rpc"));
+            assert!(!encoded.contains("cleanup_failed"));
+        }
     }
 
     #[test]
