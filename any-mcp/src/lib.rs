@@ -84,6 +84,7 @@ pub mod runtime;
 pub mod schema;
 pub mod schema_property_toolset;
 pub mod schema_space_toolset;
+pub mod schema_tag_toolset;
 pub mod schema_type_toolset;
 pub mod server;
 mod stdio;
