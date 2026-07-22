@@ -259,6 +259,8 @@ pub struct AnytypeClient {
     pub(crate) keystore: KeyStore,
     pub(crate) cache: Arc<AnytypeCache>,
     pub(crate) grpc: Arc<Mutex<Option<AnytypeGrpcClient>>>,
+    pub(crate) attached_discussion_metrics:
+        Arc<crate::attached_discussions::AttachedDiscussionMetrics>,
     pub(crate) type_property_metrics: Arc<crate::types::TypePropertyClassificationMetrics>,
     pub(crate) collection_membership_metrics: Arc<crate::views::CollectionMembershipMetrics>,
 }
@@ -373,6 +375,9 @@ impl AnytypeClient {
             keystore,
             cache: Arc::new(cache),
             grpc: Arc::new(Mutex::new(None)),
+            attached_discussion_metrics: Arc::new(
+                crate::attached_discussions::AttachedDiscussionMetrics::default(),
+            ),
             type_property_metrics: Arc::new(
                 crate::types::TypePropertyClassificationMetrics::default(),
             ),
@@ -550,6 +555,14 @@ impl AnytypeClient {
     #[must_use]
     pub fn http_metrics(&self) -> HttpMetricsSnapshot {
         self.client.metrics_snapshot()
+    }
+
+    /// Returns cumulative attached-discussion HTTP/gRPC ownership counters.
+    #[must_use]
+    pub fn attached_discussion_metrics(
+        &self,
+    ) -> crate::attached_discussions::AttachedDiscussionMetricsSnapshot {
+        self.attached_discussion_metrics.snapshot()
     }
 
     /// Returns cumulative type-property classification RPC ownership metrics.

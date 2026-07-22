@@ -88,13 +88,14 @@ impl_grpc_error!(
 
 // object
 use anytype_rpc::anytype::rpc::object::{
-    close as object_close, list_delete, search_subscribe, search_unsubscribe, search_with_meta,
-    show as object_show,
+    close as object_close, discussion_add, list_delete, search_subscribe, search_unsubscribe,
+    search_with_meta, show as object_show,
 };
 
 impl_grpc_error!(
     list_delete::response::Error,
     object_close::response::Error,
+    discussion_add::response::Error,
     object_show::response::Error,
     search_subscribe::response::Error,
     search_unsubscribe::response::Error,

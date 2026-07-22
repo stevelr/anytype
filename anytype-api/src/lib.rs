@@ -184,6 +184,7 @@
 #![warn(clippy::unnecessary_wraps)]
 #![warn(clippy::unused_async)]
 
+pub mod attached_discussions;
 pub mod auth;
 pub mod body;
 pub mod body_mutation;
@@ -224,6 +225,11 @@ pub mod prelude {
     pub use crate::error::*;
     pub use crate::{
         // Typed body-block reads
+        attached_discussions::{
+            AttachedDiscussion, AttachedDiscussionErrorKind, AttachedDiscussionMetricsSnapshot,
+            AttachedDiscussionRequest, MAX_ATTACHED_DISCUSSION_OPERATION_TIMEOUT,
+            MAX_ATTACHED_DISCUSSION_RPC_TIMEOUT,
+        },
         body::{
             BlockContent, BlockId, BlockRef, BlockRestrictions, BlocksClient, BodyBlock,
             BodyGraphErrorKind, BodyLimits, BodyRequest, BodySnapshot, BookmarkContent,
