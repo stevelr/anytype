@@ -48,19 +48,19 @@ explicitly:
 
 ```json
 {
-	"mcpServers": {
-		"anytype": {
-			"command": "/absolute/path/to/any-mcp",
-			"env": {
-				"ANY_MCP_PROTOCOL": "stable",
-				"ANY_MCP_PROFILE": "compact",
-				"ANY_MCP_READ_ONLY": "1",
-				"ANYTYPE_URL": "http://127.0.0.1:31009",
-				"ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
-				"ANYTYPE_KEYSTORE_SERVICE": "anyr"
-			}
-		}
-	}
+  "mcpServers": {
+    "anytype": {
+      "command": "/absolute/path/to/any-mcp",
+      "env": {
+        "ANY_MCP_PROTOCOL": "stable",
+        "ANY_MCP_PROFILE": "compact",
+        "ANY_MCP_READ_ONLY": "1",
+        "ANYTYPE_URL": "http://127.0.0.1:31009",
+        "ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
+        "ANYTYPE_KEYSTORE_SERVICE": "anyr"
+      }
+    }
+  }
 }
 ```
 
@@ -121,19 +121,19 @@ explicitly:
 
 ```json
 {
-	"mcpServers": {
-		"anytype": {
-			"command": "/absolute/path/to/anytype/target/debug/any-mcp",
-			"env": {
-				"ANY_MCP_PROTOCOL": "stable",
-				"ANY_MCP_PROFILE": "compact",
-				"ANY_MCP_READ_ONLY": "1",
-				"ANYTYPE_URL": "http://127.0.0.1:31009",
-				"ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
-				"ANYTYPE_KEYSTORE_SERVICE": "anyr"
-			}
-		}
-	}
+  "mcpServers": {
+    "anytype": {
+      "command": "/absolute/path/to/anytype/target/debug/any-mcp",
+      "env": {
+        "ANY_MCP_PROTOCOL": "stable",
+        "ANY_MCP_PROFILE": "compact",
+        "ANY_MCP_READ_ONLY": "1",
+        "ANYTYPE_URL": "http://127.0.0.1:31009",
+        "ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
+        "ANYTYPE_KEYSTORE_SERVICE": "anyr"
+      }
+    }
+  }
 }
 ```
 
