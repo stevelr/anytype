@@ -179,7 +179,7 @@ fn live_mutation_retry_inventory_is_current() {
             0,
             12,
         ),
-        ("test_views.rs", include_str!("test_views.rs"), 2, 0, 0, 2),
+        ("test_views.rs", include_str!("test_views.rs"), 6, 0, 0, 0),
     ];
 
     let count = |source: &str, needle: &str| source.matches(needle).count();
@@ -226,6 +226,6 @@ fn live_mutation_retry_inventory_is_current() {
         excluded_calls += excluded;
     }
 
-    assert_eq!(setup_calls, 119);
-    assert_eq!(excluded_calls, 63);
+    assert_eq!(setup_calls, 123);
+    assert_eq!(excluded_calls, 61);
 }

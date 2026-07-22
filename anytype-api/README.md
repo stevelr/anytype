@@ -584,6 +584,43 @@ evidence return an error rather than `Absent`. After a mutation has been
 dispatched, callers must treat every such error as an indeterminate mutation
 outcome and perform a fresh read before deciding whether retry is safe.
 
+Use `collection_membership_page` to enumerate the same canonical direct
+membership scope without consulting a selected or saved view:
+
+```rust,no_run
+use anytype::prelude::*;
+
+# async fn example(client: &AnytypeClient) -> anytype::Result<()> {
+let first = client
+    .collection_membership_page("space-id", "collection-id", 20, None)
+    .await?;
+if let Some(next) = first.continuation {
+    let second = client
+        .collection_membership_page("space-id", "collection-id", 20, Some(next))
+        .await?;
+    println!("{} direct members so far", first.object_ids.len() + second.object_ids.len());
+}
+# Ok(())
+# }
+```
+
+Public pages contain at most 61 validated 1..256-byte safe entity IDs in
+Heart's direct collection order. Collection scopes ignore an `id` sort, so the
+request carries no sort and the client preserves the returned order without
+post-sorting. Each page performs one cache-independent logical HTTP
+GET (one through six physical attempts through the shared no-seventh-send
+pipeline), one non-replayed Heart subscribe, and one foreground unsubscribe;
+an interrupted or failed cleanup can arm only one bounded drop fallback.
+A continuation reads one private overlap row to prove its prior boundary and
+total are unchanged, then discards that row. Real Heart offset windows report
+the complete total while leaving both relative counters at zero, so checked
+total/offset/row arithmetic determines whether another page exists. Changed
+totals or boundaries, overlap-only results, malformed or nonzero relative
+counters, unexpected dependencies, cleanup failure, and Set/query targets fail
+closed instead of producing an empty or truncated page. Separate pages are not
+snapshot-isolated; restart from the first page after concurrent membership
+changes.
+
 ## Status and Compatibility
 
 The crate has 100% coverage of the Anytype REST api 2025-11-08.

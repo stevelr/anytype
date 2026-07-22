@@ -8,6 +8,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add canonical manual-collection membership pages independent of saved views,
+  filters, and Kanban presentation. Exact collection REST identity, preserved
+  native collection order with no ineffective `id` sort, 1..61 public pages,
+  a 62-row internal overlap, client-owned finite
+  Heart subscriptions, strict echoed IDs/counters/dependencies, and bounded
+  cleanup make empty, terminal, continued, malformed, and concurrent-shift
+  evidence explicit. Results expose only exact scoped object IDs and verified
+  continuation state; exact total/offset/row arithmetic determines continuation
+  because real Heart offset windows leave both relative counters at zero.
+  The page contract accepts exact 256-byte safe entity-ID boundaries, records
+  one logical GET with the shared six-attempt ceiling, uses one non-replayed
+  subscribe plus one foreground unsubscribe, permits only one cleanup fallback,
+  and preserves typed secret-safe gRPC authentication failures. Set/query
+  objects fail before subscription.
 - Add evidence-backed REST chat prerequisites for bounded MCP workflows:
   message timestamp conversion is fallible and canonical UTC milliseconds,
   older-history pages preserve server order behind a 256-byte opaque
