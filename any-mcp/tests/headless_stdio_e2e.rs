@@ -24,7 +24,9 @@ use any_mcp::collection_member_toolset::{
 #[cfg(feature = "acceptance-harness")]
 use anytype::test_util::retry_definitive_rate_limit;
 use anytype::{
+    chats::MessageContent,
     error::AnytypeError,
+    objects::Icon,
     prelude::{AnytypeClient, ClientConfig, Color, Tag},
     test_util::{
         DisposableRun, TestContext, TestError, TestResult, unique_suffix,
@@ -39,7 +41,8 @@ mod support;
 
 use support::{
     live_scenario::{
-        McpDriver, ScenarioEvidence, ScenarioId, run_scenario, validate_live_ownership,
+        ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
+        run_chats_registry_scenario, run_scenario, validate_live_ownership,
     },
     process::{ProcessOutput, ProtocolProcess},
 };
@@ -320,6 +323,12 @@ impl StdioDriver {
     }
 
     fn start_with_toolsets(options: DriverOptions, toolsets: Option<&str>) -> Self {
+        let mut driver = Self::spawn_with_toolsets_uninitialized(options, toolsets);
+        driver.initialize();
+        driver
+    }
+
+    fn spawn_with_toolsets_uninitialized(options: DriverOptions, toolsets: Option<&str>) -> Self {
         let (keystore, isolated_specification) = TemporaryKeystore::isolate_environment()
             .unwrap_or_else(|error| panic!("isolate live-test keystore: {error}"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
@@ -345,9 +354,7 @@ impl StdioDriver {
         if let Some(specification) = isolated_specification {
             command.env("ANYTYPE_KEYSTORE", specification);
         }
-        let mut driver = Self::spawn(command, options, keystore);
-        driver.initialize();
-        driver
+        Self::spawn(command, options, keystore)
     }
 
     fn spawn(
@@ -1567,6 +1574,140 @@ async fn headless_stdio_members_minimizes_personal_data() {
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned members suite skipped before callback: {reason:?}");
+        }
+    }
+}
+
+fn chats_process_failure(
+    label: &str,
+    stage: &str,
+    driver: StdioDriver,
+) -> anytype::test_util::TestError {
+    let (transcript, output, category) = driver.finish_after_panic();
+    let stderr = stderr_metrics(&output.stderr);
+    let (requests, results, tool_errors) = process_metrics(&transcript);
+    eprintln!(
+        "spawned chats registry process failed: transport={label} stage={stage} category={category} requests={requests} results={results} tool_errors={tool_errors} stderr={}",
+        stderr.summary()
+    );
+    TestError::Assertion {
+        message: "spawned chats registry process failed".to_owned(),
+    }
+}
+
+async fn run_spawned_chats_registry_transport(
+    label: &str,
+    options: DriverOptions,
+    fixture: ChatsRegistryFixture<'_>,
+) -> Result<ChatsRegistryEvidence, TestError> {
+    let mut driver = StdioDriver::spawn_with_toolsets_uninitialized(options, Some("chats"));
+    if std::panic::catch_unwind(AssertUnwindSafe(|| driver.initialize())).is_err() {
+        return Err(chats_process_failure(label, "initialize", driver));
+    }
+    let result = AssertUnwindSafe(run_chats_registry_scenario(&mut driver, fixture))
+        .catch_unwind()
+        .await;
+    match result {
+        Ok(Ok(evidence)) => {
+            let (transcript, output) = driver.finish();
+            let stderr = stderr_metrics(&output.stderr);
+            if stderr.stack_overflow != 0 || stderr.panic != 0 || stderr.fatal != 0 {
+                eprintln!(
+                    "spawned chats registry emitted fatal diagnostics: transport={label} stderr={}",
+                    stderr.summary()
+                );
+                return Err(TestError::Assertion {
+                    message: "spawned chats registry emitted fatal diagnostics".to_owned(),
+                });
+            }
+            if transcript.contains("private-content-sentinel") {
+                return Err(TestError::Assertion {
+                    message: "spawned chats registry transcript exposed content".to_owned(),
+                });
+            }
+            Ok(evidence)
+        }
+        Ok(Err(message)) => {
+            let _ = driver.finish();
+            eprintln!("spawned chats registry scenario failed: transport={label} stage={message}");
+            Err(TestError::Assertion { message })
+        }
+        Err(_) => Err(chats_process_failure(label, "scenario", driver)),
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_chats_registry_runs_stable_and_preview_workflows() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-stdio-chats-registry",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let suffix = unique_suffix();
+                let query = format!("mcpstdiochats{suffix}");
+                let chat = ctx
+                    .client
+                    .chats()
+                    .in_space(&ctx.space_id)
+                    .create(
+                        format!("MCP stdio chats registry {suffix}"),
+                        Icon::Emoji {
+                            emoji: "💬".to_owned(),
+                        },
+                    )
+                    .create()
+                    .await?;
+                ctx.register_object(&chat.id);
+                let seed_id = ctx
+                    .client
+                    .chats()
+                    .in_space(&ctx.space_id)
+                    .add_message(
+                        &chat.id,
+                        MessageContent::new().text(format!("{query} cleanup-owned seed")),
+                    )
+                    .send()
+                    .await?;
+                ctx.register_chat_message(&chat.id, &seed_id)?;
+
+                for (label, options) in [
+                    ("stable", DriverOptions::COMPACT),
+                    ("preview", DriverOptions::PREVIEW),
+                ] {
+                    let add_text = format!("{label} chats registry {suffix}");
+                    let idempotency_key = format!("{label}-chats-registry-{suffix}");
+                    let evidence = Box::pin(run_spawned_chats_registry_transport(
+                        label,
+                        options,
+                        ChatsRegistryFixture {
+                            space_id: &ctx.space_id,
+                            chat_id: &chat.id,
+                            seed_message_id: &seed_id,
+                            search_query: &query,
+                            add_text: &add_text,
+                            idempotency_key: &idempotency_key,
+                        },
+                    ))
+                    .await?;
+                    assert_eq!(evidence.chat_id, chat.id);
+                    assert_eq!(evidence.seed_message_id, seed_id);
+                    assert!(evidence.deleted);
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned chats registry suite");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("spawned chats registry suite skipped before callback: {reason:?}");
         }
     }
 }

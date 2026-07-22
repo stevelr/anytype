@@ -17,12 +17,15 @@ use std::{
 };
 
 use anytype::{
+    chats::MessageContent,
+    objects::Icon,
     prelude::{
         Color, Filter, FilterExpression, HttpMetricsSnapshot, Object, ObjectLayout, PropertyFormat,
         SetProperty,
     },
     test_util::{
-        DisposableRun, TestContext, unique_suffix, with_disposable_space_context, with_test_context,
+        DisposableRun, TestContext, TestError, unique_suffix, with_disposable_space_context,
+        with_test_context,
     },
 };
 use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject, ReadResourceRequestParams};
@@ -37,7 +40,10 @@ use crate::runtime::{RuntimeContext, StartupStatus};
 #[path = "../../tests/support/live_scenario.rs"]
 mod live_scenario;
 
-use live_scenario::{McpDriver, ScenarioEvidence, ScenarioId, run_scenario};
+use live_scenario::{
+    ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId, run_chats_registry_scenario,
+    run_scenario,
+};
 
 fn arguments(value: Value) -> JsonObject {
     value
@@ -100,6 +106,29 @@ async fn live_members_server(ctx: &TestContext, read_only: bool) -> AnyMcpServer
         selected,
     );
     AnyMcpServer::new(runtime).expect("production members MCP catalog")
+}
+
+async fn live_chats_server(ctx: &TestContext) -> AnyMcpServer {
+    ctx.client
+        .ping_http()
+        .await
+        .expect("chats suite requires authenticated HTTP");
+    let selected =
+        OptionalToolsetSelection::parse(Some("chats".to_owned()), &production_optional_metadata())
+            .expect("complete chats registry");
+    let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+        ctx.client.clone(),
+        2,
+        Duration::from_secs(30),
+        StartupStatus {
+            http_available: true,
+            grpc_available: false,
+        },
+        ApplicationProfile::Compact,
+        false,
+        selected,
+    );
+    AnyMcpServer::new(runtime).expect("production chats MCP catalog")
 }
 
 async fn call(server: &AnyMcpServer, name: &'static str, value: Value) -> CallToolResult {
@@ -2109,6 +2138,85 @@ async fn headless_direct_members_minimizes_personal_data() {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("direct members suite skipped before callback: {reason:?}");
         }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(disposable_anytype_api)]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_direct_chats_registry_runs_all_six_workflows() {
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-direct-chats-registry",
+        |ctx| {
+            Box::pin(async move {
+                let suffix = unique_suffix();
+                let query = format!("mcpchats{suffix}");
+                let chat = ctx
+                    .client
+                    .chats()
+                    .in_space(&ctx.space_id)
+                    .create(
+                        format!("MCP chats registry {suffix}"),
+                        Icon::Emoji {
+                            emoji: "💬".to_owned(),
+                        },
+                    )
+                    .create()
+                    .await
+                    .map_err(|_| {
+                        eprintln!("direct chats registry chat fixture creation failed");
+                        TestError::Assertion {
+                            message: "create direct chats registry fixture".to_owned(),
+                        }
+                    })?;
+                ctx.register_object(&chat.id);
+                let seed_id = ctx
+                    .client
+                    .chats()
+                    .in_space(&ctx.space_id)
+                    .add_message(
+                        &chat.id,
+                        MessageContent::new().text(format!("{query} cleanup-owned seed")),
+                    )
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        eprintln!("direct chats registry seed creation failed");
+                        TestError::Assertion {
+                            message: "create direct chats registry seed".to_owned(),
+                        }
+                    })?;
+                ctx.register_chat_message(&chat.id, &seed_id)?;
+
+                let server = live_chats_server(ctx.as_ref()).await;
+                let mut driver = DirectRouterDriver { server: &server };
+                let evidence = Box::pin(run_chats_registry_scenario(
+                    &mut driver,
+                    ChatsRegistryFixture {
+                        space_id: &ctx.space_id,
+                        chat_id: &chat.id,
+                        seed_message_id: &seed_id,
+                        search_query: &query,
+                        add_text: &format!("direct chats registry {suffix}"),
+                        idempotency_key: &format!("direct-chats-registry-{suffix}"),
+                    },
+                ))
+                .await
+                .map_err(|message| {
+                    eprintln!("direct chats registry protocol scenario failed: {message}");
+                    TestError::Assertion { message }
+                })?;
+                assert_eq!(evidence.chat_id, chat.id);
+                assert_eq!(evidence.seed_message_id, seed_id);
+                assert!(evidence.deleted);
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct chats registry acceptance");
+    if let DisposableRun::Skipped(reason) = outcome {
+        eprintln!("direct chats registry acceptance skipped before callback: {reason:?}");
     }
 }
 

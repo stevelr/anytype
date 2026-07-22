@@ -110,6 +110,14 @@ The nine tools contribute 7,856 tokens under the 9,500 domain ceiling; common
 status brings the selected contribution to 8,112 tokens under its 10,000
 ceiling.
 
+`chats-token-budget.json` locks the complete linked production `chats`
+descriptor against the same compact base hash. It records every one of the six
+standalone tool contributions, exact compact/standard and read-write/read-only
+catalog hashes and totals, the `chats,files,members` mixed total, and the
+component snapshots' adversarial maximum-result and exact byte-boundary
+evidence. The read-write and read-only domain totals are 5,609 and 3,811 tokens
+under their reviewed 8,500 and 6,500 ceilings; every tool remains under 2,000.
+
 `files-token-budget.json` locks the files registry's complete standard
 read-write/read-only compositions, common status contribution, per-tool and
 maximum result costs, and exact multipart body evidence. Its maximum upload

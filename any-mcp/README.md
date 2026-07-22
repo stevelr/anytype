@@ -146,9 +146,9 @@ stated maximum.
 - `ANY_MCP_TOOLSETS` is absent by default. A present selector is an exact,
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
-  fail closed without being echoed. The linked production names are `members`,
-  `files`, `schema`, and `views-write`; incomplete registries such as `chats`
-  remain rejected;
+  fail closed without being echoed. The linked production names are `chats`,
+  `files`, `members`, `schema`, and `views-write`; incomplete registries remain
+  rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
@@ -331,12 +331,11 @@ and resource names return method-not-found before argument decoding or I/O.
 Stable and experimental protocol modes use the same composed catalog.
 
 Only `compact` and `standard` application profiles exist. The optional
-`members`, `files`, `schema`, and `views-write` registries are linked and can
-be selected explicitly or combined in one comma-separated
-`ANY_MCP_TOOLSETS` value; they are absent by default. Proposed `chats` and
-`admin` toolsets are not selectable in this release. Their names become valid
-selectors only when a complete independently reviewed production registry is
-linked.
+`chats`, `members`, `files`, `schema`, and `views-write` registries are linked
+and can be selected explicitly or combined in one comma-separated
+`ANY_MCP_TOOLSETS` value; they are absent by default. Proposed `admin` toolsets
+are not selectable in this release. Their names become valid selectors only
+when a complete independently reviewed production registry is linked.
 
 The production `schema` registry includes `space_create` and `space_update`.
 Both workflows use `anytype-api` only and return just a validated space ID,
@@ -491,10 +490,12 @@ current run ledger remained.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
 
-The production-unlinked `chats` slices implement `chat_list`,
+The default-off production `chats` registry implements `chat_list`,
 `chat_message_list`, `chat_message_get`, `chat_message_search`,
-`chat_message_add`, and `chat_message_delete` for later composition into the
-complete registry. They use REST through `anytype-api` only. Chat lists default
+`chat_message_add`, and `chat_message_delete`. Read-only mode retains exactly
+the four reads. The registry contributes no resources or templates, adds the
+common optional status once, and requires authenticated HTTP but not gRPC. It
+uses REST through `anytype-api` only. Chat lists default
 to 10 and cap at 20; message
 lists and searches default to 8 and cap at 12. Older-history cursors keep one
 validated opaque server anchor and a one-based page number only in the bounded
@@ -554,9 +555,8 @@ Resolution, admission, detached leader work, and verification share one
 absolute invocation deadline; a waiter observes the earlier of its own and the
 leader's deadline. The fixed catalog/result snapshot keeps the actual tool at
 or below its reviewed 2,000-token ceiling. Deterministic process tests drive
-real stdio frames through a test-owned child composing this exact reviewed
-registry and separately prove that the shipped production composition
-continues to reject the unlinked tool. The slice exposes no edit, attachment,
+real stdio frames through this exact reviewed production registry. The slice
+exposes no edit, attachment,
 rich block, reaction, read-state, pin-state, streaming, or gRPC capability.
 
 `chat_message_delete` accepts exact space, chat, and message identities, the
@@ -576,8 +576,8 @@ is capped by both the remaining three-second/ten-attempt verification budget
 and the common request deadline. A stable-ID invocation admits at most 12
 logical operations and 67 physical attempts; maximum name resolution raises
 those aggregate ceilings to 23 and 133 respectively, with exactly one physical
-DELETE in either case. This slice remains production-unlinked until the
-complete `chats` registry lands.
+DELETE in either case. The complete production `chats` registry composes this
+slice without broadening its contract.
 
 The production `schema` registry includes `property_create` and
 `property_update` through `anytype-api` only. Create accepts every closed

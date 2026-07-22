@@ -5,8 +5,7 @@
 
 //! Verified, process-idempotent plain chat-message creation.
 //!
-//! This slice stays production-unlinked until the complete `chats` registry is
-//! assembled and independently reviewed.
+//! The complete production `chats` registry composes this reviewed slice.
 
 use std::{
     borrow::Cow,
@@ -1446,7 +1445,7 @@ mod tests {
         )
     }
 
-    fn production_runtime(client: AnytypeClient) -> RuntimeContext {
+    fn production_unselected_runtime(client: AnytypeClient) -> RuntimeContext {
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(
             client,
             8,
@@ -1770,15 +1769,15 @@ mod tests {
     }
 
     #[test]
-    fn spawned_shipped_composition_process_entrypoint() {
+    fn spawned_shipped_unselected_process_entrypoint() {
         run_spawned_stdio_child(
-            AnyMcpServer::new(production_runtime(no_io_client()))
+            AnyMcpServer::new(production_unselected_runtime(no_io_client()))
                 .expect("shipped production composition"),
         );
     }
 
     #[test]
-    fn spawned_process_stdio_covers_reviewed_registry_and_shipped_rejection() {
+    fn spawned_process_stdio_covers_reviewed_registry_and_unselected_rejection() {
         let mut reviewed = SpawnedStdioSession::start(
             "chat_add_toolset::tests::spawned_reviewed_chat_add_process_entrypoint",
         );
@@ -1798,7 +1797,7 @@ mod tests {
         reviewed.finish();
 
         let mut shipped = SpawnedStdioSession::start(
-            "chat_add_toolset::tests::spawned_shipped_composition_process_entrypoint",
+            "chat_add_toolset::tests::spawned_shipped_unselected_process_entrypoint",
         );
         let catalog = shipped.list_tools();
         assert!(
