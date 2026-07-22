@@ -19,6 +19,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Member reads now accept the REST API's bounded `_participant` IDs and
+  network identities as safe URL path segments instead of incorrectly
+  requiring every member reference to have object-CID shape. The fixed
+  endpoint contract accepts 1 through 256 URL-unreserved bytes.
 - Body reader integration coverage now uses fresh prefix-authorized disposable
   spaces and cleanup-owned real-server objects for typed conversion, exact
   order, close-safe repeat reads, tightened limits, and missing-object failures
@@ -219,7 +223,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   dataview block, copies the complete proto,
   sends one authenticated create RPC, requires one exact full-view event and a
   distinct server-assigned ID, and finitely verifies the complete two-view REST
-  result. Collection teardown owns the mutation.
+  result. Returned view IDs are now privately registered immediately,
+  before response/event classification, while collection deletion remains the
+  sole cleanup operation for those nested views.
+- Add cleanup-owned representative Kanban fixtures for disposable real-server
+  tests. The helper registers its custom card and collection types, Select
+  property, options, view, and cards before follow-up reads; adds and verifies
+  the exact Heart-internal grouping relation independently from the REST
+  property key; forces membership reads across two-item pages; and proves column
+  movement through an ordinary property update. Verification
+  fails closed for missing or wrong-format grouping relations, deleted options,
+  filtered views, malformed pagination, identity collisions, or incomplete
+  cleanup provenance.
 - Add a test-only disposable-space lifecycle that registers validated REST
   create ID/name/model provenance before verification only after a strict
   complete pre-create inventory proves the ID is neither current nor

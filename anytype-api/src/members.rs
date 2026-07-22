@@ -36,6 +36,9 @@ use crate::{
     prelude::*,
 };
 
+/// Maximum byte length accepted for a member profile or network identity.
+pub const MAX_MEMBER_REFERENCE_BYTES: usize = 256;
+
 /// Member role within a space.
 #[derive(
     Debug, Deserialize, Serialize, Clone, PartialEq, Eq, strum::Display, strum::EnumString,
@@ -176,7 +179,7 @@ impl MemberRequest {
     /// Retrieves the member by ID.
     pub async fn get(self) -> Result<Member> {
         self.limits.validate_id(&self.space_id, "space_id")?;
-        self.limits.validate_id(&self.member_id, "member_id")?;
+        validate_member_reference(&self.member_id)?;
 
         let response: MemberResponse = self
             .client
@@ -186,6 +189,25 @@ impl MemberRequest {
             )
             .await?;
         Ok(response.member)
+    }
+}
+
+/// Member endpoints accept participant IDs and network identities in addition
+/// to object-shaped IDs. Keep the path segment bounded and URL-unreserved
+/// without imposing the object CID grammar used by other endpoint builders.
+fn validate_member_reference(member_id: &str) -> Result<()> {
+    let valid = !member_id.is_empty()
+        && member_id.len() <= MAX_MEMBER_REFERENCE_BYTES
+        && !matches!(member_id, "." | "..")
+        && member_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'));
+    if valid {
+        Ok(())
+    } else {
+        Err(AnytypeError::Validation {
+            message: "member_id is not a valid bounded member reference".to_owned(),
+        })
     }
 }
 
@@ -328,5 +350,21 @@ mod tests {
 
         member.name = Some("John Doe".to_string());
         assert_eq!(member.display_name(), "John Doe");
+    }
+
+    #[test]
+    fn member_reference_accepts_documented_forms_and_rejects_path_injection() {
+        for value in [
+            "_participant_bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4a",
+            "12D3KooWExampleNetworkIdentity",
+            "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4a",
+        ] {
+            assert!(validate_member_reference(value).is_ok(), "{value}");
+        }
+        for value in ["", ".", "..", "member/id", "member?id", "member id"] {
+            assert!(validate_member_reference(value).is_err(), "{value}");
+        }
+        assert!(validate_member_reference(&"x".repeat(MAX_MEMBER_REFERENCE_BYTES)).is_ok());
+        assert!(validate_member_reference(&"x".repeat(MAX_MEMBER_REFERENCE_BYTES + 1)).is_err());
     }
 }

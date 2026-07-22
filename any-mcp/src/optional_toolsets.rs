@@ -24,6 +24,8 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    cursor::CursorStore,
+    member_toolset::MEMBERS_REGISTRY,
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     runtime::RuntimeContext,
     schema::SchemaContractError,
@@ -292,6 +294,7 @@ pub trait OptionalToolsetRegistry: fmt::Debug + Send + Sync {
         &'a self,
         request: CallToolRequestParams,
         runtime: &'a RuntimeContext,
+        cursors: &'a CursorStore,
         cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>>;
 
@@ -323,8 +326,10 @@ pub trait OptionalToolsetRegistry: fmt::Debug + Send + Sync {
 /// schema, resource, scenario, and token ownership land together.
 #[must_use]
 pub fn production_optional_registries() -> &'static [&'static dyn OptionalToolsetRegistry] {
-    &[]
+    &PRODUCTION_OPTIONAL_REGISTRIES
 }
+
+static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 1] = [MEMBERS_REGISTRY];
 
 /// Returns immutable production metadata without building schemas or clients.
 #[must_use]

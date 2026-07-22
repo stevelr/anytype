@@ -515,6 +515,13 @@ exact source list; `featured` contains only definitions visible on the REST
 type. Hidden and file recommendation lists are separate Heart concepts and are
 not part of this replaceable-property model.
 
+## Members
+
+List members with `client.members(space_id).list()` and read one exact member
+with `client.member(space_id, member_id).get()`. The exact-read builder accepts
+the REST API's object-shaped IDs, `_participant` IDs, and network identities;
+the value must remain a URL-unreserved path segment of at most 256 bytes.
+
 ## Direct Collection Membership
 
 Saved collection views can hide members through filters and pagination. Use
@@ -696,6 +703,7 @@ source .test-env
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_body -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_discovery -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_stream -- --ignored --test-threads=1 --nocapture
+ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_kanban_fixture -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_process_watcher watcher_completes_on_real_import_finish_fallback -- --ignored --exact --test-threads=1 --nocapture
 ```
 
@@ -731,6 +739,21 @@ every REST-visible default-view field against the exact
 a distinct server-assigned ID, and complete nested-view equality before a
 finite exact two-view REST verification. Collection teardown owns the added
 view; there is no general view-create production API.
+
+Representative Kanban tests can use `TestContext::create_kanban_fixture` inside
+`with_disposable_space_context`. The helper creates and immediately registers a
+custom card type, its Select grouping property and two status options, a
+collection, an existing server view converted to Kanban, and three cards. It
+adds the grouping relation through heart before setting the layout, rejects
+pre-existing filters, resolves Heart's internal relation key separately from
+the REST property key, and independently rereads the exact relation format,
+view grouping key, tags, membership, and card values. Membership verification
+uses two-item pages so pagination is exercised rather than bypassed.
+`move_kanban_item_fixture` performs an ordinary object Select-property update
+and requires the moved card and complete board to reread exactly. Missing or
+wrong-format relations, removed options, filtered views, malformed pagination,
+or unregistered resources fail closed. Collection deletion owns view cleanup;
+property cleanup owns its options.
 
 Tests that need disposable spaces should use
 `TestContext::create_space_fixture`. It creates through the authenticated REST
