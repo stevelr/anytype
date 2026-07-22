@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a transport-neutral exported-Markdown no-op protocol scenario with fast
+  exact-forwarding and lossy-repeat regressions plus ignored serial direct and
+  production-stdio real-server cases. Independent stable REST exports and
+  fresh `ObjectShow` identity/type/order reads prove byte and typed-semantic
+  stability for the approved rich cohort while recording block-ID churn.
 - Add ignored serial production-stdio disposable lifecycle sentinels that
   prove exact create/read object and space identity, registered fallible child
   shutdown, cleanup before a deliberate callback panic resumes, and exact

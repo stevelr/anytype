@@ -806,7 +806,8 @@ cargo test -p any-mcp --test headless_stdio_e2e -- --ignored --test-threads=1
 
 The selectable `headless_direct_standard_*` and
 `headless_stdio_standard_*` cases cover discovery, document/resource access,
-views, mutations, and archive through both entry paths. They execute all 14
+views, mutations, exported-Markdown no-op replacement, and archive through
+both entry paths. They execute all 14
 standard tools and `resources/list`, `resources/templates/list`, and
 `resources/read`, including bounded cursor terminality and binding,
 ambiguity, explicit view selection, idempotent create, independent
@@ -814,8 +815,16 @@ read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
 list filter and rejects a continuation cursor whose filter binding changes
 through both entry paths. Existing focused live regressions remain alongside
-this acceptance baseline. The direct command selects exactly 13 intended
-`headless_` cases; the spawned target contains exactly 10 ignored live cases.
+this acceptance baseline. The direct command selects exactly 14 intended
+`headless_` cases; the spawned target contains exactly 11 ignored live cases.
+
+The shared Markdown no-op scenario independently waits for stable REST exports
+and fresh `ObjectShow` identity/type/order evidence, supplies the complete
+export plus its independently checked SHA-256 to `object_update`, and repeats
+both MCP and `anytype-api` reads. It locks byte and typed-semantic identity for
+the approved headings, lists, checkboxes, one-line quote, link, Unicode, and
+multiline-paragraph cohort while recording the expected block-ID churn rather
+than treating unchanged Markdown as proof that the block graph was unchanged.
 
 Two spawned-stdio disposable lifecycle sentinels create and read an object by
 its exact object and space IDs through the production MCP process. The normal
