@@ -23,13 +23,16 @@ use rmcp::{
     schemars::{JsonSchema, Schema, SchemaGenerator, json_schema},
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     cursor::{CursorStore, CursorToken},
     domain::{DisplayName, DomainValueError, EntityId, ObjectId, TypeKey},
+    filters::{McpListFilter, prepare_flat_filters},
     handler_support::{
         HandlerError, PageRequest, UpstreamPagination, begin_page, execute_handler, finish_page,
+        validate_page_binding_size,
     },
     object_output::{ProjectionMode, normalized_projection_keys, object_output},
     pagination::{Page, PageLimit},
@@ -37,7 +40,7 @@ use crate::{
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
     schema::SchemaContractError,
-    validation::ProjectionList,
+    validation::{Omittable, ProjectionList, optional_non_null_schema},
 };
 
 /// Maximum characters accepted for a resolvable space or view name/id.
@@ -122,12 +125,20 @@ pub struct ViewObjectListInput {
     /// Optional bounded property keys to project; absence returns summaries only.
     #[serde(default)]
     pub property_keys: Option<ProjectionList<TypeKey>>,
+    /// Optional shared filter; this endpoint accepts only one flat `and` group.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_filter_schema")]
+    pub filters: Omittable<McpListFilter>,
     /// Requested item limit, defaulting to 20.
     #[serde(default)]
     pub limit: PageLimit,
     /// Opaque continuation cursor from a preceding `view_object_list` call.
     #[serde(default)]
     pub cursor: Option<CursorToken>,
+}
+
+fn optional_filter_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<McpListFilter>(generator)
 }
 
 /// Closed Anytype view layouts exposed by `view_list`.
@@ -225,7 +236,7 @@ impl ViewReadHandlers {
                 Page<crate::object_output::ObjectOutput>,
             >(
                 "view_object_list",
-                "List bounded object summaries for one resolved view; bodies are never returned.",
+                "List bounded object summaries for one resolved view, optionally using one server-side flat-AND filter; bodies are never returned.",
                 ToolProfile::Read,
             )?,
         })
@@ -301,6 +312,22 @@ impl ViewReadHandlers {
             Ok(keys) => keys,
             Err(error) => return tool_error(&error.tool_error()),
         };
+        let prepared = match prepare_flat_filters(&input.filters) {
+            Ok(prepared) => prepared,
+            Err(error) => return tool_error(error.tool_error()),
+        };
+        let raw_binding = ViewObjectListBinding {
+            space: input.space.as_str(),
+            list_id: input.list_id.as_str(),
+            view: input.view.as_str(),
+            property_keys: &normalized_projection,
+            filters: prepared.raw_binding.as_ref(),
+        };
+        if let Err(error) =
+            validate_page_binding_size("view_object_list", input.limit, &raw_binding)
+        {
+            return tool_error(error.tool_error());
+        }
         let request = match begin_page(
             &self.cursors,
             input.cursor.as_ref(),
@@ -311,6 +338,7 @@ impl ViewReadHandlers {
                 list_id: input.list_id.as_str(),
                 view: input.view.as_str(),
                 property_keys: &normalized_projection,
+                filters: prepared.semantic_binding.as_ref(),
             },
         ) {
             Ok(request) => request,
@@ -331,11 +359,15 @@ impl ViewReadHandlers {
                 let view_id = EntityId::new(view_id).map_err(|_| AnytypeError::Other {
                     message: "resolved view identifier is unsafe".to_owned(),
                 })?;
-                client
+                let mut upstream = client
                     .view_list_objects(&space_id, input.list_id.as_str())
                     .view(view_id.as_str())
                     .limit(u32::from(input.limit.get()))
-                    .offset(request.offset().get())
+                    .offset(request.offset().get());
+                for filter in prepared.upstream {
+                    upstream = upstream.filter(filter);
+                }
+                upstream
                     .list()
                     .await
                     .map(anytype::paged::PagedResult::into_response)
@@ -360,6 +392,8 @@ struct ViewObjectListBinding<'a> {
     list_id: &'a str,
     view: &'a str,
     property_keys: &'a [TypeKey],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<&'a Value>,
 }
 
 fn convert_view_page(
@@ -545,6 +579,21 @@ mod tests {
         })
     }
 
+    fn text_filter(value: &str) -> Omittable<McpListFilter> {
+        Omittable::Present(
+            serde_json::from_value(json!({
+                "operator": "and",
+                "conditions": [{
+                    "format": "text",
+                    "property_key": "name",
+                    "condition": "contains",
+                    "value": value
+                }]
+            }))
+            .expect("valid shared view filter"),
+        )
+    }
+
     fn view_list_input(limit: u16) -> ViewListInput {
         ViewListInput {
             space: ResolvableReference::new(SPACE_ID).unwrap(),
@@ -562,6 +611,7 @@ mod tests {
             property_keys: Some(
                 ProjectionList::new(vec![TypeKey::new("status").unwrap()]).unwrap(),
             ),
+            filters: text_filter("Roadmap"),
             limit: PageLimit::new(limit).unwrap(),
             cursor: None,
         }
@@ -575,6 +625,24 @@ mod tests {
         assert!(input_schema::<ViewObjectListInput>().is_ok());
         assert!(output_schema::<Page<ViewSummary>>().is_ok());
         assert!(output_schema::<Page<crate::object_output::ObjectOutput>>().is_ok());
+        assert!(
+            serde_json::from_value::<ViewObjectListInput>(json!({
+                "space": SPACE_ID,
+                "list_id": LIST_ID,
+                "view": "Roadmap",
+                "filters": null
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ViewListInput>(json!({
+                "space": SPACE_ID,
+                "list_id": LIST_ID,
+                "filters": {"operator":"and","conditions":[{"format":"not_empty","property_key":"name"}]}
+            }))
+            .is_err(),
+            "view_list must remain schema-locked without filters"
+        );
 
         let handlers = ViewReadHandlers::new(
             runtime(fixture_client("http://127.0.0.1:1".to_owned())),
@@ -692,6 +760,15 @@ mod tests {
         assert!(!rendered.contains("must not escape"));
         assert!(!rendered.contains("not requested"));
 
+        let mut changed_filter = view_object_input("Roadmap", 2);
+        changed_filter.filters = text_filter("Private changed query");
+        changed_filter.cursor = Some(cursor.clone());
+        let mismatch = handlers
+            .view_object_list(changed_filter, &CancellationToken::new())
+            .await;
+        assert_eq!(mismatch.is_error, Some(true));
+        assert_eq!(mismatch.structured_content.unwrap()["code"], "validation");
+
         let mut second_input = view_object_input("Roadmap", 2);
         second_input.property_keys = Some(
             ProjectionList::new(vec![
@@ -734,6 +811,7 @@ mod tests {
             "GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views/view-1/objects?"
         )));
         assert!(first_page.contains("limit=2"));
+        assert!(first_page.contains("name%5Bcontains%5D=Roadmap"));
         assert!(!first_page.contains("offset="));
         assert!(requests[2].starts_with(&format!(
             "GET /v1/spaces/{SPACE_ID}/lists/{LIST_ID}/views?limit=99 HTTP/1.1"
@@ -744,6 +822,23 @@ mod tests {
         )));
         assert!(second_page.contains("limit=2"));
         assert!(second_page.contains("offset=2"));
+        assert!(second_page.contains("name%5Bcontains%5D=Roadmap"));
+    }
+
+    #[test]
+    fn view_object_list_rejects_or_filter_during_decode() {
+        assert!(
+            serde_json::from_value::<ViewObjectListInput>(json!({
+                "space": SPACE_ID,
+                "list_id": LIST_ID,
+                "view": "Roadmap",
+                "filters": {
+                "operator": "or",
+                "conditions": [{"format":"not_empty","property_key":"name"}]
+                }
+            }))
+            .is_err()
+        );
     }
 
     #[tokio::test]

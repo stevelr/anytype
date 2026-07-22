@@ -250,6 +250,7 @@ impl ProcessWatcher {
                 return Ok(());
             }
             if self.process_id.is_none()
+                && request.kind == ProcessKind::Import
                 && request.completion_fallback == ProcessCompletionFallback::ImportFinishEvent
                 && self.progress.import_finish_events > import_finish_at_start
             {
@@ -298,12 +299,23 @@ impl ProcessWatcher {
         let mut observed = false;
         for message in &event.messages {
             if let Some(EventValue::ImportFinish(finish)) = &message.value {
+                if request.kind != ProcessKind::Import
+                    || request.completion_fallback != ProcessCompletionFallback::ImportFinishEvent
+                    || !space_matches(
+                        message.space_id.as_str(),
+                        request.space_id.as_str(),
+                        request.allow_empty_space_id,
+                    )
+                {
+                    continue;
+                }
                 self.progress.import_finish_events =
                     self.progress.import_finish_events.saturating_add(1);
                 self.progress.import_finish_objects = self
                     .progress
                     .import_finish_objects
                     .saturating_add(finish.objects_count.max(0));
+                observed = true;
                 continue;
             }
             let (kind, process) = match &message.value {
@@ -488,79 +500,19 @@ async fn wait_for_next_event(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::{SocketAddr, TcpListener},
-        time::Duration,
-    };
-
-    use anytype_rpc::{
-        anytype::{Event, event::Message as EventMessage, event::message::Value as EventValue},
-        client::{AnytypeGrpcClient, AnytypeGrpcConfig},
+    use anytype_rpc::anytype::{
+        Event, event::Message as EventMessage, event::message::Value as EventValue,
     };
 
     use super::*;
-    use crate::mock::MockChatServer;
 
-    fn next_test_addr() -> SocketAddr {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test listener must succeed");
-        let addr = listener
-            .local_addr()
-            .expect("ephemeral listener must have local address");
-        drop(listener);
-        addr
-    }
-
-    #[tokio::test]
-    async fn watcher_completes_on_import_finish_fallback() {
-        let addr = next_test_addr();
-        let server = MockChatServer::start(addr).expect("mock server must start");
-
-        let endpoint = format!("http://{}", server.addr());
-        let grpc = {
-            let mut last_err = None;
-            let mut connected = None;
-            for _ in 0..20 {
-                match AnytypeGrpcClient::from_token(
-                    &AnytypeGrpcConfig::new(endpoint.clone()),
-                    "token-alice".to_string(),
-                )
-                .await
-                {
-                    Ok(client) => {
-                        connected = Some(client);
-                        break;
-                    }
-                    Err(err) => {
-                        last_err = Some(err);
-                        tokio::time::sleep(Duration::from_millis(25)).await;
-                    }
-                }
-            }
-            connected.unwrap_or_else(|| {
-                panic!(
-                    "grpc mock client must connect: {}",
-                    last_err.map_or_else(|| "unknown error".to_string(), |err| err.to_string())
-                )
-            })
-        };
-
-        let timeouts = ProcessWatcherTimeouts {
-            event_stream_connect_timeout: Duration::from_secs(2),
-            process_start_timeout: Duration::from_secs(2),
-            process_idle_timeout: Duration::from_secs(2),
-            process_done_timeout: Duration::from_secs(5),
-        };
-        let mut watcher = ProcessWatcher::subscribe(&grpc, timeouts)
-            .await
-            .expect("watcher subscribe must succeed");
-
-        let event = Event {
+    fn import_finish_event(space_id: &str, objects_count: i64) -> Event {
+        Event {
             messages: vec![EventMessage {
-                space_id: String::new(),
+                space_id: space_id.to_owned(),
                 value: Some(EventValue::ImportFinish(
                     anytype_rpc::anytype::event::import::Finish {
-                        objects_count: 3,
+                        objects_count,
                         root_collection_id: String::new(),
                         import_type: 0,
                     },
@@ -569,30 +521,75 @@ mod tests {
             context_id: String::new(),
             initiator: None,
             trace_id: String::new(),
-        };
-        server.emit_event(event).await;
+        }
+    }
 
+    #[test]
+    fn import_finish_reducer_records_matching_space() {
+        let mut watcher = ProcessWatcher::default();
         let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test")
-            .allow_empty_space_id(true)
             .completion_fallback(ProcessCompletionFallback::ImportFinishEvent);
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            watcher.wait_for_process(&grpc, &request, None),
-        )
-        .await
-        .expect("watcher wait should not hang")
-        .expect("watcher should complete from fallback event");
+        let (completed, observed) = watcher
+            .process_event(&import_finish_event("space-test", 3), &request)
+            .expect("constructed matching import-finish event should reduce");
 
         let progress = watcher.progress();
+        assert!(!completed);
+        assert!(observed);
         assert_eq!(progress.import_finish_events, 1);
         assert_eq!(progress.import_finish_objects, 3);
+    }
 
-        tokio::time::timeout(Duration::from_secs(3), watcher.unsubscribe(&grpc))
-            .await
-            .expect("watcher unsubscribe should not hang")
-            .expect("watcher unsubscribe must succeed");
-        tokio::time::timeout(Duration::from_secs(3), server.shutdown())
-            .await
-            .expect("mock server shutdown should not hang");
+    #[test]
+    fn import_finish_reducer_ignores_unrelated_space_and_requires_empty_opt_in() {
+        let mut watcher = ProcessWatcher::default();
+        let strict_request = ProcessWatchRequest::new(ProcessKind::Import, "space-test")
+            .completion_fallback(ProcessCompletionFallback::ImportFinishEvent);
+        let (_, unrelated_observed) = watcher
+            .process_event(&import_finish_event("space-other", 5), &strict_request)
+            .expect("constructed unrelated import-finish event should reduce");
+        let (_, empty_observed) = watcher
+            .process_event(&import_finish_event("", 7), &strict_request)
+            .expect("constructed empty-space import-finish event should reduce");
+        assert!(!unrelated_observed);
+        assert!(!empty_observed);
+        assert_eq!(watcher.progress().import_finish_events, 0);
+
+        let fallback_request = strict_request.allow_empty_space_id(true);
+        let (_, fallback_observed) = watcher
+            .process_event(&import_finish_event("", 7), &fallback_request)
+            .expect("constructed opted-in empty-space import-finish event should reduce");
+        assert!(fallback_observed);
+        assert_eq!(watcher.progress().import_finish_events, 1);
+        assert_eq!(watcher.progress().import_finish_objects, 7);
+    }
+
+    #[test]
+    fn import_finish_reducer_ignores_non_import_request() {
+        let mut watcher = ProcessWatcher::default();
+        let request = ProcessWatchRequest::new(ProcessKind::Export, "space-test")
+            .completion_fallback(ProcessCompletionFallback::ImportFinishEvent);
+        let (completed, observed) = watcher
+            .process_event(&import_finish_event("space-test", 3), &request)
+            .expect("constructed import-finish event should reduce for export request");
+
+        assert!(!completed);
+        assert!(!observed);
+        assert_eq!(watcher.progress().import_finish_events, 0);
+        assert_eq!(watcher.progress().import_finish_objects, 0);
+    }
+
+    #[test]
+    fn import_finish_reducer_ignores_request_without_fallback() {
+        let mut watcher = ProcessWatcher::default();
+        let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test");
+        let (completed, observed) = watcher
+            .process_event(&import_finish_event("space-test", 3), &request)
+            .expect("constructed import-finish event should reduce without fallback");
+
+        assert!(!completed);
+        assert!(!observed);
+        assert_eq!(watcher.progress().import_finish_events, 0);
+        assert_eq!(watcher.progress().import_finish_objects, 0);
     }
 }

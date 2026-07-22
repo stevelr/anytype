@@ -572,6 +572,18 @@ cargo test -- --nocapture
 
 Integration tests require a running Anytype server and environment variables. See `src/client.rs` for details.
 
+Chat resolver integration tests create cleanup-owned chats and messages on the
+configured real HTTP and gRPC endpoints; they do not use the deprecated custom
+gRPC mock.
+
+Process watcher import-finish coverage uses a real Markdown import in the fresh
+cleanup-owned space created by `with_disposable_space_context`. The watcher
+subscribes and unsubscribes from the configured gRPC server, accepts empty-space
+fallback events only for import requests that explicitly enable the fallback,
+and applies fixed timeouts to every live stage. The test is ignored under
+`any-9h0k` until env-only disposable credentials and a complete space inventory
+are available; run it explicitly after that environment issue is repaired.
+
 Tests that need a custom collection can use the hidden
 `TestContext::create_collection_type_fixture` helper. Anytype's REST type
 create/update contract rejects collection layout, so this test-only helper uses

@@ -32,12 +32,19 @@ is identical on Linux, macOS, and Windows; it does not use a host-installed
 Python package, network service, byte/token estimate, or platform newline.
 
 The internal compatibility-policy floor is a 200,000-token model context. The
-complete default compact `tools/list` result is 9,669 tokens, leaving 331
+complete default compact `tools/list` result is 9,658 tokens, leaving 342
 tokens below the strict 10,000-token ceiling (5% of that support floor).
-Compact read-only is 8,380 tokens; explicit standard and standard read-only are
-22,909 and 15,654. The schema-valid representative `object_search` and
+Compact read-only is 8,369 tokens; explicit standard and standard read-only are
+36,135 and 28,880. The schema-valid representative `object_search` and
 `object_get` results are 421 and 316 tokens. The compact catalog's 2% growth
-boundary is 9,863 tokens and retains 137 tokens below the ceiling.
+boundary is 9,852 tokens and retains 148 tokens below the ceiling.
+Flat list filters add 13,226 tokens to both standard catalogs over the preceding
+22,909/15,654 baselines: 57.73% read-write and 84.49% read-only. The resulting
+catalogs consume 18.068% and 14.440% of the 200,000-token floor. This material
+growth is accepted because each independently valid MCP tool input schema must
+embed the exhaustive closed shared-leaf union; MCP has no cross-tool schema
+registry. The compact catalogs contain none of these standard-only tools and
+retain a concurrent 11-token reduction rather than stale allowance.
 The earlier 14-tool baseline was 22,496 tokens; a rejected global annotation
 and definition-name compaction reached about 14,612 tokens, still exceeded the
 ceiling, and weakened every tool instead of selecting a coherent workflow.

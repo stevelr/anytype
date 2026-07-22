@@ -9,6 +9,10 @@ use std::{
     collections::{BTreeMap, HashSet},
     future::Future,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -17,7 +21,9 @@ use anytype::{
         Color, Filter, FilterExpression, HttpMetricsSnapshot, Object, ObjectLayout, PropertyFormat,
         SetProperty,
     },
-    test_util::{TestContext, unique_suffix, with_test_context},
+    test_util::{
+        DisposableRun, TestContext, unique_suffix, with_disposable_space_context, with_test_context,
+    },
 };
 use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject, ReadResourceRequestParams};
 use serde_json::{Value, json};
@@ -208,6 +214,51 @@ fn item_id(item: &Value) -> Option<&Value> {
         .or_else(|| item.get("object").and_then(|object| object.get("id")))
 }
 
+fn exact_item_ids(page: &Value) -> HashSet<String> {
+    let items = page["items"].as_array().expect("filtered items array");
+    let ids = items
+        .iter()
+        .map(|item| {
+            item_id(item)
+                .and_then(Value::as_str)
+                .expect("filtered item exact id")
+                .to_owned()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        ids.len(),
+        items.len(),
+        "filtered page contains duplicate ids"
+    );
+    ids
+}
+
+async fn assert_filtered_ids(
+    server: &AnyMcpServer,
+    name: &'static str,
+    mut input: JsonObject,
+    property_key: &str,
+    value: &str,
+    expected: &HashSet<String>,
+) {
+    input.insert(
+        "filters".to_owned(),
+        json!({
+            "operator": "and",
+            "conditions": [{
+                "format": "text",
+                "property_key": property_key,
+                "condition": "contains",
+                "value": value
+            }]
+        }),
+    );
+    input.insert("limit".to_owned(), json!(100));
+    let page = success(server, name, Value::Object(input)).await;
+    assert_eq!(exact_item_ids(&page), *expected, "{name} filter identities");
+    assert!(page.get("next_cursor").is_none());
+}
+
 async fn assert_cursor_continuation(
     server: &AnyMcpServer,
     name: &'static str,
@@ -237,110 +288,6 @@ async fn assert_cursor_continuation(
         assert_ne!(first_id, second_id);
     }
     (first, second)
-}
-
-async fn assert_fixture_space_continuation(
-    ctx: &TestContext,
-    server: &AnyMcpServer,
-    fixture_ids: &[&str],
-) {
-    const MAX_SPACE_LIST_PAGES: usize = 1_000;
-
-    let response = ctx
-        .client
-        .spaces()
-        .limit(1_000)
-        .offset(0)
-        .list()
-        .await
-        .expect("list registered space fixtures")
-        .into_response();
-    assert_eq!(response.pagination.offset, 0);
-    assert!(!response.pagination.has_more);
-    assert_eq!(response.pagination.total, response.items.len());
-    let expected_ids: HashSet<String> = response
-        .items
-        .iter()
-        .map(|space| space.id.clone())
-        .collect();
-    assert_eq!(expected_ids.len(), response.items.len());
-    for fixture_id in fixture_ids {
-        assert!(
-            response.items.iter().any(|space| space.id == *fixture_id),
-            "registered fixture must be present in complete space listing"
-        );
-    }
-    assert!(
-        response.items.len() >= 2,
-        "two registered fixtures must force limit=1 continuation"
-    );
-    assert!(response.items.len() <= MAX_SPACE_LIST_PAGES);
-
-    let mut next_cursor: Option<String> = None;
-    let mut seen_cursors = HashSet::new();
-    let mut seen_ids = HashSet::new();
-    let mut binding_checked = false;
-    let mut reached_terminal = false;
-    for _ in 0..MAX_SPACE_LIST_PAGES {
-        let mut request = arguments(json!({"limit": 1}));
-        if let Some(cursor) = &next_cursor {
-            request.insert("cursor".to_owned(), json!(cursor));
-        }
-        let page = success(server, SPACE_LIST, Value::Object(request)).await;
-        let items = page["items"]
-            .as_array()
-            .expect("space_list items must be an array");
-        assert_eq!(items.len(), 1, "each bounded space page must progress");
-        let id = item_id(&items[0])
-            .and_then(Value::as_str)
-            .expect("space_list item id");
-        assert!(
-            seen_ids.insert(id.to_owned()),
-            "space_list must not repeat an item while advancing"
-        );
-
-        let Some(cursor) = page.get("next_cursor") else {
-            reached_terminal = true;
-            break;
-        };
-        let cursor = cursor
-            .as_str()
-            .filter(|cursor| !cursor.is_empty())
-            .expect("space_list next_cursor must be a nonempty string")
-            .to_owned();
-        assert!(
-            seen_cursors.insert(cursor.clone()),
-            "space_list cursor chain must not loop"
-        );
-
-        if !binding_checked {
-            let mismatch = failure(
-                server,
-                SPACE_LIST,
-                json!({"limit": 2, "cursor": cursor.as_str()}),
-            )
-            .await;
-            assert_eq!(mismatch["code"], "validation", "space_list cursor binding");
-            binding_checked = true;
-        }
-        next_cursor = Some(cursor);
-    }
-
-    assert!(
-        binding_checked,
-        "fixture-backed listing must expose a cursor"
-    );
-    assert!(
-        reached_terminal,
-        "space_list must terminate within its hard bound"
-    );
-    assert_eq!(seen_ids, expected_ids);
-    for fixture_id in fixture_ids {
-        assert!(
-            seen_ids.contains(*fixture_id),
-            "cursor walk must observe each registered fixture id"
-        );
-    }
 }
 
 async fn assert_collection_view_continuation(
@@ -976,376 +923,637 @@ async fn headless_shared_filters_conform_and_preserve_server_pagination() {
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
-    Box::pin(with_test_context(|ctx| {
-        Box::pin(async move {
-            let server = live_server(ctx.as_ref()).await;
-            let status = success(&server, SERVER_STATUS, json!({})).await;
-            assert_eq!(status["http_available"], true);
-            assert_eq!(status["grpc_available"], true);
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-discovery",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let server = live_server(ctx.as_ref()).await;
+                let status = success(&server, SERVER_STATUS, json!({})).await;
+                assert_eq!(status["http_available"], true);
+                assert_eq!(status["grpc_available"], true);
 
-            let first_space = ctx
-                .create_space_fixture(format!("MCP pagination space {}", unique_suffix()))
-                .await
-                .expect("create first disposable space");
-            let second_space = ctx
-                .create_space_fixture(format!("MCP pagination space {}", unique_suffix()))
-                .await
-                .expect("create second disposable space");
+                let all_spaces = ctx
+                    .client
+                    .spaces()
+                    .limit(100)
+                    .offset(0)
+                    .list()
+                    .await
+                    .expect("list spaces containing the cleanup-owned fixture")
+                    .into_response();
+                let space_filter_term = all_spaces
+                    .items
+                    .iter()
+                    .find(|space| space.id == ctx.space_id)
+                    .map(|space| space.name.clone())
+                    .expect("cleanup-owned disposable space is independently visible");
+                assert!(!space_filter_term.is_empty());
 
-            let duplicate_name = format!("MCP ambiguous {}", unique_suffix());
-            let first_type = ctx
-                .client
-                .new_type(&ctx.space_id, &duplicate_name)
-                .key(format!("mcp_ambiguous_a_{}", unique_suffix()))
-                .ensure_available()
-                .create()
-                .await
-                .expect("create first pagination type");
-            ctx.register_type(&first_type.id);
-            let second_type = ctx
-                .client
-                .new_type(&ctx.space_id, &duplicate_name)
-                .key(format!("mcp_ambiguous_b_{}", unique_suffix()))
-                .ensure_available()
-                .create()
-                .await
-                .expect("create second pagination type");
-            ctx.register_type(&second_type.id);
-
-            let template_fixtures = ctx
-                .create_template_fixtures(
-                    format!("MCP template type {}", unique_suffix()),
-                    [
-                        format!("MCP template first {}", unique_suffix()),
-                        format!("MCP template second {}", unique_suffix()),
-                    ],
-                )
-                .await
-                .expect("create cleanup-owned template fixtures");
-
-            let property = ctx
-                .client
-                .new_property(
-                    &ctx.space_id,
-                    format!("MCP pagination select {}", unique_suffix()),
-                    PropertyFormat::Select,
-                )
-                .create()
-                .await
-                .expect("create select pagination property");
-            ctx.register_property(&property.id);
-            let text_property = ctx
-                .client
-                .new_property(
-                    &ctx.space_id,
-                    format!("MCP pagination text {}", unique_suffix()),
-                    PropertyFormat::Text,
-                )
-                .create()
-                .await
-                .expect("create text pagination property");
-            ctx.register_property(&text_property.id);
-            for (name, color) in [("First", Color::Blue), ("Second", Color::Red)] {
-                ctx.client
-                    .new_tag(&ctx.space_id, &property.id)
-                    .name(format!("{name} {}", unique_suffix()))
-                    .color(color)
+                let duplicate_name = format!("MCP ambiguous {}", unique_suffix());
+                let first_type = ctx
+                    .client
+                    .new_type(&ctx.space_id, &duplicate_name)
+                    .key(format!("mcp_ambiguous_a_{}", unique_suffix()))
+                    .ensure_available()
                     .create()
                     .await
-                    .expect("create tag fixture");
-            }
+                    .expect("create first pagination type");
+                ctx.register_type(&first_type.id);
+                let second_type = ctx
+                    .client
+                    .new_type(&ctx.space_id, &duplicate_name)
+                    .key(format!("mcp_ambiguous_b_{}", unique_suffix()))
+                    .ensure_available()
+                    .create()
+                    .await
+                    .expect("create second pagination type");
+                ctx.register_type(&second_type.id);
 
-            let search_term = format!("McpPagination{}", unique_suffix());
-            let first_object =
-                create_object(ctx.as_ref(), "page", &format!("{search_term} first"), "").await;
-            let second_object =
-                create_object(ctx.as_ref(), "page", &format!("{search_term} second"), "").await;
-            sleep(Duration::from_millis(300)).await;
+                let template_filter_term = format!("MCP filter templates {}", unique_suffix());
+                let template_fixtures = ctx
+                    .create_template_fixtures(
+                        format!("MCP template type {}", unique_suffix()),
+                        [
+                            format!("{template_filter_term} first"),
+                            format!("{template_filter_term} second"),
+                        ],
+                    )
+                    .await
+                    .expect("create cleanup-owned template fixtures");
 
-            assert_fixture_space_continuation(
-                ctx.as_ref(),
-                &server,
-                &[first_space.id.as_str(), second_space.id.as_str()],
-            )
-            .await;
-            assert_cursor_continuation(
-                &server,
-                TYPE_LIST,
-                arguments(json!({"space": ctx.space_id.as_str()})),
-            )
-            .await;
-            assert_cursor_continuation(
-                &server,
-                PROPERTY_LIST,
-                arguments(json!({"space": ctx.space_id.as_str()})),
-            )
-            .await;
-            assert_cursor_continuation(
-                &server,
-                TAG_LIST,
-                arguments(json!({
-                    "space": ctx.space_id.as_str(),
-                    "property": property.id.as_str()
-                })),
-            )
-            .await;
+                let property_filter_term = format!("MCP filter property {}", unique_suffix());
+                let property = ctx
+                    .client
+                    .new_property(&ctx.space_id, &property_filter_term, PropertyFormat::Select)
+                    .create()
+                    .await
+                    .expect("create select pagination property");
+                ctx.register_property(&property.id);
+                let text_property = ctx
+                    .client
+                    .new_property(
+                        &ctx.space_id,
+                        format!("MCP pagination text {}", unique_suffix()),
+                        PropertyFormat::Text,
+                    )
+                    .create()
+                    .await
+                    .expect("create text pagination property");
+                ctx.register_property(&text_property.id);
+                let tag_filter_term = format!("MCP filter tags {}", unique_suffix());
+                let mut tag_ids = HashSet::new();
+                for (name, color) in [("First", Color::Blue), ("Second", Color::Red)] {
+                    let tag = ctx
+                        .client
+                        .new_tag(&ctx.space_id, &property.id)
+                        .name(format!("{tag_filter_term} {name}"))
+                        .color(color)
+                        .create()
+                        .await
+                        .expect("create tag fixture");
+                    assert!(tag_ids.insert(tag.id));
+                }
 
-            assert_fixture_template_continuation(
-                &server,
-                ctx.space_id.as_str(),
-                template_fixtures.type_.id.as_str(),
-                &template_fixtures
+                let search_term = format!("McpPagination{}", unique_suffix());
+                let first_object =
+                    create_object(ctx.as_ref(), "page", &format!("{search_term} first"), "").await;
+                let second_object =
+                    create_object(ctx.as_ref(), "page", &format!("{search_term} second"), "").await;
+                sleep(Duration::from_millis(300)).await;
+
+                let expected_space_ids = HashSet::from([ctx.space_id.clone()]);
+                let api_spaces = ctx
+                    .client
+                    .spaces()
+                    .filter(Filter::text_contains("name", &space_filter_term))
+                    .limit(100)
+                    .offset(0)
+                    .list()
+                    .await
+                    .expect("independent filtered space list")
+                    .into_response();
+                assert_eq!(api_spaces.pagination.offset, 0);
+                assert_eq!(api_spaces.pagination.limit, 100);
+                assert_eq!(api_spaces.pagination.total, expected_space_ids.len());
+                assert!(!api_spaces.pagination.has_more);
+                assert_eq!(
+                    api_spaces
+                        .items
+                        .iter()
+                        .map(|space| space.id.clone())
+                        .collect::<HashSet<_>>(),
+                    expected_space_ids
+                );
+                assert_filtered_ids(
+                    &server,
+                    SPACE_LIST,
+                    arguments(json!({})),
+                    "name",
+                    &space_filter_term,
+                    &expected_space_ids,
+                )
+                .await;
+
+                let expected_type_ids = [first_type.id.clone(), second_type.id.clone()]
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                let api_types = ctx
+                    .client
+                    .types(&ctx.space_id)
+                    .filter(Filter::text_contains("name", &duplicate_name))
+                    .limit(100)
+                    .offset(0)
+                    .list()
+                    .await
+                    .expect("independent filtered type list")
+                    .into_response();
+                assert_eq!(api_types.pagination.offset, 0);
+                assert_eq!(api_types.pagination.limit, 100);
+                assert_eq!(api_types.pagination.total, expected_type_ids.len());
+                assert!(!api_types.pagination.has_more);
+                assert_eq!(
+                    api_types
+                        .items
+                        .iter()
+                        .map(|type_| type_.id.clone())
+                        .collect::<HashSet<_>>(),
+                    expected_type_ids
+                );
+                assert_filtered_ids(
+                    &server,
+                    TYPE_LIST,
+                    arguments(json!({"space": ctx.space_id.as_str()})),
+                    "name",
+                    &duplicate_name,
+                    &expected_type_ids,
+                )
+                .await;
+
+                let expected_property_ids = HashSet::from([property.id.clone()]);
+                let api_properties = ctx
+                    .client
+                    .properties(&ctx.space_id)
+                    .filter(Filter::text_contains("name", &property_filter_term))
+                    .limit(100)
+                    .offset(0)
+                    .list()
+                    .await
+                    .expect("independent filtered property list")
+                    .into_response();
+                assert_eq!(api_properties.pagination.offset, 0);
+                assert_eq!(api_properties.pagination.limit, 100);
+                assert_eq!(api_properties.pagination.total, 1);
+                assert!(!api_properties.pagination.has_more);
+                assert_eq!(
+                    api_properties
+                        .items
+                        .iter()
+                        .map(|property| property.id.clone())
+                        .collect::<HashSet<_>>(),
+                    expected_property_ids
+                );
+                assert_filtered_ids(
+                    &server,
+                    PROPERTY_LIST,
+                    arguments(json!({"space": ctx.space_id.as_str()})),
+                    "name",
+                    &property_filter_term,
+                    &expected_property_ids,
+                )
+                .await;
+
+                let api_tags = ctx
+                    .client
+                    .tags(&ctx.space_id, &property.id)
+                    .filter(Filter::text_contains("name", &tag_filter_term))
+                    .limit(100)
+                    .offset(0)
+                    .list()
+                    .await
+                    .expect("independent filtered tag list")
+                    .into_response();
+                assert_eq!(api_tags.pagination.offset, 0);
+                assert_eq!(api_tags.pagination.limit, 100);
+                assert_eq!(api_tags.pagination.total, tag_ids.len());
+                assert!(!api_tags.pagination.has_more);
+                assert_eq!(
+                    api_tags
+                        .items
+                        .iter()
+                        .map(|tag| tag.id.clone())
+                        .collect::<HashSet<_>>(),
+                    tag_ids
+                );
+                assert_filtered_ids(
+                    &server,
+                    TAG_LIST,
+                    arguments(json!({
+                        "space": ctx.space_id.as_str(),
+                        "property": property.id.as_str()
+                    })),
+                    "name",
+                    &tag_filter_term,
+                    &tag_ids,
+                )
+                .await;
+
+                let expected_template_ids = template_fixtures
                     .templates
                     .iter()
-                    .map(|template| template.id.as_str())
-                    .collect(),
-            )
-            .await;
-            let (search_first, search_second) = assert_cursor_continuation(
-                &server,
-                OBJECT_SEARCH,
-                arguments(json!({
-                    "space": ctx.space_id.as_str(),
-                    "text": search_term
-                })),
-            )
-            .await;
-            let searched_ids = [
-                item_id(&search_first["items"][0]).and_then(Value::as_str),
-                item_id(&search_second["items"][0]).and_then(Value::as_str),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<HashSet<_>>();
-            assert!(searched_ids.contains(first_object.id.as_str()));
-            assert!(searched_ids.contains(second_object.id.as_str()));
+                    .map(|template| template.id.clone())
+                    .collect::<HashSet<_>>();
+                let api_templates = ctx
+                    .client
+                    .templates(&ctx.space_id, &template_fixtures.type_.id)
+                    .filter(Filter::text_contains("name", &template_filter_term))
+                    .limit(100)
+                    .offset(0)
+                    .list()
+                    .await
+                    .expect("independent filtered template list")
+                    .into_response();
+                assert_eq!(api_templates.pagination.offset, 0);
+                assert_eq!(api_templates.pagination.limit, 100);
+                assert_eq!(api_templates.pagination.total, expected_template_ids.len());
+                assert!(!api_templates.pagination.has_more);
+                assert_eq!(
+                    api_templates
+                        .items
+                        .iter()
+                        .map(|template| template.id.clone())
+                        .collect::<HashSet<_>>(),
+                    expected_template_ids
+                );
+                assert_filtered_ids(
+                    &server,
+                    TEMPLATE_LIST,
+                    arguments(json!({
+                        "space": ctx.space_id.as_str(),
+                        "type": template_fixtures.type_.id.as_str()
+                    })),
+                    "name",
+                    &template_filter_term,
+                    &expected_template_ids,
+                )
+                .await;
 
-            let ambiguous = failure(
-                &server,
-                PROPERTY_LIST,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "type": duplicate_name,
-                    "limit": 1
-                }),
-            )
-            .await;
-            assert_eq!(ambiguous["code"], "ambiguous");
-            let ids = ambiguous["candidates"]
-                .as_array()
-                .expect("ambiguity candidates")
-                .iter()
-                .filter_map(|candidate| candidate["id"].as_str())
+                assert_cursor_continuation(
+                    &server,
+                    TYPE_LIST,
+                    arguments(json!({"space": ctx.space_id.as_str()})),
+                )
+                .await;
+                assert_cursor_continuation(
+                    &server,
+                    PROPERTY_LIST,
+                    arguments(json!({"space": ctx.space_id.as_str()})),
+                )
+                .await;
+                assert_cursor_continuation(
+                    &server,
+                    TAG_LIST,
+                    arguments(json!({
+                        "space": ctx.space_id.as_str(),
+                        "property": property.id.as_str()
+                    })),
+                )
+                .await;
+
+                assert_fixture_template_continuation(
+                    &server,
+                    ctx.space_id.as_str(),
+                    template_fixtures.type_.id.as_str(),
+                    &template_fixtures
+                        .templates
+                        .iter()
+                        .map(|template| template.id.as_str())
+                        .collect(),
+                )
+                .await;
+                let (search_first, search_second) = assert_cursor_continuation(
+                    &server,
+                    OBJECT_SEARCH,
+                    arguments(json!({
+                        "space": ctx.space_id.as_str(),
+                        "text": search_term
+                    })),
+                )
+                .await;
+                let searched_ids = [
+                    item_id(&search_first["items"][0]).and_then(Value::as_str),
+                    item_id(&search_second["items"][0]).and_then(Value::as_str),
+                ]
+                .into_iter()
+                .flatten()
                 .collect::<HashSet<_>>();
-            assert!(ids.contains(first_type.id.as_str()));
-            assert!(ids.contains(second_type.id.as_str()));
-            Ok(())
-        })
-    }))
+                assert!(searched_ids.contains(first_object.id.as_str()));
+                assert!(searched_ids.contains(second_object.id.as_str()));
+
+                let ambiguous = failure(
+                    &server,
+                    PROPERTY_LIST,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "type": duplicate_name,
+                        "limit": 1
+                    }),
+                )
+                .await;
+                assert_eq!(ambiguous["code"], "ambiguous");
+                let ids = ambiguous["candidates"]
+                    .as_array()
+                    .expect("ambiguity candidates")
+                    .iter()
+                    .filter_map(|candidate| candidate["id"].as_str())
+                    .collect::<HashSet<_>>();
+                assert!(ids.contains(first_type.id.as_str()));
+                assert!(ids.contains(second_type.id.as_str()));
+                Ok(())
+            })
+        },
+    ))
     .await
-    .expect("cleanup-safe live discovery suite");
+    .expect("prefix-authorized live discovery harness");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("disposable discovery suite skipped before callback: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
-    Box::pin(with_test_context(|ctx| {
-        Box::pin(async move {
-            let server = live_server(ctx.as_ref()).await;
-            let listed_resources = serde_json::to_value(
-                server
-                    .list_resources_wire(None)
-                    .expect("production resources/list"),
-            )
-            .expect("serialize resources/list");
-            assert_eq!(listed_resources["resources"], json!([]));
-            let listed_templates = serde_json::to_value(
-                server
-                    .list_resource_templates_wire(None)
-                    .expect("production resources/templates/list"),
-            )
-            .expect("serialize resources/templates/list");
-            assert_eq!(
-                listed_templates["resourceTemplates"][0]["uriTemplate"],
-                "anytype://spaces/{space_id}/objects/{object_id}"
-            );
-            let collection_type = ctx
-                .create_collection_type_fixture(format!("MCP collection type {}", unique_suffix()))
-                .await
-                .expect("create and register collection-layout type fixture");
-            assert_eq!(collection_type.layout, ObjectLayout::Collection);
-            let collection = ctx
-                .create_collection_fixture(
-                    &collection_type,
-                    format!("MCP collection {}", unique_suffix()),
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-view-resources",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let server = live_server(ctx.as_ref()).await;
+                let listed_resources = serde_json::to_value(
+                    server
+                        .list_resources_wire(None)
+                        .expect("production resources/list"),
                 )
-                .await
-                .expect("create privately owned collection fixture");
-            let second_view_name = format!("MCP second view {}", unique_suffix());
-            let second_view = ctx
-                .create_collection_view_fixture(&collection.id, &second_view_name)
-                .await
-                .expect("create cleanup-owned second collection view");
-            let first = create_object(
-                ctx.as_ref(),
-                "page",
-                &format!("MCP collection first {}", unique_suffix()),
-                "first resource body",
-            )
-            .await;
-            let second = create_object(
-                ctx.as_ref(),
-                "page",
-                &format!("MCP collection second {}", unique_suffix()),
-                "second resource body",
-            )
-            .await;
-            ctx.client
-                .view_add_objects(
-                    &ctx.space_id,
+                .expect("serialize resources/list");
+                assert_eq!(listed_resources["resources"], json!([]));
+                let listed_templates = serde_json::to_value(
+                    server
+                        .list_resource_templates_wire(None)
+                        .expect("production resources/templates/list"),
+                )
+                .expect("serialize resources/templates/list");
+                assert_eq!(
+                    listed_templates["resourceTemplates"][0]["uriTemplate"],
+                    "anytype://spaces/{space_id}/objects/{object_id}"
+                );
+                let collection_type = ctx
+                    .create_collection_type_fixture(format!(
+                        "MCP collection type {}",
+                        unique_suffix()
+                    ))
+                    .await
+                    .expect("create and register collection-layout type fixture");
+                assert_eq!(collection_type.layout, ObjectLayout::Collection);
+                let collection = ctx
+                    .create_collection_fixture(
+                        &collection_type,
+                        format!("MCP collection {}", unique_suffix()),
+                    )
+                    .await
+                    .expect("create privately owned collection fixture");
+                let second_view_name = format!("MCP second view {}", unique_suffix());
+                let second_view = ctx
+                    .create_collection_view_fixture(&collection.id, &second_view_name)
+                    .await
+                    .expect("create cleanup-owned second collection view");
+                let view_filter_term = format!("MCP filtered members {}", unique_suffix());
+                let first = create_object(
+                    ctx.as_ref(),
+                    "page",
+                    &format!("{view_filter_term} first"),
+                    "first resource body",
+                )
+                .await;
+                let second = create_object(
+                    ctx.as_ref(),
+                    "page",
+                    &format!("{view_filter_term} second"),
+                    "second resource body",
+                )
+                .await;
+                ctx.client
+                    .view_add_objects(
+                        &ctx.space_id,
+                        &collection.id,
+                        vec![first.id.clone(), second.id.clone()],
+                    )
+                    .await
+                    .expect("add live collection members");
+                assert_collection_view_continuation(
+                    ctx.as_ref(),
+                    &server,
                     &collection.id,
-                    vec![first.id.clone(), second.id.clone()],
+                    &first.id,
+                    &second_view.id,
+                    &second_view_name,
                 )
-                .await
-                .expect("add live collection members");
-            assert_collection_view_continuation(
-                ctx.as_ref(),
-                &server,
-                &collection.id,
-                &first.id,
-                &second_view.id,
-                &second_view_name,
-            )
-            .await;
-            let view_id = second_view.id;
+                .await;
+                let view_id = second_view.id;
+                let expected_member_ids = HashSet::from([first.id.clone(), second.id.clone()]);
+                let independent_members = ctx
+                    .client
+                    .view_list_objects(&ctx.space_id, &collection.id)
+                    .view(&view_id)
+                    .filter(Filter::text_contains("name", &view_filter_term))
+                    .limit(100)
+                    .offset(0)
+                    .list()
+                    .await
+                    .expect("independent filtered view-object list")
+                    .into_response();
+                assert_eq!(independent_members.pagination.offset, 0);
+                assert_eq!(independent_members.pagination.limit, 100);
+                assert_eq!(independent_members.pagination.total, 2);
+                assert!(!independent_members.pagination.has_more);
+                assert_eq!(
+                    independent_members
+                        .items
+                        .iter()
+                        .map(|object| object.id.clone())
+                        .collect::<HashSet<_>>(),
+                    expected_member_ids
+                );
 
-            let mut listed = None;
-            for _ in 0..10 {
-                let result = call(
+                let mut listed = None;
+                for _ in 0..10 {
+                    let result = call(
+                        &server,
+                        VIEW_OBJECT_LIST,
+                        json!({
+                            "space": ctx.space_id.as_str(),
+                            "list_id": collection.id.as_str(),
+                            "view": view_id.as_str(),
+                            "filters": {
+                                "operator": "and",
+                                "conditions": [{
+                                    "format": "text",
+                                    "property_key": "name",
+                                    "condition": "contains",
+                                    "value": view_filter_term.as_str()
+                                }]
+                            },
+                            "limit": 1
+                        }),
+                    )
+                    .await;
+                    if result.is_error == Some(false)
+                        && result
+                            .structured_content
+                            .as_ref()
+                            .and_then(|value| value["next_cursor"].as_str())
+                            .is_some()
+                    {
+                        listed = result.structured_content;
+                        break;
+                    }
+                    sleep(Duration::from_millis(500)).await;
+                }
+                let listed = listed.expect("explicit selected view exposes a continuation");
+                let cursor = listed["next_cursor"].as_str().unwrap().to_owned();
+                let mismatch = failure(
                     &server,
                     VIEW_OBJECT_LIST,
                     json!({
                         "space": ctx.space_id.as_str(),
                         "list_id": collection.id.as_str(),
                         "view": view_id.as_str(),
-                        "limit": 1
+                        "filters": {
+                            "operator": "and",
+                            "conditions": [{
+                                "format": "text",
+                                "property_key": "name",
+                                "condition": "contains",
+                                "value": view_filter_term.as_str()
+                            }]
+                        },
+                        "limit": 2,
+                        "cursor": cursor.as_str()
                     }),
                 )
                 .await;
-                if result.is_error == Some(false)
-                    && result
-                        .structured_content
-                        .as_ref()
-                        .and_then(|value| value["next_cursor"].as_str())
-                        .is_some()
-                {
-                    listed = result.structured_content;
-                    break;
-                }
-                sleep(Duration::from_millis(500)).await;
-            }
-            let listed = listed.expect("explicit selected view exposes a continuation");
-            let cursor = listed["next_cursor"].as_str().unwrap().to_owned();
-            let mismatch = failure(
-                &server,
-                VIEW_OBJECT_LIST,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "list_id": collection.id.as_str(),
-                    "view": view_id.as_str(),
-                    "limit": 2,
-                    "cursor": cursor.as_str()
-                }),
-            )
-            .await;
-            assert_eq!(mismatch["code"], "validation");
-            let continued = success(
-                &server,
-                VIEW_OBJECT_LIST,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "list_id": collection.id.as_str(),
-                    "view": view_id.as_str(),
-                    "limit": 1,
-                    "cursor": cursor
-                }),
-            )
-            .await;
-            let observed = [
-                item_id(&listed["items"][0]).and_then(Value::as_str),
-                item_id(&continued["items"][0]).and_then(Value::as_str),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<HashSet<_>>();
-            assert!(
-                observed.contains(first.id.as_str()),
-                "first collection member missing from pages: {listed} / {continued}"
-            );
-            assert!(
-                observed.contains(second.id.as_str()),
-                "second collection member missing from pages: {listed} / {continued}"
-            );
-
-            let first_chunk = success(
-                &server,
-                OBJECT_GET,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": first.id.as_str(),
-                    "body": {"offset": 0, "max_chars": 5}
-                }),
-            )
-            .await;
-            let complete_body = read_body(ctx.as_ref(), &first.id).await;
-            assert_eq!(first_chunk["body"]["text"], "first");
-            let next_offset = first_chunk["body"]["next_offset"]
-                .as_u64()
-                .expect("body continuation offset");
-            let second_chunk = success(
-                &server,
-                OBJECT_GET,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": first.id.as_str(),
-                    "body": {"offset": next_offset, "max_chars": 100}
-                }),
-            )
-            .await;
-            let reconstructed = format!(
-                "{}{}",
-                first_chunk["body"]["text"].as_str().unwrap(),
-                second_chunk["body"]["text"].as_str().unwrap()
-            );
-            assert_eq!(reconstructed, complete_body);
-            assert_eq!(
-                first_chunk["body"]["sha256"],
-                second_chunk["body"]["sha256"]
-            );
-            assert!(second_chunk["body"].get("next_offset").is_none());
-
-            let uri = first_chunk["object"]["summary"]["resource_uri"]
-                .as_str()
-                .expect("canonical object resource URI");
-            let resource = server
-                .state
-                .resources
-                .read_resource(
-                    ReadResourceRequestParams::new(uri),
-                    &CancellationToken::new(),
+                assert_eq!(mismatch["code"], "validation");
+                let continued = success(
+                    &server,
+                    VIEW_OBJECT_LIST,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "list_id": collection.id.as_str(),
+                        "view": view_id.as_str(),
+                        "filters": {
+                            "operator": "and",
+                            "conditions": [{
+                                "format": "text",
+                                "property_key": "name",
+                                "condition": "contains",
+                                "value": view_filter_term.as_str()
+                            }]
+                        },
+                        "limit": 1,
+                        "cursor": cursor
+                    }),
                 )
-                .await
-                .expect("production document resource read");
-            let resource = serde_json::to_value(resource).expect("serialize resource result");
-            assert_eq!(resource["contents"][0]["text"], complete_body);
-            assert_eq!(resource["contents"][0]["uri"], uri);
-            Ok(())
-        })
-    }))
+                .await;
+                let observed = [
+                    item_id(&listed["items"][0]).and_then(Value::as_str),
+                    item_id(&continued["items"][0]).and_then(Value::as_str),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<HashSet<_>>();
+                assert_eq!(
+                    observed,
+                    expected_member_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<HashSet<_>>(),
+                    "filtered MCP and independent API view identities differ"
+                );
+
+                let first_chunk = success(
+                    &server,
+                    OBJECT_GET,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": first.id.as_str(),
+                        "body": {"offset": 0, "max_chars": 5}
+                    }),
+                )
+                .await;
+                let complete_body = read_body(ctx.as_ref(), &first.id).await;
+                assert_eq!(first_chunk["body"]["text"], "first");
+                let next_offset = first_chunk["body"]["next_offset"]
+                    .as_u64()
+                    .expect("body continuation offset");
+                let second_chunk = success(
+                    &server,
+                    OBJECT_GET,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": first.id.as_str(),
+                        "body": {"offset": next_offset, "max_chars": 100}
+                    }),
+                )
+                .await;
+                let reconstructed = format!(
+                    "{}{}",
+                    first_chunk["body"]["text"].as_str().unwrap(),
+                    second_chunk["body"]["text"].as_str().unwrap()
+                );
+                assert_eq!(reconstructed, complete_body);
+                assert_eq!(
+                    first_chunk["body"]["sha256"],
+                    second_chunk["body"]["sha256"]
+                );
+                assert!(second_chunk["body"].get("next_offset").is_none());
+
+                let uri = first_chunk["object"]["summary"]["resource_uri"]
+                    .as_str()
+                    .expect("canonical object resource URI");
+                let resource = server
+                    .state
+                    .resources
+                    .read_resource(
+                        ReadResourceRequestParams::new(uri),
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .expect("production document resource read");
+                let resource = serde_json::to_value(resource).expect("serialize resource result");
+                assert_eq!(resource["contents"][0]["text"], complete_body);
+                assert_eq!(resource["contents"][0]["uri"], uri);
+                Ok(())
+            })
+        },
+    ))
     .await
-    .expect("cleanup-safe live view and resource suite");
+    .expect("prefix-authorized live view and resource harness");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("disposable view/resource suite skipped before callback: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]

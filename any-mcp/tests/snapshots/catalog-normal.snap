@@ -1508,7 +1508,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search one bounded Anytype page. Returns summaries and only explicitly projected properties, never document bodies. Boolean and numeric filters are passed through unchanged and may fail due to upstream anytype-heart#2879.",
+      "description": "Search one bounded Anytype page. Returns summaries and only explicitly projected properties, never document bodies. Boolean and numeric filters are passed through unchanged and pagination follows the checked upstream page.",
       "inputSchema": {
         "$defs": {
           "AnytypeReference": {
@@ -1641,7 +1641,7 @@
             ]
           },
           "McpFilter": {
-            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. They are currently affected by\nupstream `anytype-heart#2879`; this server does not rewrite them into a\nquery with different semantics.",
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
             "oneOf": [
               {
                 "additionalProperties": false,
@@ -3392,24 +3392,616 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List one bounded page of property definitions and tag counts. Does not return tag options.",
+      "description": "List one bounded page of property definitions and tag counts, optionally using one server-side flat-AND filter. A filter cannot be combined with type scoping.",
       "inputSchema": {
         "$defs": {
+          "ArrayCondition": {
+            "description": "Operators supported for multi-value properties.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match at least one supplied value.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "all_in",
+                "description": "Require all supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "BoundedText4096": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "BoundedText64": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "CheckboxCondition": {
+            "description": "Operators supported for checkbox properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              }
+            ]
+          },
           "CursorToken": {
             "maxLength": 64,
             "minLength": 52,
             "pattern": "^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$",
             "type": "string"
           },
+          "DateCondition": {
+            "description": "Operators supported for dates.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "in",
+                "description": "Match a date value accepted by Anytype's `in` condition.",
+                "type": "string"
+              }
+            ]
+          },
           "DiscoveryReference": {
             "maxLength": 512,
             "minLength": 1,
+            "type": "string"
+          },
+          "EntityId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "FilterNumber": {
+            "maximum": 1000000000000000.0,
+            "minimum": -1000000000000000.0,
+            "type": "number"
+          },
+          "McpFilter": {
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Plain text property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "text",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Numeric property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/NumberCondition",
+                    "description": "Numeric operator."
+                  },
+                  "format": {
+                    "const": "number",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/FilterNumber",
+                    "description": "Compared number."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Single-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/SelectCondition",
+                    "description": "Select operator."
+                  },
+                  "format": {
+                    "const": "select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Multi-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "multi_select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "RFC 3339-like date property value accepted by Anytype.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/DateCondition",
+                    "description": "Date operator."
+                  },
+                  "format": {
+                    "const": "date",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText64",
+                    "description": "Compared date text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checkbox property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/CheckboxCondition",
+                    "description": "Boolean operator."
+                  },
+                  "format": {
+                    "const": "checkbox",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "description": "Compared checkbox state.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "File-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "files",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
+                    "description": "Compared file ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "URL property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "url",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared URL text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Email property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "email",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared email text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Phone property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "phone",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared phone text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Object-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "objects",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
+                    "description": "Compared object ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be empty.",
+                "properties": {
+                  "format": {
+                    "const": "empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be present and nonempty.",
+                "properties": {
+                  "format": {
+                    "const": "not_empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpListFilter": {
+            "additionalProperties": false,
+            "description": "One flat conjunction for an upstream list endpoint. All shared filter leaf formats are available; nested groups and or are unsupported.",
+            "properties": {
+              "conditions": {
+                "description": "Direct shared filter leaves forwarded to the upstream list request.",
+                "items": {
+                  "$ref": "#/$defs/McpFilter"
+                },
+                "maxItems": 49,
+                "minItems": 1,
+                "type": "array"
+              },
+              "operator": {
+                "const": "and",
+                "description": "List endpoints combine every condition with and.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operator",
+              "conditions"
+            ],
+            "type": "object"
+          },
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NumberCondition": {
+            "description": "Operators supported for numeric properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              }
+            ]
+          },
+          "ObjectId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
             "type": "string"
           },
           "PageLimit": {
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
+          },
+          "SelectCondition": {
+            "description": "Operators supported for a single-select property.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match one of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
+          },
+          "TextCondition": {
+            "description": "Operators supported for textual property formats.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "contains",
+                "description": "Contains the supplied text.",
+                "type": "string"
+              },
+              {
+                "const": "not_contains",
+                "description": "Does not contain the supplied text.",
+                "type": "string"
+              }
+            ]
+          },
+          "TypeKey": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3426,6 +4018,10 @@
             ],
             "default": null,
             "description": "Opaque continuation cursor, when continuing the same request."
+          },
+          "filters": {
+            "$ref": "#/$defs/McpListFilter",
+            "description": "Optional shared filter; list endpoints accept only one flat `and` group."
           },
           "limit": {
             "$ref": "#/$defs/PageLimit",
@@ -3741,19 +4337,611 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List one bounded page of concise Anytype space summaries.",
+      "description": "List one bounded page of concise Anytype space summaries, optionally using one server-side flat-AND filter.",
       "inputSchema": {
         "$defs": {
+          "ArrayCondition": {
+            "description": "Operators supported for multi-value properties.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match at least one supplied value.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "all_in",
+                "description": "Require all supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "BoundedText4096": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "BoundedText64": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "CheckboxCondition": {
+            "description": "Operators supported for checkbox properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              }
+            ]
+          },
           "CursorToken": {
             "maxLength": 64,
             "minLength": 52,
             "pattern": "^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$",
             "type": "string"
           },
+          "DateCondition": {
+            "description": "Operators supported for dates.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "in",
+                "description": "Match a date value accepted by Anytype's `in` condition.",
+                "type": "string"
+              }
+            ]
+          },
+          "EntityId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "FilterNumber": {
+            "maximum": 1000000000000000.0,
+            "minimum": -1000000000000000.0,
+            "type": "number"
+          },
+          "McpFilter": {
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Plain text property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "text",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Numeric property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/NumberCondition",
+                    "description": "Numeric operator."
+                  },
+                  "format": {
+                    "const": "number",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/FilterNumber",
+                    "description": "Compared number."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Single-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/SelectCondition",
+                    "description": "Select operator."
+                  },
+                  "format": {
+                    "const": "select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Multi-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "multi_select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "RFC 3339-like date property value accepted by Anytype.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/DateCondition",
+                    "description": "Date operator."
+                  },
+                  "format": {
+                    "const": "date",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText64",
+                    "description": "Compared date text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checkbox property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/CheckboxCondition",
+                    "description": "Boolean operator."
+                  },
+                  "format": {
+                    "const": "checkbox",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "description": "Compared checkbox state.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "File-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "files",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
+                    "description": "Compared file ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "URL property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "url",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared URL text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Email property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "email",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared email text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Phone property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "phone",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared phone text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Object-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "objects",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
+                    "description": "Compared object ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be empty.",
+                "properties": {
+                  "format": {
+                    "const": "empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be present and nonempty.",
+                "properties": {
+                  "format": {
+                    "const": "not_empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpListFilter": {
+            "additionalProperties": false,
+            "description": "One flat conjunction for an upstream list endpoint. All shared filter leaf formats are available; nested groups and or are unsupported.",
+            "properties": {
+              "conditions": {
+                "description": "Direct shared filter leaves forwarded to the upstream list request.",
+                "items": {
+                  "$ref": "#/$defs/McpFilter"
+                },
+                "maxItems": 49,
+                "minItems": 1,
+                "type": "array"
+              },
+              "operator": {
+                "const": "and",
+                "description": "List endpoints combine every condition with and.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operator",
+              "conditions"
+            ],
+            "type": "object"
+          },
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NumberCondition": {
+            "description": "Operators supported for numeric properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              }
+            ]
+          },
+          "ObjectId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
           "PageLimit": {
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
+          },
+          "SelectCondition": {
+            "description": "Operators supported for a single-select property.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match one of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
+          },
+          "TextCondition": {
+            "description": "Operators supported for textual property formats.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "contains",
+                "description": "Contains the supplied text.",
+                "type": "string"
+              },
+              {
+                "const": "not_contains",
+                "description": "Does not contain the supplied text.",
+                "type": "string"
+              }
+            ]
+          },
+          "TypeKey": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3770,6 +4958,10 @@
             ],
             "default": null,
             "description": "Opaque continuation cursor, when continuing the same request."
+          },
+          "filters": {
+            "$ref": "#/$defs/McpListFilter",
+            "description": "Optional shared filter; list endpoints accept only one flat `and` group."
           },
           "limit": {
             "$ref": "#/$defs/PageLimit",
@@ -3876,24 +5068,616 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List one bounded page of tag options for one resolved select property.",
+      "description": "List one bounded page of tag options for one resolved select property, optionally using one server-side flat-AND filter.",
       "inputSchema": {
         "$defs": {
+          "ArrayCondition": {
+            "description": "Operators supported for multi-value properties.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match at least one supplied value.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "all_in",
+                "description": "Require all supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "BoundedText4096": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "BoundedText64": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "CheckboxCondition": {
+            "description": "Operators supported for checkbox properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              }
+            ]
+          },
           "CursorToken": {
             "maxLength": 64,
             "minLength": 52,
             "pattern": "^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$",
             "type": "string"
           },
+          "DateCondition": {
+            "description": "Operators supported for dates.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "in",
+                "description": "Match a date value accepted by Anytype's `in` condition.",
+                "type": "string"
+              }
+            ]
+          },
           "DiscoveryReference": {
             "maxLength": 512,
             "minLength": 1,
+            "type": "string"
+          },
+          "EntityId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "FilterNumber": {
+            "maximum": 1000000000000000.0,
+            "minimum": -1000000000000000.0,
+            "type": "number"
+          },
+          "McpFilter": {
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Plain text property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "text",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Numeric property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/NumberCondition",
+                    "description": "Numeric operator."
+                  },
+                  "format": {
+                    "const": "number",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/FilterNumber",
+                    "description": "Compared number."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Single-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/SelectCondition",
+                    "description": "Select operator."
+                  },
+                  "format": {
+                    "const": "select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Multi-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "multi_select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "RFC 3339-like date property value accepted by Anytype.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/DateCondition",
+                    "description": "Date operator."
+                  },
+                  "format": {
+                    "const": "date",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText64",
+                    "description": "Compared date text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checkbox property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/CheckboxCondition",
+                    "description": "Boolean operator."
+                  },
+                  "format": {
+                    "const": "checkbox",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "description": "Compared checkbox state.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "File-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "files",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
+                    "description": "Compared file ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "URL property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "url",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared URL text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Email property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "email",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared email text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Phone property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "phone",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared phone text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Object-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "objects",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
+                    "description": "Compared object ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be empty.",
+                "properties": {
+                  "format": {
+                    "const": "empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be present and nonempty.",
+                "properties": {
+                  "format": {
+                    "const": "not_empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpListFilter": {
+            "additionalProperties": false,
+            "description": "One flat conjunction for an upstream list endpoint. All shared filter leaf formats are available; nested groups and or are unsupported.",
+            "properties": {
+              "conditions": {
+                "description": "Direct shared filter leaves forwarded to the upstream list request.",
+                "items": {
+                  "$ref": "#/$defs/McpFilter"
+                },
+                "maxItems": 49,
+                "minItems": 1,
+                "type": "array"
+              },
+              "operator": {
+                "const": "and",
+                "description": "List endpoints combine every condition with and.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operator",
+              "conditions"
+            ],
+            "type": "object"
+          },
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NumberCondition": {
+            "description": "Operators supported for numeric properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              }
+            ]
+          },
+          "ObjectId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
             "type": "string"
           },
           "PageLimit": {
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
+          },
+          "SelectCondition": {
+            "description": "Operators supported for a single-select property.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match one of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
+          },
+          "TextCondition": {
+            "description": "Operators supported for textual property formats.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "contains",
+                "description": "Contains the supplied text.",
+                "type": "string"
+              },
+              {
+                "const": "not_contains",
+                "description": "Does not contain the supplied text.",
+                "type": "string"
+              }
+            ]
+          },
+          "TypeKey": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3910,6 +5694,10 @@
             ],
             "default": null,
             "description": "Opaque continuation cursor, when continuing the same request."
+          },
+          "filters": {
+            "$ref": "#/$defs/McpListFilter",
+            "description": "Optional shared filter; list endpoints accept only one flat `and` group."
           },
           "limit": {
             "$ref": "#/$defs/PageLimit",
@@ -4068,24 +5856,616 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List one bounded page of template summaries for one resolved type. Returns no template bodies.",
+      "description": "List one bounded page of body-free template summaries for one resolved type, optionally using one server-side flat-AND filter.",
       "inputSchema": {
         "$defs": {
+          "ArrayCondition": {
+            "description": "Operators supported for multi-value properties.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match at least one supplied value.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "all_in",
+                "description": "Require all supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "BoundedText4096": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "BoundedText64": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "CheckboxCondition": {
+            "description": "Operators supported for checkbox properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              }
+            ]
+          },
           "CursorToken": {
             "maxLength": 64,
             "minLength": 52,
             "pattern": "^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$",
             "type": "string"
           },
+          "DateCondition": {
+            "description": "Operators supported for dates.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "in",
+                "description": "Match a date value accepted by Anytype's `in` condition.",
+                "type": "string"
+              }
+            ]
+          },
           "DiscoveryReference": {
             "maxLength": 512,
             "minLength": 1,
+            "type": "string"
+          },
+          "EntityId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "FilterNumber": {
+            "maximum": 1000000000000000.0,
+            "minimum": -1000000000000000.0,
+            "type": "number"
+          },
+          "McpFilter": {
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Plain text property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "text",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Numeric property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/NumberCondition",
+                    "description": "Numeric operator."
+                  },
+                  "format": {
+                    "const": "number",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/FilterNumber",
+                    "description": "Compared number."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Single-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/SelectCondition",
+                    "description": "Select operator."
+                  },
+                  "format": {
+                    "const": "select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Multi-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "multi_select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "RFC 3339-like date property value accepted by Anytype.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/DateCondition",
+                    "description": "Date operator."
+                  },
+                  "format": {
+                    "const": "date",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText64",
+                    "description": "Compared date text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checkbox property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/CheckboxCondition",
+                    "description": "Boolean operator."
+                  },
+                  "format": {
+                    "const": "checkbox",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "description": "Compared checkbox state.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "File-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "files",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
+                    "description": "Compared file ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "URL property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "url",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared URL text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Email property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "email",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared email text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Phone property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "phone",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared phone text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Object-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "objects",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
+                    "description": "Compared object ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be empty.",
+                "properties": {
+                  "format": {
+                    "const": "empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be present and nonempty.",
+                "properties": {
+                  "format": {
+                    "const": "not_empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpListFilter": {
+            "additionalProperties": false,
+            "description": "One flat conjunction for an upstream list endpoint. All shared filter leaf formats are available; nested groups and or are unsupported.",
+            "properties": {
+              "conditions": {
+                "description": "Direct shared filter leaves forwarded to the upstream list request.",
+                "items": {
+                  "$ref": "#/$defs/McpFilter"
+                },
+                "maxItems": 49,
+                "minItems": 1,
+                "type": "array"
+              },
+              "operator": {
+                "const": "and",
+                "description": "List endpoints combine every condition with and.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operator",
+              "conditions"
+            ],
+            "type": "object"
+          },
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NumberCondition": {
+            "description": "Operators supported for numeric properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              }
+            ]
+          },
+          "ObjectId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
             "type": "string"
           },
           "PageLimit": {
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
+          },
+          "SelectCondition": {
+            "description": "Operators supported for a single-select property.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match one of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
+          },
+          "TextCondition": {
+            "description": "Operators supported for textual property formats.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "contains",
+                "description": "Contains the supplied text.",
+                "type": "string"
+              },
+              {
+                "const": "not_contains",
+                "description": "Does not contain the supplied text.",
+                "type": "string"
+              }
+            ]
+          },
+          "TypeKey": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4102,6 +6482,10 @@
             ],
             "default": null,
             "description": "Opaque continuation cursor, when continuing the same request."
+          },
+          "filters": {
+            "$ref": "#/$defs/McpListFilter",
+            "description": "Optional shared filter; list endpoints accept only one flat `and` group."
           },
           "limit": {
             "$ref": "#/$defs/PageLimit",
@@ -4239,24 +6623,616 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List one bounded page of active type identifiers, keys, names, and layouts in a resolved space.",
+      "description": "List one bounded page of active types in a resolved space, optionally using one server-side flat-AND filter.",
       "inputSchema": {
         "$defs": {
+          "ArrayCondition": {
+            "description": "Operators supported for multi-value properties.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match at least one supplied value.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "all_in",
+                "description": "Require all supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "BoundedText4096": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "BoundedText64": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "CheckboxCondition": {
+            "description": "Operators supported for checkbox properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              }
+            ]
+          },
           "CursorToken": {
             "maxLength": 64,
             "minLength": 52,
             "pattern": "^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$",
             "type": "string"
           },
+          "DateCondition": {
+            "description": "Operators supported for dates.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "in",
+                "description": "Match a date value accepted by Anytype's `in` condition.",
+                "type": "string"
+              }
+            ]
+          },
           "DiscoveryReference": {
             "maxLength": 512,
             "minLength": 1,
+            "type": "string"
+          },
+          "EntityId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "FilterNumber": {
+            "maximum": 1000000000000000.0,
+            "minimum": -1000000000000000.0,
+            "type": "number"
+          },
+          "McpFilter": {
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Plain text property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "text",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Numeric property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/NumberCondition",
+                    "description": "Numeric operator."
+                  },
+                  "format": {
+                    "const": "number",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/FilterNumber",
+                    "description": "Compared number."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Single-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/SelectCondition",
+                    "description": "Select operator."
+                  },
+                  "format": {
+                    "const": "select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Multi-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "multi_select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "RFC 3339-like date property value accepted by Anytype.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/DateCondition",
+                    "description": "Date operator."
+                  },
+                  "format": {
+                    "const": "date",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText64",
+                    "description": "Compared date text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checkbox property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/CheckboxCondition",
+                    "description": "Boolean operator."
+                  },
+                  "format": {
+                    "const": "checkbox",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "description": "Compared checkbox state.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "File-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "files",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
+                    "description": "Compared file ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "URL property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "url",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared URL text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Email property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "email",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared email text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Phone property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "phone",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared phone text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Object-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "objects",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
+                    "description": "Compared object ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be empty.",
+                "properties": {
+                  "format": {
+                    "const": "empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be present and nonempty.",
+                "properties": {
+                  "format": {
+                    "const": "not_empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpListFilter": {
+            "additionalProperties": false,
+            "description": "One flat conjunction for an upstream list endpoint. All shared filter leaf formats are available; nested groups and or are unsupported.",
+            "properties": {
+              "conditions": {
+                "description": "Direct shared filter leaves forwarded to the upstream list request.",
+                "items": {
+                  "$ref": "#/$defs/McpFilter"
+                },
+                "maxItems": 49,
+                "minItems": 1,
+                "type": "array"
+              },
+              "operator": {
+                "const": "and",
+                "description": "List endpoints combine every condition with and.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operator",
+              "conditions"
+            ],
+            "type": "object"
+          },
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NumberCondition": {
+            "description": "Operators supported for numeric properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              }
+            ]
+          },
+          "ObjectId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
             "type": "string"
           },
           "PageLimit": {
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
+          },
+          "SelectCondition": {
+            "description": "Operators supported for a single-select property.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match one of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
+          },
+          "TextCondition": {
+            "description": "Operators supported for textual property formats.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "contains",
+                "description": "Contains the supplied text.",
+                "type": "string"
+              },
+              {
+                "const": "not_contains",
+                "description": "Does not contain the supplied text.",
+                "type": "string"
+              }
+            ]
+          },
+          "TypeKey": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4273,6 +7249,10 @@
             ],
             "default": null,
             "description": "Opaque continuation cursor, when continuing the same request."
+          },
+          "filters": {
+            "$ref": "#/$defs/McpListFilter",
+            "description": "Optional shared filter; list endpoints accept only one flat `and` group."
           },
           "limit": {
             "$ref": "#/$defs/PageLimit",
@@ -4589,9 +7569,29 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List bounded object summaries for one resolved view; bodies are never returned.",
+      "description": "List bounded object summaries for one resolved view, optionally using one server-side flat-AND filter; bodies are never returned.",
       "inputSchema": {
         "$defs": {
+          "ArrayCondition": {
+            "description": "Operators supported for multi-value properties.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match at least one supplied value.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "all_in",
+                "description": "Require all supplied values.",
+                "type": "string"
+              }
+            ]
+          },
           "BoundedList50OfTypeKey": {
             "items": {
               "$ref": "#/$defs/TypeKey"
@@ -4599,11 +7599,526 @@
             "maxItems": 50,
             "type": "array"
           },
+          "BoundedText4096": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "BoundedText64": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "CheckboxCondition": {
+            "description": "Operators supported for checkbox properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              }
+            ]
+          },
           "CursorToken": {
             "maxLength": 64,
             "minLength": 52,
             "pattern": "^c[0-9]+\\.[0-9a-f]{16}\\.[0-9a-f]{32}$",
             "type": "string"
+          },
+          "DateCondition": {
+            "description": "Operators supported for dates.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "in",
+                "description": "Match a date value accepted by Anytype's `in` condition.",
+                "type": "string"
+              }
+            ]
+          },
+          "EntityId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "FilterNumber": {
+            "maximum": 1000000000000000.0,
+            "minimum": -1000000000000000.0,
+            "type": "number"
+          },
+          "McpFilter": {
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Plain text property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "text",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Numeric property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/NumberCondition",
+                    "description": "Numeric operator."
+                  },
+                  "format": {
+                    "const": "number",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/FilterNumber",
+                    "description": "Compared number."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Single-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/SelectCondition",
+                    "description": "Select operator."
+                  },
+                  "format": {
+                    "const": "select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Multi-select property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "multi_select",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfSelectReference",
+                    "description": "Compared tag ids or keys."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "RFC 3339-like date property value accepted by Anytype.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/DateCondition",
+                    "description": "Date operator."
+                  },
+                  "format": {
+                    "const": "date",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText64",
+                    "description": "Compared date text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checkbox property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/CheckboxCondition",
+                    "description": "Boolean operator."
+                  },
+                  "format": {
+                    "const": "checkbox",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "description": "Compared checkbox state.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "File-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "files",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfEntityId",
+                    "description": "Compared file ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "URL property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "url",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared URL text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Email property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "email",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared email text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Phone property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/TextCondition",
+                    "description": "Text operator."
+                  },
+                  "format": {
+                    "const": "phone",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Compared phone text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Object-reference property.",
+                "properties": {
+                  "condition": {
+                    "$ref": "#/$defs/ArrayCondition",
+                    "description": "Array operator."
+                  },
+                  "format": {
+                    "const": "objects",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  },
+                  "values": {
+                    "$ref": "#/$defs/NonEmptyFilterValueList100OfObjectId",
+                    "description": "Compared object ids."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key",
+                  "condition",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be empty.",
+                "properties": {
+                  "format": {
+                    "const": "empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Require a property to be present and nonempty.",
+                "properties": {
+                  "format": {
+                    "const": "not_empty",
+                    "type": "string"
+                  },
+                  "property_key": {
+                    "$ref": "#/$defs/TypeKey",
+                    "description": "Property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "property_key"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpListFilter": {
+            "additionalProperties": false,
+            "description": "One flat conjunction for an upstream list endpoint. All shared filter leaf formats are available; nested groups and or are unsupported.",
+            "properties": {
+              "conditions": {
+                "description": "Direct shared filter leaves forwarded to the upstream list request.",
+                "items": {
+                  "$ref": "#/$defs/McpFilter"
+                },
+                "maxItems": 49,
+                "minItems": 1,
+                "type": "array"
+              },
+              "operator": {
+                "const": "and",
+                "description": "List endpoints combine every condition with and.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operator",
+              "conditions"
+            ],
+            "type": "object"
+          },
+          "NonEmptyFilterValueList100OfEntityId": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfObjectId": {
+            "items": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NonEmptyFilterValueList100OfSelectReference": {
+            "items": {
+              "$ref": "#/$defs/SelectReference"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "NumberCondition": {
+            "description": "Operators supported for numeric properties.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "lt",
+                "description": "Less than.",
+                "type": "string"
+              },
+              {
+                "const": "lte",
+                "description": "Less than or equal.",
+                "type": "string"
+              },
+              {
+                "const": "gt",
+                "description": "Greater than.",
+                "type": "string"
+              },
+              {
+                "const": "gte",
+                "description": "Greater than or equal.",
+                "type": "string"
+              }
+            ]
           },
           "ObjectId": {
             "maxLength": 256,
@@ -4620,6 +8135,52 @@
             "maxLength": 512,
             "minLength": 1,
             "type": "string"
+          },
+          "SelectCondition": {
+            "description": "Operators supported for a single-select property.",
+            "oneOf": [
+              {
+                "const": "in",
+                "description": "Match one of the supplied values.",
+                "type": "string"
+              },
+              {
+                "const": "not_in",
+                "description": "Match none of the supplied values.",
+                "type": "string"
+              }
+            ]
+          },
+          "SelectReference": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^,]+$",
+            "type": "string"
+          },
+          "TextCondition": {
+            "description": "Operators supported for textual property formats.",
+            "oneOf": [
+              {
+                "const": "eq",
+                "description": "Equal.",
+                "type": "string"
+              },
+              {
+                "const": "ne",
+                "description": "Not equal.",
+                "type": "string"
+              },
+              {
+                "const": "contains",
+                "description": "Contains the supplied text.",
+                "type": "string"
+              },
+              {
+                "const": "not_contains",
+                "description": "Does not contain the supplied text.",
+                "type": "string"
+              }
+            ]
           },
           "TypeKey": {
             "maxLength": 256,
@@ -4641,6 +8202,10 @@
             ],
             "default": null,
             "description": "Opaque continuation cursor from a preceding `view_object_list` call."
+          },
+          "filters": {
+            "$ref": "#/$defs/McpListFilter",
+            "description": "Optional shared filter; this endpoint accepts only one flat `and` group."
           },
           "limit": {
             "$ref": "#/$defs/PageLimit",

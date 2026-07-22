@@ -394,7 +394,11 @@ parameters, and fragments are removed before encoding.
 
 `space_list`, `type_list`, `property_list`, `tag_list`, and `template_list`
 each request exactly one explicit upstream page and use the shared opaque
-cursor integrity checks. Space, type, and property references use the bounded
+cursor integrity checks. Each optionally accepts one strict flat `and` group
+of shared filters and forwards every leaf through the endpoint's server-side
+query builder. Recursive groups and `or` are rejected. `property_list` also
+rejects combining a filter with `type`, whose linked-property scope is applied
+after one upstream window. Space, type, and property references use the bounded
 `anytype-api` resolvers, so ambiguity returns actionable candidate IDs instead
 of selecting an arbitrary match. Type-scoped property discovery filters one
 upstream property window against the resolved type's linked property IDs;
@@ -638,12 +642,16 @@ Phase 1 read path.
   property sets are never returned.
   Archived objects are omitted from this core discovery workflow while the
   cursor still advances by the checked upstream page window.
-- MCP filters use one shared closed tagged model, currently consumed by
-  `object_search`, for text, number, select,
+- MCP filters use one shared closed tagged leaf model for text, number, select,
   multi-select, date, checkbox, file, URL, email, phone, object-reference,
   empty, and nonempty conditions. Each supported format and condition converts
   directly to the corresponding `anytype-api` filter without client-side
-  post-pagination emulation. Filter count, value count, nesting depth, scalar
+  post-pagination emulation. `object_search` accepts the recursive expression;
+  `space_list`, `type_list`, `property_list`, `tag_list`, `template_list`, and
+  `view_object_list` accept one nonempty flat `and` conjunction. `view_list`
+  has no upstream filter builder and rejects a `filters` field. Current members,
+  chat, and file toolsets remain unimplemented even though their future API
+  builders can accept flat filters. Filter count, value count, nesting depth, scalar
   lengths, arrays, and numeric magnitude are bounded. Set operands advertise
   1..100 values, and the recursive expression schema requires at least one
   nonempty condition or child array while retaining omission defaults.
@@ -773,14 +781,17 @@ Catalog changes are never accepted through an environment variable. Follow
 the explicit regeneration and review procedure in
 [`tests/snapshots/README.md`](tests/snapshots/README.md), including its pinned
 `o200k_base` token-count audit. The complete serialized default compact
-`tools/list` result is 9,669 tokens, strictly below 10,000 tokens (5% of the
-internal 200,000-token compatibility-policy floor), with 331 tokens of
-headroom. Its 2% material-growth boundary is 9,863 tokens, retaining 137 tokens
-of headroom. Compact read-only is 8,380 tokens. Exact reviewed baselines also
-measure explicit standard (22,909) and standard read-only (15,654), plus
+`tools/list` result is 9,658 tokens, strictly below 10,000 tokens (5% of the
+internal 200,000-token compatibility-policy floor), with 342 tokens of
+headroom. Its 2% material-growth boundary is 9,852 tokens, retaining 148 tokens
+of headroom. Compact read-only is 8,369 tokens. Exact reviewed baselines also
+measure explicit standard (36,135) and standard read-only (28,880), plus
 schema-valid representative search/get results; any
 count drift fails, and growth of at least 2% requires a recorded material-growth
-rationale. Then run:
+rationale. Flat filters add 13,226 tokens to each standard catalog because each
+standalone tool schema must include the exhaustive closed leaf union; the
+resulting catalogs occupy 18.068% and 14.440% of the 200,000-token support
+floor. Then run:
 
 ```sh
 cargo test -p any-mcp
