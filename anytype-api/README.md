@@ -1071,6 +1071,10 @@ state. A failure reports only its final closed stage/category and completed
 attempt count. Create failures likewise expose only a closed setup stage and
 category, distinguishing rejected or indeterminate requests from invalid ID,
 model, name, or ambient-identity evidence without rendering response values.
+The numeric/checkbox acceptance callback similarly reports only a closed
+fixture or comparison stage and a payload-free `TestError`/API diagnostic
+category, which proves whether execution crossed the callback boundary without
+exposing fixture identities, queries, endpoints, or upstream bodies.
 The two immediate pre-delete checks and final absence proof also
 use cache-disabled direct exact-ID reads. The helper cleans registered children first and retains callback,
 cleanup, deletion, absence, ledger, and panic outcomes; an unproven absence is

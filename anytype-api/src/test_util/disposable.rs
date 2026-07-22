@@ -57,6 +57,78 @@ pub enum DisposableRun<T> {
     Skipped(DisposableSkip),
 }
 
+/// Closed callback boundary used by disposable filter acceptance tests.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisposableCallbackStage {
+    /// Required property and type fixture construction.
+    Fixture,
+    /// Integer numeric equality.
+    NumberEqualInteger,
+    /// Numeric inequality.
+    NumberNotEqual,
+    /// Numeric less-than.
+    NumberLess,
+    /// Numeric less-than-or-equal.
+    NumberLessOrEqual,
+    /// Numeric greater-than.
+    NumberGreater,
+    /// Numeric greater-than-or-equal.
+    NumberGreaterOrEqual,
+    /// Negative-decimal numeric equality.
+    NumberEqualDecimal,
+    /// Checkbox equality with `true`.
+    CheckboxEqualTrue,
+    /// Checkbox equality with `false`.
+    CheckboxEqualFalse,
+    /// Checkbox inequality with `true`.
+    CheckboxNotEqualTrue,
+    /// Checkbox inequality with `false`.
+    CheckboxNotEqualFalse,
+}
+
+impl DisposableCallbackStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixture => "fixture",
+            Self::NumberEqualInteger => "number_equal_integer",
+            Self::NumberNotEqual => "number_not_equal",
+            Self::NumberLess => "number_less",
+            Self::NumberLessOrEqual => "number_less_or_equal",
+            Self::NumberGreater => "number_greater",
+            Self::NumberGreaterOrEqual => "number_greater_or_equal",
+            Self::NumberEqualDecimal => "number_equal_decimal",
+            Self::CheckboxEqualTrue => "checkbox_equal_true",
+            Self::CheckboxEqualFalse => "checkbox_equal_false",
+            Self::CheckboxNotEqualTrue => "checkbox_not_equal_true",
+            Self::CheckboxNotEqualFalse => "checkbox_not_equal_false",
+        }
+    }
+}
+
+/// Replaces a disposable callback error with closed, payload-free evidence.
+///
+/// API failures retain only [`AnytypeError::diagnostic`]'s static variant name.
+/// Configuration and assertion text, identifiers, names, endpoints, queries,
+/// credentials, and upstream bodies are discarded.
+#[doc(hidden)]
+pub fn disposable_callback_error(stage: DisposableCallbackStage, error: TestError) -> TestError {
+    let category = match error {
+        TestError::Api { source } => source.diagnostic().variant,
+        TestError::Env { .. } => "environment",
+        TestError::Config { .. } => "config",
+        TestError::DisposableReadiness { .. } => "readiness",
+        TestError::DisposableSetup { .. } => "setup",
+        TestError::DisposableCallback { .. } => "callback",
+        TestError::Assertion { .. } => "assertion",
+        TestError::SpaceCreateIndeterminate => "space_create_indeterminate",
+    };
+    TestError::DisposableCallback {
+        stage: stage.as_str(),
+        category,
+    }
+}
+
 /// Secret-safe reason a disposable-space test was skipped.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +224,18 @@ impl DisposableTestError {
         }
     }
 
+    /// Returns the secret-safe callback stage and error category, when available.
+    ///
+    /// A value proves the callback started and crossed the named boundary.
+    /// Pre-callback setup/readiness and cleanup-only failures return `None`.
+    #[must_use]
+    pub fn callback_failure(&self) -> Option<(&'static str, &'static str)> {
+        match self.source.as_deref() {
+            Some(TestError::DisposableCallback { stage, category }) => Some((*stage, *category)),
+            _ => None,
+        }
+    }
+
     /// Returns the final secret-safe readiness stage, category, and attempt count.
     ///
     /// Other setup and cleanup failures return `None`. The diagnostic never
@@ -183,6 +267,7 @@ impl fmt::Debug for DisposableTestError {
             .field("primary_error_retained", &self.source.is_some())
             .field("setup_failure", &self.setup_failure())
             .field("readiness_failure", &self.readiness_failure())
+            .field("callback_failure", &self.callback_failure())
             .field("evidence", &self.evidence)
             .finish()
     }
@@ -2708,6 +2793,100 @@ mod tests {
     }
 
     #[test]
+    fn callback_diagnostics_cover_api_config_assertion_and_started_boundary() {
+        const SECRET: &str = "secret-callback-value";
+        let api = setup_diagnostic(disposable_callback_error(
+            DisposableCallbackStage::Fixture,
+            TestError::Api {
+                source: AnytypeError::ApiError {
+                    code: 503,
+                    method: "GET".to_owned(),
+                    url: "http://secret.invalid/v1/spaces/secret-id/properties".to_owned(),
+                    message: SECRET.to_owned(),
+                },
+            },
+        ));
+        assert_eq!(api.callback_failure(), Some(("fixture", "api_error")));
+        assert_eq!(api.setup_failure(), None);
+        assert_eq!(api.readiness_failure(), None);
+
+        let config = setup_diagnostic(disposable_callback_error(
+            DisposableCallbackStage::NumberEqualInteger,
+            config_error(SECRET),
+        ));
+        assert_eq!(
+            config.callback_failure(),
+            Some(("number_equal_integer", "config"))
+        );
+
+        let assertion = setup_diagnostic(disposable_callback_error(
+            DisposableCallbackStage::CheckboxNotEqualFalse,
+            TestError::Assertion {
+                message: SECRET.to_owned(),
+            },
+        ));
+        assert_eq!(
+            assertion.callback_failure(),
+            Some(("checkbox_not_equal_false", "assertion"))
+        );
+
+        let pre_callback = setup_diagnostic(setup_error("space_create", "indeterminate"));
+        assert_eq!(pre_callback.callback_failure(), None);
+        assert_eq!(
+            pre_callback.setup_failure(),
+            Some(("space_create", "indeterminate"))
+        );
+
+        for rendered in [
+            api.to_string(),
+            format!("{api:?}"),
+            config.to_string(),
+            format!("{config:?}"),
+            assertion.to_string(),
+            format!("{assertion:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET));
+            assert!(!rendered.contains("secret.invalid"));
+            assert!(!rendered.contains("secret-id"));
+        }
+    }
+
+    #[test]
+    fn callback_stage_taxonomy_is_closed_and_exact() {
+        let stages = [
+            DisposableCallbackStage::Fixture,
+            DisposableCallbackStage::NumberEqualInteger,
+            DisposableCallbackStage::NumberNotEqual,
+            DisposableCallbackStage::NumberLess,
+            DisposableCallbackStage::NumberLessOrEqual,
+            DisposableCallbackStage::NumberGreater,
+            DisposableCallbackStage::NumberGreaterOrEqual,
+            DisposableCallbackStage::NumberEqualDecimal,
+            DisposableCallbackStage::CheckboxEqualTrue,
+            DisposableCallbackStage::CheckboxEqualFalse,
+            DisposableCallbackStage::CheckboxNotEqualTrue,
+            DisposableCallbackStage::CheckboxNotEqualFalse,
+        ];
+        assert_eq!(
+            stages.map(DisposableCallbackStage::as_str),
+            [
+                "fixture",
+                "number_equal_integer",
+                "number_not_equal",
+                "number_less",
+                "number_less_or_equal",
+                "number_greater",
+                "number_greater_or_equal",
+                "number_equal_decimal",
+                "checkbox_equal_true",
+                "checkbox_equal_false",
+                "checkbox_not_equal_true",
+                "checkbox_not_equal_false",
+            ]
+        );
+    }
+
+    #[test]
     fn every_delete_read_must_still_authorize_the_current_name() {
         let prefix = DisposablePrefix::parse("xtest".to_owned()).unwrap();
         assert!(!authorized_delete_presence(&prefix, &ExactSpace::Absent).unwrap());
@@ -3466,6 +3645,27 @@ mod tests {
         );
         assert_eq!(error.readiness_failure(), None);
         assert_eq!(error.evidence.absence, StageOutcome::Unproven);
+    }
+
+    #[test]
+    fn cleanup_precedence_retains_closed_callback_diagnostic() {
+        let mut harness = clean_evidence();
+        harness.ledger = StageOutcome::Error;
+        let error = finish_outcomes::<()>(
+            Ok(Err(disposable_callback_error(
+                DisposableCallbackStage::NumberLess,
+                TestError::Assertion {
+                    message: "secret assertion detail".to_owned(),
+                },
+            ))),
+            harness,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.category, DisposableErrorCategory::HarnessStateCleanup);
+        assert_eq!(error.callback_failure(), Some(("number_less", "assertion")));
+        assert_eq!(error.evidence.ledger, StageOutcome::Error);
+        assert!(!format!("{error:?}").contains("secret assertion detail"));
     }
 
     #[test]
