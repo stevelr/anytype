@@ -161,6 +161,23 @@ selection can authenticate or perform I/O, its effective
 `ANYTYPE_RATE_LIMIT_MAX_RETRIES` value must be in `1..=5`; empty-selection
 Phase 1 startup retains the existing `anytype-api` behavior.
 
+### Object-tag exclusion policy status
+
+`any-mcp` does not currently enforce an object tag such as `never-access` as
+an access policy. An investigation found that ordinary object, search, and
+saved-view list responses already include assigned select and multi-select
+tags, so those pages do not inherently require one follow-up request per
+object. Canonical manual-collection membership returns IDs only and needs a
+separate policy-aware query; filtering its current pages afterward would leak
+protected membership through pagination. Global search, linked or embedded
+objects, chat/discussion inheritance, schema mutation, and write races also
+need resolved contracts before such a guard can be advertised.
+
+Any future tag guard would constrain only this MCP process. Other Anytype
+clients can change object tags, and the current API cannot atomically bind a
+tag preflight to a later mutation. Continue to use Anytype space permissions
+as the authorization boundary.
+
 The response budgets are enforced while chunks arrive, before workflow
 pagination or projection. A truthful oversized `Content-Length` fails before
 body allocation, and absent or misleading framing cannot exceed the streamed
