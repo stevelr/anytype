@@ -264,7 +264,10 @@ pub mod prelude {
         // Property tags
         tags::{CreateTagRequest, Tag},
         // Type objects
-        types::{CreateTypeProperty, Type, TypeLayout},
+        types::{
+            CreateTypeProperty, MAX_TYPE_PROPERTY_LINKS, Type, TypeLayout,
+            TypePropertyClassification,
+        },
         // Validation
         validation::ValidationLimits,
         // Verify
