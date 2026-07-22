@@ -8,6 +8,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Document the feasibility and security limits of a future object-tag
+  exclusion policy. REST object, search, and saved-view pages already include
+  assigned select and multi-select tags, while canonical collection
+  membership remains identity-only and cannot be safely post-filtered without
+  pagination leakage. No `never-access` policy is implemented or advertised;
+  global search, chat/discussion inheritance, link/embed behavior, schema
+  protection, and mutation races still require a reviewed design.
 - Add the production-unlinked `discussions` candidate with exactly one
   read-only `object_discussion_get` workflow. It resolves one explicit space,
   validates one exact parent ID, and reuses the typed `anytype-api` attached
