@@ -612,14 +612,41 @@ cargo test -- --nocapture
 
 Integration tests require a running Anytype server and environment variables. See `src/client.rs` for details.
 
-Chat resolver integration tests create cleanup-owned chats and messages on the
-configured real HTTP and gRPC endpoints; they do not use the deprecated custom
-gRPC mock.
+The crate no longer ships a semantic gRPC mock server. Successful gRPC
+behavior is covered with cleanup-owned resources against the configured real
+Anytype server. Protocol and reducer edge cases use scripted transport handlers
+or constructed values without pretending to implement Anytype semantics.
+Disconnect, latency, and other connection-fault scenarios require the reviewed
+external fault-injection harness and are not emulated by an in-process gRPC
+service.
 
-Body reader integration tests create cleanup-owned objects on the configured
-real HTTP endpoint, then verify typed reads, ordering, close-safe repeat reads,
-tightened limits, and missing-object failures through the configured gRPC
-endpoint; they do not use the custom gRPC mock.
+Chat resolver integration tests create cleanup-owned chats and messages in a
+fresh prefix-authorized space on the configured real HTTP and gRPC endpoints.
+Supporting REST reads and the REST SSE test use the same disposable tier so the
+resolver and stream files remain runnable when the server has no ambient
+spaces. Broader pre-existing REST CRUD, search, reaction, and read-state cases
+remain in the ambient `test_chats` tier and are not part of the mock migration.
+Every created message is registered immediately, before stream waits or
+assertions, and the gRPC stream worker is shut down before teardown.
+
+Body reader integration tests create cleanup-owned objects in a fresh
+prefix-authorized space on the configured real HTTP endpoint, then verify typed
+reads, ordering, close-safe repeat reads, tightened limits, and missing-object
+failures through the configured gRPC endpoint. The adjacent dataview test was
+not formerly mock-backed, but shares the disposable tier so the body test file
+does not require ambient inventory.
+
+The body, chat-discovery, and chat-stream files are ignored in ordinary test
+runs. Run each in its own admitted, single-threaded process; do not run these
+commands concurrently:
+
+```sh
+source .test-env
+ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_body -- --ignored --test-threads=1 --nocapture
+ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_discovery -- --ignored --test-threads=1 --nocapture
+ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_stream -- --ignored --test-threads=1 --nocapture
+ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_process_watcher watcher_completes_on_real_import_finish_fallback -- --ignored --exact --test-threads=1 --nocapture
+```
 
 Process watcher import-finish coverage uses a real Markdown import in the fresh
 cleanup-owned space created by `with_disposable_space_context`. The watcher

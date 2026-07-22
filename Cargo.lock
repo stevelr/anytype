@@ -328,7 +328,6 @@ dependencies = [
  "test-log",
  "tokio",
  "tonic",
- "tonic-prost",
  "tracing",
  "tracing-subscriber",
  "url",

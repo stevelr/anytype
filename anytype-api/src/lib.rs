@@ -197,8 +197,6 @@ pub(crate) mod grpc_util;
 mod http_client;
 pub mod keystore;
 pub mod members;
-#[doc(hidden)]
-pub mod mock;
 pub mod objects;
 pub mod paged;
 pub mod process_watcher;
