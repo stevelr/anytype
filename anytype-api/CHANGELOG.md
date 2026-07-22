@@ -107,6 +107,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Make disposable-space readiness convergence finite and observable with an
+  exact 20-second/50-attempt budget. Readiness now resolves only the exact
+  `@page` key, verifies it through a cache-independent GET on the same space
+  path, rejects mismatched ID/key/archive evidence, and retains only a closed
+  final stage/category plus attempt count while preserving cleanup precedence.
+  Pre-readiness create failures now retain an equally closed setup
+  stage/category that distinguishes rejected or indeterminate requests and
+  invalid ID/model/name/ambient-identity responses without exposing values.
 - Replace the stale `anytype-heart#2879` numeric/checkbox limitation with exact
   query-encoding unit regressions and a cleanup-owned real-server matrix over
   object-list and scoped-search endpoints. The matrix covers all six numeric

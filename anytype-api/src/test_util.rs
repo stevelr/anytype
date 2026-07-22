@@ -154,6 +154,28 @@ pub enum TestError {
     #[snafu(display("Configuration error: {message}"))]
     Config { message: String },
 
+    /// A disposable space did not reach exact, scoped REST readiness.
+    #[snafu(display(
+        "Disposable readiness failed: stage={stage} category={category} attempts={attempts}"
+    ))]
+    DisposableReadiness {
+        /// Closed readiness stage name.
+        stage: &'static str,
+        /// Closed payload-free failure category.
+        category: &'static str,
+        /// Number of completed readiness observations.
+        attempts: usize,
+    },
+
+    /// A disposable-space setup stage failed with a closed, secret-safe cause.
+    #[snafu(display("Disposable setup failed: stage={stage} category={category}"))]
+    DisposableSetup {
+        /// Closed setup stage name.
+        stage: &'static str,
+        /// Closed payload-free failure category.
+        category: &'static str,
+    },
+
     #[snafu(display("Test assertion failed: {message}"))]
     Assertion { message: String },
 
