@@ -1,0 +1,79 @@
+{
+  "biome": {
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 110
+  },
+  "dockerfile": {},
+  "excludes": [
+    "*.bak",
+    "*.tmp",
+    "*backup*gz",
+    ".*[_-]history",
+    ".env",
+    ".envrc",
+    ".direnv",
+    ".DS_Store",
+    "target/",
+    "dist/",
+    "node_modules/",
+    ".venv",
+    "*.py[cod]",
+    "__pycache__",
+    ".zcompcache*",
+    ".zcompdump*",
+    "zig-bin",
+    "zig-cache",
+    ".vscode",
+    ".idea/",
+    "*.mp[34]",
+    ".m4b",
+    ".mkv",
+    "*.tiff",
+    "*.avi",
+    "*.flv",
+    "*.mov",
+    "*.wmv",
+    "nohup.out",
+    ".ssh/",
+    ".gnupg/",
+    ".*.sw[pon]",
+    ".*cache",
+    "*.log",
+    "*.rdb",
+    "*.db",
+    "**/*-lock.json",
+    "**/flake.lock"
+  ],
+  "indentWidth": 2,
+  "markdown": {
+    "emphasisKind": "asterisks",
+    "lineWidth": 110,
+    "strongKind": "asterisks",
+    "textWrap": "maintain"
+  },
+  "plugins": [
+    "@GATE_PLUGIN:dprint-plugin-biome@",
+    "@GATE_PLUGIN:dprint-plugin-dockerfile@",
+    "@GATE_PLUGIN:g-plane-malva@",
+    "@GATE_PLUGIN:dprint-plugin-markdown@",
+    "@GATE_PLUGIN:g-plane-markup_fmt@",
+    "@GATE_PLUGIN:dprint-plugin-ruff@",
+    "@GATE_PLUGIN:dprint-plugin-toml@",
+    "@GATE_PLUGIN:dprint-plugin-typescript@",
+    "@GATE_PLUGIN:g-plane-pretty_yaml@"
+  ],
+  "ruff": {
+    "lineWidth": 110,
+    "quoteStyle": "double"
+  },
+  "toml": {
+    "lineWidth": 110
+  },
+  "typescript": {},
+  "useTabs": false,
+  "yaml": {
+    "associations": [".yml"],
+    "bracketSpacing": true
+  }
+}
