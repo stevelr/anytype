@@ -20,7 +20,8 @@ use sha2::{Digest, Sha256};
 use tonic::Request;
 
 use super::{
-    AnytypeClient, AnytypeError, ChildOwnershipOutcome, ClientConfig, Space, SpaceModel,
+    AnytypeClient, AnytypeError, ChildOwnershipOutcome, ClientConfig, DisposableCallbackStage,
+    DisposableFailureCategory, DisposableReadinessStage, DisposableSetupStage, Space, SpaceModel,
     TestContext, TestError, TestResult, VerifyConfig, space_delete_succeeded, with_token_request,
 };
 
@@ -57,55 +58,6 @@ pub enum DisposableRun<T> {
     Skipped(DisposableSkip),
 }
 
-/// Closed callback boundary used by disposable filter acceptance tests.
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DisposableCallbackStage {
-    /// Required property and type fixture construction.
-    Fixture,
-    /// Integer numeric equality.
-    NumberEqualInteger,
-    /// Numeric inequality.
-    NumberNotEqual,
-    /// Numeric less-than.
-    NumberLess,
-    /// Numeric less-than-or-equal.
-    NumberLessOrEqual,
-    /// Numeric greater-than.
-    NumberGreater,
-    /// Numeric greater-than-or-equal.
-    NumberGreaterOrEqual,
-    /// Negative-decimal numeric equality.
-    NumberEqualDecimal,
-    /// Checkbox equality with `true`.
-    CheckboxEqualTrue,
-    /// Checkbox equality with `false`.
-    CheckboxEqualFalse,
-    /// Checkbox inequality with `true`.
-    CheckboxNotEqualTrue,
-    /// Checkbox inequality with `false`.
-    CheckboxNotEqualFalse,
-}
-
-impl DisposableCallbackStage {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Fixture => "fixture",
-            Self::NumberEqualInteger => "number_equal_integer",
-            Self::NumberNotEqual => "number_not_equal",
-            Self::NumberLess => "number_less",
-            Self::NumberLessOrEqual => "number_less_or_equal",
-            Self::NumberGreater => "number_greater",
-            Self::NumberGreaterOrEqual => "number_greater_or_equal",
-            Self::NumberEqualDecimal => "number_equal_decimal",
-            Self::CheckboxEqualTrue => "checkbox_equal_true",
-            Self::CheckboxEqualFalse => "checkbox_equal_false",
-            Self::CheckboxNotEqualTrue => "checkbox_not_equal_true",
-            Self::CheckboxNotEqualFalse => "checkbox_not_equal_false",
-        }
-    }
-}
-
 /// Replaces a disposable callback error with closed, payload-free evidence.
 ///
 /// API failures retain only [`AnytypeError::diagnostic`]'s static variant name.
@@ -114,18 +66,69 @@ impl DisposableCallbackStage {
 #[doc(hidden)]
 pub fn disposable_callback_error(stage: DisposableCallbackStage, error: TestError) -> TestError {
     let category = match error {
-        TestError::Api { source } => source.diagnostic().variant,
-        TestError::Env { .. } => "environment",
-        TestError::Config { .. } => "config",
-        TestError::DisposableReadiness { .. } => "readiness",
-        TestError::DisposableSetup { .. } => "setup",
-        TestError::DisposableCallback { .. } => "callback",
-        TestError::Assertion { .. } => "assertion",
-        TestError::SpaceCreateIndeterminate => "space_create_indeterminate",
+        TestError::Api { source } => failure_category_from_anytype(&source),
+        TestError::Env { .. } => DisposableFailureCategory::Environment,
+        TestError::Config { .. } => DisposableFailureCategory::Config,
+        TestError::DisposableReadiness { .. } => DisposableFailureCategory::Readiness,
+        TestError::DisposableSetup { .. } => DisposableFailureCategory::Setup,
+        TestError::DisposableCallback { .. } => DisposableFailureCategory::Callback,
+        TestError::Assertion { .. } => DisposableFailureCategory::Assertion,
+        TestError::SpaceCreateIndeterminate => DisposableFailureCategory::SpaceCreateIndeterminate,
     };
-    TestError::DisposableCallback {
-        stage: stage.as_str(),
-        category,
+    TestError::DisposableCallback { stage, category }
+}
+
+fn failure_category_from_anytype(error: &AnytypeError) -> DisposableFailureCategory {
+    match error {
+        AnytypeError::Http { .. } => DisposableFailureCategory::HttpTransport,
+        AnytypeError::ApiError { .. } => DisposableFailureCategory::ApiError,
+        AnytypeError::ResponseTooLarge { .. } => DisposableFailureCategory::ResponseTooLarge,
+        AnytypeError::FileHeaderEvidenceTooLarge { .. } => {
+            DisposableFailureCategory::FileHeaderEvidenceTooLarge
+        }
+        AnytypeError::InvalidFileResponseHeader { .. } => {
+            DisposableFailureCategory::InvalidFileResponseHeader
+        }
+        AnytypeError::ChatSseEventTooLarge { .. } => {
+            DisposableFailureCategory::ChatSseEventTooLarge
+        }
+        AnytypeError::ChatSseTransport { .. } => DisposableFailureCategory::ChatSseTransport,
+        AnytypeError::ChatTimestamp { .. } => DisposableFailureCategory::ChatTimestamp,
+        AnytypeError::ChatHistoryEvidence { .. } => DisposableFailureCategory::ChatHistoryEvidence,
+        AnytypeError::ChatEditTimestampNotAdvanced => {
+            DisposableFailureCategory::ChatEditTimestampNotAdvanced
+        }
+        AnytypeError::TooManyRetries { .. } => DisposableFailureCategory::TooManyRetries,
+        AnytypeError::Auth { .. } => DisposableFailureCategory::Auth,
+        AnytypeError::Deserialization { .. } => DisposableFailureCategory::Deserialization,
+        AnytypeError::Serialization { .. } => DisposableFailureCategory::Serialization,
+        AnytypeError::NotFound { .. } => DisposableFailureCategory::NotFound,
+        AnytypeError::Ambiguous { .. } => DisposableFailureCategory::Ambiguous,
+        AnytypeError::ResolutionLimitExceeded { .. } => {
+            DisposableFailureCategory::ResolutionLimitExceeded
+        }
+        AnytypeError::Unauthorized => DisposableFailureCategory::Unauthorized,
+        AnytypeError::Forbidden => DisposableFailureCategory::Forbidden,
+        AnytypeError::RateLimitExceeded { .. } => DisposableFailureCategory::RateLimit,
+        AnytypeError::Validation { .. } => DisposableFailureCategory::Validation,
+        AnytypeError::NoKeyStore => DisposableFailureCategory::NoKeystore,
+        AnytypeError::Grpc { .. } => DisposableFailureCategory::Grpc,
+        AnytypeError::GrpcUnavailable { .. } => DisposableFailureCategory::GrpcUnavailable,
+        AnytypeError::KeyStore { .. } => DisposableFailureCategory::Keystore,
+        AnytypeError::CacheDisabled => DisposableFailureCategory::CacheDisabled,
+        AnytypeError::BodyGraph { .. } => DisposableFailureCategory::BodyGraph,
+        AnytypeError::BodyMutationIndeterminate { .. } => {
+            DisposableFailureCategory::BodyMutationIndeterminate
+        }
+        AnytypeError::CollectionMembershipEvidence { .. } => {
+            DisposableFailureCategory::CollectionMembershipEvidence
+        }
+        AnytypeError::TypePropertyClassification { .. } => {
+            DisposableFailureCategory::TypePropertyClassification
+        }
+        AnytypeError::AttachedDiscussion { .. } => DisposableFailureCategory::AttachedDiscussion,
+        AnytypeError::VerifyTimeout { .. } => DisposableFailureCategory::VerifyTimeout,
+        AnytypeError::Other { .. } => DisposableFailureCategory::Other,
     }
 }
 
@@ -219,7 +222,9 @@ impl DisposableTestError {
     #[must_use]
     pub fn setup_failure(&self) -> Option<(&'static str, &'static str)> {
         match self.source.as_deref() {
-            Some(TestError::DisposableSetup { stage, category }) => Some((*stage, *category)),
+            Some(TestError::DisposableSetup { stage, category }) => {
+                Some((stage.as_str(), category.as_str()))
+            }
             _ => None,
         }
     }
@@ -231,7 +236,9 @@ impl DisposableTestError {
     #[must_use]
     pub fn callback_failure(&self) -> Option<(&'static str, &'static str)> {
         match self.source.as_deref() {
-            Some(TestError::DisposableCallback { stage, category }) => Some((*stage, *category)),
+            Some(TestError::DisposableCallback { stage, category }) => {
+                Some((stage.as_str(), category.as_str()))
+            }
             _ => None,
         }
     }
@@ -247,7 +254,7 @@ impl DisposableTestError {
                 stage,
                 category,
                 attempts,
-            }) => Some((*stage, *category, *attempts)),
+            }) => Some((stage.as_str(), category.as_str(), *attempts)),
             _ => None,
         }
     }
@@ -1467,17 +1474,17 @@ enum ExactSpace {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReadinessFailure {
-    stage: &'static str,
-    category: &'static str,
+    stage: DisposableReadinessStage,
+    category: DisposableFailureCategory,
 }
 
 impl ReadinessFailure {
-    const fn new(stage: &'static str, category: &'static str) -> Self {
+    const fn new(stage: DisposableReadinessStage, category: DisposableFailureCategory) -> Self {
         Self { stage, category }
     }
 
-    fn from_api(stage: &'static str, error: &AnytypeError) -> Self {
-        Self::new(stage, error.diagnostic().variant)
+    fn from_api(stage: DisposableReadinessStage, error: &AnytypeError) -> Self {
+        Self::new(stage, failure_category_from_anytype(error))
     }
 }
 
@@ -1511,9 +1518,10 @@ impl ReadinessConvergence {
     }
 
     fn error(&self) -> TestError {
-        let failure = self
-            .last_failure
-            .unwrap_or(ReadinessFailure::new("readiness", "not_observed"));
+        let failure = self.last_failure.unwrap_or(ReadinessFailure::new(
+            DisposableReadinessStage::Readiness,
+            DisposableFailureCategory::NotObserved,
+        ));
         TestError::DisposableReadiness {
             stage: failure.stage,
             category: failure.category,
@@ -1522,7 +1530,10 @@ impl ReadinessConvergence {
     }
 
     fn mark_timeout(&mut self) {
-        self.last_failure = Some(ReadinessFailure::new("readiness", "timeout"));
+        self.last_failure = Some(ReadinessFailure::new(
+            DisposableReadinessStage::Readiness,
+            DisposableFailureCategory::Timeout,
+        ));
     }
 }
 
@@ -1548,7 +1559,10 @@ fn readiness_error_is_terminal(error: &AnytypeError) -> bool {
     }
 }
 
-fn classify_readiness_api_failure(stage: &'static str, error: &AnytypeError) -> ReadinessAttempt {
+fn classify_readiness_api_failure(
+    stage: DisposableReadinessStage,
+    error: &AnytypeError,
+) -> ReadinessAttempt {
     let failure = ReadinessFailure::from_api(stage, error);
     if readiness_error_is_terminal(error) {
         ReadinessAttempt::Terminal(failure)
@@ -1564,39 +1578,52 @@ async fn readiness_attempt(
 ) -> ReadinessAttempt {
     match exact_space(client, space_id).await {
         Ok(ExactSpace::Absent) => {
-            return ReadinessAttempt::Retry(ReadinessFailure::new("space", "not_found"));
+            return ReadinessAttempt::Retry(ReadinessFailure::new(
+                DisposableReadinessStage::Space,
+                DisposableFailureCategory::NotFound,
+            ));
         }
         Ok(ExactSpace::Present(space)) if !prefix.authorizes(&space.name) => {
-            return ReadinessAttempt::Terminal(ReadinessFailure::new("space", "identity_mismatch"));
+            return ReadinessAttempt::Terminal(ReadinessFailure::new(
+                DisposableReadinessStage::Space,
+                DisposableFailureCategory::IdentityMismatch,
+            ));
         }
         Ok(ExactSpace::Present(_)) => {}
         Err(TestError::Api { source }) => {
-            return classify_readiness_api_failure("space", &source);
+            return classify_readiness_api_failure(DisposableReadinessStage::Space, &source);
         }
         Err(_) => {
-            return ReadinessAttempt::Terminal(ReadinessFailure::new("space", "invalid_evidence"));
+            return ReadinessAttempt::Terminal(ReadinessFailure::new(
+                DisposableReadinessStage::Space,
+                DisposableFailureCategory::InvalidEvidence,
+            ));
         }
     }
 
     let resolved = match client.resolve_type(space_id, PAGE_TYPE_REFERENCE).await {
         Ok(typ) => typ,
-        Err(error) => return classify_readiness_api_failure("type_resolve", &error),
+        Err(error) => {
+            return classify_readiness_api_failure(DisposableReadinessStage::TypeResolve, &error);
+        }
     };
     if resolved.key != PAGE_TYPE_KEY || resolved.archived {
         return ReadinessAttempt::Terminal(ReadinessFailure::new(
-            "type_resolve",
-            "identity_mismatch",
+            DisposableReadinessStage::TypeResolve,
+            DisposableFailureCategory::IdentityMismatch,
         ));
     }
 
     let direct = match client.get_type(space_id, &resolved.id).get_direct().await {
         Ok(typ) => typ,
-        Err(error) => return classify_readiness_api_failure("type_direct", &error),
+        Err(error) => {
+            return classify_readiness_api_failure(DisposableReadinessStage::TypeDirect, &error);
+        }
     };
     if direct.id != resolved.id || direct.key != PAGE_TYPE_KEY || direct.archived {
         return ReadinessAttempt::Terminal(ReadinessFailure::new(
-            "type_direct",
-            "identity_mismatch",
+            DisposableReadinessStage::TypeDirect,
+            DisposableFailureCategory::IdentityMismatch,
         ));
     }
 
@@ -1633,24 +1660,42 @@ fn validate_created_space(
     ambient_space_ids: &[String],
 ) -> TestResult<()> {
     if limits.validate_id(&created.id, "disposable space").is_err() {
-        return Err(setup_error("create_response", "invalid_id"));
+        return Err(setup_error(
+            DisposableSetupStage::CreateResponse,
+            DisposableFailureCategory::InvalidId,
+        ));
     }
     if created.object != SpaceModel::Space {
-        return Err(setup_error("create_response", "model_mismatch"));
+        return Err(setup_error(
+            DisposableSetupStage::CreateResponse,
+            DisposableFailureCategory::ModelMismatch,
+        ));
     }
     if created.name != expected_name || !prefix.authorizes(&created.name) {
-        return Err(setup_error("create_response", "name_mismatch"));
+        return Err(setup_error(
+            DisposableSetupStage::CreateResponse,
+            DisposableFailureCategory::NameMismatch,
+        ));
     }
     if ambient_space_ids.iter().any(|id| id == &created.id) {
-        return Err(setup_error("create_response", "ambient_collision"));
+        return Err(setup_error(
+            DisposableSetupStage::CreateResponse,
+            DisposableFailureCategory::AmbientCollision,
+        ));
     }
     Ok(())
 }
 
 fn classify_disposable_space_create_error(error: AnytypeError) -> TestError {
     match super::classify_space_create_error(error) {
-        TestError::SpaceCreateIndeterminate => setup_error("space_create", "indeterminate"),
-        _ => setup_error("space_create", "api_rejected"),
+        TestError::SpaceCreateIndeterminate => setup_error(
+            DisposableSetupStage::SpaceCreate,
+            DisposableFailureCategory::Indeterminate,
+        ),
+        _ => setup_error(
+            DisposableSetupStage::SpaceCreate,
+            DisposableFailureCategory::ApiRejected,
+        ),
     }
 }
 
@@ -1675,7 +1720,10 @@ async fn wait_ready(
             tokio::time::timeout(remaining, readiness_attempt(client, prefix, space_id))
                 .await
                 .unwrap_or_else(|_| {
-                    ReadinessAttempt::Terminal(ReadinessFailure::new("readiness", "timeout"))
+                    ReadinessAttempt::Terminal(ReadinessFailure::new(
+                        DisposableReadinessStage::Readiness,
+                        DisposableFailureCategory::Timeout,
+                    ))
                 });
         match convergence.observe(observation) {
             ReadinessAttempt::Ready => return Ok(()),
@@ -2460,7 +2508,7 @@ fn config_error(message: &str) -> TestError {
     }
 }
 
-fn setup_error(stage: &'static str, category: &'static str) -> TestError {
+fn setup_error(stage: DisposableSetupStage, category: DisposableFailureCategory) -> TestError {
     TestError::DisposableSetup { stage, category }
 }
 
@@ -2503,7 +2551,10 @@ mod tests {
 
     #[test]
     fn readiness_convergence_accepts_a_delayed_exact_result() {
-        let pending = ReadinessFailure::new("type_resolve", "not_found");
+        let pending = ReadinessFailure::new(
+            DisposableReadinessStage::TypeResolve,
+            DisposableFailureCategory::NotFound,
+        );
         let mut convergence = ReadinessConvergence::default();
 
         assert_eq!(
@@ -2523,7 +2574,10 @@ mod tests {
 
     #[test]
     fn readiness_identity_mismatch_is_terminal_and_sanitized() {
-        let mismatch = ReadinessFailure::new("type_direct", "identity_mismatch");
+        let mismatch = ReadinessFailure::new(
+            DisposableReadinessStage::TypeDirect,
+            DisposableFailureCategory::IdentityMismatch,
+        );
         let mut convergence = ReadinessConvergence::default();
 
         assert_eq!(
@@ -2533,8 +2587,8 @@ mod tests {
         assert!(matches!(
             convergence.error(),
             TestError::DisposableReadiness {
-                stage: "type_direct",
-                category: "identity_mismatch",
+                stage: DisposableReadinessStage::TypeDirect,
+                category: DisposableFailureCategory::IdentityMismatch,
                 attempts: 1,
             }
         ));
@@ -2544,26 +2598,104 @@ mod tests {
     fn readiness_timeout_replaces_transient_failure_without_unbounded_attempts() {
         let mut convergence = ReadinessConvergence::default();
         let _ = convergence.observe(ReadinessAttempt::Retry(ReadinessFailure::new(
-            "space",
-            "not_found",
+            DisposableReadinessStage::Space,
+            DisposableFailureCategory::NotFound,
         )));
         convergence.mark_timeout();
 
         assert!(matches!(
             convergence.error(),
             TestError::DisposableReadiness {
-                stage: "readiness",
-                category: "timeout",
+                stage: DisposableReadinessStage::Readiness,
+                category: DisposableFailureCategory::Timeout,
                 attempts: 1,
             }
         ));
     }
 
     #[test]
+    fn readiness_api_status_table_distinguishes_transient_and_terminal_codes() {
+        for code in [404, 408, 409, 425, 429, 500, 502, 503] {
+            let error = AnytypeError::ApiError {
+                code,
+                method: "GET".to_owned(),
+                url: "http://secret.invalid/v1/spaces/secret-id".to_owned(),
+                message: "secret body".to_owned(),
+            };
+            assert!(matches!(
+                classify_readiness_api_failure(DisposableReadinessStage::Space, &error),
+                ReadinessAttempt::Retry(ReadinessFailure {
+                    stage: DisposableReadinessStage::Space,
+                    category: DisposableFailureCategory::ApiError,
+                })
+            ));
+        }
+
+        for code in [400, 401, 403, 405, 410, 422] {
+            let error = AnytypeError::ApiError {
+                code,
+                method: "GET".to_owned(),
+                url: "http://secret.invalid/v1/spaces/secret-id".to_owned(),
+                message: "secret body".to_owned(),
+            };
+            assert!(matches!(
+                classify_readiness_api_failure(DisposableReadinessStage::Space, &error),
+                ReadinessAttempt::Terminal(ReadinessFailure {
+                    stage: DisposableReadinessStage::Space,
+                    category: DisposableFailureCategory::ApiError,
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn readiness_variant_table_distinguishes_transient_and_terminal_errors() {
+        let transient = [
+            AnytypeError::NotFound {
+                obj_type: "secret type".to_owned(),
+                key: "secret key".to_owned(),
+            },
+            AnytypeError::RateLimitExceeded {
+                header: "secret header".to_owned(),
+                duration: Duration::from_secs(1),
+            },
+            AnytypeError::TooManyRetries { n: 3 },
+        ];
+        for error in transient {
+            assert!(matches!(
+                classify_readiness_api_failure(DisposableReadinessStage::TypeResolve, &error),
+                ReadinessAttempt::Retry(_)
+            ));
+        }
+
+        let terminal = [
+            AnytypeError::Validation {
+                message: "secret validation".to_owned(),
+            },
+            AnytypeError::CacheDisabled,
+            AnytypeError::Unauthorized,
+            AnytypeError::Forbidden,
+            AnytypeError::ResponseTooLarge {
+                limit: 1,
+                declared: Some(2),
+            },
+            AnytypeError::Other {
+                message: "secret other".to_owned(),
+            },
+        ];
+        for error in terminal {
+            assert!(matches!(
+                classify_readiness_api_failure(DisposableReadinessStage::TypeDirect, &error),
+                ReadinessAttempt::Terminal(_)
+            ));
+        }
+    }
+
+    #[test]
     fn readiness_failure_is_reported_after_successful_cleanup() {
         let primary = TestError::DisposableReadiness {
-            stage: "type_resolve",
-            category: "not_found",
+            stage: DisposableReadinessStage::TypeResolve,
+            category: DisposableFailureCategory::NotFound,
             attempts: READINESS_MAX_ATTEMPTS,
         };
         let error = finish_outcomes::<()>(Ok(Err(primary)), clean_evidence()).unwrap_err();
@@ -2830,7 +2962,10 @@ mod tests {
             Some(("checkbox_not_equal_false", "assertion"))
         );
 
-        let pre_callback = setup_diagnostic(setup_error("space_create", "indeterminate"));
+        let pre_callback = setup_diagnostic(setup_error(
+            DisposableSetupStage::SpaceCreate,
+            DisposableFailureCategory::Indeterminate,
+        ));
         assert_eq!(pre_callback.callback_failure(), None);
         assert_eq!(
             pre_callback.setup_failure(),
@@ -3633,7 +3768,10 @@ mod tests {
         let mut absence = clean_evidence();
         absence.absence = StageOutcome::Unproven;
         let error = finish_outcomes::<()>(
-            Ok(Err(setup_error("create_response", "name_mismatch"))),
+            Ok(Err(setup_error(
+                DisposableSetupStage::CreateResponse,
+                DisposableFailureCategory::NameMismatch,
+            ))),
             absence,
         )
         .unwrap_err();
