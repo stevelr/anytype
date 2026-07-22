@@ -12,6 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
+    time::Instant,
 };
 
 use anytype::error::AnytypeError;
@@ -257,6 +258,51 @@ where
     .await
 }
 
+/// Executes one prepared operation under a caller-supplied absolute deadline.
+pub async fn execute_prepared_handler_until<U, O, F, C, CF, E>(
+    runtime: &RuntimeContext,
+    deadline: Instant,
+    contract: &WorkflowTool<O>,
+    context: OperationContext,
+    cancellation: &CancellationToken,
+    operation: F,
+    convert: C,
+) -> CallToolResult
+where
+    O: Serialize,
+    F: Future<Output = Result<U, E>>,
+    E: Into<HandlerOperationError>,
+    C: FnOnce(U) -> CF,
+    CF: Future<Output = Result<O, HandlerError>>,
+{
+    let control_policy = ControlledFailurePolicy::Ordinary;
+    let result = runtime
+        .execute_classified_with_control_until(
+            deadline,
+            context,
+            cancellation,
+            async {
+                let upstream = operation
+                    .await
+                    .map_err(|error| HandlerExecutionError::Operation(error.into()))?;
+                let output = convert(upstream)
+                    .await
+                    .map_err(HandlerExecutionError::Conversion)?;
+                contract
+                    .success(&output)
+                    .map_err(|_| HandlerExecutionError::Encoding)
+            },
+            HandlerExecutionError::diagnostic,
+            |failure| control_policy.diagnostic(failure),
+        )
+        .await;
+
+    match result {
+        Ok(output) => output,
+        Err(error) => tool_error(&execution_tool_error(error, control_policy)),
+    }
+}
+
 /// Executes a mutation with stage-aware cancellation, timeout, and shutdown
 /// handling.
 ///
@@ -296,6 +342,56 @@ where
         ControlledFailurePolicy::Mutation(progress),
     )
     .await
+}
+
+/// Executes a mutation under one caller-supplied absolute request deadline.
+///
+/// Detached create supervisors use this variant so resolution, admission,
+/// dispatch, verification, and waiting share the leader's original deadline.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_mutation_handler_until<U, O, F, C, CF, E>(
+    runtime: &RuntimeContext,
+    deadline: Instant,
+    contract: &WorkflowTool<O>,
+    context: OperationContext,
+    cancellation: &CancellationToken,
+    progress: &MutationProgress,
+    operation: F,
+    convert: C,
+) -> CallToolResult
+where
+    O: Serialize,
+    F: Future<Output = Result<U, E>>,
+    E: Into<HandlerOperationError>,
+    C: FnOnce(U) -> CF,
+    CF: Future<Output = Result<O, HandlerError>>,
+{
+    let control_policy = ControlledFailurePolicy::Mutation(progress);
+    let result = runtime
+        .execute_classified_with_control_until(
+            deadline,
+            context,
+            cancellation,
+            async {
+                let upstream = operation
+                    .await
+                    .map_err(|error| HandlerExecutionError::Operation(error.into()))?;
+                let output = convert(upstream)
+                    .await
+                    .map_err(HandlerExecutionError::Conversion)?;
+                contract
+                    .success(&output)
+                    .map_err(|_| HandlerExecutionError::Encoding)
+            },
+            HandlerExecutionError::diagnostic,
+            |failure| control_policy.diagnostic(failure),
+        )
+        .await;
+
+    match result {
+        Ok(output) => output,
+        Err(error) => tool_error(&execution_tool_error(error, control_policy)),
+    }
 }
 
 async fn execute_prepared_with_policy<U, O, F, C, CF, E>(

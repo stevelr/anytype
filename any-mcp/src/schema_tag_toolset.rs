@@ -403,6 +403,7 @@ impl SchemaTagHandlers {
             BeginAttempt::Indeterminate => tool_error(&ToolError::mutation_indeterminate()),
             BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
             BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
+            BeginAttempt::Expired => tool_error(&ToolError::upstream()),
             BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
             BeginAttempt::Lead(attempt) => {
                 let supervision = TagCreateSupervision {

@@ -19,6 +19,39 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   by object ID. Direct and spawned-stdio acceptance uses cleanup-owned real
   spaces; the operator-supplied read-only `Page One` fixture is optional
   corroboration, never mutated. Fault injection remains P4.
+- Add the production-unlinked `chat_message_add` mutation slice through
+  `anytype-api` REST only. The strict workflow accepts 1..8,192-scalar plain
+  paragraph text, an optional exact reply target, and a required process-local
+  idempotency key. It resolves scope before cohort admission, preflights a
+  reply by exact GET without projecting its unreturned text, sends at most one
+  non-replayed POST, validates the
+  server-assigned ID, and requires one exact readback of text, paragraph,
+  marks, attachments, and reply identity. Concurrent identical callers share
+  the leader result without another GET or POST; changed normalized input
+  conflicts; later successful replay performs one fresh exact GET and never
+  compares mutable presentation or content. Definitive POST rejection and
+  post-dispatch uncertainty before an assigned ID remain terminal for the key.
+  Once POST returns a valid assigned ID, the candidate is retained before
+  verification; ordinary not-found, authentication/permission, bounded-result,
+  upstream GET, timeout, and cancellation outcomes remain safe for later
+  exact-GET-only retry and can never dispatch a second POST. Direct-router and
+  persistent preview-stdio acceptance use a cleanup-owned disposable real
+  chat, prove exact leader, replay, conflict, missing-reply retry,
+  retained-capacity, reply leader, and reply replay work, register every
+  message immediately, and leave no prefix-owned space. Concurrent cohort
+  admission and completion run through the actual router with a test-only
+  deterministic admission gate, proving one POST, one leader GET, zero waiter
+  GETs, and identical returned detail without timing or latency injection. A
+  test-owned child-process stdio harness covers the exact reviewed registry,
+  while a second spawned child proves the shipped composition still rejects
+  the production-unlinked tool. One absolute deadline
+  now covers resolution, admission, detached leader execution, verification,
+  and the earlier of each waiter or leader deadline. Fixed catalog/result
+  token evidence plus exact direct/preview rejection, pre-cancellation, terminal,
+  retained-capacity, and retryable reply-preflight tests require no fault or
+  mock server. Boxed parity scenarios also lock the ordinary 2-MiB test-stack
+  regression. Fault and latency
+  injection remains deferred to the P4 fault-injection design.
 - Add the production-unlinked `collection_member_list` read slice for the
   future `views-write` registry. The strict tool resolves one space, binds an
   opaque cursor to the exact resolved space, collection, limit, registry, and

@@ -55,6 +55,7 @@
 //! The crate README contains current host registration, complete tool semantics,
 //! protocol compatibility, token baselines, and operational guidance.
 
+pub mod chat_add_toolset;
 pub mod chat_read_toolset;
 pub mod collection_member_toolset;
 pub mod config;

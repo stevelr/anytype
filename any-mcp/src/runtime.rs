@@ -273,7 +273,7 @@ impl RuntimeContext {
         .await
     }
 
-    async fn execute_classified_with_control_until<F, T, E, C, D>(
+    pub(crate) async fn execute_classified_with_control_until<F, T, E, C, D>(
         &self,
         deadline: Instant,
         context: OperationContext,
