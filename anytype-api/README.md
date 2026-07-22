@@ -756,6 +756,8 @@ shared endpoint. Pagination coverage owns a uniquely filtered, cleanup-tracked
 object cohort and does not depend on unrelated ambient-space objects.
 Space-creation requests validate a nonempty bounded name before HTTP; validation
 coverage never probes this rule by creating an untracked unnamed space.
+Empty-filter coverage likewise owns its expected object rather than depending
+on pre-existing content in the configured test space.
 
 Integration tests require a running Anytype server and environment variables. See `src/client.rs` for details.
 

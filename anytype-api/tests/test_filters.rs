@@ -717,12 +717,23 @@ async fn test_filter_expression_and() -> TestResult<()> {
 #[serial]
 async fn test_filter_expression_empty() -> TestResult<()> {
     with_test_context(|ctx| async move {
-        // Empty filters should return all objects (up to limit)
+        let object_name = unique_test_name("Empty Filter Fixture");
+        let object = create_object_with_retry("empty filter fixture", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&object_name)
+                .create()
+                .await
+        })
+        .await?;
+        ctx.register_object(&object.id);
+
+        // Empty filters should retain the exact fixture object.
         let results = ctx.client.objects(&ctx.space_id).limit(10).list().await?;
 
         assert!(
-            !results.is_empty(),
-            "Expected to get results with no filters applied"
+            results.iter().any(|result| result.id == object.id),
+            "unfiltered list should contain the cleanup-owned fixture"
         );
 
         Ok(())
