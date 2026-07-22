@@ -785,29 +785,16 @@ async fn test_search_with_empty_type_array() {
 #[test_log::test]
 async fn test_search_with_zero_limit() {
     with_test_context_unit(|ctx| async move {
-        // Search with limit=0 should either be rejected or return 0 results.
-        let result = ctx.client.search_in(&ctx.space_id).limit(0).execute().await;
-
-        match result {
-            Ok(results) => {
-                assert_eq!(
-                    results.len(),
-                    0,
-                    "Search with limit=0 should return 0 results"
-                );
-                println!("Search with limit=0 correctly returned 0 results");
-            }
-            Err(AnytypeError::Validation { message }) => {
-                assert!(
-                    message.contains("limit must be between 1 and 1000"),
-                    "Unexpected validation error for limit=0: {message}"
-                );
-                println!("Search with limit=0 correctly rejected: {message}");
-            }
-            Err(err) => {
-                panic!("Unexpected error for limit=0: {err:?}");
-            }
-        }
+        let error = ctx
+            .client
+            .search_in(&ctx.space_id)
+            .limit(0)
+            .execute()
+            .await
+            .expect_err("search limit 0 must be rejected before HTTP");
+        assert!(
+            matches!(error, AnytypeError::Validation { ref message } if message == "search limit must be between 1 and 1000")
+        );
     })
     .await
 }

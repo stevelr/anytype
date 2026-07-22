@@ -238,6 +238,10 @@ async fn main() -> Result<(), AnytypeError> {
 }
 ```
 
+Search pagination limits must be between 1 and 1000 inclusive. Both global and
+space-scoped search reject `0` or larger values with `AnytypeError::Validation`
+before sending an HTTP request.
+
 See the [Examples](./examples/README.md) folder for more code samples.
 
 For soft-delete workflows that reconcile uncertain responses themselves,

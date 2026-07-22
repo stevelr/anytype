@@ -35,6 +35,7 @@ use serde::Serialize;
 use crate::{
     Result,
     client::AnytypeClient,
+    config::MAX_PAGINATION_LIMIT,
     filters::Query,
     http_client::{GetPaged, HttpClient},
     prelude::*,
@@ -100,6 +101,8 @@ impl SearchRequest {
     }
 
     /// Sets the pagination limit.
+    ///
+    /// [`Self::execute`] rejects values outside `1..=1000` before HTTP.
     #[must_use]
     pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
@@ -154,6 +157,14 @@ impl SearchRequest {
     /// To exclude, filter returned values with `.filter(|obj| !obj.archived)`
     ///
     pub async fn execute(self) -> Result<PagedResult<Object>> {
+        if self
+            .limit
+            .is_some_and(|limit| limit == 0 || limit > MAX_PAGINATION_LIMIT)
+        {
+            return Err(AnytypeError::Validation {
+                message: format!("search limit must be between 1 and {MAX_PAGINATION_LIMIT}"),
+            });
+        }
         let query = Query::default()
             .set_limit_opt(self.limit)
             .set_offset_opt(self.offset);
@@ -192,5 +203,56 @@ impl AnytypeClient {
             self.config.limits.clone(),
             Some(space_id.into()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    fn sentinel_client(address: std::net::SocketAddr) -> AnytypeClient {
+        let mut config = ClientConfig::default().app_name("search-limit-validation");
+        config.base_url = Some(format!("http://{address}"));
+        config.keystore = Some("env".to_owned());
+        let client = AnytypeClient::with_config(config).expect("search limit sentinel client");
+        client.set_api_key(HttpCredentials::new("fixture-token"));
+        client
+    }
+
+    #[tokio::test]
+    async fn invalid_search_limits_fail_before_http_for_both_scopes() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind search limit sentinel");
+        let address = listener
+            .local_addr()
+            .expect("search limit sentinel address");
+        let client = sentinel_client(address);
+        let expected = format!("search limit must be between 1 and {MAX_PAGINATION_LIMIT}");
+
+        for limit in [0, MAX_PAGINATION_LIMIT + 1] {
+            for request in [client.search_global(), client.search_in("space-id")] {
+                let error = request
+                    .limit(limit)
+                    .execute()
+                    .await
+                    .expect_err("invalid search limit must fail");
+                assert!(
+                    matches!(error, AnytypeError::Validation { ref message } if message == &expected)
+                );
+            }
+        }
+        assert_eq!(client.http_metrics().logical_operations, 0);
+        assert_eq!(client.http_metrics().physical_attempts, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "invalid search limits must not open a connection"
+        );
     }
 }

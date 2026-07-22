@@ -40,6 +40,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Search requests now reject pagination limits outside `1..=1000` with the
+  stable validation error before global or space-scoped HTTP dispatch.
 - Refresh the live mutation retry inventory for the seven bounded fixture
   setup retries now owned by `test_util`, restoring the full integration gate.
 - Member reads now accept the REST API's bounded `_participant` IDs and
