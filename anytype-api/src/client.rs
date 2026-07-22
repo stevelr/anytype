@@ -568,6 +568,16 @@ impl AnytypeClient {
         self.collection_membership_metrics.snapshot()
     }
 
+    /// Returns a non-secret generation that changes whenever the in-memory
+    /// HTTP credentials are set or cleared.
+    ///
+    /// This can namespace process-local caches without retaining or hashing
+    /// credential material.
+    #[must_use]
+    pub fn http_credential_generation(&self) -> u64 {
+        self.client.credential_generation()
+    }
+
     /// Enables cache.
     /// Cache is always cleared if disabled and re-enabled, to ensure it's not stale
     pub fn enable_cache(&self) {

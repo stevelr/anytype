@@ -132,6 +132,12 @@ into retries. HTTP metrics expose independent `logical_operations` and
 `physical_attempts` counters; the existing `total_requests` field retains its
 physical-request meaning.
 
+`http_credential_generation()` exposes only a monotonic process-local number.
+It advances whenever the in-memory HTTP key is set or cleared, allowing
+principal-bound caches to invalidate entries without reading, retaining, or
+hashing the credential itself. Credential replacement and generation advance
+share one synchronization boundary; no observer can see a mixed pair.
+
 ### Secret-safe HTTP diagnostics
 
 The library-owned HTTP diagnostics remain metadata-only at every `RUST_LOG`
@@ -348,6 +354,30 @@ client
 `files().upload(space).from_path(path).upload()` selects REST for a simple
 path upload and returns a normalized `FileObject`. Adding `file_type`, `style`,
 `details`, or creation-context options selects the richer gRPC upload.
+
+REST uploads can apply request-local ceilings without changing the client
+configuration:
+
+```rust
+let file = client
+    .files()
+    .upload(space_id)
+    .bytes("report.txt", b"bounded bytes".to_vec())
+    .mime("text/plain")
+    .multipart_limit_bytes(71_680)
+    .response_limit_bytes(65_536)
+    .error_limit_bytes(65_536)
+    .upload()
+    .await?;
+```
+
+The multipart ceiling includes the complete boundary and part headers and is
+checked before authentication or network I/O. The successful and error-body
+ceilings are independent, and the REST upload POST is sent at most once.
+
+Call `resolve_space_id_bounded(reference, page_limit)` when a workflow needs a
+request-local ceiling on every name-resolution page. Stable space IDs still
+return without I/O; names retain the normal finite scan and ambiguity rules.
 
 `files().preload(space)` accepts either `from_path(path)` or `from_url(url)` as
 its source and always runs over gRPC, returning the preload file id.

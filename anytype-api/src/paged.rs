@@ -66,6 +66,7 @@ pub struct PagedResult<T> {
 struct Refill {
     client: Arc<HttpClient>,
     request: HttpRequest,
+    response_limit: Option<u64>,
 }
 
 impl<T> PagedResult<T> {
@@ -74,10 +75,15 @@ impl<T> PagedResult<T> {
         response: PaginatedResponse<T>,
         client: Arc<HttpClient>,
         request: HttpRequest,
+        response_limit: Option<u64>,
     ) -> Self {
         Self {
             response,
-            refill: Some(Refill { client, request }),
+            refill: Some(Refill {
+                client,
+                request,
+                response_limit,
+            }),
         }
     }
 
@@ -238,17 +244,31 @@ impl<T: DeserializeOwned + Send + 'static> PagedResult<T> {
                 if has_more && let Some(refill) = refill {
                     // Build the next request with updated offset
                     let next_request = refill.request.with_pagination(offset, limit);
-                    match refill
-                        .client
-                        .send::<PaginatedResponse<T>>(next_request.clone())
-                        .await
-                    {
+                    let response = match refill.response_limit {
+                        Some(limit) => {
+                            refill
+                                .client
+                                .send_with_limit::<PaginatedResponse<T>>(
+                                    next_request.clone(),
+                                    limit,
+                                )
+                                .await
+                        }
+                        None => {
+                            refill
+                                .client
+                                .send::<PaginatedResponse<T>>(next_request.clone())
+                                .await
+                        }
+                    };
+                    match response {
                         Ok(next_response) => next_response_iter(
                             next_response,
                             limit,
                             Refill {
                                 client: refill.client.clone(),
                                 request: next_request,
+                                response_limit: refill.response_limit,
                             },
                         ),
                         Err(err) => {

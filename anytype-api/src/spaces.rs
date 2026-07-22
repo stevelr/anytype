@@ -559,6 +559,7 @@ pub struct ListSpacesRequest {
     offset: Option<u32>,
     filters: Vec<Filter>,
     cache: Arc<AnytypeCache>,
+    response_limit_bytes: Option<u64>,
 }
 
 impl ListSpacesRequest {
@@ -570,6 +571,7 @@ impl ListSpacesRequest {
             offset: None,
             filters: Vec::new(),
             cache,
+            response_limit_bytes: None,
         }
     }
 
@@ -617,6 +619,13 @@ impl ListSpacesRequest {
         self
     }
 
+    /// Sets a finite response-body ceiling applied independently to every page.
+    #[must_use]
+    pub const fn response_limit_bytes(mut self, limit: u64) -> Self {
+        self.response_limit_bytes = Some(limit);
+        self
+    }
+
     /// Executes the list request.
     ///
     /// # Returns
@@ -640,7 +649,14 @@ impl ListSpacesRequest {
             .set_offset_opt(self.offset)
             .add_filters(&self.filters);
 
-        self.client.get_request_paged("/v1/spaces", query).await
+        match self.response_limit_bytes {
+            Some(limit) => {
+                self.client
+                    .get_request_paged_with_limit("/v1/spaces", query, limit)
+                    .await
+            }
+            None => self.client.get_request_paged("/v1/spaces", query).await,
+        }
     }
 }
 

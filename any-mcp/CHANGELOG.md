@@ -100,29 +100,35 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   cancellation cleanup, zero-I/O boundary rejection, and catalog/input/result
   token snapshots replace semantic mocks; transport-fault injection remains
   deferred to the P4 follow-up.
-- Add the production-unlinked `files` read slice through `anytype-api` only:
+- Add the default-off production `files` toolset through `anytype-api` only:
   bounded exact-ID metadata and ranged byte reads, strong-validator and HTTP
   evidence reconciliation, native MCP image/audio/text/blob content selected
   by MIME type and negotiated revision, and canonical hash-bound
   `anytype-file://bytes/...` resource reads. Strict schemas, frame and token
-  ceilings, scripted direct-handler coverage, and preview stdio dispatch tests
-  lock the contract without enabling the incomplete optional registry; upload,
-  bounded 1-MiB/page name resolution with caller-scoped cumulative retry and
-  error-evidence controls, real-headless acceptance, and atomic production
-  linkage remain separately tracked. Until those prerequisites land, this
-  slice rejects non-ID space references before I/O and the entire module is
-  compiled only for tests. The acceptance matrix includes exact text boundary
+  ceilings, pure state-machine coverage, and disposable real-server direct and
+  preview-stdio tests lock the contract. `file_upload` accepts at most 64 KiB
+  of canonical inline base64, sends exactly one bounded multipart POST,
+  retains its candidate ID,
+  and proves identity, metadata, complete length, MIME essence, and SHA-256
+  before success. Same-key retries reuse verified output or safely reverify a
+  retained candidate without another POST. Space names resolve through
+  1-MiB-per-page evidence limits; stable IDs skip the scan. The read-write
+  registry exposes metadata, read, and upload while read-only mode removes only
+  upload; both modes retain the single hash-bound resource template and no
+  listed resources. The acceptance matrix includes exact text boundary
   selection, four deterministic 64-KiB byte patterns, maximum-field tool and
-  resource budgets, cross-identity and refreshed-MIME resource reads,
-  cancellation/timeout, retry-attempt metrics, and diagnostic redaction.
-  Every deterministic 64-KiB corpus now uses maximum legal metadata fields and
-  round-trips decoded tool and resource payloads exactly; separate HEAD, GET,
-  and mixed 429/504/transport-close cases prove the six-attempt ceiling.
-  Preview tests lock public template caching and private zero-TTL resource
-  reads, while overrun evidence and seeded failure diagnostics remain private.
-  Oversized bodies are classified only inside successful `200`/`206` paths;
-  nonempty `412` and `416` control responses retain conflict and validation
-  semantics without emitting partial content.
+  resource budgets, scoped upload cohorts, cancellation classification, exact
+  upload request metrics, and real-server cleanup. One absolute deadline now
+  covers resolution, cohort waiting, POST, and verification; waiters cannot
+  extend a leader. Cohort admission itself is deadline-bound and cannot return
+  cached/conflict/capacity outcomes after expiry or strand an unstarted leader.
+  Cohorts invalidate on the atomically coupled non-secret HTTP credential
+  generation, preventing cached cross-principal success. Direct and stdio
+  acceptance reread returned hash-bound resource URIs and lock complete
+  read-write/read-only catalogs, templates, and status calls. Token fixtures
+  use the worst allowed four-byte Unicode scalar. Malformed responses,
+  latency, rate limiting, and transport faults remain deferred to the external
+  P4 fault-injection plan.
 - Add a transport-neutral exported-Markdown no-op protocol scenario with fast
   exact-forwarding and lossy-repeat regressions plus ignored serial direct and
   production-stdio real-server cases. Independent stable REST exports and

@@ -3,14 +3,19 @@
 // SPDX-FileCopyrightText: 2026 Steve Schoettler
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded Anytype file metadata, byte reads, and hash-bound MCP resources.
+//! Bounded Anytype file upload, metadata, byte reads, and hash-bound resources.
 //!
-//! This module implements the approved read side of the optional `files`
-//! registry without linking that registry into the production catalog. The
-//! terminal files task adds upload, real-headless coverage, and atomic
-//! production linkage after all slices are complete.
+//! The default-off production `files` registry uses `anytype-api` only. Upload
+//! accepts inline bytes, retains one process-local candidate per idempotency
+//! key, and never exposes a host path, URL, or delete surface.
 
-use std::{borrow::Cow, fmt, io};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt, io,
+    sync::{Arc, LazyLock, Weak},
+    time::Instant,
+};
 
 use anytype::{
     error::AnytypeError,
@@ -29,11 +34,14 @@ use rmcp::{
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    create_idempotency::IdempotencyKey,
     domain::{EntityId, SpaceId},
-    error::{AnytypeErrorMapping, ToolError, ToolErrorCode},
+    error::{AnytypeErrorMapping, ToolError, ToolErrorCode, mutation_rejection_is_definitive},
+    handler_support::{MutationAccess, MutationProgress, MutationStage, require_mutation_access},
     optional_toolsets::{
         OptionalRegistryFuture, OptionalRegistryTool, OptionalToolsetMetadata,
         OptionalToolsetRegistry,
@@ -63,11 +71,17 @@ const MAX_SPACE_REFERENCE_CHARS: usize = 512;
 const MAX_MEDIA_TYPE_BYTES: usize = 255;
 const MAX_STRONG_ETAG_BYTES: usize = 256;
 const MAX_OBJECT_PREFLIGHT_BYTES: u64 = 262_144;
+const MAX_RESOLVER_PAGE_BYTES: u64 = 1_048_576;
+const MAX_UPLOAD_MULTIPART_BYTES: u64 = 71_680;
+const MAX_UPLOAD_RESPONSE_BYTES: u64 = 65_536;
 const MAX_ERROR_BODY_BYTES: u64 = 65_536;
 const MAX_HEADER_EVIDENCE_BYTES: u64 = 4_096;
 const MAX_SAFE_ATTEMPTS: u32 = 6;
 const JSON_SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
 const DEFAULT_READ_LENGTH: u64 = MAX_FILE_CONTENT_BYTES;
+const MAX_FILE_NAME_CHARS: usize = 512;
+const MAX_CANONICAL_BASE64_CHARS: usize = 87_384;
+const MAX_UPLOAD_COHORT_ENTRIES: usize = 1_024;
 
 const INVALID_RESOURCE_URI: &str = "Invalid Anytype file resource URI.";
 const MISSING_RESOURCE: &str = "Resource not found.";
@@ -95,6 +109,174 @@ impl SpaceRef {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A bounded display filename that can never be interpreted as a path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FileName(String);
+
+impl FileName {
+    /// Validates the exact caller spelling without trimming or normalization.
+    pub fn new(value: impl Into<String>) -> Result<Self, FileValueError> {
+        let value = value.into();
+        if value.is_empty()
+            || value == "."
+            || value == ".."
+            || value.chars().count() > MAX_FILE_NAME_CHARS
+            || value
+                .chars()
+                .any(|character| character == '/' || character == '\\' || character.is_control())
+        {
+            return Err(FileValueError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the validated filename.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for FileName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for FileName {
+    fn schema_name() -> Cow<'static, str> {
+        "FileName".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_FILE_NAME_CHARS
+        })
+    }
+}
+
+/// Canonically encoded, nonempty file bytes retained in decoded form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalBase64(Vec<u8>);
+
+impl CanonicalBase64 {
+    fn parse(value: &str) -> Result<Self, FileValueError> {
+        if value.is_empty()
+            || value.len() > MAX_CANONICAL_BASE64_CHARS
+            || !value.is_ascii()
+            || value.bytes().any(|byte| byte.is_ascii_whitespace())
+        {
+            return Err(FileValueError::Invalid);
+        }
+        let decoded = BASE64_STANDARD
+            .decode(value)
+            .map_err(|_| FileValueError::Invalid)?;
+        if decoded.is_empty()
+            || decoded.len() > MAX_FILE_CONTENT_BYTES as usize
+            || BASE64_STANDARD.encode(&decoded) != value
+        {
+            return Err(FileValueError::Invalid);
+        }
+        Ok(Self(decoded))
+    }
+
+    /// Borrows the decoded payload without creating a second base64 copy.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CanonicalBase64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for CanonicalBase64 {
+    fn schema_name() -> Cow<'static, str> {
+        "CanonicalBase64".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 4,
+            "maxLength": MAX_CANONICAL_BASE64_CHARS,
+            "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        })
+    }
+}
+
+/// A bounded MIME essence accepted for one multipart upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct UploadMediaType(String);
+
+impl UploadMediaType {
+    /// Parses and normalizes one MIME essence with no parameters.
+    pub fn new(value: impl Into<String>) -> Result<Self, FileValueError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_MEDIA_TYPE_BYTES
+            || !value.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(FileValueError::Invalid);
+        }
+        let parsed = value
+            .parse::<mime::Mime>()
+            .map_err(|_| FileValueError::Invalid)?;
+        if parsed.params().next().is_some() {
+            return Err(FileValueError::Invalid);
+        }
+        let normalized = format!("{}/{}", parsed.type_(), parsed.subtype());
+        if normalized.len() > MAX_MEDIA_TYPE_BYTES {
+            return Err(FileValueError::Invalid);
+        }
+        Ok(Self(normalized))
+    }
+
+    /// Borrows the normalized MIME essence.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for UploadMediaType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for UploadMediaType {
+    fn schema_name() -> Cow<'static, str> {
+        "UploadMediaType".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 3,
+            "maxLength": MAX_MEDIA_TYPE_BYTES,
+            "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+        })
     }
 }
 
@@ -525,11 +707,53 @@ impl fmt::Display for FileValueError {
 
 impl std::error::Error for FileValueError {}
 
+/// Exact input for `file_upload`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileUploadInput {
+    /// Unique space name or stable identifier.
+    space: SpaceRef,
+    /// Display filename sent as multipart metadata, never a host path.
+    name: FileName,
+    /// Canonically encoded nonempty payload, decoded exactly once during input validation.
+    content_base64: CanonicalBase64,
+    /// Optional normalized MIME essence with no parameters.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_upload_media_type_schema")]
+    media_type: Omittable<UploadMediaType>,
+    /// Caller-stable process-local create key.
+    idempotency_key: IdempotencyKey,
+}
+
+fn optional_upload_media_type_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<UploadMediaType>(generator)
+}
+
+/// Exact verified output for `file_upload`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileUploadOutput {
+    /// Stable file-object identifier returned and independently verified.
+    file_id: EntityId,
+    /// Resolved stable space identifier.
+    space_id: SpaceId,
+    /// Exact validated caller display name.
+    requested_name: FileName,
+    /// Normalized MIME value verified by the stored representation.
+    media_type: FileMediaType,
+    /// Exact verified representation length.
+    size_bytes: JsonSafeInteger,
+    /// SHA-256 of the complete verified representation.
+    content_sha256: FileSha256,
+    /// Whether an earlier same-key candidate was safely reverified without another POST.
+    reused: bool,
+}
+
 /// Exact input for `file_metadata`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileMetadataInput {
-    /// Stable space identifier; production linkage awaits bounded name resolution.
+    /// Unique space name or stable identifier.
     space: SpaceRef,
     /// Stable file object identifier; names and CIDs are not accepted.
     file_id: EntityId,
@@ -561,7 +785,7 @@ pub struct FileMetadataOutput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileReadInput {
-    /// Stable space identifier; production linkage awaits bounded name resolution.
+    /// Unique space name or stable identifier.
     space: SpaceRef,
     /// Stable file object identifier; names and CIDs are not accepted.
     file_id: EntityId,
@@ -639,6 +863,15 @@ pub struct FileReadOutput {
     last_modified: Option<FileHttpDate>,
 }
 
+/// Builds the exact `file_upload` tool contract.
+pub fn file_upload_tool() -> Result<WorkflowTool<FileUploadOutput>, SchemaContractError> {
+    workflow_tool::<FileUploadInput, FileUploadOutput>(
+        "file_upload",
+        "Upload bounded inline bytes as one verified Anytype file object.",
+        ToolProfile::Create,
+    )
+}
+
 /// Builds the exact `file_metadata` tool contract.
 pub fn file_metadata_tool() -> Result<WorkflowTool<FileMetadataOutput>, SchemaContractError> {
     workflow_tool::<FileMetadataInput, FileMetadataOutput>(
@@ -670,21 +903,539 @@ pub fn file_byte_resource_template() -> ResourceTemplate {
         )
 }
 
-/// Transport-neutral handlers for the approved files-domain read workflows.
+#[derive(Debug)]
+struct UploadCohort {
+    state: Mutex<UploadCohortState>,
+    capacity: usize,
+}
+
+#[derive(Debug, Default)]
+struct UploadCohortState {
+    credential_generation: Option<u64>,
+    entries: HashMap<IdempotencyKey, StoredUpload>,
+}
+
+#[derive(Debug)]
+enum StoredUpload {
+    Running {
+        fingerprint: [u8; 32],
+        attempt: Arc<UploadAttempt>,
+    },
+    Candidate {
+        fingerprint: [u8; 32],
+        candidate: EntityId,
+    },
+    Complete {
+        fingerprint: [u8; 32],
+        output: FileUploadOutput,
+    },
+    Indeterminate {
+        fingerprint: [u8; 32],
+    },
+}
+
+#[derive(Debug)]
+struct UploadAttempt {
+    result: Mutex<Option<CallToolResult>>,
+    candidate: Mutex<Option<EntityId>>,
+    notify: Notify,
+    progress: MutationProgress,
+    deadline: Instant,
+    credential_generation: u64,
+}
+
+enum BeginUpload {
+    LeadNew(Arc<UploadAttempt>),
+    LeadReplay(Arc<UploadAttempt>, EntityId),
+    Wait(Arc<UploadAttempt>),
+    Cached(FileUploadOutput),
+    Indeterminate,
+    Conflict,
+    Full,
+    Expired,
+}
+
+enum UploadDisposition {
+    Verified(FileUploadOutput),
+    CandidateFailed(EntityId),
+    Indeterminate,
+    PreDispatchFailure,
+}
+
+struct UploadExecution {
+    result: CallToolResult,
+    disposition: UploadDisposition,
+}
+
+impl UploadCohort {
+    fn new(capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(UploadCohortState::default()),
+            capacity,
+        }
+    }
+
+    async fn begin(
+        &self,
+        credential_generation: u64,
+        deadline: Instant,
+        key: IdempotencyKey,
+        fingerprint: [u8; 32],
+    ) -> BeginUpload {
+        let mut state = self.state.lock().await;
+        if Instant::now() >= deadline {
+            return BeginUpload::Expired;
+        }
+        if state.credential_generation != Some(credential_generation) {
+            state.entries.clear();
+            state.credential_generation = Some(credential_generation);
+        }
+        if let Some(entry) = state.entries.get(&key) {
+            let result = match entry {
+                StoredUpload::Running {
+                    fingerprint: saved,
+                    attempt,
+                } if saved == &fingerprint => BeginUpload::Wait(attempt.clone()),
+                StoredUpload::Candidate {
+                    fingerprint: saved,
+                    candidate,
+                } if saved == &fingerprint => {
+                    let candidate = candidate.clone();
+                    let attempt = Arc::new(UploadAttempt::new(
+                        Some(candidate.clone()),
+                        deadline,
+                        credential_generation,
+                    ));
+                    state.entries.insert(
+                        key.clone(),
+                        StoredUpload::Running {
+                            fingerprint,
+                            attempt: attempt.clone(),
+                        },
+                    );
+                    BeginUpload::LeadReplay(attempt, candidate)
+                }
+                StoredUpload::Complete {
+                    fingerprint: saved,
+                    output,
+                } if saved == &fingerprint => BeginUpload::Cached(output.clone()),
+                StoredUpload::Indeterminate { fingerprint: saved } if saved == &fingerprint => {
+                    BeginUpload::Indeterminate
+                }
+                _ => BeginUpload::Conflict,
+            };
+            if Instant::now() >= deadline {
+                if let BeginUpload::LeadReplay(attempt, candidate) = &result
+                    && matches!(
+                        state.entries.get(&key),
+                        Some(StoredUpload::Running { attempt: stored, .. })
+                            if Arc::ptr_eq(stored, attempt)
+                    )
+                {
+                    state.entries.insert(
+                        key.clone(),
+                        StoredUpload::Candidate {
+                            fingerprint,
+                            candidate: candidate.clone(),
+                        },
+                    );
+                }
+                return BeginUpload::Expired;
+            }
+            return result;
+        }
+        if self.capacity == 0 || state.entries.len() >= self.capacity {
+            return if Instant::now() >= deadline {
+                BeginUpload::Expired
+            } else {
+                BeginUpload::Full
+            };
+        }
+        let attempt = Arc::new(UploadAttempt::new(None, deadline, credential_generation));
+        state.entries.insert(
+            key.clone(),
+            StoredUpload::Running {
+                fingerprint,
+                attempt: attempt.clone(),
+            },
+        );
+        if Instant::now() >= deadline {
+            state.entries.remove(&key);
+            BeginUpload::Expired
+        } else {
+            BeginUpload::LeadNew(attempt)
+        }
+    }
+
+    async fn retain_candidate(
+        &self,
+        key: &IdempotencyKey,
+        attempt: &Arc<UploadAttempt>,
+        candidate: &EntityId,
+    ) {
+        let state = self.state.lock().await;
+        let owns_attempt = matches!(
+            state.entries.get(key),
+            Some(StoredUpload::Running { attempt: stored, .. }) if Arc::ptr_eq(stored, attempt)
+        );
+        drop(state);
+        if owns_attempt {
+            *attempt.candidate.lock().await = Some(candidate.clone());
+        }
+    }
+
+    async fn finish(
+        &self,
+        key: &IdempotencyKey,
+        attempt: &Arc<UploadAttempt>,
+        execution: UploadExecution,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(StoredUpload::Running {
+            fingerprint,
+            attempt: stored,
+        }) = state.entries.get(key)
+            && Arc::ptr_eq(stored, attempt)
+        {
+            let fingerprint = *fingerprint;
+            match &execution.disposition {
+                UploadDisposition::Verified(output) => {
+                    state.entries.insert(
+                        key.clone(),
+                        StoredUpload::Complete {
+                            fingerprint,
+                            output: output.clone(),
+                        },
+                    );
+                }
+                UploadDisposition::CandidateFailed(candidate) => {
+                    state.entries.insert(
+                        key.clone(),
+                        StoredUpload::Candidate {
+                            fingerprint,
+                            candidate: candidate.clone(),
+                        },
+                    );
+                }
+                UploadDisposition::Indeterminate => {
+                    state
+                        .entries
+                        .insert(key.clone(), StoredUpload::Indeterminate { fingerprint });
+                }
+                UploadDisposition::PreDispatchFailure => {
+                    state.entries.remove(key);
+                }
+            }
+        }
+        drop(state);
+        *attempt.result.lock().await = Some(execution.result);
+        attempt.notify.notify_waiters();
+    }
+
+    async fn reject_unstarted(&self, key: &IdempotencyKey, admission: &BeginUpload) {
+        let (attempt, retained_candidate) = match admission {
+            BeginUpload::LeadNew(attempt) => (attempt, None),
+            BeginUpload::LeadReplay(attempt, candidate) => (attempt, Some(candidate)),
+            BeginUpload::Wait(_)
+            | BeginUpload::Cached(_)
+            | BeginUpload::Indeterminate
+            | BeginUpload::Conflict
+            | BeginUpload::Full
+            | BeginUpload::Expired => return,
+        };
+        let mut state = self.state.lock().await;
+        let fingerprint = match state.entries.get(key) {
+            Some(StoredUpload::Running {
+                fingerprint,
+                attempt: stored,
+            }) if Arc::ptr_eq(stored, attempt) => Some(*fingerprint),
+            _ => None,
+        };
+        let Some(fingerprint) = fingerprint else {
+            return;
+        };
+        match retained_candidate {
+            Some(candidate) => {
+                state.entries.insert(
+                    key.clone(),
+                    StoredUpload::Candidate {
+                        fingerprint,
+                        candidate: candidate.clone(),
+                    },
+                );
+            }
+            None => {
+                state.entries.remove(key);
+            }
+        }
+        drop(state);
+        *attempt.result.lock().await = Some(tool_error(&ToolError::upstream()));
+        attempt.notify.notify_waiters();
+    }
+}
+
+async fn admit_upload(
+    cohort: &UploadCohort,
+    credential_generation: u64,
+    deadline: Instant,
+    key: IdempotencyKey,
+    fingerprint: [u8; 32],
+) -> BeginUpload {
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        cohort.begin(credential_generation, deadline, key, fingerprint),
+    )
+    .await
+    .unwrap_or(BeginUpload::Expired)
+}
+
+impl UploadAttempt {
+    fn new(candidate: Option<EntityId>, deadline: Instant, credential_generation: u64) -> Self {
+        Self {
+            result: Mutex::new(None),
+            candidate: Mutex::new(candidate),
+            notify: Notify::new(),
+            progress: MutationProgress::new(),
+            deadline,
+            credential_generation,
+        }
+    }
+}
+
+type RuntimeUploadCohorts = HashMap<usize, (Weak<()>, Arc<UploadCohort>)>;
+
+static UPLOAD_COHORTS: LazyLock<std::sync::Mutex<RuntimeUploadCohorts>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn upload_cohort(runtime: &RuntimeContext) -> Arc<UploadCohort> {
+    let identity = runtime.identity();
+    let key = Arc::as_ptr(identity) as usize;
+    let mut cohorts = match UPLOAD_COHORTS.lock() {
+        Ok(cohorts) => cohorts,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cohorts.retain(|_, (owner, _)| owner.strong_count() != 0);
+    if let Some((owner, cohort)) = cohorts.get(&key)
+        && owner
+            .upgrade()
+            .is_some_and(|owner| Arc::ptr_eq(&owner, identity))
+    {
+        return cohort.clone();
+    }
+    let cohort = Arc::new(UploadCohort::new(MAX_UPLOAD_COHORT_ENTRIES));
+    cohorts.insert(key, (Arc::downgrade(identity), cohort.clone()));
+    cohort
+}
+
+#[derive(Clone)]
+struct NormalizedUpload {
+    space_id: SpaceId,
+    name: FileName,
+    bytes: Vec<u8>,
+    media_type: Option<UploadMediaType>,
+    sha256: FileSha256,
+}
+
+impl NormalizedUpload {
+    fn new(space_id: SpaceId, input: FileUploadInput) -> Self {
+        let bytes = input.content_base64.as_bytes().to_vec();
+        let sha256 = FileSha256::digest(&bytes);
+        Self {
+            space_id,
+            name: input.name,
+            bytes,
+            media_type: input.media_type.as_ref().cloned(),
+            sha256,
+        }
+    }
+
+    fn fingerprint(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"any-mcp:file-upload:r8\0");
+        fingerprint_field(&mut digest, self.space_id.as_str().as_bytes());
+        fingerprint_field(&mut digest, self.name.as_str().as_bytes());
+        match self.media_type.as_ref() {
+            Some(media_type) => {
+                digest.update([1]);
+                fingerprint_field(&mut digest, media_type.as_str().as_bytes());
+            }
+            None => digest.update([0]),
+        }
+        digest.update((self.bytes.len() as u64).to_be_bytes());
+        fingerprint_field(&mut digest, self.sha256.as_str().as_bytes());
+        digest.finalize().into()
+    }
+}
+
+fn fingerprint_field(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+async fn wait_for_upload(
+    attempt: Arc<UploadAttempt>,
+    cancellation: &CancellationToken,
+    invocation_deadline: Instant,
+) -> CallToolResult {
+    let deadline = attempt.deadline.min(invocation_deadline);
+    loop {
+        let notified = attempt.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(result) = attempt.result.lock().await.clone() {
+            return result;
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                let error = match attempt.progress.stage() {
+                    MutationStage::PreDispatch => ToolError::upstream(),
+                    MutationStage::Dispatched => ToolError::mutation_indeterminate(),
+                };
+                return tool_error(&error);
+            },
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                let error = match attempt.progress.stage() {
+                    MutationStage::PreDispatch => ToolError::upstream(),
+                    MutationStage::Dispatched => ToolError::mutation_indeterminate(),
+                };
+                return tool_error(&error);
+            },
+            () = &mut notified => {}
+        }
+    }
+}
+
+/// Transport-neutral handlers for the approved files-domain workflows.
 #[derive(Debug, Clone)]
 pub struct FileContentHandlers {
     runtime: RuntimeContext,
+    upload_contract: WorkflowTool<FileUploadOutput>,
     metadata_contract: WorkflowTool<FileMetadataOutput>,
+    uploads: Arc<UploadCohort>,
 }
 
 impl FileContentHandlers {
     /// Creates handlers and validates both typed contracts.
     pub fn new(runtime: RuntimeContext) -> Result<Self, SchemaContractError> {
         file_read_tool()?;
+        let uploads = upload_cohort(&runtime);
         Ok(Self {
             runtime,
+            upload_contract: file_upload_tool()?,
             metadata_contract: file_metadata_tool()?,
+            uploads,
         })
+    }
+
+    /// Uploads and independently verifies one bounded in-memory file.
+    pub async fn file_upload(
+        &self,
+        access: MutationAccess,
+        input: FileUploadInput,
+        cancellation: &CancellationToken,
+    ) -> CallToolResult {
+        let deadline = self.runtime.request_deadline();
+        if let Err(error) = require_mutation_access(access) {
+            return tool_error(error.tool_error());
+        }
+        let key = input.idempotency_key.clone();
+        let space = input.space.clone();
+        let credential_generation = self.runtime.client().http_credential_generation();
+        let resolved = self
+            .runtime
+            .execute_classified_until(
+                deadline,
+                OperationContext::new("file_upload_resolve"),
+                cancellation,
+                async {
+                    let resolved = self
+                        .runtime
+                        .client()
+                        .resolve_space_id_bounded(space.as_str(), MAX_RESOLVER_PAGE_BYTES)
+                        .await?;
+                    SpaceId::new(resolved)
+                        .map_err(|_| FileOperationError::Tool(ToolError::upstream()))
+                },
+                FileOperationError::diagnostic,
+            )
+            .await;
+        let space_id = match resolved {
+            Ok(space_id) => space_id,
+            Err(error) => return tool_error(&controlled_tool_error(error)),
+        };
+        if self.runtime.client().http_credential_generation() != credential_generation
+            || Instant::now() >= deadline
+        {
+            return tool_error(&ToolError::upstream());
+        }
+        let normalized = NormalizedUpload::new(space_id, input);
+        let fingerprint = normalized.fingerprint();
+        let began = admit_upload(
+            &self.uploads,
+            credential_generation,
+            deadline,
+            key.clone(),
+            fingerprint,
+        )
+        .await;
+        if self.runtime.client().http_credential_generation() != credential_generation
+            || Instant::now() >= deadline
+        {
+            self.uploads.reject_unstarted(&key, &began).await;
+            return tool_error(&ToolError::upstream());
+        }
+        match began {
+            BeginUpload::Cached(mut output) => {
+                if self.runtime.client().http_credential_generation() != credential_generation
+                    || Instant::now() >= deadline
+                {
+                    return tool_error(&ToolError::upstream());
+                }
+                output.reused = true;
+                self.upload_contract
+                    .success(&output)
+                    .unwrap_or_else(|_| tool_error(&ToolError::upstream()))
+            }
+            BeginUpload::Indeterminate if Instant::now() < deadline => {
+                tool_error(&ToolError::mutation_indeterminate())
+            }
+            BeginUpload::Conflict if Instant::now() < deadline => {
+                tool_error(&ToolError::conflict())
+            }
+            BeginUpload::Full if Instant::now() < deadline => {
+                tool_error(&ToolError::bounded_result())
+            }
+            BeginUpload::Indeterminate | BeginUpload::Conflict | BeginUpload::Full => {
+                tool_error(&ToolError::upstream())
+            }
+            BeginUpload::Expired => tool_error(&ToolError::upstream()),
+            BeginUpload::Wait(attempt) => wait_for_upload(attempt, cancellation, deadline).await,
+            BeginUpload::LeadNew(attempt) => {
+                spawn_upload_supervisor(
+                    self.runtime.clone(),
+                    self.upload_contract.clone(),
+                    self.uploads.clone(),
+                    key,
+                    attempt.clone(),
+                    normalized,
+                    None,
+                );
+                wait_for_upload(attempt, cancellation, deadline).await
+            }
+            BeginUpload::LeadReplay(attempt, candidate) => {
+                spawn_upload_supervisor(
+                    self.runtime.clone(),
+                    self.upload_contract.clone(),
+                    self.uploads.clone(),
+                    key,
+                    attempt.clone(),
+                    normalized,
+                    Some(candidate),
+                );
+                wait_for_upload(attempt, cancellation, deadline).await
+            }
+        }
     }
 
     /// Executes one bounded metadata workflow.
@@ -780,16 +1531,317 @@ impl FileContentHandlers {
     }
 }
 
-#[cfg(test)]
+fn spawn_upload_supervisor(
+    runtime: RuntimeContext,
+    contract: WorkflowTool<FileUploadOutput>,
+    cohort: Arc<UploadCohort>,
+    key: IdempotencyKey,
+    attempt: Arc<UploadAttempt>,
+    input: NormalizedUpload,
+    retained_candidate: Option<EntityId>,
+) {
+    tokio::spawn(async move {
+        let credential_generation = attempt.credential_generation;
+        let progress = attempt.progress.clone();
+        let task_runtime = runtime.clone();
+        let task_contract = contract.clone();
+        let task_cohort = cohort.clone();
+        let task_key = key.clone();
+        let task_attempt = attempt.clone();
+        let task_progress = progress.clone();
+        let task_deadline = attempt.deadline;
+        let task = tokio::spawn(async move {
+            match retained_candidate {
+                Some(candidate) => {
+                    execute_upload_replay(
+                        &task_runtime,
+                        &task_contract,
+                        input,
+                        candidate,
+                        &CancellationToken::new(),
+                        task_deadline,
+                    )
+                    .await
+                }
+                None => {
+                    execute_upload_leader(
+                        &task_runtime,
+                        &task_contract,
+                        &task_cohort,
+                        &task_key,
+                        &task_attempt,
+                        input,
+                        &CancellationToken::new(),
+                        &task_progress,
+                        task_deadline,
+                    )
+                    .await
+                }
+            }
+        });
+        tokio::pin!(task);
+        let mut execution = tokio::select! {
+            result = &mut task => match result {
+            Ok(execution) => execution,
+            Err(_) => {
+                let candidate = attempt.candidate.lock().await.clone();
+                let (result, disposition) = match candidate {
+                    Some(candidate) => {
+                        let error = if progress.stage() == MutationStage::Dispatched {
+                            ToolError::mutation_indeterminate()
+                        } else {
+                            ToolError::upstream()
+                        };
+                        (
+                            tool_error(&error),
+                            UploadDisposition::CandidateFailed(candidate),
+                        )
+                    }
+                    None if progress.stage() == MutationStage::Dispatched => (
+                        tool_error(&ToolError::mutation_indeterminate()),
+                        UploadDisposition::Indeterminate,
+                    ),
+                    None => (
+                        tool_error(&ToolError::upstream()),
+                        UploadDisposition::PreDispatchFailure,
+                    ),
+                };
+                UploadExecution {
+                    result,
+                    disposition,
+                }
+            }
+            },
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(attempt.deadline)) => {
+                task.abort();
+                let candidate = attempt.candidate.lock().await.clone();
+                let disposition = match candidate {
+                    Some(candidate) => UploadDisposition::CandidateFailed(candidate),
+                    None if progress.stage() == MutationStage::Dispatched => UploadDisposition::Indeterminate,
+                    None => UploadDisposition::PreDispatchFailure,
+                };
+                let error = if progress.stage() == MutationStage::Dispatched {
+                    ToolError::mutation_indeterminate()
+                } else {
+                    ToolError::upstream()
+                };
+                UploadExecution { result: tool_error(&error), disposition }
+            }
+        };
+        if runtime.client().http_credential_generation() != credential_generation {
+            execution = UploadExecution {
+                result: tool_error(&if progress.stage() == MutationStage::Dispatched {
+                    ToolError::mutation_indeterminate()
+                } else {
+                    ToolError::upstream()
+                }),
+                disposition: if progress.stage() == MutationStage::Dispatched {
+                    UploadDisposition::Indeterminate
+                } else {
+                    UploadDisposition::PreDispatchFailure
+                },
+            };
+        }
+        cohort.finish(&key, &attempt, execution).await;
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_upload_leader(
+    runtime: &RuntimeContext,
+    contract: &WorkflowTool<FileUploadOutput>,
+    cohort: &Arc<UploadCohort>,
+    key: &IdempotencyKey,
+    attempt: &Arc<UploadAttempt>,
+    input: NormalizedUpload,
+    cancellation: &CancellationToken,
+    progress: &MutationProgress,
+    deadline: Instant,
+) -> UploadExecution {
+    let client = runtime.client().clone();
+    let operation_input = input.clone();
+    let operation_cohort = cohort.clone();
+    let operation_key = key.clone();
+    let operation_attempt = attempt.clone();
+    let operation_progress = progress.clone();
+    let result = runtime
+        .execute_classified_until(
+            deadline,
+            OperationContext::new("file_upload"),
+            cancellation,
+            async move {
+                let mut request = client
+                    .files()
+                    .upload(operation_input.space_id.as_str())
+                    .bytes(operation_input.name.as_str(), operation_input.bytes.clone())
+                    .multipart_limit_bytes(MAX_UPLOAD_MULTIPART_BYTES)
+                    .response_limit_bytes(MAX_UPLOAD_RESPONSE_BYTES)
+                    .error_limit_bytes(MAX_ERROR_BODY_BYTES);
+                if let Some(media_type) = operation_input.media_type.as_ref() {
+                    request = request.mime(media_type.as_str());
+                }
+                operation_progress.mark_dispatched();
+                let uploaded = match request.upload().await {
+                    Ok(uploaded) => uploaded,
+                    Err(error) if mutation_rejection_is_definitive(&error) => {
+                        return Err(FileOperationError::DefinitiveUpstream(error));
+                    }
+                    Err(_) => return Err(FileOperationError::PostDispatchUncertain),
+                };
+                let candidate = EntityId::new(uploaded.id)
+                    .map_err(|_| FileOperationError::PostDispatchUncertain)?;
+                operation_cohort
+                    .retain_candidate(&operation_key, &operation_attempt, &candidate)
+                    .await;
+                verify_upload(&client, &operation_input, candidate, false).await
+            },
+            FileOperationError::diagnostic,
+        )
+        .await;
+    match result {
+        Ok(output) => {
+            let encoded = contract
+                .success(&output)
+                .unwrap_or_else(|_| tool_error(&ToolError::upstream()));
+            UploadExecution {
+                result: encoded,
+                disposition: UploadDisposition::Verified(output),
+            }
+        }
+        Err(error) => {
+            let candidate = attempt.candidate.lock().await.clone();
+            if let Some(candidate) = candidate {
+                return UploadExecution {
+                    result: tool_error(&ToolError::mutation_indeterminate()),
+                    disposition: UploadDisposition::CandidateFailed(candidate),
+                };
+            }
+            if matches!(
+                error,
+                ControlledOperationError::Operation(FileOperationError::DefinitiveUpstream(_))
+            ) {
+                return UploadExecution {
+                    result: tool_error(&controlled_tool_error(error)),
+                    disposition: UploadDisposition::PreDispatchFailure,
+                };
+            }
+            let disposition = if progress.stage() == MutationStage::Dispatched {
+                UploadDisposition::Indeterminate
+            } else {
+                UploadDisposition::PreDispatchFailure
+            };
+            let tool = if progress.stage() == MutationStage::Dispatched {
+                ToolError::mutation_indeterminate()
+            } else {
+                controlled_tool_error(error)
+            };
+            UploadExecution {
+                result: tool_error(&tool),
+                disposition,
+            }
+        }
+    }
+}
+
+async fn execute_upload_replay(
+    runtime: &RuntimeContext,
+    contract: &WorkflowTool<FileUploadOutput>,
+    input: NormalizedUpload,
+    candidate: EntityId,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> UploadExecution {
+    let client = runtime.client().clone();
+    let retained = candidate.clone();
+    let result = runtime
+        .execute_classified_until(
+            deadline,
+            OperationContext::new("file_upload_reverify"),
+            cancellation,
+            async move { verify_upload(&client, &input, candidate, true).await },
+            FileOperationError::diagnostic,
+        )
+        .await;
+    match result {
+        Ok(output) => UploadExecution {
+            result: contract
+                .success(&output)
+                .unwrap_or_else(|_| tool_error(&ToolError::upstream())),
+            disposition: UploadDisposition::Verified(output),
+        },
+        Err(error) => UploadExecution {
+            result: tool_error(&controlled_tool_error(error)),
+            disposition: UploadDisposition::CandidateFailed(retained),
+        },
+    }
+}
+
+async fn verify_upload(
+    client: &anytype::prelude::AnytypeClient,
+    input: &NormalizedUpload,
+    candidate: EntityId,
+    reused: bool,
+) -> Result<FileUploadOutput, FileOperationError> {
+    exact_preflight(client, &input.space_id, &candidate).await?;
+    let head = head_request(client, &input.space_id, &candidate).await?;
+    let head = normalized_metadata(&head.metadata)?;
+    let expected_size = u64::try_from(input.bytes.len())
+        .map_err(|_| FileOperationError::Tool(ToolError::bounded_result()))?;
+    if head.size.get() != expected_size || !upload_media_matches(input.media_type.as_ref(), &head)?
+    {
+        return Err(FileOperationError::RepresentationChanged);
+    }
+    let response = client
+        .files()
+        .download_request(input.space_id.as_str(), candidate.as_str())
+        .response_limit_bytes(MAX_FILE_CONTENT_BYTES + 1)
+        .error_limit_bytes(MAX_ERROR_BODY_BYTES)
+        .header_evidence_limit_bytes(MAX_HEADER_EVIDENCE_BYTES)
+        .max_attempts(MAX_SAFE_ATTEMPTS)
+        .download()
+        .await?;
+    if response.status.as_u16() != 200 {
+        return Err(status_error(response.status.as_u16()));
+    }
+    let get = normalized_metadata(&response.metadata)?;
+    if response.bytes.len() != input.bytes.len()
+        || get.size.get() != expected_size
+        || get.media_type != head.media_type
+        || FileSha256::digest(&response.bytes) != input.sha256
+    {
+        return Err(FileOperationError::RepresentationChanged);
+    }
+    Ok(FileUploadOutput {
+        file_id: candidate,
+        space_id: input.space_id.clone(),
+        requested_name: input.name.clone(),
+        media_type: head.media_type,
+        size_bytes: head.size,
+        content_sha256: input.sha256.clone(),
+        reused,
+    })
+}
+
+fn upload_media_matches(
+    requested: Option<&UploadMediaType>,
+    metadata: &NormalizedMetadata,
+) -> Result<bool, FileOperationError> {
+    let Some(requested) = requested else {
+        return Ok(true);
+    };
+    let actual = metadata.media_type.parsed()?;
+    let requested = requested
+        .as_str()
+        .parse::<mime::Mime>()
+        .map_err(|_| FileOperationError::Encoding)?;
+    Ok(actual.type_() == requested.type_() && actual.subtype() == requested.subtype())
+}
+
 #[derive(Debug)]
 pub(crate) struct FileContentRegistry;
 
-#[cfg(test)]
 pub(crate) static FILE_CONTENT_REGISTRY: FileContentRegistry = FileContentRegistry;
-#[cfg(test)]
-pub(crate) static FILE_CONTENT_LINKED: [&dyn OptionalToolsetRegistry; 1] = [&FILE_CONTENT_REGISTRY];
 
-#[cfg(test)]
 impl OptionalToolsetRegistry for FileContentRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
         OptionalToolsetMetadata::new("files", false)
@@ -799,6 +1851,7 @@ impl OptionalToolsetRegistry for FileContentRegistry {
         Ok(vec![
             OptionalRegistryTool::read(file_metadata_tool()?),
             OptionalRegistryTool::read(file_read_tool()?),
+            OptionalRegistryTool::mutation(file_upload_tool()?),
         ])
     }
 
@@ -810,6 +1863,8 @@ impl OptionalToolsetRegistry for FileContentRegistry {
         &[
             "file_content_direct_contract",
             "file_content_stdio_contract",
+            "file_upload_direct_contract",
+            "file_upload_stdio_contract",
         ]
     }
 
@@ -818,7 +1873,7 @@ impl OptionalToolsetRegistry for FileContentRegistry {
     }
 
     fn catalog_token_ceiling(&self) -> usize {
-        2_600
+        3_400
     }
 
     fn call_tool<'a>(
@@ -833,6 +1888,12 @@ impl OptionalToolsetRegistry for FileContentRegistry {
             let handlers = FileContentHandlers::new(runtime.clone())
                 .map_err(|_| ErrorData::internal_error("Files contracts unavailable.", None))?;
             match request.name.as_ref() {
+                "file_upload" => {
+                    let input = decode_arguments::<FileUploadInput>(request.arguments)?;
+                    Ok(handlers
+                        .file_upload(MutationAccess::Allowed, input, cancellation)
+                        .await)
+                }
                 "file_metadata" => {
                     let input = decode_arguments::<FileMetadataInput>(request.arguments)?;
                     Ok(handlers.file_metadata(&input, cancellation).await)
@@ -874,7 +1935,6 @@ impl OptionalToolsetRegistry for FileContentRegistry {
     }
 }
 
-#[cfg(test)]
 fn decode_arguments<T: for<'de> Deserialize<'de>>(
     arguments: Option<rmcp::model::JsonObject>,
 ) -> Result<T, ErrorData> {
@@ -891,11 +1951,11 @@ async fn exact_space_and_preflight(
     space: &SpaceRef,
     file_id: &EntityId,
 ) -> Result<(SpaceId, EntityId), FileOperationError> {
-    if !anytype::validation::looks_like_object_id(space.as_str()) {
-        return Err(FileOperationError::Tool(ToolError::validation()));
-    }
-    let space_id = SpaceId::new(space.as_str())
-        .map_err(|_| FileOperationError::Tool(ToolError::validation()))?;
+    let resolved = client
+        .resolve_space_id_bounded(space.as_str(), MAX_RESOLVER_PAGE_BYTES)
+        .await?;
+    let space_id =
+        SpaceId::new(resolved).map_err(|_| FileOperationError::Tool(ToolError::validation()))?;
     exact_preflight(client, &space_id, file_id).await?;
     Ok((space_id, file_id.clone()))
 }
@@ -1445,9 +2505,11 @@ fn status_error(status: u16) -> FileOperationError {
 #[derive(Debug)]
 enum FileOperationError {
     Upstream(AnytypeError),
+    DefinitiveUpstream(AnytypeError),
     Tool(ToolError),
     IdentityMismatch,
     RepresentationChanged,
+    PostDispatchUncertain,
     Encoding,
 }
 
@@ -1460,7 +2522,9 @@ impl From<AnytypeError> for FileOperationError {
 impl FileOperationError {
     fn diagnostic(&self) -> OperationFailureDiagnostic {
         match self {
-            Self::Upstream(error) => OperationFailureDiagnostic::from_anytype(error),
+            Self::Upstream(error) | Self::DefinitiveUpstream(error) => {
+                OperationFailureDiagnostic::from_anytype(error)
+            }
             Self::Tool(_) => {
                 OperationFailureDiagnostic::classified("workflow_error", "file_workflow")
             }
@@ -1471,6 +2535,9 @@ impl FileOperationError {
                 "representation_changed",
                 "file_representation",
             ),
+            Self::PostDispatchUncertain => {
+                OperationFailureDiagnostic::classified("mutation_indeterminate", "file_upload")
+            }
             Self::Encoding => {
                 OperationFailureDiagnostic::classified("encoding_error", "file_encoding")
             }
@@ -1492,6 +2559,12 @@ fn controlled_tool_error(error: ControlledOperationError<FileOperationError>) ->
                 AnytypeErrorMapping::AmbiguityRequiresCandidates => ToolError::upstream(),
             }
         }
+        ControlledOperationError::Operation(FileOperationError::DefinitiveUpstream(error)) => {
+            match ToolError::from_anytype(&error) {
+                AnytypeErrorMapping::Ready(error) => error,
+                AnytypeErrorMapping::AmbiguityRequiresCandidates => ToolError::upstream(),
+            }
+        }
         ControlledOperationError::Operation(FileOperationError::Tool(error)) => error,
         ControlledOperationError::Operation(
             FileOperationError::IdentityMismatch | FileOperationError::Encoding,
@@ -1501,6 +2574,9 @@ fn controlled_tool_error(error: ControlledOperationError<FileOperationError>) ->
         | ControlledOperationError::ShuttingDown => ToolError::upstream(),
         ControlledOperationError::Operation(FileOperationError::RepresentationChanged) => {
             ToolError::conflict()
+        }
+        ControlledOperationError::Operation(FileOperationError::PostDispatchUncertain) => {
+            ToolError::mutation_indeterminate()
         }
     }
 }
@@ -1540,6 +2616,10 @@ fn controlled_resource_error(error: ControlledOperationError<FileOperationError>
                 }
             }
         }
+        ControlledOperationError::Operation(FileOperationError::DefinitiveUpstream(_))
+        | ControlledOperationError::Operation(FileOperationError::PostDispatchUncertain) => {
+            ErrorData::internal_error(RESOURCE_UPSTREAM, None)
+        }
         ControlledOperationError::Operation(FileOperationError::Encoding)
         | ControlledOperationError::Cancelled
         | ControlledOperationError::TimedOut
@@ -1551,336 +2631,189 @@ fn controlled_resource_error(error: ControlledOperationError<FileOperationError>
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, time::Duration};
+    use std::{collections::BTreeMap, future::Future, sync::Barrier, time::Duration};
 
-    use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
-    use rmcp::model::{ErrorCode, ResourceContents};
+    use anytype::{
+        prelude::{AnytypeClient, ClientConfig, HttpCredentials},
+        test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
+    };
+    use rmcp::model::{ErrorCode, ListToolsResult, ResourceContents};
     use serde_json::{Map, json};
     use tiktoken_rs::o200k_base;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-        task::JoinHandle,
-    };
-    use tracing::instrument::WithSubscriber;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
 
     use super::*;
     use crate::{
-        config::ApplicationProfile, optional_toolsets::OptionalToolsetSelection,
-        runtime::StartupStatus, server::AnyMcpServer,
+        config::ApplicationProfile,
+        optional_toolsets::{OptionalToolsetSelection, production_optional_metadata},
+        runtime::StartupStatus,
+        server::AnyMcpServer,
     };
 
     const SPACE_ID: &str =
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
     const FILE_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
     const DATE: &str = "Wed, 22 Jul 2026 09:00:00 GMT";
+    const FILES_TOKEN_BUDGET_SNAPSHOT: &str =
+        include_str!("../tests/snapshots/files-token-budget.json");
+    const FILES_RESULT_SNAPSHOT: &str = include_str!("../tests/snapshots/files-results.json");
+    const FILES_PRODUCTION_SURFACE_SNAPSHOT: &str =
+        include_str!("../tests/snapshots/files-production-surface.json");
 
-    struct ScriptedReply {
-        status: &'static str,
-        headers: Vec<(&'static str, String)>,
-        body: Vec<u8>,
-    }
-
-    impl ScriptedReply {
-        fn object() -> Self {
-            Self::object_identity(FILE_ID, SPACE_ID)
-        }
-
-        fn object_identity(file_id: &str, space_id: &str) -> Self {
-            let body = json!({
-                "object": {
-                    "archived": false,
-                    "id": file_id,
-                    "layout": "basic",
-                    "object": "object",
-                    "properties": [],
-                    "space_id": space_id,
-                    "type": null
-                }
+    fn run_large_future<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        std::thread::Builder::new()
+            .name("file-content-handler".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("files test runtime")
+                    .block_on(test());
             })
-            .to_string()
-            .into_bytes();
-            Self {
-                status: "200 OK",
-                headers: vec![
-                    ("Content-Type", "application/json".to_owned()),
-                    ("Content-Length", body.len().to_string()),
-                ],
-                body,
-            }
-        }
-
-        fn head(media_type: &str, length: usize) -> Self {
-            Self {
-                status: "200 OK",
-                headers: file_headers(media_type, length, None),
-                body: Vec::new(),
-            }
-        }
-
-        fn partial(media_type: &str, offset: u64, total: u64, body: &[u8]) -> Self {
-            let end = offset + body.len() as u64 - 1;
-            Self {
-                status: "206 Partial Content",
-                headers: file_headers(
-                    media_type,
-                    body.len(),
-                    Some(format!("bytes {offset}-{end}/{total}")),
-                ),
-                body: body.to_vec(),
-            }
-        }
-
-        fn full(media_type: &str, body: &[u8]) -> Self {
-            Self {
-                status: "200 OK",
-                headers: file_headers(media_type, body.len(), None),
-                body: body.to_vec(),
-            }
-        }
-
-        fn partial_with_range(media_type: &str, range: &str, body: &[u8]) -> Self {
-            Self {
-                status: "206 Partial Content",
-                headers: file_headers(media_type, body.len(), Some(range.to_owned())),
-                body: body.to_vec(),
-            }
-        }
-
-        fn range_not_satisfiable(total: u64) -> Self {
-            Self {
-                status: "416 Range Not Satisfiable",
-                headers: vec![
-                    ("Content-Length", "0".to_owned()),
-                    ("Content-Range", format!("bytes */{total}")),
-                ],
-                body: Vec::new(),
-            }
-        }
-
-        fn control_with_body(status: &'static str, body: &[u8]) -> Self {
-            Self {
-                status,
-                headers: vec![("Content-Length", body.len().to_string())],
-                body: body.to_vec(),
-            }
-        }
-
-        fn status(status: &'static str) -> Self {
-            Self {
-                status,
-                headers: vec![("Content-Length", "0".to_owned())],
-                body: Vec::new(),
-            }
-        }
-
-        fn rate_limited() -> Self {
-            Self {
-                status: "429 Too Many Requests",
-                headers: vec![
-                    ("RateLimit-Reset", "0".to_owned()),
-                    ("Content-Length", "0".to_owned()),
-                ],
-                body: Vec::new(),
-            }
-        }
-
-        fn transport_close() -> Self {
-            Self {
-                status: "",
-                headers: Vec::new(),
-                body: Vec::new(),
-            }
-        }
-
-        fn without_header(mut self, name: &str) -> Self {
-            self.headers
-                .retain(|(header, _)| !header.eq_ignore_ascii_case(name));
-            self
-        }
+            .expect("spawn files test")
+            .join()
+            .expect("files test thread");
     }
 
-    fn file_headers(
-        media_type: &str,
-        length: usize,
-        content_range: Option<String>,
-    ) -> Vec<(&'static str, String)> {
-        let mut headers = vec![
-            ("Content-Type", media_type.to_owned()),
-            ("Content-Length", length.to_string()),
-            ("Accept-Ranges", "bytes".to_owned()),
-            ("ETag", "\"file-v1\"".to_owned()),
-            ("Last-Modified", DATE.to_owned()),
-        ];
-        if let Some(content_range) = content_range {
-            headers.push(("Content-Range", content_range));
-        }
-        headers
-    }
-
-    async fn scripted_http(replies: Vec<ScriptedReply>) -> (String, JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind scripted file endpoint");
-        let address = listener.local_addr().expect("scripted endpoint address");
-        let task = tokio::spawn(async move {
-            let mut requests = Vec::with_capacity(replies.len());
-            for reply in replies {
-                let (mut socket, _) = listener.accept().await.expect("accept request");
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let read = socket.read(&mut buffer).await.expect("read request");
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                requests.push(String::from_utf8(request).expect("request headers"));
-                if reply.status.is_empty() {
-                    continue;
-                }
-                let mut response = format!("HTTP/1.1 {}\r\n", reply.status).into_bytes();
-                for (name, value) in reply.headers {
-                    response.extend_from_slice(name.as_bytes());
-                    response.extend_from_slice(b": ");
-                    response.extend_from_slice(value.as_bytes());
-                    response.extend_from_slice(b"\r\n");
-                }
-                response.extend_from_slice(b"Connection: close\r\n\r\n");
-                response.extend_from_slice(&reply.body);
-                socket.write_all(&response).await.expect("write response");
-            }
-            requests
-        });
-        (format!("http://{address}"), task)
-    }
-
-    async fn scripted_http_then_hang(
-        replies: Vec<ScriptedReply>,
-    ) -> (
-        String,
-        std::sync::Arc<tokio::sync::Notify>,
-        JoinHandle<Vec<String>>,
-    ) {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind hanging file endpoint");
-        let address = listener.local_addr().expect("hanging endpoint address");
-        let started = std::sync::Arc::new(tokio::sync::Notify::new());
-        let task_started = started.clone();
-        let task = tokio::spawn(async move {
-            let mut requests = Vec::with_capacity(replies.len() + 1);
-            for reply in replies {
-                let (mut socket, _) = listener.accept().await.expect("accept request");
-                let request = read_request_headers(&mut socket).await;
-                requests.push(request);
-                if reply.status.is_empty() {
-                    continue;
-                }
-                let mut response = format!("HTTP/1.1 {}\r\n", reply.status).into_bytes();
-                for (name, value) in reply.headers {
-                    response.extend_from_slice(name.as_bytes());
-                    response.extend_from_slice(b": ");
-                    response.extend_from_slice(value.as_bytes());
-                    response.extend_from_slice(b"\r\n");
-                }
-                response.extend_from_slice(b"Connection: close\r\n\r\n");
-                response.extend_from_slice(&reply.body);
-                socket.write_all(&response).await.expect("write response");
-            }
-            let (mut socket, _) = listener.accept().await.expect("accept hanging request");
-            requests.push(read_request_headers(&mut socket).await);
-            task_started.notify_one();
-            let mut byte = [0_u8; 1];
-            let _ = socket.read(&mut byte).await;
-            requests
-        });
-        (format!("http://{address}"), started, task)
-    }
-
-    async fn read_request_headers(socket: &mut tokio::net::TcpStream) -> String {
-        let mut request = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        loop {
-            let read = socket.read(&mut buffer).await.expect("read request");
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&buffer[..read]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
-        String::from_utf8(request).expect("request headers")
-    }
-
-    fn client(base_url: String) -> AnytypeClient {
+    fn catalog_client() -> AnytypeClient {
         let client = AnytypeClient::with_config(ClientConfig {
-            base_url: Some(base_url),
+            base_url: Some("http://127.0.0.1:1".to_owned()),
             keystore: Some("env".to_owned()),
-            keystore_service: Some("file-content-test".to_owned()),
-            app_name: "file-content-test".to_owned(),
+            keystore_service: Some("file-content-catalog-test".to_owned()),
+            app_name: "file-content-catalog-test".to_owned(),
             ..ClientConfig::default()
         })
-        .expect("scripted client");
-        client.set_api_key(HttpCredentials::new("scripted-secret-token"));
+        .expect("catalog client");
+        client.set_api_key(HttpCredentials::new("catalog-test-token"));
         client
     }
 
-    fn runtime(base_url: String) -> RuntimeContext {
-        runtime_with_timeout(base_url, Duration::from_secs(3))
-    }
-
-    fn runtime_with_timeout(base_url: String, timeout: Duration) -> RuntimeContext {
-        RuntimeContext::from_parts(
-            client(base_url),
-            1,
-            timeout,
-            StartupStatus {
-                http_available: true,
-                grpc_available: false,
-            },
-        )
-    }
-
-    fn selected_runtime(base_url: String) -> RuntimeContext {
+    fn production_files_server(client: AnytypeClient, read_only: bool) -> AnyMcpServer {
         let selection = OptionalToolsetSelection::parse(
             Some("files".to_owned()),
-            &[FILE_CONTENT_REGISTRY.metadata()],
+            &production_optional_metadata(),
         )
-        .expect("files selection");
-        RuntimeContext::from_parts_with_profile_and_optional_toolsets(
-            client(base_url),
+        .expect("production files selection");
+        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            client,
             1,
-            Duration::from_secs(3),
+            Duration::from_secs(30),
             StartupStatus {
                 http_available: true,
-                grpc_available: false,
+                grpc_available: true,
             },
-            ApplicationProfile::Compact,
-            false,
+            ApplicationProfile::Standard,
+            read_only,
             selection,
+        );
+        AnyMcpServer::new(runtime).expect("production files server")
+    }
+
+    fn production_base_server(client: AnytypeClient) -> AnyMcpServer {
+        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            client,
+            1,
+            Duration::from_secs(30),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            ApplicationProfile::Standard,
+            false,
+            OptionalToolsetSelection::default(),
+        );
+        AnyMcpServer::new(runtime).expect("production base server")
+    }
+
+    async fn direct_tool(
+        server: &AnyMcpServer,
+        name: &'static str,
+        arguments: Value,
+    ) -> CallToolResult {
+        server
+            .dispatch_tool(
+                CallToolRequestParams::new(name).with_arguments(
+                    arguments
+                        .as_object()
+                        .cloned()
+                        .expect("direct files arguments"),
+                ),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("direct files dispatch")
+    }
+
+    async fn production_stdio_request(
+        server: AnyMcpServer,
+        method: &'static str,
+        mut params: Value,
+    ) -> Value {
+        params
+            .as_object_mut()
+            .expect("stdio params object")
+            .entry("_meta")
+            .or_insert_with(|| {
+                json!({
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                })
+            });
+        let (client_io, server_io) = duplex(128 * 1024);
+        let (server_reader, server_writer) = split(server_io);
+        let task = tokio::spawn(crate::stdio::serve_preview(
+            server,
+            BufReader::new(server_reader),
+            server_writer,
+        ));
+        let (client_reader, mut client_writer) = split(client_io);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 91,
+            "method": method,
+            "params": params
+        });
+        client_writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write production stdio request");
+        let mut reader = BufReader::new(client_reader);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read production stdio response");
+        drop(client_writer);
+        drop(reader);
+        task.await
+            .expect("join production stdio")
+            .expect("production stdio transport");
+        serde_json::from_str(&line).expect("decode production stdio response")
+    }
+
+    async fn production_stdio_tool(
+        server: AnyMcpServer,
+        name: &'static str,
+        arguments: Value,
+    ) -> Value {
+        production_stdio_request(
+            server,
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": arguments,
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }),
         )
-    }
-
-    fn metadata_input() -> FileMetadataInput {
-        serde_json::from_value(json!({"space": SPACE_ID, "file_id": FILE_ID}))
-            .expect("metadata input")
-    }
-
-    fn read_input(length: usize) -> FileReadInput {
-        serde_json::from_value(json!({
-            "space": SPACE_ID,
-            "file_id": FILE_ID,
-            "offset": 0,
-            "length": length,
-            "expected_strong_etag": "\"file-v1\""
-        }))
-        .expect("read input")
+        .await
     }
 
     fn observation(media_type: &str, bytes: &[u8]) -> FileReadObservation {
@@ -1957,6 +2890,46 @@ mod tests {
             .resource
     }
 
+    fn assert_blob_resource(
+        result: &ReadResourceResult,
+        expected_uri: &str,
+        expected_bytes: &[u8],
+    ) {
+        assert_eq!(result.contents.len(), 1);
+        let ResourceContents::BlobResourceContents {
+            uri,
+            mime_type,
+            blob,
+            ..
+        } = &result.contents[0]
+        else {
+            panic!("expected blob resource")
+        };
+        assert_eq!(uri, expected_uri);
+        assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
+        let decoded = BASE64_STANDARD.decode(blob).expect("resource base64");
+        assert_eq!(decoded, expected_bytes);
+        assert_eq!(
+            FileSha256::digest(&decoded),
+            FileSha256::digest(expected_bytes)
+        );
+    }
+
+    fn assert_stdio_blob_resource(result: &Value, expected_uri: &str, expected_bytes: &[u8]) {
+        assert_eq!(result["contents"].as_array().expect("contents").len(), 1);
+        let resource = &result["contents"][0];
+        assert_eq!(resource["uri"], expected_uri);
+        assert_eq!(resource["mimeType"], "application/octet-stream");
+        let decoded = BASE64_STANDARD
+            .decode(resource["blob"].as_str().expect("resource blob"))
+            .expect("resource base64");
+        assert_eq!(decoded, expected_bytes);
+        assert_eq!(
+            FileSha256::digest(&decoded),
+            FileSha256::digest(expected_bytes)
+        );
+    }
+
     #[test]
     fn domain_values_lock_exact_boundaries_and_canonical_resource_grammar() {
         assert!(SpaceRef::new(" ").is_err());
@@ -1966,6 +2939,51 @@ mod tests {
         );
         assert!(SpaceRef::new("x".repeat(512)).is_ok());
         assert!(SpaceRef::new("x".repeat(513)).is_err());
+
+        assert!(FileName::new("report.txt").is_ok());
+        assert!(FileName::new("x".repeat(MAX_FILE_NAME_CHARS)).is_ok());
+        for invalid in ["", ".", "..", "a/b", "a\\b", "line\nfeed"] {
+            assert!(FileName::new(invalid).is_err(), "{invalid:?}");
+        }
+        assert!(FileName::new("x".repeat(MAX_FILE_NAME_CHARS + 1)).is_err());
+
+        let maximum_payload = vec![0xa5; MAX_FILE_CONTENT_BYTES as usize];
+        let maximum_base64 = BASE64_STANDARD.encode(&maximum_payload);
+        assert_eq!(maximum_base64.len(), MAX_CANONICAL_BASE64_CHARS);
+        assert_eq!(
+            CanonicalBase64::parse(&maximum_base64)
+                .expect("maximum canonical payload")
+                .as_bytes(),
+            maximum_payload
+        );
+        for invalid in ["", "Zg", "Zg=", "Z g==", "===="] {
+            assert!(CanonicalBase64::parse(invalid).is_err(), "{invalid:?}");
+        }
+        assert!(CanonicalBase64::parse(&BASE64_STANDARD.encode(vec![0; 65_537])).is_err());
+
+        assert_eq!(
+            UploadMediaType::new("Text/Plain")
+                .expect("normalized MIME")
+                .as_str(),
+            "text/plain"
+        );
+        for invalid in ["text/plain; charset=utf-8", "text plain", "text/plain\n"] {
+            assert!(UploadMediaType::new(invalid).is_err(), "{invalid:?}");
+        }
+
+        let upload = json!({
+            "space": SPACE_ID,
+            "name": "report.txt",
+            "content_base64": "SGVsbG8=",
+            "idempotency_key": "stable-key"
+        });
+        assert!(serde_json::from_value::<FileUploadInput>(upload.clone()).is_ok());
+        let mut null_media = upload.clone();
+        null_media["media_type"] = Value::Null;
+        assert!(serde_json::from_value::<FileUploadInput>(null_media).is_err());
+        let mut unknown = upload;
+        unknown["path"] = json!("/tmp/secret");
+        assert!(serde_json::from_value::<FileUploadInput>(unknown).is_err());
 
         assert!(JsonSafeInteger::new(JSON_SAFE_INTEGER_MAX).is_ok());
         assert!(JsonSafeInteger::new(JSON_SAFE_INTEGER_MAX + 1).is_err());
@@ -2020,12 +3038,23 @@ mod tests {
 
     #[test]
     fn contracts_are_closed_exact_and_within_reviewed_token_ceilings() {
+        let upload = file_upload_tool().expect("upload contract").into_tool();
         let metadata = file_metadata_tool().expect("metadata contract").into_tool();
         let read = file_read_tool().expect("read contract").into_tool();
+        assert_eq!(upload.name, "file_upload");
         assert_eq!(metadata.name, "file_metadata");
         assert_eq!(read.name, "file_read");
         assert_eq!(metadata.input_schema["additionalProperties"], false);
         assert_eq!(read.input_schema["additionalProperties"], false);
+        assert_eq!(upload.input_schema["additionalProperties"], false);
+        assert_eq!(
+            upload.input_schema["required"],
+            json!(["space", "name", "content_base64", "idempotency_key"])
+        );
+        assert_eq!(
+            upload.input_schema["properties"]["content_base64"]["$ref"],
+            "#/$defs/CanonicalBase64"
+        );
         assert_eq!(
             read.input_schema["properties"]["length"]["$ref"],
             "#/$defs/FileReadLength"
@@ -2043,16 +3072,74 @@ mod tests {
         assert!(template.meta.is_none());
 
         let tokenizer = o200k_base().expect("tokenizer");
-        for tool in [&metadata, &read] {
+        for tool in [&upload, &metadata, &read] {
             let wire = canonical_json(serde_json::to_value(tool).expect("tool JSON"));
             assert!(tokenizer.encode_ordinary(&wire.to_string()).len() <= 1_200);
         }
+        let read_write_catalog = canonical_json(json!({
+            "tools": [metadata.clone(), read.clone(), upload],
+            "resources": [],
+            "resourceTemplates": [template.clone()]
+        }));
+        assert!(
+            tokenizer
+                .encode_ordinary(&read_write_catalog.to_string())
+                .len()
+                <= 3_400
+        );
         let catalog = canonical_json(json!({
             "tools": [metadata, read],
             "resources": [],
             "resourceTemplates": [template]
         }));
         assert!(tokenizer.encode_ordinary(&catalog.to_string()).len() <= 2_600);
+    }
+
+    #[test]
+    fn production_registry_inventory_and_read_only_projection_are_exact() {
+        assert_eq!(
+            FILE_CONTENT_REGISTRY.metadata(),
+            OptionalToolsetMetadata::new("files", false)
+        );
+        assert!(FILE_CONTENT_REGISTRY.resources().is_empty());
+        assert_eq!(
+            FILE_CONTENT_REGISTRY.resource_templates(),
+            vec![file_byte_resource_template()]
+        );
+        assert_eq!(FILE_CONTENT_REGISTRY.catalog_token_ceiling(), 3_400);
+        assert!(
+            production_optional_metadata()
+                .iter()
+                .any(|metadata| metadata.name == "files" && !metadata.requires_grpc)
+        );
+
+        let client = catalog_client();
+        let read_write = production_files_server(client.clone(), false)
+            .list_tools_wire(None)
+            .expect("read-write files catalog");
+        let read_only = production_files_server(client, true)
+            .list_tools_wire(None)
+            .expect("read-only files catalog");
+        let file_names = |result: &rmcp::model::ListToolsResult| {
+            result
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .filter(|name| name.starts_with("file_"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            file_names(&read_write),
+            [
+                "file_metadata".to_owned(),
+                "file_read".to_owned(),
+                "file_upload".to_owned(),
+            ]
+        );
+        assert_eq!(
+            file_names(&read_only),
+            ["file_metadata".to_owned(), "file_read".to_owned()]
+        );
     }
 
     #[test]
@@ -2525,1085 +3612,730 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn metadata_handler_preflights_identity_and_normalizes_exact_headers() {
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("text/plain; charset=utf-8", 4),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let result = handlers
-            .file_metadata(&metadata_input(), &CancellationToken::new())
-            .await;
-        assert_eq!(result.is_error, Some(false));
-        let output = result.structured_content.expect("structured metadata");
-        assert_eq!(output["file_id"], FILE_ID);
-        assert_eq!(output["space_id"], SPACE_ID);
-        assert_eq!(output["media_type"], "text/plain; charset=utf-8");
-        assert_eq!(output["size_bytes"], 4);
-        assert_eq!(output["accepts_byte_ranges"], true);
-        assert_eq!(output["strong_etag"], "\"file-v1\"");
-        assert_eq!(output["last_modified"], DATE);
+    fn cohort_output(reused: bool) -> FileUploadOutput {
+        FileUploadOutput {
+            file_id: EntityId::new(FILE_ID).expect("file id"),
+            space_id: SpaceId::new(SPACE_ID).expect("space id"),
+            requested_name: FileName::new("cohort.bin").expect("file name"),
+            media_type: FileMediaType::from_evidence(Some("application/octet-stream"))
+                .expect("media type"),
+            size_bytes: JsonSafeInteger(3),
+            content_sha256: FileSha256::digest(b"abc"),
+            reused,
+        }
+    }
 
-        let requests = endpoint.await.expect("scripted endpoint");
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].starts_with(&format!(
-            "GET /v1/spaces/{SPACE_ID}/objects/{FILE_ID} HTTP/1.1\r\n"
-        )));
-        assert!(requests[1].starts_with(&format!(
-            "HEAD /v1/spaces/{SPACE_ID}/files/{FILE_ID} HTTP/1.1\r\n"
-        )));
+    fn cohort_success(output: &FileUploadOutput) -> CallToolResult {
+        file_upload_tool()
+            .expect("upload contract")
+            .success(output)
+            .expect("upload success")
+    }
+
+    fn test_deadline() -> Instant {
+        Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .unwrap_or_else(Instant::now)
+    }
+
+    async fn cohort_begin(
+        cohort: &UploadCohort,
+        key: IdempotencyKey,
+        fingerprint: [u8; 32],
+    ) -> BeginUpload {
+        cohort.begin(0, test_deadline(), key, fingerprint).await
     }
 
     #[tokio::test]
-    async fn inactive_slice_rejects_names_and_bounds_preflight_and_header_evidence() {
-        let name_input = serde_json::from_value(json!({
-            "space": "human-readable-name",
-            "file_id": FILE_ID
-        }))
-        .expect("name input");
-        let handlers =
-            FileContentHandlers::new(runtime("http://127.0.0.1:1".to_owned())).expect("handlers");
-        let result = handlers
-            .file_metadata(&name_input, &CancellationToken::new())
-            .await;
-        assert_eq!(result.is_error, Some(true));
-        assert_eq!(
-            result.structured_content.as_ref().expect("error")["code"],
-            "validation"
-        );
-
-        let oversized = vec![b'x'; MAX_OBJECT_PREFLIGHT_BYTES as usize + 1];
-        let (base_url, endpoint) = scripted_http(vec![ScriptedReply {
-            status: "200 OK",
-            headers: vec![
-                ("Content-Type", "application/json".to_owned()),
-                ("Content-Length", oversized.len().to_string()),
-            ],
-            body: oversized,
-        }])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let result = handlers
-            .file_metadata(&metadata_input(), &CancellationToken::new())
-            .await;
-        assert_eq!(result.is_error, Some(true));
-        assert_eq!(
-            result.structured_content.as_ref().expect("error")["code"],
-            "bounded_result"
-        );
-        assert_eq!(endpoint.await.expect("endpoint").len(), 1);
-
-        let mut oversized_head = ScriptedReply::head("application/octet-stream", 0);
-        oversized_head.headers.push((
-            "Cache-Control",
-            "private,".repeat((MAX_HEADER_EVIDENCE_BYTES / 8 + 2) as usize),
-        ));
-        let (base_url, endpoint) =
-            scripted_http(vec![ScriptedReply::object(), oversized_head]).await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let result = handlers
-            .file_metadata(&metadata_input(), &CancellationToken::new())
-            .await;
-        assert_eq!(result.is_error, Some(true));
-        assert_eq!(
-            result.structured_content.as_ref().expect("error")["code"],
-            "bounded_result"
-        );
-        assert_eq!(endpoint.await.expect("endpoint").len(), 2);
-    }
-
-    #[tokio::test]
-    async fn preview_stdio_dispatch_returns_native_image_and_no_second_base64_copy() {
-        let bytes = [0_u8, 1, 2, 3];
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("image/png", bytes.len()),
-            ScriptedReply::partial("image/png", 0, bytes.len() as u64, &bytes),
-        ])
-        .await;
-        let server = AnyMcpServer::new_with_optional_registries(
-            selected_runtime(base_url),
-            &FILE_CONTENT_LINKED,
-        )
-        .expect("files test server");
-        let params = json!({
-            "name": "file_read",
-            "arguments": {
-                "space": SPACE_ID,
-                "file_id": FILE_ID,
-                "offset": 0,
-                "length": bytes.len(),
-                "expected_strong_etag": "\"file-v1\""
-            },
-            "_meta": {
-                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientCapabilities": {}
-            }
-        })
-        .as_object()
-        .expect("params")
-        .clone();
-        let response = crate::stdio::dispatch_modern(
-            &server,
-            json!(7),
-            "tools/call",
-            params,
-            &CancellationToken::new(),
-        )
-        .await;
-        assert_eq!(response["result"]["content"][1]["type"], "image");
-        assert_eq!(
-            response["result"]["structuredContent"]["content_kind"],
-            "image"
-        );
-        let encoded = BASE64_STANDARD.encode(bytes);
-        assert_eq!(response.to_string().matches(&encoded).count(), 1);
-        assert!(
-            response["result"]["structuredContent"]
-                .get("data")
-                .is_none()
-        );
-        assert!(
-            response["result"]["structuredContent"]
-                .get("blob")
-                .is_none()
-        );
-        let requests = endpoint.await.expect("endpoint");
-        assert_eq!(requests.len(), 3);
-        assert!(requests[2].contains("range: bytes=0-3\r\n"));
-        assert!(requests[2].contains("if-range: \"file-v1\"\r\n"));
-    }
-
-    #[tokio::test]
-    async fn preview_resource_read_is_private_zero_ttl_and_templates_are_public_cached() {
-        let bytes = b"ab";
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(bytes);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 2, &hash)
-            .expect("resource URI");
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", 2),
-            ScriptedReply::partial("application/octet-stream", 0, 2, bytes),
-        ])
-        .await;
-        let server = AnyMcpServer::new_with_optional_registries(
-            selected_runtime(base_url),
-            &FILE_CONTENT_LINKED,
-        )
-        .expect("files test server");
-        let templates = crate::stdio::dispatch_modern(
-            &server,
-            json!(31),
-            "resources/templates/list",
-            Map::new(),
-            &CancellationToken::new(),
-        )
-        .await;
-        assert_eq!(templates["result"]["cacheScope"], "public");
-        assert!(
-            templates["result"]["ttlMs"]
-                .as_u64()
-                .is_some_and(|ttl| ttl > 0)
-        );
-        assert_eq!(templates["result"]["resultType"], "complete");
-        assert!(
-            templates["result"]["resourceTemplates"]
-                .as_array()
-                .expect("templates")
-                .iter()
-                .any(|template| template["uriTemplate"] == FILE_BYTE_RESOURCE_TEMPLATE)
-        );
-
-        let params = json!({"uri": uri.as_str()})
-            .as_object()
-            .expect("resource params")
-            .clone();
-        let read = crate::stdio::dispatch_modern(
-            &server,
-            json!(32),
-            "resources/read",
-            params,
-            &CancellationToken::new(),
-        )
-        .await;
-        assert_eq!(read["result"]["cacheScope"], "private");
-        assert_eq!(read["result"]["ttlMs"], 0);
-        assert_eq!(read["result"]["resultType"], "complete");
-        assert_eq!(
-            read["result"]["contents"]
-                .as_array()
-                .expect("contents")
-                .len(),
-            1
-        );
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-    }
-
-    #[tokio::test]
-    async fn stale_expected_validator_stops_before_get_with_conflict() {
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", 4),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let mut input = read_input(4);
-        input.expected_strong_etag = Omittable::Present(
-            StrongEntityTag::new("\"stale\"").expect("stale expected validator"),
-        );
-        let result = handlers
-            .file_read(
-                &input,
-                &ProtocolVersion::V_2025_11_25,
-                &CancellationToken::new(),
+    async fn upload_cohort_coalesces_leader_and_waiter_with_one_post_branch() {
+        let cohort = UploadCohort::new(2);
+        let key = IdempotencyKey::new("leader-waiter").expect("key");
+        let fingerprint = [7; 32];
+        let leader = match cohort_begin(&cohort, key.clone(), fingerprint).await {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("first caller must lead"),
+        };
+        let waiter = match cohort_begin(&cohort, key.clone(), fingerprint).await {
+            BeginUpload::Wait(attempt) => attempt,
+            _ => panic!("second caller must wait"),
+        };
+        assert!(Arc::ptr_eq(&leader, &waiter));
+        let post_branches = 1_u64;
+        let output = cohort_output(false);
+        cohort
+            .finish(
+                &key,
+                &leader,
+                UploadExecution {
+                    result: cohort_success(&output),
+                    disposition: UploadDisposition::Verified(output),
+                },
             )
             .await;
-        assert_eq!(result.is_error, Some(true));
+        let result = wait_for_upload(waiter, &CancellationToken::new(), test_deadline()).await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(post_branches, 1);
+        assert!(matches!(
+            cohort_begin(&cohort, key, fingerprint).await,
+            BeginUpload::Cached(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn upload_cohort_locks_conflict_capacity_candidate_retry_and_terminal_states() {
+        let cohort = UploadCohort::new(1);
+        let key = IdempotencyKey::new("state-machine").expect("key");
+        let other = IdempotencyKey::new("capacity").expect("key");
+        let fingerprint = [3; 32];
+        let leader = match cohort_begin(&cohort, key.clone(), fingerprint).await {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("first caller must lead"),
+        };
+        assert!(matches!(
+            cohort_begin(&cohort, key.clone(), [4; 32]).await,
+            BeginUpload::Conflict
+        ));
+        assert!(matches!(
+            cohort_begin(&cohort, other, [5; 32]).await,
+            BeginUpload::Full
+        ));
+        let candidate = EntityId::new(FILE_ID).expect("candidate");
+        cohort.retain_candidate(&key, &leader, &candidate).await;
+        cohort
+            .finish(
+                &key,
+                &leader,
+                UploadExecution {
+                    result: tool_error(&ToolError::mutation_indeterminate()),
+                    disposition: UploadDisposition::CandidateFailed(candidate.clone()),
+                },
+            )
+            .await;
+        let replay = match cohort_begin(&cohort, key.clone(), fingerprint).await {
+            BeginUpload::LeadReplay(attempt, retained) => {
+                assert_eq!(retained, candidate);
+                attempt
+            }
+            _ => panic!("retained candidate must be reverified"),
+        };
+        let output = cohort_output(true);
+        cohort
+            .finish(
+                &key,
+                &replay,
+                UploadExecution {
+                    result: cohort_success(&output),
+                    disposition: UploadDisposition::Verified(output),
+                },
+            )
+            .await;
+        assert!(matches!(
+            cohort_begin(&cohort, key.clone(), fingerprint).await,
+            BeginUpload::Cached(FileUploadOutput { reused: true, .. })
+        ));
+
+        let uncertain = UploadCohort::new(1);
+        let attempt = match cohort_begin(&uncertain, key.clone(), fingerprint).await {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("uncertain leader"),
+        };
+        attempt.progress.mark_dispatched();
+        uncertain
+            .finish(
+                &key,
+                &attempt,
+                UploadExecution {
+                    result: tool_error(&ToolError::mutation_indeterminate()),
+                    disposition: UploadDisposition::Indeterminate,
+                },
+            )
+            .await;
+        assert!(matches!(
+            cohort_begin(&uncertain, key.clone(), fingerprint).await,
+            BeginUpload::Indeterminate
+        ));
+
+        let rejected = UploadCohort::new(1);
+        let attempt = match cohort_begin(&rejected, key.clone(), fingerprint).await {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("rejected leader"),
+        };
+        rejected
+            .finish(
+                &key,
+                &attempt,
+                UploadExecution {
+                    result: tool_error(&ToolError::validation()),
+                    disposition: UploadDisposition::PreDispatchFailure,
+                },
+            )
+            .await;
+        assert!(matches!(
+            cohort_begin(&rejected, key, fingerprint).await,
+            BeginUpload::LeadNew(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn upload_waiter_cancellation_is_stage_safe_and_runtime_shutdown_isolated() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let deadline = test_deadline();
+        let pre_dispatch = wait_for_upload(
+            Arc::new(UploadAttempt::new(None, deadline, 0)),
+            &cancellation,
+            deadline,
+        )
+        .await;
         assert_eq!(
-            result.structured_content.as_ref().expect("error")["code"],
+            pre_dispatch.structured_content.expect("error")["code"],
+            "upstream"
+        );
+
+        let deadline = test_deadline();
+        let dispatched = Arc::new(UploadAttempt::new(None, deadline, 0));
+        dispatched.progress.mark_dispatched();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let post_dispatch = wait_for_upload(dispatched, &cancellation, deadline).await;
+        assert_eq!(
+            post_dispatch.structured_content.expect("error")["code"],
             "conflict"
         );
-        assert_eq!(endpoint.await.expect("endpoint").len(), 2);
-    }
 
-    #[tokio::test]
-    async fn cumulative_http_metrics_lock_logical_retry_and_physical_attempt_ceilings() {
-        let bytes = b"ab";
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::rate_limited(),
-            ScriptedReply::head("application/octet-stream", bytes.len()),
-            ScriptedReply::partial("application/octet-stream", 0, bytes.len() as u64, bytes),
-        ])
-        .await;
-        let handlers =
-            FileContentHandlers::new(runtime_with_timeout(base_url, Duration::from_secs(100)))
-                .expect("handlers");
-        let result = handlers
-            .file_read(
-                &read_input(bytes.len()),
-                &ProtocolVersion::V_2025_11_25,
-                &CancellationToken::new(),
-            )
-            .await;
-        assert_eq!(result.is_error, Some(false));
-        let metrics = handlers.runtime.client().http_metrics();
-        assert_eq!(metrics.logical_operations, 3);
-        assert_eq!(metrics.physical_attempts, 4);
-        assert_eq!(metrics.total_requests, 4);
-        assert_eq!(metrics.retries, 1);
-        assert_eq!(endpoint.await.expect("endpoint").len(), 4);
-
-        let mut replies = vec![ScriptedReply::object()];
-        replies.extend((0..MAX_SAFE_ATTEMPTS).map(|_| ScriptedReply::rate_limited()));
-        let (base_url, endpoint) = scripted_http(replies).await;
-        let handlers =
-            FileContentHandlers::new(runtime_with_timeout(base_url, Duration::from_secs(100)))
-                .expect("handlers");
-        let result = handlers
-            .file_metadata(&metadata_input(), &CancellationToken::new())
-            .await;
-        assert_eq!(result.is_error, Some(true));
-        let metrics = handlers.runtime.client().http_metrics();
-        assert_eq!(metrics.logical_operations, 2);
-        assert_eq!(metrics.physical_attempts, u64::from(MAX_SAFE_ATTEMPTS) + 1);
-        assert_eq!(metrics.total_requests, u64::from(MAX_SAFE_ATTEMPTS) + 1);
-        assert_eq!(metrics.retries, u64::from(MAX_SAFE_ATTEMPTS - 1));
-        assert_eq!(
-            endpoint.await.expect("endpoint").len(),
-            MAX_SAFE_ATTEMPTS as usize + 1
-        );
-
-        let mut replies = vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", bytes.len()),
-        ];
-        replies.extend((0..MAX_SAFE_ATTEMPTS).map(|_| ScriptedReply::rate_limited()));
-        let (base_url, endpoint) = scripted_http(replies).await;
-        let handlers =
-            FileContentHandlers::new(runtime_with_timeout(base_url, Duration::from_secs(100)))
-                .expect("handlers");
-        let result = handlers
-            .file_read(
-                &read_input(bytes.len()),
-                &ProtocolVersion::V_2025_11_25,
-                &CancellationToken::new(),
-            )
-            .await;
-        assert_eq!(result.is_error, Some(true));
-        let metrics = handlers.runtime.client().http_metrics();
-        assert_eq!(metrics.logical_operations, 3);
-        assert_eq!(metrics.physical_attempts, u64::from(MAX_SAFE_ATTEMPTS) + 2);
-        assert_eq!(metrics.total_requests, u64::from(MAX_SAFE_ATTEMPTS) + 2);
-        assert_eq!(metrics.retries, u64::from(MAX_SAFE_ATTEMPTS - 1));
-        assert_eq!(
-            endpoint.await.expect("endpoint").len(),
-            MAX_SAFE_ATTEMPTS as usize + 2
-        );
-
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", bytes.len()),
-            ScriptedReply::rate_limited(),
-            ScriptedReply::status("504 Gateway Timeout"),
-            ScriptedReply::rate_limited(),
-            ScriptedReply::status("504 Gateway Timeout"),
-            ScriptedReply::rate_limited(),
-            ScriptedReply::transport_close(),
-        ])
-        .await;
-        let handlers =
-            FileContentHandlers::new(runtime_with_timeout(base_url, Duration::from_secs(100)))
-                .expect("handlers");
-        let result = handlers
-            .file_read(
-                &read_input(bytes.len()),
-                &ProtocolVersion::V_2025_11_25,
-                &CancellationToken::new(),
-            )
-            .await;
-        assert_eq!(result.is_error, Some(true));
-        let metrics = handlers.runtime.client().http_metrics();
-        assert_eq!(metrics.logical_operations, 3);
-        assert_eq!(metrics.physical_attempts, u64::from(MAX_SAFE_ATTEMPTS) + 2);
-        assert_eq!(metrics.total_requests, u64::from(MAX_SAFE_ATTEMPTS) + 2);
-        assert_eq!(metrics.retries, u64::from(MAX_SAFE_ATTEMPTS - 1));
-        assert_eq!(endpoint.await.expect("endpoint").len(), 8);
-    }
-
-    #[tokio::test]
-    async fn read_handler_locks_range_status_and_cross_response_evidence_matrix() {
-        let cases = [
-            (
-                "bounded eof truncation",
-                ScriptedReply::head("application/octet-stream", 2),
-                ScriptedReply::partial("application/octet-stream", 0, 2, b"ab"),
-                0,
-                4,
-                None,
-            ),
-            (
-                "complete 200",
-                ScriptedReply::head("application/octet-stream", 2),
-                ScriptedReply::full("application/octet-stream", b"ab"),
-                0,
-                4,
-                None,
-            ),
-        ];
-        for (name, head, get, offset, length, expected_code) in cases {
-            let (base_url, endpoint) =
-                scripted_http(vec![ScriptedReply::object(), head, get]).await;
-            let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-            let input = serde_json::from_value(json!({
-                "space": SPACE_ID,
-                "file_id": FILE_ID,
-                "offset": offset,
-                "length": length
-            }))
-            .expect("read input");
-            let result = handlers
-                .file_read(
-                    &input,
-                    &ProtocolVersion::V_2025_11_25,
-                    &CancellationToken::new(),
-                )
-                .await;
-            assert_eq!(
-                result
-                    .structured_content
-                    .as_ref()
-                    .and_then(|value| value.get("code"))
-                    .and_then(Value::as_str),
-                expected_code,
-                "{name}"
-            );
-            assert_eq!(result.is_error, Some(expected_code.is_some()), "{name}");
-            assert_eq!(endpoint.await.expect("endpoint").len(), 3, "{name}");
-        }
-
-        let failures = [
-            (
-                "truncated content range",
-                ScriptedReply::head("application/octet-stream", 4),
-                ScriptedReply::partial_with_range("application/octet-stream", "bytes 0-3/4", b"ab"),
-                0,
-                4,
-                "upstream",
-            ),
-            (
-                "range overrun",
-                ScriptedReply::head("application/octet-stream", 5),
-                ScriptedReply::partial("application/octet-stream", 0, 5, b"abcde"),
-                0,
-                4,
-                "conflict",
-            ),
-            (
-                "ignored nonzero range",
-                ScriptedReply::head("application/octet-stream", 3),
-                ScriptedReply::full("application/octet-stream", b"abc"),
-                1,
-                2,
-                "conflict",
-            ),
-            (
-                "contradictory total",
-                ScriptedReply::head("application/octet-stream", 4),
-                ScriptedReply::partial_with_range("application/octet-stream", "bytes 0-1/5", b"ab"),
-                0,
-                2,
-                "conflict",
-            ),
-            (
-                "MIME mismatch",
-                ScriptedReply::head("text/plain", 2),
-                ScriptedReply::partial("image/png", 0, 2, b"ab"),
-                0,
-                2,
-                "conflict",
-            ),
-        ];
-        for (name, head, get, offset, length, expected_code) in failures {
-            let (base_url, endpoint) =
-                scripted_http(vec![ScriptedReply::object(), head, get]).await;
-            let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-            let input = serde_json::from_value(json!({
-                "space": SPACE_ID,
-                "file_id": FILE_ID,
-                "offset": offset,
-                "length": length
-            }))
-            .expect("read input");
-            let result = handlers
-                .file_read(
-                    &input,
-                    &ProtocolVersion::V_2025_11_25,
-                    &CancellationToken::new(),
-                )
-                .await;
-            assert_eq!(result.is_error, Some(true), "{name}");
-            assert_eq!(
-                result.structured_content.as_ref().expect("error")["code"],
-                expected_code,
-                "{name}"
-            );
-            assert_eq!(endpoint.await.expect("endpoint").len(), 3, "{name}");
-        }
-
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", 4),
-            ScriptedReply::range_not_satisfiable(4),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let result = handlers
-            .file_read(
-                &read_input(4),
-                &ProtocolVersion::V_2025_11_25,
-                &CancellationToken::new(),
-            )
-            .await;
-        assert_eq!(result.is_error, Some(true));
-        assert_eq!(
-            result.structured_content.as_ref().expect("error")["code"],
-            "validation"
-        );
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-
-        for (name, control, expected_code) in [
-            (
-                "oversized 416 sentinel",
-                ScriptedReply::control_with_body("416 Range Not Satisfiable", b"abc"),
-                "validation",
-            ),
-            (
-                "oversized 412 sentinel",
-                ScriptedReply::control_with_body("412 Precondition Failed", b"abc"),
-                "conflict",
-            ),
-        ] {
-            let (base_url, endpoint) = scripted_http(vec![
-                ScriptedReply::object(),
-                ScriptedReply::head("application/octet-stream", 4),
-                control,
-            ])
-            .await;
-            let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-            let result = handlers
-                .file_read(
-                    &read_input(2),
-                    &ProtocolVersion::V_2025_11_25,
-                    &CancellationToken::new(),
-                )
-                .await;
-            assert_eq!(result.is_error, Some(true), "{name}");
-            assert_eq!(result.content.len(), 1, "{name}");
-            assert!(result.content[0].as_text().is_some(), "{name}");
-            let structured = result.structured_content.as_ref().expect("error");
-            assert_eq!(structured["code"], expected_code, "{name}");
-            assert!(structured.get("content_kind").is_none(), "{name}");
-            assert!(structured.get("resource_uri").is_none(), "{name}");
-            assert_eq!(endpoint.await.expect("endpoint").len(), 3, "{name}");
-        }
-
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", 2),
-            ScriptedReply::partial("application/octet-stream", 0, 2, b"ab")
-                .without_header("etag")
-                .without_header("last-modified"),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let input = serde_json::from_value(json!({
-            "space": SPACE_ID,
-            "file_id": FILE_ID,
-            "offset": 0,
-            "length": 2
-        }))
-        .expect("read input");
-        let result = handlers
-            .file_read(
-                &input,
-                &ProtocolVersion::V_2025_11_25,
-                &CancellationToken::new(),
-            )
-            .await;
-        assert_eq!(result.is_error, Some(false));
-        let output = result.structured_content.expect("output");
-        assert!(output.get("strong_etag").is_none());
-        assert!(output.get("last_modified").is_none());
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-    }
-
-    #[tokio::test]
-    async fn canonical_resource_reader_returns_strict_text_and_rejects_changed_hash() {
-        let bytes = b"hello";
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(bytes);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 5, &hash)
-            .expect("resource URI");
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("text/plain; charset=us-ascii", bytes.len()),
-            ScriptedReply::partial("text/plain; charset=us-ascii", 0, 5, bytes),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let result = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect("resource read");
-        assert_eq!(result.contents.len(), 1);
-        assert!(result.meta.is_none());
-        match &result.contents[0] {
-            ResourceContents::TextResourceContents {
-                uri: returned_uri,
-                mime_type,
-                text,
-                meta,
-            } => {
-                assert_eq!(returned_uri, uri.as_str());
-                assert_eq!(mime_type.as_deref(), Some("text/plain; charset=us-ascii"));
-                assert_eq!(text, "hello");
-                assert!(meta.is_none());
-            }
-            ResourceContents::BlobResourceContents { .. } => panic!("unexpected blob"),
-            _ => panic!("unexpected future resource content"),
-        }
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-
-        let changed_hash = FileSha256::digest(b"other");
-        let changed_uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 5, &changed_hash)
-            .expect("changed URI");
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("text/plain", bytes.len()),
-            ScriptedReply::partial("text/plain", 0, 5, bytes),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let error = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(changed_uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("changed hash");
-        assert_eq!(error.code, ErrorCode::RESOURCE_NOT_FOUND);
-        assert_eq!(error.message, MISSING_RESOURCE);
-        assert!(error.data.is_none());
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-    }
-
-    #[tokio::test]
-    async fn resource_reader_maps_missing_changed_truncated_and_private_upstream_errors() {
-        let bytes = b"ab";
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(bytes);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 2, &hash)
-            .expect("resource URI");
-
-        for (name, reply, code, message) in [
-            (
-                "missing",
-                ScriptedReply::status("404 Not Found"),
-                ErrorCode::RESOURCE_NOT_FOUND,
-                MISSING_RESOURCE,
-            ),
-            (
-                "authentication",
-                ScriptedReply::status("401 Unauthorized"),
-                ErrorCode::INTERNAL_ERROR,
-                RESOURCE_UPSTREAM,
-            ),
-        ] {
-            let (base_url, endpoint) = scripted_http(vec![reply]).await;
-            let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-            let error = handlers
-                .read_resource(
-                    ReadResourceRequestParams::new(uri.as_str()),
-                    &CancellationToken::new(),
-                )
-                .await
-                .expect_err(name);
-            assert_eq!(error.code, code, "{name}");
-            assert_eq!(error.message, message, "{name}");
-            assert!(error.data.is_none(), "{name}");
-            let wire = serde_json::to_string(&error).expect("error JSON");
-            assert!(!wire.contains(FILE_ID), "{name}");
-            assert!(!wire.contains(hash.as_str()), "{name}");
-            assert_eq!(endpoint.await.expect("endpoint").len(), 1, "{name}");
-        }
-
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", 2),
-            ScriptedReply::partial_with_range("application/octet-stream", "bytes 0-1/2", b"a"),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let error = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("truncated response");
-        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(error.message, RESOURCE_UPSTREAM);
-        assert!(error.data.is_none());
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", 2),
-            ScriptedReply::partial_with_range("application/octet-stream", "bytes 0-1/3", bytes),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let error = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("changed total");
-        assert_eq!(error.code, ErrorCode::RESOURCE_NOT_FOUND);
-        assert_eq!(error.message, MISSING_RESOURCE);
-        assert!(error.data.is_none());
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-    }
-
-    #[tokio::test]
-    async fn resource_reader_rejects_cross_identity_and_refreshes_current_mime() {
-        let bytes = b"ab";
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(bytes);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 2, &hash)
-            .expect("resource URI");
-
-        for (name, object) in [
-            (
-                "cross-object",
-                ScriptedReply::object_identity(&format!("{FILE_ID}x"), SPACE_ID),
-            ),
-            (
-                "cross-space",
-                ScriptedReply::object_identity(FILE_ID, "different-space"),
-            ),
-        ] {
-            let (base_url, endpoint) = scripted_http(vec![object]).await;
-            let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-            let error = handlers
-                .read_resource(
-                    ReadResourceRequestParams::new(uri.as_str()),
-                    &CancellationToken::new(),
-                )
-                .await
-                .expect_err(name);
-            assert_eq!(error.code, ErrorCode::RESOURCE_NOT_FOUND, "{name}");
-            assert_eq!(error.message, MISSING_RESOURCE, "{name}");
-            assert!(error.data.is_none(), "{name}");
-            assert_eq!(endpoint.await.expect("endpoint").len(), 1, "{name}");
-        }
-
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("image/png", 2),
-            ScriptedReply::partial("image/png", 0, 2, bytes),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let result = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect("current MIME refresh");
-        match &result.contents[0] {
-            ResourceContents::BlobResourceContents { mime_type, .. } => {
-                assert_eq!(mime_type.as_deref(), Some("image/png"));
-            }
-            _ => panic!("non-text resource MIME must use a blob"),
-        }
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("image/png", 2),
-            ScriptedReply::partial("text/plain", 0, 2, bytes),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let error = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("MIME changed during read");
-        assert_eq!(error.code, ErrorCode::RESOURCE_NOT_FOUND);
-        assert_eq!(error.message, MISSING_RESOURCE);
-        assert!(error.data.is_none());
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-
-        let mut oversized_head = ScriptedReply::head("application/octet-stream", 2);
-        oversized_head.headers.push((
-            "Cache-Control",
-            "private,".repeat((MAX_HEADER_EVIDENCE_BYTES / 8 + 2) as usize),
-        ));
-        let (base_url, endpoint) =
-            scripted_http(vec![ScriptedReply::object(), oversized_head]).await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let error = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("bounded header evidence");
-        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(error.message, RESOURCE_UPSTREAM);
-        assert!(error.data.is_none());
-        assert_eq!(endpoint.await.expect("endpoint").len(), 2);
-    }
-
-    #[tokio::test]
-    async fn resource_body_overrun_is_bounded_evidence_not_changed_identity() {
-        let bytes = b"ab";
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(bytes);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 2, &hash)
-            .expect("resource URI");
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("application/octet-stream", 3),
-            ScriptedReply::full("application/octet-stream", b"abc"),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let error = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("body overrun");
-        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(error.message, RESOURCE_UPSTREAM);
-        assert!(error.data.is_none());
-        assert_eq!(endpoint.await.expect("endpoint").len(), 3);
-    }
-
-    #[tokio::test]
-    async fn resource_cancellation_and_timeout_are_bounded_private_errors() {
-        let bytes = b"ab";
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(bytes);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 2, &hash)
-            .expect("resource URI");
-
-        let (base_url, started, endpoint) =
-            scripted_http_then_hang(vec![ScriptedReply::object()]).await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let cancellation = CancellationToken::new();
-        let cancel = cancellation.clone();
-        let request = ReadResourceRequestParams::new(uri.as_str());
-        let (cancel_dispatch, cancel_output) =
-            crate::logging::test_support::capture("any_mcp::operation=trace");
-        let task = tokio::spawn(async move {
-            handlers
-                .read_resource(request, &cancellation)
-                .with_subscriber(cancel_dispatch)
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(1), started.notified())
-            .await
-            .expect("HEAD started");
-        cancel.cancel();
-        let error = task
-            .await
-            .expect("cancellation task")
-            .expect_err("cancelled read");
-        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(error.message, RESOURCE_UPSTREAM);
-        assert!(error.data.is_none());
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), endpoint)
-                .await
-                .expect("cancelled socket closes")
-                .expect("endpoint")
-                .len(),
-            2
-        );
-        let cancel_diagnostics = cancel_output.contents();
-        assert!(cancel_diagnostics.contains("outcome=\"cancelled\""));
-        for private in [
-            hash.as_str(),
-            uri.as_str(),
-            "scripted-secret-token",
-            FILE_ID,
-            SPACE_ID,
-        ] {
-            assert!(
-                !cancel_diagnostics.contains(private),
-                "cancel leaked {private}"
-            );
-        }
-
-        let (base_url, started, endpoint) =
-            scripted_http_then_hang(vec![ScriptedReply::object()]).await;
-        let handlers =
-            FileContentHandlers::new(runtime_with_timeout(base_url, Duration::from_millis(30)))
-                .expect("handlers");
-        let started_wait = started.notified();
-        let timeout_cancellation = CancellationToken::new();
-        let (timeout_dispatch, timeout_output) =
-            crate::logging::test_support::capture("any_mcp::operation=trace");
-        let result = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &timeout_cancellation,
-            )
-            .with_subscriber(timeout_dispatch);
-        let ((), error) = tokio::join!(
-            async {
-                tokio::time::timeout(Duration::from_secs(1), started_wait)
-                    .await
-                    .expect("HEAD started");
+        let runtime = RuntimeContext::from_parts(
+            catalog_client(),
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
             },
-            async { result.await.expect_err("timed out read") }
         );
-        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(error.message, RESOURCE_UPSTREAM);
-        assert!(error.data.is_none());
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), endpoint)
-                .await
-                .expect("timed-out socket closes")
-                .expect("endpoint")
-                .len(),
-            2
-        );
-        let timeout_diagnostics = timeout_output.contents();
-        assert!(timeout_diagnostics.contains("outcome=\"timeout\""));
-        for private in [
-            hash.as_str(),
-            uri.as_str(),
-            "scripted-secret-token",
-            FILE_ID,
-            SPACE_ID,
-        ] {
-            assert!(
-                !timeout_diagnostics.contains(private),
-                "timeout leaked {private}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn file_operation_diagnostics_redact_ids_urls_headers_and_bodies() {
-        let secret = "SECRET_FILE_RESPONSE_BODY_AND_CREDENTIAL";
-        let body = json!({"message": secret}).to_string().into_bytes();
-        let (base_url, endpoint) = scripted_http(vec![ScriptedReply {
-            status: "400 Bad Request",
-            headers: vec![
-                ("Content-Type", "application/json".to_owned()),
-                ("Content-Length", body.len().to_string()),
-                ("Cache-Control", format!("private,{secret}")),
-            ],
-            body,
-        }])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let (dispatch, output) = crate::logging::test_support::capture("any_mcp::operation=trace");
-        let result = handlers
-            .file_metadata(&metadata_input(), &CancellationToken::new())
-            .with_subscriber(dispatch)
+        let clone = runtime.clone();
+        runtime.begin_shutdown();
+        let result = clone
+            .execute(
+                OperationContext::new("file_shutdown_test"),
+                &CancellationToken::new(),
+                std::future::pending::<Result<(), AnytypeError>>(),
+            )
             .await;
-        assert_eq!(result.is_error, Some(true));
-        let diagnostics = output.contents();
-        assert!(diagnostics.contains("operation=\"file_metadata\""));
-        assert!(diagnostics.contains("upstream_http_status=400"));
-        for private in [secret, FILE_ID, SPACE_ID, "cache-control", "127.0.0.1"] {
-            assert!(!diagnostics.contains(private), "leaked {private}");
-        }
-        assert_eq!(endpoint.await.expect("endpoint").len(), 1);
-    }
-
-    #[tokio::test]
-    async fn resource_header_failure_diagnostics_redact_every_seeded_field() {
-        let bytes = b"ab";
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(bytes);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 2, &hash)
-            .expect("resource URI");
-        let secret_mime = "application/x-secret-mime-seed";
-        let secret_etag = "\"secret-etag-seed\"";
-        let secret_token_cursor = "SECRET_TOKEN_CURSOR_SEED";
-        let mut head = ScriptedReply::head(secret_mime, 2);
-        for (name, value) in &mut head.headers {
-            if name.eq_ignore_ascii_case("etag") {
-                *value = secret_etag.to_owned();
-            }
-        }
-        head.headers.push((
-            "Cache-Control",
-            secret_token_cursor.repeat((MAX_HEADER_EVIDENCE_BYTES as usize / 8) + 1),
+        assert!(matches!(
+            result,
+            Err(crate::runtime::RuntimeError::ShuttingDown)
         ));
-        let (base_url, endpoint) = scripted_http(vec![ScriptedReply::object(), head]).await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let (dispatch, output) = crate::logging::test_support::capture("any_mcp::operation=trace");
-        let error = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
-            )
-            .with_subscriber(dispatch)
-            .await
-            .expect_err("bounded header evidence");
-        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(error.message, RESOURCE_UPSTREAM);
-        assert!(error.data.is_none());
-        let diagnostics = output.contents();
-        assert!(diagnostics.contains("operation=\"file_resource_read\""));
-        for private in [
-            secret_mime,
-            secret_etag,
-            DATE,
-            hash.as_str(),
-            uri.as_str(),
-            secret_token_cursor,
-            "scripted-secret-token",
-            FILE_ID,
-            SPACE_ID,
-        ] {
-            assert!(!diagnostics.contains(private), "leaked {private}");
-        }
-        let error_wire = serde_json::to_string(&error).expect("error JSON");
-        for private in [
-            secret_mime,
-            secret_etag,
-            DATE,
-            hash.as_str(),
-            secret_token_cursor,
-        ] {
-            assert!(!error_wire.contains(private), "error leaked {private}");
-        }
-        assert_eq!(endpoint.await.expect("endpoint").len(), 2);
     }
 
     #[tokio::test]
-    async fn malformed_resource_uri_fails_before_io_with_exact_stable_error() {
-        let server = AnyMcpServer::new_with_optional_registries(
-            selected_runtime("http://127.0.0.1:1".to_owned()),
-            &FILE_CONTENT_LINKED,
-        )
-        .expect("files test server");
-        let error = server
-            .read_resource_wire(
-                ReadResourceRequestParams::new("ANYTYPE-FILE://bytes/not-canonical"),
-                &CancellationToken::new(),
+    async fn upload_cohorts_are_scoped_to_runtime_identity() {
+        let client = catalog_client();
+        let make_runtime = |client| {
+            RuntimeContext::from_parts(
+                client,
+                1,
+                Duration::from_secs(1),
+                StartupStatus {
+                    http_available: true,
+                    grpc_available: false,
+                },
             )
-            .await
-            .expect_err("invalid URI");
-        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
-        assert_eq!(error.message, INVALID_RESOURCE_URI);
-        assert!(error.data.is_none());
+        };
+        let first = make_runtime(client.clone());
+        let first_clone = first.clone();
+        let second = make_runtime(client);
+        assert!(Arc::ptr_eq(
+            &upload_cohort(&first),
+            &upload_cohort(&first_clone)
+        ));
+        assert!(!Arc::ptr_eq(
+            &upload_cohort(&first),
+            &upload_cohort(&second)
+        ));
+        let key = IdempotencyKey::new("same-principal-key").expect("key");
+        assert!(matches!(
+            upload_cohort(&first)
+                .begin(0, test_deadline(), key.clone(), [9; 32])
+                .await,
+            BeginUpload::LeadNew(_)
+        ));
+        assert!(matches!(
+            upload_cohort(&second)
+                .begin(0, test_deadline(), key, [9; 32])
+                .await,
+            BeginUpload::LeadNew(_)
+        ));
     }
 
     #[tokio::test]
-    async fn empty_resource_is_canonical_and_reads_exactly_zero_bytes() {
-        let space = SpaceId::new(SPACE_ID).expect("space");
-        let file = EntityId::new(FILE_ID).expect("file");
-        let hash = FileSha256::digest(&[]);
-        let uri = FileResourceUri::new(&space, &file, JsonSafeInteger(0), 0, &hash)
-            .expect("empty resource URI");
-        let (base_url, endpoint) = scripted_http(vec![
-            ScriptedReply::object(),
-            ScriptedReply::head("text/plain; charset=utf-8", 0),
-            ScriptedReply::full("text/plain; charset=utf-8", &[]),
-        ])
-        .await;
-        let handlers = FileContentHandlers::new(runtime(base_url)).expect("handlers");
-        let result = handlers
-            .read_resource(
-                ReadResourceRequestParams::new(uri.as_str()),
-                &CancellationToken::new(),
+    async fn upload_cohort_invalidates_complete_results_on_credential_generation_change() {
+        let client = catalog_client();
+        let runtime = RuntimeContext::from_parts(
+            client.clone(),
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+        );
+        let handlers = FileContentHandlers::new(runtime).expect("handlers");
+        let key = IdempotencyKey::new("principal-safe").expect("key");
+        let stable_input: FileUploadInput = serde_json::from_value(json!({
+            "space":SPACE_ID,
+            "name":"principal-safe.bin",
+            "content_base64":BASE64_STANDARD.encode(b"abc"),
+            "idempotency_key":"principal-safe"
+        }))
+        .expect("stable-ID input");
+        let fingerprint =
+            NormalizedUpload::new(SpaceId::new(SPACE_ID).expect("stable space"), stable_input)
+                .fingerprint();
+        let first_generation = client.http_credential_generation();
+        let attempt = match handlers
+            .uploads
+            .begin(first_generation, test_deadline(), key.clone(), fingerprint)
+            .await
+        {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("first generation must lead"),
+        };
+        let output = cohort_output(false);
+        handlers
+            .uploads
+            .finish(
+                &key,
+                &attempt,
+                UploadExecution {
+                    result: cohort_success(&output),
+                    disposition: UploadDisposition::Verified(output),
+                },
+            )
+            .await;
+        assert!(matches!(
+            handlers
+                .uploads
+                .begin(first_generation, test_deadline(), key.clone(), fingerprint,)
+                .await,
+            BeginUpload::Cached(_)
+        ));
+
+        let barrier = Arc::new(Barrier::new(2));
+        let setter = {
+            let client = client.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                client.set_api_key(HttpCredentials::new("replacement-token"));
+            })
+        };
+        barrier.wait();
+        setter.join().expect("concurrent credential setter");
+        let replacement_generation = client.http_credential_generation();
+        assert!(replacement_generation > first_generation);
+        let replacement_attempt = match handlers
+            .uploads
+            .begin(
+                replacement_generation,
+                test_deadline(),
+                key.clone(),
+                fingerprint,
             )
             .await
-            .expect("empty resource");
-        match &result.contents[0] {
-            ResourceContents::TextResourceContents {
-                uri: returned_uri,
-                text,
-                ..
-            } => {
-                assert_eq!(returned_uri, uri.as_str());
-                assert!(text.is_empty());
+        {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("replacement generation must not replay cached success"),
+        };
+        let output = cohort_output(false);
+        handlers
+            .uploads
+            .finish(
+                &key,
+                &replacement_attempt,
+                UploadExecution {
+                    result: cohort_success(&output),
+                    disposition: UploadDisposition::Verified(output),
+                },
+            )
+            .await;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let clearer = {
+            let client = client.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                client.clear_api_key();
+            })
+        };
+        barrier.wait();
+        clearer.join().expect("concurrent credential clearer");
+        let cleared_generation = client.http_credential_generation();
+        assert!(cleared_generation > replacement_generation);
+        assert!(matches!(
+            handlers
+                .uploads
+                .begin(cleared_generation, test_deadline(), key, fingerprint,)
+                .await,
+            BeginUpload::LeadNew(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn upload_deadline_is_shared_and_never_extended_by_waiters() {
+        let cohort = UploadCohort::new(1);
+        let key = IdempotencyKey::new("shared-deadline").expect("key");
+        let leader_deadline = Instant::now()
+            .checked_add(Duration::from_millis(20))
+            .unwrap_or_else(Instant::now);
+        let leader = match cohort
+            .begin(0, leader_deadline, key.clone(), [12; 32])
+            .await
+        {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("leader expected"),
+        };
+        let later_deadline = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .unwrap_or_else(Instant::now);
+        let waiter = match cohort.begin(0, later_deadline, key, [12; 32]).await {
+            BeginUpload::Wait(attempt) => attempt,
+            _ => panic!("waiter expected"),
+        };
+        assert!(Arc::ptr_eq(&leader, &waiter));
+        assert_eq!(waiter.deadline, leader_deadline);
+        let result = wait_for_upload(waiter, &CancellationToken::new(), later_deadline).await;
+        assert_eq!(
+            result.structured_content.expect("timeout")["code"],
+            "upstream"
+        );
+
+        let runtime = RuntimeContext::from_parts(
+            catalog_client(),
+            1,
+            Duration::from_secs(30),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+        );
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or_else(Instant::now);
+        let result = runtime
+            .execute_classified_until(
+                expired,
+                OperationContext::new("file_expired_deadline"),
+                &CancellationToken::new(),
+                std::future::pending::<Result<(), FileOperationError>>(),
+                FileOperationError::diagnostic,
+            )
+            .await;
+        assert!(matches!(result, Err(ControlledOperationError::TimedOut)));
+    }
+
+    #[tokio::test]
+    async fn expired_cached_admission_never_returns_success() {
+        let cohort = UploadCohort::new(1);
+        let key = IdempotencyKey::new("expired-cached").expect("key");
+        let fingerprint = [13; 32];
+        let attempt = match cohort_begin(&cohort, key.clone(), fingerprint).await {
+            BeginUpload::LeadNew(attempt) => attempt,
+            _ => panic!("leader expected"),
+        };
+        let output = cohort_output(false);
+        cohort
+            .finish(
+                &key,
+                &attempt,
+                UploadExecution {
+                    result: cohort_success(&output),
+                    disposition: UploadDisposition::Verified(output),
+                },
+            )
+            .await;
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or_else(Instant::now);
+        assert!(matches!(
+            admit_upload(&cohort, 0, expired, key, fingerprint).await,
+            BeginUpload::Expired
+        ));
+    }
+
+    #[tokio::test]
+    async fn cohort_lock_contention_expires_without_stranding_running_admission() {
+        let cohort = Arc::new(UploadCohort::new(1));
+        let guard = cohort.state.lock().await;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(20))
+            .unwrap_or_else(Instant::now);
+        let blocked = {
+            let cohort = cohort.clone();
+            tokio::spawn(async move {
+                admit_upload(
+                    &cohort,
+                    0,
+                    deadline,
+                    IdempotencyKey::new("contended").expect("key"),
+                    [14; 32],
+                )
+                .await
+            })
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), blocked)
+            .await
+            .expect("bounded admission task")
+            .expect("admission join");
+        assert!(matches!(result, BeginUpload::Expired));
+        drop(guard);
+        assert!(cohort.state.lock().await.entries.is_empty());
+
+        let key = IdempotencyKey::new("post-admission-expiry").expect("key");
+        let admission = cohort_begin(&cohort, key.clone(), [15; 32]).await;
+        let attempt = match &admission {
+            BeginUpload::LeadNew(attempt) => attempt.clone(),
+            _ => panic!("leader expected"),
+        };
+        cohort.reject_unstarted(&key, &admission).await;
+        assert!(cohort.state.lock().await.entries.is_empty());
+        let result = wait_for_upload(attempt, &CancellationToken::new(), test_deadline()).await;
+        assert_eq!(
+            result.structured_content.expect("rejection")["code"],
+            "upstream"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(disposable_anytype_files)]
+    #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+    fn production_direct_and_stdio_upload_metadata_ranges_hash_and_cleanup() {
+        run_large_future(|| async {
+            let outcome = Box::pin(with_disposable_space_context(
+            "any-mcp-files-terminal",
+            |ctx| {
+                Box::pin(async move {
+                    ctx.client.ping_http().await?;
+                    ctx.client.ping_grpc().await?;
+                    let mut state = 0x0A11_F17E_u32;
+                    let mut bytes = Vec::with_capacity(8_192);
+                    for _ in 0..8_192 {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        bytes.push((state & 0xff) as u8);
+                    }
+                    let expected_hash = FileSha256::digest(&bytes);
+
+                    let space_name = ctx
+                        .client
+                        .space(&ctx.space_id)
+                        .get_direct()
+                        .await?
+                        .name;
+
+                    let direct_server = production_files_server(ctx.client.clone(), false);
+                    let direct_name = "mcp-files-direct.bin";
+                    let direct_key = format!("mcp-files-direct-{}", unique_suffix());
+                    let direct_arguments = json!({
+                        "space": ctx.space_id,
+                        "name": direct_name,
+                        "content_base64": BASE64_STANDARD.encode(&bytes),
+                        "media_type": "application/octet-stream",
+                        "idempotency_key": direct_key
+                    });
+                    let before_upload = ctx.client.http_metrics();
+                    let uploaded =
+                        direct_tool(&direct_server, "file_upload", direct_arguments.clone()).await;
+                    assert_eq!(uploaded.is_error, Some(false), "{uploaded:?}");
+                    let uploaded_value = uploaded
+                        .structured_content
+                        .as_ref()
+                        .expect("direct upload output");
+                    let direct_id = uploaded_value["file_id"]
+                        .as_str()
+                        .expect("direct candidate id")
+                        .to_owned();
+                    ctx.register_object(&direct_id);
+                    assert_eq!(uploaded_value["space_id"], ctx.space_id);
+                    assert_eq!(uploaded_value["content_sha256"], expected_hash.as_str());
+                    assert_eq!(uploaded_value["reused"], false);
+
+                    let after_upload = ctx.client.http_metrics();
+                    assert_eq!(after_upload.logical_operations - before_upload.logical_operations, 4);
+                    assert_eq!(after_upload.total_requests - before_upload.total_requests, 4);
+                    assert_eq!(after_upload.physical_attempts - before_upload.physical_attempts, 4);
+                    assert_eq!(after_upload.multipart_posts - before_upload.multipart_posts, 1);
+                    assert_eq!(after_upload.successful_responses - before_upload.successful_responses, 4);
+                    assert_eq!(after_upload.errors - before_upload.errors, 0);
+                    assert_eq!(after_upload.retries - before_upload.retries, 0);
+                    assert_eq!(after_upload.rate_limit_errors - before_upload.rate_limit_errors, 0);
+                    assert_eq!(after_upload.bytes_sent - before_upload.bytes_sent, 8_458);
+
+                    let metrics = after_upload;
+                    let replay = direct_tool(&direct_server, "file_upload", direct_arguments).await;
+                    assert_eq!(replay.is_error, Some(false));
+                    assert_eq!(
+                        replay.structured_content.as_ref().expect("direct replay")["reused"],
+                        true
+                    );
+                    assert_eq!(ctx.client.http_metrics(), metrics);
+
+                    let metadata = direct_tool(
+                        &direct_server,
+                        "file_metadata",
+                        json!({"space":space_name,"file_id":direct_id}),
+                    )
+                    .await;
+                    assert_eq!(metadata.is_error, Some(false), "{metadata:?}");
+                    assert_eq!(
+                        metadata
+                            .structured_content
+                            .as_ref()
+                            .expect("direct metadata")["size_bytes"],
+                        bytes.len()
+                    );
+
+                    let split_at = bytes.len() / 2;
+                    let first = direct_tool(
+                        &direct_server,
+                        "file_read",
+                        json!({
+                            "space":ctx.space_id,
+                            "file_id":direct_id,
+                            "offset":0,
+                            "length":split_at
+                        }),
+                    )
+                    .await;
+                    let second = direct_tool(
+                        &direct_server,
+                        "file_read",
+                        json!({
+                            "space":ctx.space_id,
+                            "file_id":direct_id,
+                            "offset":split_at,
+                            "length":bytes.len()-split_at
+                        }),
+                    )
+                    .await;
+                    assert_eq!(first.is_error, Some(false), "{first:?}");
+                    assert_eq!(second.is_error, Some(false), "{second:?}");
+                    assert_eq!(
+                        first.structured_content.as_ref().expect("first range")["content_sha256"],
+                        FileSha256::digest(&bytes[..split_at]).as_str()
+                    );
+                    assert_eq!(
+                        second.structured_content.as_ref().expect("second range")["content_sha256"],
+                        FileSha256::digest(&bytes[split_at..]).as_str()
+                    );
+                    let first_uri = first
+                        .structured_content
+                        .as_ref()
+                        .expect("first structured")["resource_uri"]
+                        .as_str()
+                        .expect("first resource URI");
+                    let direct_resource = direct_server
+                        .read_resource_wire(
+                            ReadResourceRequestParams::new(first_uri),
+                            &CancellationToken::new(),
+                        )
+                        .await
+                        .expect("direct resources/read");
+                    assert_blob_resource(&direct_resource, first_uri, &bytes[..split_at]);
+
+                    let independent = ctx
+                        .client
+                        .files()
+                        .download_request(&ctx.space_id, &direct_id)
+                        .response_limit_bytes(MAX_FILE_CONTENT_BYTES + 1)
+                        .error_limit_bytes(MAX_ERROR_BODY_BYTES)
+                        .header_evidence_limit_bytes(MAX_HEADER_EVIDENCE_BYTES)
+                        .max_attempts(MAX_SAFE_ATTEMPTS)
+                        .download()
+                        .await?;
+                    assert_eq!(independent.status.as_u16(), 200);
+                    assert_eq!(FileSha256::digest(&independent.bytes), expected_hash);
+
+                    let stdio_name = format!("mcp-files-stdio-{}.bin", unique_suffix());
+                    let stdio_upload = production_stdio_tool(
+                        production_files_server(ctx.client.clone(), false),
+                        "file_upload",
+                        json!({
+                            "space":ctx.space_id,
+                            "name":stdio_name,
+                            "content_base64":BASE64_STANDARD.encode(&bytes),
+                            "media_type":"application/octet-stream",
+                            "idempotency_key":format!("mcp-files-stdio-{}",unique_suffix())
+                        }),
+                    )
+                    .await;
+                    assert_eq!(stdio_upload["result"]["isError"], false, "{stdio_upload}");
+                    let stdio_id = stdio_upload["result"]["structuredContent"]["file_id"]
+                        .as_str()
+                        .expect("stdio candidate id")
+                        .to_owned();
+                    ctx.register_object(&stdio_id);
+                    let stdio_metadata = production_stdio_tool(
+                        production_files_server(ctx.client.clone(), false),
+                        "file_metadata",
+                        json!({"space":ctx.space_id,"file_id":stdio_id}),
+                    )
+                    .await;
+                    assert_eq!(stdio_metadata["result"]["isError"], false);
+                    for (offset, length) in [(0, split_at), (split_at, bytes.len() - split_at)] {
+                        let read = production_stdio_tool(
+                            production_files_server(ctx.client.clone(), false),
+                            "file_read",
+                            json!({
+                                "space":ctx.space_id,
+                                "file_id":stdio_id,
+                                "offset":offset,
+                                "length":length
+                            }),
+                        )
+                        .await;
+                        assert_eq!(read["result"]["isError"], false, "{read}");
+                        let uri = read["result"]["structuredContent"]["resource_uri"]
+                            .as_str()
+                            .expect("stdio resource URI");
+                        let stdio_resource = production_stdio_request(
+                            production_files_server(ctx.client.clone(), false),
+                            "resources/read",
+                            json!({"uri":uri}),
+                        )
+                        .await;
+                        assert!(stdio_resource.get("error").is_none(), "{stdio_resource}");
+                        assert_stdio_blob_resource(
+                            &stdio_resource["result"],
+                            uri,
+                            &bytes[offset..offset + length],
+                        );
+                        let parity = production_files_server(ctx.client.clone(), false)
+                            .read_resource_wire(
+                                ReadResourceRequestParams::new(uri),
+                                &CancellationToken::new(),
+                            )
+                            .await
+                            .expect("direct parity resources/read");
+                        assert_eq!(
+                            serde_json::to_value(parity.contents).expect("direct parity JSON"),
+                            stdio_resource["result"]["contents"]
+                        );
+                    }
+                    Ok(())
+                })
+            },
+        ))
+        .await
+        .expect("disposable files harness");
+            match outcome {
+                DisposableRun::Completed(()) => {}
+                DisposableRun::Skipped(reason) => {
+                    eprintln!("files live gate skipped before callback: {reason:?}");
+                }
             }
-            _ => panic!("empty UTF-8 text must remain native text"),
-        }
-        let requests = endpoint.await.expect("endpoint");
-        assert_eq!(requests.len(), 3);
-        assert!(!requests[2].contains("range:"));
+        });
     }
 
     fn assert_payload_once(result: &CallToolResult, payload: &str) {
@@ -3640,5 +4372,332 @@ mod tests {
             Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
             scalar => scalar,
         }
+    }
+
+    fn canonical_sha256(value: &Value) -> String {
+        let encoded = serde_json::to_string(&canonical_json(value.clone()))
+            .expect("canonical production surface");
+        Sha256::digest(encoded.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    async fn files_production_surface_snapshot() -> Value {
+        let client = catalog_client();
+        let read_write = production_files_server(client.clone(), false);
+        let read_only = production_files_server(client.clone(), true);
+        let read_write_catalog = serde_json::to_value(
+            read_write
+                .list_tools_wire(None)
+                .expect("read-write catalog"),
+        )
+        .expect("read-write catalog JSON");
+        let read_only_catalog =
+            serde_json::to_value(read_only.list_tools_wire(None).expect("read-only catalog"))
+                .expect("read-only catalog JSON");
+        let read_write_templates = serde_json::to_value(
+            read_write
+                .list_resource_templates_wire(None)
+                .expect("read-write templates"),
+        )
+        .expect("read-write templates JSON");
+        let read_only_templates = serde_json::to_value(
+            read_only
+                .list_resource_templates_wire(None)
+                .expect("read-only templates"),
+        )
+        .expect("read-only templates JSON");
+        let read_write_status = serde_json::to_value(
+            direct_tool(&read_write, "optional_toolset_status", json!({})).await,
+        )
+        .expect("read-write status JSON");
+        let read_only_status = serde_json::to_value(
+            direct_tool(&read_only, "optional_toolset_status", json!({})).await,
+        )
+        .expect("read-only status JSON");
+        let tool_names = |catalog: &Value| {
+            catalog["tools"]
+                .as_array()
+                .expect("catalog tools")
+                .iter()
+                .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
+                .collect::<Vec<_>>()
+        };
+        let stdio_read_write_catalog = production_stdio_request(
+            production_files_server(client.clone(), false),
+            "tools/list",
+            json!({}),
+        )
+        .await;
+        let stdio_read_only_catalog = production_stdio_request(
+            production_files_server(client.clone(), true),
+            "tools/list",
+            json!({}),
+        )
+        .await;
+        let stdio_read_write_templates = production_stdio_request(
+            production_files_server(client.clone(), false),
+            "resources/templates/list",
+            json!({}),
+        )
+        .await;
+        let stdio_read_only_templates = production_stdio_request(
+            production_files_server(client.clone(), true),
+            "resources/templates/list",
+            json!({}),
+        )
+        .await;
+        let stdio_read_write_status = production_stdio_tool(
+            production_files_server(client.clone(), false),
+            "optional_toolset_status",
+            json!({}),
+        )
+        .await;
+        let stdio_read_only_status = production_stdio_tool(
+            production_files_server(client, true),
+            "optional_toolset_status",
+            json!({}),
+        )
+        .await;
+        json!({
+            "read_write_catalog_sha256":canonical_sha256(&read_write_catalog),
+            "read_write_tool_names":tool_names(&read_write_catalog),
+            "read_only_catalog_sha256":canonical_sha256(&read_only_catalog),
+            "read_only_tool_names":tool_names(&read_only_catalog),
+            "read_write_resource_templates":read_write_templates,
+            "read_only_resource_templates":read_only_templates,
+            "read_write_status_call":read_write_status,
+            "read_only_status_call":read_only_status,
+            "stdio_read_write_catalog_sha256":canonical_sha256(&stdio_read_write_catalog["result"]),
+            "stdio_read_write_tool_names":tool_names(&stdio_read_write_catalog["result"]),
+            "stdio_read_write_catalog_control":{
+                "resultType":stdio_read_write_catalog["result"]["resultType"],
+                "ttlMs":stdio_read_write_catalog["result"]["ttlMs"],
+                "cacheScope":stdio_read_write_catalog["result"]["cacheScope"]
+            },
+            "stdio_read_only_catalog_sha256":canonical_sha256(&stdio_read_only_catalog["result"]),
+            "stdio_read_only_tool_names":tool_names(&stdio_read_only_catalog["result"]),
+            "stdio_read_only_catalog_control":{
+                "resultType":stdio_read_only_catalog["result"]["resultType"],
+                "ttlMs":stdio_read_only_catalog["result"]["ttlMs"],
+                "cacheScope":stdio_read_only_catalog["result"]["cacheScope"]
+            },
+            "stdio_read_write_resource_templates":stdio_read_write_templates["result"],
+            "stdio_read_only_resource_templates":stdio_read_only_templates["result"],
+            "stdio_read_write_status_call":stdio_read_write_status["result"],
+            "stdio_read_only_status_call":stdio_read_only_status["result"]
+        })
+    }
+
+    fn files_token_budget_snapshot() -> Value {
+        let tokenizer = o200k_base().expect("files tokenizer");
+        let token_count = |value: Value| {
+            tokenizer
+                .encode_ordinary(
+                    &serde_json::to_string(&canonical_json(value)).expect("canonical files JSON"),
+                )
+                .len()
+        };
+        let client = catalog_client();
+        let base = production_base_server(client.clone());
+        let read_write = production_files_server(client.clone(), false);
+        let read_only = production_files_server(client, true);
+        let base_value = serde_json::to_value(base.list_tools_wire(None).expect("base tools/list"))
+            .expect("base catalog JSON");
+        let base_json = serde_json::to_string(&canonical_json(base_value.clone()))
+            .expect("canonical base catalog");
+        let base_hash = Sha256::digest(base_json.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let read_write_value = serde_json::to_value(
+            read_write
+                .list_tools_wire(None)
+                .expect("read-write tools/list"),
+        )
+        .expect("read-write catalog JSON");
+        let read_only_value = serde_json::to_value(
+            read_only
+                .list_tools_wire(None)
+                .expect("read-only tools/list"),
+        )
+        .expect("read-only catalog JSON");
+        let status = read_write
+            .tools()
+            .iter()
+            .find(|tool| tool.name == "optional_toolset_status")
+            .expect("common optional status tool")
+            .clone();
+        let status_value = serde_json::to_value(ListToolsResult::with_all_items(vec![status]))
+            .expect("status tools/list JSON");
+        let per_tool = read_write
+            .tools()
+            .iter()
+            .filter(|tool| tool.name.starts_with("file_"))
+            .map(|tool| {
+                (
+                    tool.name.to_string(),
+                    token_count(serde_json::to_value(tool).expect("file tool JSON")),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let mut state = 0x0A11_F17E_u32;
+        let random = (0..MAX_FILE_CONTENT_BYTES)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let maximum = maximum_observation(&random);
+        let maximum_tool = encode_file_read(maximum.clone(), &ProtocolVersion::V_2025_11_25)
+            .expect("maximum files tool result");
+        let maximum_resource =
+            encode_resource_read(maximum).expect("maximum files resource result");
+        let maximum_scalar = '\u{10ffff}';
+        assert_eq!(maximum_scalar.len_utf8(), 4);
+        let maximum_request = json!({
+            "space":maximum_scalar.to_string().repeat(MAX_SPACE_REFERENCE_CHARS),
+            "name":maximum_scalar.to_string().repeat(MAX_FILE_NAME_CHARS),
+            "content_base64":BASE64_STANDARD.encode(&random),
+            "media_type":format!("application/{}","x".repeat(243)),
+            "idempotency_key":maximum_scalar.to_string().repeat(256)
+        });
+        let maximum_upload = FileUploadOutput {
+            file_id: EntityId::new("f".repeat(256)).expect("maximum file id"),
+            space_id: SpaceId::new("s".repeat(256)).expect("maximum space id"),
+            requested_name: FileName::new(maximum_scalar.to_string().repeat(MAX_FILE_NAME_CHARS))
+                .expect("maximum file name"),
+            media_type: FileMediaType::from_evidence(Some(&format!(
+                "application/{}",
+                "x".repeat(243)
+            )))
+            .expect("maximum media type"),
+            size_bytes: JsonSafeInteger(MAX_FILE_CONTENT_BYTES),
+            content_sha256: FileSha256::digest(&random),
+            reused: false,
+        };
+        let upload_success = file_upload_tool()
+            .expect("upload contract")
+            .success(&maximum_upload)
+            .expect("maximum upload success");
+        let maximum_metadata = FileMetadataOutput {
+            file_id: EntityId::new("f".repeat(256)).expect("maximum metadata file id"),
+            space_id: SpaceId::new("s".repeat(256)).expect("maximum metadata space id"),
+            media_type: maximum_upload.media_type.clone(),
+            size_bytes: JsonSafeInteger(JSON_SAFE_INTEGER_MAX),
+            accepts_byte_ranges: true,
+            strong_etag: Some(
+                StrongEntityTag::new(format!("\"{}\"", "e".repeat(254)))
+                    .expect("maximum metadata etag"),
+            ),
+            last_modified: Some(FileHttpDate::from_evidence(DATE).expect("metadata date")),
+        };
+        let metadata_success = file_metadata_tool()
+            .expect("metadata contract")
+            .success(&maximum_metadata)
+            .expect("maximum metadata success");
+        json!({
+            "tokenizer":"tiktoken o200k_base (tiktoken-rs 0.12.0)",
+            "base_catalog_sha256":base_hash,
+            "base_catalog_tokens":token_count(base_value),
+            "selected":["files"],
+            "common_status_ceiling_tokens":500,
+            "common_status_tokens":token_count(status_value),
+            "files_catalog_ceiling_tokens":3400,
+            "composed_total_tokens":token_count(read_write_value),
+            "read_only_composed_total_tokens":token_count(read_only_value),
+            "per_tool_ceiling_tokens":1200,
+            "per_tool_tokens":per_tool,
+            "maximum_upload_request_ceiling_tokens":65000,
+            "maximum_upload_request_tokens":token_count(maximum_request),
+            "maximum_file_read_ceiling_tokens":70000,
+            "maximum_file_read_tokens":token_count(serde_json::to_value(maximum_tool).expect("tool result JSON")),
+            "maximum_resource_read_ceiling_tokens":70000,
+            "maximum_resource_read_tokens":token_count(serde_json::to_value(maximum_resource).expect("resource result JSON")),
+            "metadata_upload_success_ceiling_tokens":8000,
+            "maximum_metadata_success_tokens":token_count(serde_json::to_value(metadata_success).expect("metadata success JSON")),
+            "maximum_upload_success_tokens":token_count(serde_json::to_value(upload_success).expect("upload success JSON")),
+            "maximum_unicode_scalar":"U+10FFFF (4-byte UTF-8)",
+            "live_new_upload_multipart_body_bytes":8458,
+            "deterministic_random_seed":"0x0A11F17E"
+        })
+    }
+
+    fn files_result_snapshot() -> Value {
+        let bytes = b"Hello";
+        let read = encode_file_read(
+            observation("text/plain; charset=utf-8", bytes),
+            &ProtocolVersion::V_2025_11_25,
+        )
+        .expect("representative read");
+        let upload = FileUploadOutput {
+            file_id: EntityId::new(FILE_ID).expect("file id"),
+            space_id: SpaceId::new(SPACE_ID).expect("space id"),
+            requested_name: FileName::new("report.txt").expect("file name"),
+            media_type: FileMediaType::from_evidence(Some("text/plain; charset=utf-8"))
+                .expect("media type"),
+            size_bytes: JsonSafeInteger(bytes.len() as u64),
+            content_sha256: FileSha256::digest(bytes),
+            reused: false,
+        };
+        json!({
+            "file_upload":upload,
+            "file_metadata":{
+                "file_id":FILE_ID,
+                "space_id":SPACE_ID,
+                "media_type":"text/plain; charset=utf-8",
+                "size_bytes":5,
+                "accepts_byte_ranges":true,
+                "strong_etag":"\"file-v1\"",
+                "last_modified":DATE
+            },
+            "file_read_structured":read.structured_content.expect("read structured content")
+        })
+    }
+
+    #[test]
+    fn files_token_and_result_snapshots_are_exact() {
+        let expected_tokens: Value =
+            serde_json::from_str(FILES_TOKEN_BUDGET_SNAPSHOT).expect("token snapshot JSON");
+        let expected_results: Value =
+            serde_json::from_str(FILES_RESULT_SNAPSHOT).expect("result snapshot JSON");
+        assert_eq!(files_token_budget_snapshot(), expected_tokens);
+        assert_eq!(files_result_snapshot(), expected_results);
+    }
+
+    #[test]
+    fn production_catalog_templates_status_and_stdio_are_exact() {
+        run_large_future(|| async {
+            let expected: Value = serde_json::from_str(FILES_PRODUCTION_SURFACE_SNAPSHOT)
+                .expect("production surface snapshot JSON");
+            assert_eq!(files_production_surface_snapshot().await, expected);
+        });
+    }
+
+    #[test]
+    #[ignore = "manual files snapshot reporter; review values before committing"]
+    fn report_files_snapshots() {
+        println!(
+            "FILES_TOKEN_SNAPSHOT={}\nFILES_RESULT_SNAPSHOT={}",
+            serde_json::to_string_pretty(&files_token_budget_snapshot())
+                .expect("pretty token snapshot"),
+            serde_json::to_string_pretty(&files_result_snapshot()).expect("pretty result snapshot")
+        );
+    }
+
+    #[test]
+    #[ignore = "manual production surface snapshot reporter; review values before committing"]
+    fn report_files_production_surface_snapshot() {
+        run_large_future(|| async {
+            println!(
+                "FILES_PRODUCTION_SURFACE_SNAPSHOT={}",
+                serde_json::to_string_pretty(&files_production_surface_snapshot().await)
+                    .expect("pretty production surface snapshot")
+            );
+        });
     }
 }

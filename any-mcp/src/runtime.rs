@@ -46,6 +46,7 @@ pub struct StartupStatus {
 /// upstream await.
 #[derive(Clone)]
 pub struct RuntimeContext {
+    identity: Arc<()>,
     client: Arc<AnytypeClient>,
     permits: Arc<Semaphore>,
     shutdown: CancellationToken,
@@ -118,6 +119,17 @@ impl RuntimeContext {
     #[must_use]
     pub fn client(&self) -> &AnytypeClient {
         self.client.as_ref()
+    }
+
+    /// Returns the process-local identity shared by clones of this runtime.
+    pub(crate) fn identity(&self) -> &Arc<()> {
+        &self.identity
+    }
+
+    /// Returns the one absolute deadline for a newly admitted invocation.
+    pub(crate) fn request_deadline(&self) -> Instant {
+        let now = Instant::now();
+        now.checked_add(self.request_timeout).unwrap_or(now)
     }
 
     /// Returns the startup availability snapshot without repeating pings.
@@ -214,8 +226,56 @@ impl RuntimeContext {
         .await
     }
 
+    pub(crate) async fn execute_classified_until<F, T, E, C>(
+        &self,
+        deadline: Instant,
+        context: OperationContext,
+        cancellation: &CancellationToken,
+        operation: F,
+        classify: C,
+    ) -> Result<T, ControlledOperationError<E>>
+    where
+        F: Future<Output = Result<T, E>>,
+        C: Fn(&E) -> OperationFailureDiagnostic,
+    {
+        self.execute_classified_with_control_until(
+            deadline,
+            context,
+            cancellation,
+            operation,
+            classify,
+            default_control_failure_diagnostic,
+        )
+        .await
+    }
+
     pub(crate) async fn execute_classified_with_control<F, T, E, C, D>(
         &self,
+        context: OperationContext,
+        cancellation: &CancellationToken,
+        operation: F,
+        classify: C,
+        classify_control: D,
+    ) -> Result<T, ControlledOperationError<E>>
+    where
+        F: Future<Output = Result<T, E>>,
+        C: Fn(&E) -> OperationFailureDiagnostic,
+        D: Fn(ControlledFailureKind) -> OperationFailureDiagnostic,
+    {
+        self.execute_classified_with_control_until(
+            self.request_deadline(),
+            context,
+            cancellation,
+            operation,
+            classify,
+            classify_control,
+        )
+        .await
+    }
+
+    async fn execute_classified_with_control_until<F, T, E, C, D>(
+        &self,
+        deadline: Instant,
         context: OperationContext,
         cancellation: &CancellationToken,
         operation: F,
@@ -258,7 +318,7 @@ impl RuntimeContext {
             result
         };
 
-        let result = tokio::time::timeout(self.request_timeout, controlled)
+        let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), controlled)
             .await
             .unwrap_or(Err(ControlledOperationError::TimedOut));
         log_classified_operation(
@@ -336,6 +396,7 @@ impl RuntimeContext {
         optional_toolsets: OptionalToolsetSelection,
     ) -> Self {
         Self {
+            identity: Arc::new(()),
             client: Arc::new(client),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             shutdown: CancellationToken::new(),
