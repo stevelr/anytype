@@ -121,19 +121,19 @@ explicitly:
 
 ```json
 {
-  "mcpServers": {
-    "anytype": {
-      "command": "/absolute/path/to/anytype/target/debug/any-mcp",
-      "env": {
-        "ANY_MCP_PROTOCOL": "stable",
-        "ANY_MCP_PROFILE": "compact",
-        "ANY_MCP_READ_ONLY": "1",
-        "ANYTYPE_URL": "http://127.0.0.1:31009",
-        "ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
-        "ANYTYPE_KEYSTORE_SERVICE": "anyr"
-      }
-    }
-  }
+	"mcpServers": {
+		"anytype": {
+			"command": "/absolute/path/to/anytype/target/debug/any-mcp",
+			"env": {
+				"ANY_MCP_PROTOCOL": "stable",
+				"ANY_MCP_PROFILE": "compact",
+				"ANY_MCP_READ_ONLY": "1",
+				"ANYTYPE_URL": "http://127.0.0.1:31009",
+				"ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
+				"ANYTYPE_KEYSTORE_SERVICE": "anyr"
+			}
+		}
+	}
 }
 ```
 
@@ -150,7 +150,12 @@ existing non-secret selectors:
 [mcp_servers.anytype]
 command = "/absolute/path/to/anytype/target/debug/any-mcp"
 env = { ANY_MCP_PROTOCOL = "stable", ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
-env_vars = ["ANYTYPE_URL", "ANYTYPE_GRPC_ENDPOINT", "ANYTYPE_KEYSTORE", "ANYTYPE_KEYSTORE_SERVICE"]
+env_vars = [
+  "ANYTYPE_URL",
+  "ANYTYPE_GRPC_ENDPOINT",
+  "ANYTYPE_KEYSTORE",
+  "ANYTYPE_KEYSTORE_SERVICE",
+]
 ```
 
 See [stdio protocol verification](STDIO_CONFORMANCE.md) for the tested Codex,
@@ -807,6 +812,7 @@ architecture. The workspace targets Linux x86_64/aarch64, macOS aarch64, and
 Windows x86_64/aarch64; the current dist configuration produces macOS aarch64,
 Linux x86_64/aarch64, and Windows x86_64 artifacts. No external `any-mcp`
 release is published by this documentation change.
+
 ## Headless integration tests
 
 The ignored live suite uses `with_test_context`, checks authenticated HTTP and

@@ -26,21 +26,21 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.4", features = ["derive", "env"] }
 crossterm = "0.29.0"
 db-keystore = { version = "0.5.0-pre.2" }
+fs2 = "0.4.3"
 futures = "0.3.33"
 getrandom = "0.4.3"
-fs2 = "0.4.3"
 httpdate = "1.0.3"
 keyring-core = { version = "1.0.0", features = ["sample"] }
-mime = "0.3.17"
 libc = "0.2.183"
+mime = "0.3.17"
 parking_lot = "0.12.5"
 prost = "0.14.4"
 prost-types = "0.14.4"
 ratatui = "0.30.2"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", features = ["json", "multipart", "stream", "rustls", "query"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
 rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1.2.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
