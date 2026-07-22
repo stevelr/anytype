@@ -19,8 +19,33 @@
 
 mod common;
 
+use std::{fs, path::PathBuf};
+
 use anytype::{prelude::*, test_util::with_test_context_unit};
 use common::{create_object_with_retry, unique_test_name};
+
+struct EmptyFileKeystore {
+    directory: PathBuf,
+    specification: String,
+}
+
+impl EmptyFileKeystore {
+    fn new(label: &str) -> Self {
+        let directory = std::env::temp_dir().join(unique_test_name(label));
+        fs::create_dir_all(&directory).expect("create empty test keystore directory");
+        let database = directory.join("credentials.db");
+        Self {
+            specification: format!("file:path={}", database.display()),
+            directory,
+        }
+    }
+}
+
+impl Drop for EmptyFileKeystore {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
 
 // =============================================================================
 // Invalid ID Errors
@@ -514,9 +539,11 @@ async fn test_invalid_date_format() {
 async fn test_request_without_api_key() {
     with_test_context_unit(|ctx| async move {
         // Create a new client without setting an API key
+        let empty_keystore = EmptyFileKeystore::new("anytype-no-auth-request");
         let config = ClientConfig {
             base_url: ctx.client.get_config().base_url.clone(),
             app_name: "test-no-auth".to_string(),
+            keystore: Some(empty_keystore.specification.clone()),
             rate_limit_max_retries: 0,
             ..Default::default()
         };
@@ -780,12 +807,14 @@ async fn test_not_found_error() {
 async fn test_auth_error() {
     // This is tested in test_request_without_api_key and test_invalid_api_key
     // Here we verify the error type is Auth/Unauthorized
+    let empty_keystore = EmptyFileKeystore::new("anytype-auth-error");
     let config = ClientConfig {
         base_url: Some(
             std::env::var("ANYTYPE_TEST_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:31012".to_string()),
         ),
         app_name: "test-auth-error".to_string(),
+        keystore: Some(empty_keystore.specification.clone()),
         rate_limit_max_retries: 0,
         ..Default::default()
     };

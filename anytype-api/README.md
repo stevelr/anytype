@@ -726,6 +726,11 @@ Keystore modifiers use `:key=value` boundaries. Path values may contain a
 Windows drive colon or ordinary colons that are not followed by another
 modifier key and `=`.
 
+`ANYTYPE_KEYSTORE=env` is also supported for the test process when its HTTP
+and optional gRPC credentials are already present in the environment.
+Unauthenticated control tests explicitly use unique empty temporary file
+keystores, so ambient `env` credentials cannot change their expected result.
+
 Run smoke test
 
 ```sh
@@ -737,6 +742,11 @@ Run all tests
 ```shell
 cargo test -- --nocapture
 ```
+
+When the real server's mutation rate limit remains enabled, use
+`cargo test -- --test-threads=1` to keep the full live suite from flooding its
+shared endpoint. Pagination coverage owns a uniquely filtered, cleanup-tracked
+object cohort and does not depend on unrelated ambient-space objects.
 
 Integration tests require a running Anytype server and environment variables. See `src/client.rs` for details.
 
