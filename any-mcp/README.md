@@ -334,9 +334,37 @@ Only `compact` and `standard` application profiles exist. The optional
 `chats`, `members`, `files`, `schema`, and `views-write` registries are linked
 and can be selected explicitly or combined in one comma-separated
 `ANY_MCP_TOOLSETS` value; they are absent by default. Acceptance-blocked
-`discussions` and proposed `admin` are not selectable in this release. Their
-names become valid selectors only when a complete independently reviewed
+`body-blocks` and `discussions`, plus proposed `admin`, are not selectable in
+this release. Their names become valid selectors only when a complete independently reviewed
 production registry is linked.
+
+The pending `body-blocks` R4 design defines six workflow tools for stable typed
+body pages, verified single-block create/update/delete/move, and finite rich
+page construction; read-only mode retains only body listing. All schemas use
+closed nonrecursive variants, fail opaque and read-restricted content closed,
+omit bookmark/network fetching, and accept YouTube creation only as an exact
+11-character video ID normalized to inert canonical document data. Rich
+construction is explicitly non-atomic and returns bounded applied, failed, and
+not-attempted evidence without compensation or automatic write resumption.
+
+Production linkage is blocked on `any-2f0g.35` and independent review
+`any-2f0g.36`. The finite `anytype-api` body lifecycle caps decoded Show at
+4,194,304 bytes and every non-Show body gRPC response—including foreground and
+fallback ObjectClose—at 65,536 bytes, owns cancellation-resilient bounded
+cleanup, shares one absolute deadline, and exposes the exact first-write-poll
+boundary. Close overrun is cleanup failure; mutation overrun after polling is
+indeterminate. The design's paired maximum request-plus-result contexts remain
+below 200,000 `o200k_base` tokens. Ordinary gRPC acceptance uses only a
+cleanup-owned real Anytype server across direct, stable-stdio, and preview-stdio
+paths. The removed semantic mock/custom server is prohibited; latency,
+connection, malformed/status, and retry faults remain P4 behind the separately
+reviewed fault-injection design.
+
+R4 also fixes emoji and callout payloads at the current 64-byte API ceiling,
+requires both UTF-16 mark endpoints to be `u32` scalar boundaries, and gives
+relation keys one lowercase ASCII grammar with 0..64 exact-unique link relation
+entries on create and update. A replay that recovers a retained page candidate
+returns and retains an index-zero partial receipt and never resumes body writes.
 
 The production `schema` registry includes `space_create` and `space_update`.
 Both workflows use `anytype-api` only and return just a validated space ID,

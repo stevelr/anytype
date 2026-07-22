@@ -361,11 +361,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add an ignored serial tier-2 production-router scenario proving live numeric
   and checkbox filter matches by exact identity, with continuation derived from
   checked upstream pagination and no client-side post-pagination emulation.
-- Design document `designs/body-block-tools.md` (`any-2f0g.22`): a default-off
-  workflow-oriented `body-blocks` MCP registry with bounded typed body reads,
-  verified create/update/delete/move operations, flat rich-page plans, honest
-  partial and indeterminate outcomes, closed network behavior, and exact work,
-  frame, schema, and token budgets.
+- Revise `designs/body-block-tools.md` and `designs/body-block-model.md` to R4
+  pending independent rereview. The default-off six/one `body-blocks` registry
+  now has exhaustive closed projection, constructor, update, and result shapes;
+  explicit checkbox, alignment, background, link-relation, divider, and
+  YouTube-ID rules; fail-closed read restrictions; complete structural-plan and
+  retained-replay semantics; exact partial/authentication/candidate outcomes;
+  and paired request-plus-result token proofs below 200,000 tokens. Production
+  linkage requires `any-2f0g.35` plus independent review `any-2f0g.36`: a
+  bounded `anytype-api` Show/Close/write lifecycle with a 4 MiB Show cap, 64 KiB
+  cap for every non-Show body response including both close paths,
+  cancellation-resilient cleanup, one absolute deadline, and an exact write-poll
+  certainty seam. R4 also fixes emoji/callout input at 64 bytes, validates both
+  UTF-16 endpoints as `u32` scalar boundaries, closes relation-key grammar and
+  unique update arrays, and makes successful pending-candidate replay retain an
+  index-zero partial receipt without resuming writes. Direct, stable-stdio, preview-stdio, and
+  cleanup-owned real-server acceptance covers relation detection/removal/move,
+  targeted update, heading append, and rich construction. The removed semantic
+  gRPC mock/custom server is prohibited; synthetic latency, connection,
+  malformed/status, and retry faults remain P4 behind reviewed fault injection.
 - Map verified body-block mutation uncertainty from `anytype-api` directly to
   the fixed secret-safe mutation-indeterminate conflict result and runtime
   category; this is plumbing for the separately tracked optional body workflow
