@@ -191,6 +191,7 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::BodyGraph { .. }
         | AnytypeError::CollectionMembershipEvidence { .. }
         | AnytypeError::TypePropertyClassification { .. }
+        | AnytypeError::AttachedDiscussion { .. }
         | AnytypeError::BodyMutationIndeterminate { .. }
         | AnytypeError::VerifyTimeout { .. }
         | AnytypeError::Other { .. } => false,
@@ -302,7 +303,13 @@ impl ToolError {
         if error.is_authentication() {
             return AnytypeErrorMapping::Ready(Self::authentication());
         }
-        if matches!(error, AnytypeError::BodyMutationIndeterminate { .. }) {
+        if matches!(
+            error,
+            AnytypeError::BodyMutationIndeterminate { .. }
+                | AnytypeError::AttachedDiscussion {
+                    kind: anytype::attached_discussions::AttachedDiscussionErrorKind::MutationIndeterminate,
+                }
+        ) {
             return AnytypeErrorMapping::Ready(Self::mutation_indeterminate());
         }
 
@@ -313,7 +320,11 @@ impl ToolError {
             | AnytypeError::NoKeyStore
             | AnytypeError::KeyStore { .. }
             | AnytypeError::GrpcUnavailable { .. } => ToolErrorCode::Authentication,
-            AnytypeError::Validation { .. } => ToolErrorCode::Validation,
+            AnytypeError::Validation { .. }
+            | AnytypeError::AttachedDiscussion {
+                kind:
+                    anytype::attached_discussions::AttachedDiscussionErrorKind::UnsupportedParentLayout,
+            } => ToolErrorCode::Validation,
             AnytypeError::Ambiguous { candidates, .. } => {
                 let candidates = candidates
                     .iter()
@@ -357,6 +368,7 @@ impl ToolError {
             | AnytypeError::BodyGraph { .. }
             | AnytypeError::CollectionMembershipEvidence { .. }
             | AnytypeError::TypePropertyClassification { .. }
+            | AnytypeError::AttachedDiscussion { .. }
             | AnytypeError::VerifyTimeout { .. }
             | AnytypeError::Other { .. } => ToolErrorCode::Upstream,
         };
@@ -615,6 +627,18 @@ mod tests {
                     observed: None,
                 },
                 ToolErrorCode::Conflict,
+            ),
+            (
+                AnytypeError::AttachedDiscussion {
+                    kind: anytype::attached_discussions::AttachedDiscussionErrorKind::MutationIndeterminate,
+                },
+                ToolErrorCode::Conflict,
+            ),
+            (
+                AnytypeError::AttachedDiscussion {
+                    kind: anytype::attached_discussions::AttachedDiscussionErrorKind::UnsupportedParentLayout,
+                },
+                ToolErrorCode::Validation,
             ),
             (
                 AnytypeError::Other {

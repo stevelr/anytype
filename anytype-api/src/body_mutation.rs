@@ -4,7 +4,7 @@
 //! Verified, typed mutations for rich document body blocks.
 //!
 //! A [`BodyEditor`] is always derived from a freshly read
-//! [`BodySnapshot`](crate::body::BodySnapshot). Each write is sent at most
+//! [`BodySnapshot`]. Each write is sent at most
 //! once and is accepted only after a bounded, fresh `ObjectShow` read proves
 //! the exact requested content and position. Callers must reread after an
 //! indeterminate transport, timeout, or cancellation outcome; blindly

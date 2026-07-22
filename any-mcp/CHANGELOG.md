@@ -92,15 +92,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Stable-ID list calls prove exactly one logical/physical HTTP GET, one
   canonical membership round, one subscribe, one confirmed foreground close,
   zero cleanup fallbacks, and cursor-mismatch rejection with zero membership
-  I/O. One shared direct, spawned-stable-stdio, and spawned-preview-stdio
-  mutation scenario asserts Set/query rejection, add/no-op/remove/no-op, both
-  sides of both cancellation markers, read-only zero-I/O rejection, exact full
-  identity, canonical `limit=1` pagination, saved-view independence, object
-  survival, transport parity, and exact logical/physical HTTP, observer, query,
-  subscribe, foreground-close, fallback, and write deltas. Test-only child
-  modes append payload-free counter snapshots to a private file. Canonical
-  presence is checked after the repeated add no-op and before the actual
-  remove. A separate offline direct/stable/preview process test invokes the
+  I/O. One shared actual-router, spawned-stable-stdio, and
+  spawned-preview-stdio scenario seeds A, leaves target B absent, and retains
+  absent C as a control. It applies list/add/remove to a Set/query object,
+  rejects limit and collection cursor rebinding before membership I/O, covers
+  add/no-op/remove/no-op and both read-only mutation gates, and checks exact
+  A/B/C identity, canonical `limit=1` pagination, saved-view independence,
+  object survival, transport parity, and exact logical/physical HTTP, observer,
+  query, subscribe, foreground-close, fallback, and write deltas. A
+  post-preflight barrier drives two concurrent B adds through the actual direct
+  and spawned handlers, then proves a bounded safe outcome, one canonical B,
+  and no effect on A or C. The barrier is not a latency or fault server.
+  Test-only child modes append payload-free counter snapshots to a private
+  file. A separate offline direct/stable/preview process test invokes the
   same production 403 classifier twice and proves authentication mapping,
   parity, no redispatch, and zero HTTP/mutation work; it is explicitly not a
   substitute for genuine live permission denial. Add treats only completed
@@ -121,8 +125,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `CancelAddBeforeMark` but its add response timed out with empty child stderr;
   cleanup acknowledged deletion and proved absence. Injected cancellation now
   uses a handler-local token instead of canceling rmcp's response channel. This
-  final correction passes offline gates and awaits an authorized live rerun and
-  independent review.
+  final correction and strengthened shared scenario pass offline gates. Boxing
+  the preview dispatcher and optional-registry aggregate keeps the reviewed
+  tool future within the default child-worker stack. The authorized
+  direct/stable/preview real-server rerun completed every assertion and left
+  healthy HTTP/gRPC, an empty disposable prefix, no child or metrics file, and
+  no current run ledger. Independent review remains pending.
 - Add the production-unlinked four-workflow `chats` read slice through
   `anytype-api` only: bounded chat discovery, opaque older-message pagination,
   exact message reads, and in-chat full-text search. The minimized projections

@@ -399,6 +399,47 @@ impl StdioDriver {
         self.process.request(id, method, params)
     }
 
+    fn request_pair(
+        &mut self,
+        method: &str,
+        mut first_params: Value,
+        mut second_params: Value,
+    ) -> [Value; 2] {
+        if self.options.preview {
+            for params in [&mut first_params, &mut second_params] {
+                params
+                    .as_object_mut()
+                    .expect("preview params object")
+                    .insert("_meta".to_owned(), preview_meta());
+            }
+        }
+        let first_id = self.next_id;
+        let second_id = first_id + 1;
+        self.next_id += 2;
+        for (id, params) in [(first_id, first_params), (second_id, second_params)] {
+            self.process.send(json!({
+                "jsonrpc":"2.0",
+                "id":id,
+                "method":method,
+                "params":params
+            }));
+        }
+        let first_response = self.process.read_frame();
+        let second_response = self.process.read_frame();
+        self.process.record_response(&first_response);
+        self.process.record_response(&second_response);
+        let response_id = |response: &Value| response["id"].as_u64();
+        match (response_id(&first_response), response_id(&second_response)) {
+            (Some(id), Some(other)) if id == first_id && other == second_id => {
+                [first_response, second_response]
+            }
+            (Some(id), Some(other)) if id == second_id && other == first_id => {
+                [second_response, first_response]
+            }
+            _ => panic!("paired response ids must match the two requests"),
+        }
+    }
+
     fn call_tool_sync(&mut self, name: &'static str, arguments: Value) -> Result<Value, String> {
         let response = self.request("tools/call", json!({"name": name, "arguments": arguments}));
         tool_success(name, &response)
@@ -949,8 +990,11 @@ impl SpawnedViewsWriteDriver {
             Ok(result) => result,
             Err(_) => {
                 if let Some(driver) = driver.take() {
-                    let (_, _, category) = driver.finish_after_panic();
-                    eprintln!("views-write acceptance child initialization failed: {category}");
+                    let (_, output, category) = driver.finish_after_panic();
+                    eprintln!(
+                        "views-write acceptance child initialization failed: {category} {}",
+                        stderr_metrics(&output.stderr).summary()
+                    );
                 }
                 Err(TestError::Assertion {
                     message: "views-write child initialization failed".to_owned(),
@@ -975,21 +1019,60 @@ impl SpawnedViewsWriteDriver {
             Ok(result) => result?,
             Err(_) => {
                 if let Some(driver) = driver.take() {
-                    let (_, _, category) = driver.finish_after_panic();
-                    eprintln!("views-write acceptance child {category} during {name}");
+                    let (_, output, category) = driver.finish_after_panic();
+                    eprintln!(
+                        "views-write acceptance child {category} during {name}: {}",
+                        stderr_metrics(&output.stderr).summary()
+                    );
                 }
                 return Err(TestError::Assertion {
                     message: "views-write child call failed".to_owned(),
                 });
             }
         };
-        let result = response.get("result").ok_or_else(|| TestError::Assertion {
-            message: "views-write child omitted tool result".to_owned(),
-        })?;
-        Ok(AcceptanceCall {
-            is_error: result["isError"].as_bool().unwrap_or(false),
-            structured: result["structuredContent"].clone(),
-        })
+        acceptance_call_from_response(&response)
+    }
+
+    fn call_pair(
+        &self,
+        name: &'static str,
+        first: Value,
+        second: Value,
+    ) -> TestResult<[AcceptanceCall; 2]> {
+        let mut driver = lock_driver(&self.driver);
+        let responses = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            driver
+                .as_mut()
+                .ok_or_else(|| TestError::Assertion {
+                    message: "registered views-write child disappeared".to_owned(),
+                })
+                .map(|driver| {
+                    driver.request_pair(
+                        "tools/call",
+                        json!({"name":name,"arguments":first}),
+                        json!({"name":name,"arguments":second}),
+                    )
+                })
+        }));
+        let responses = match responses {
+            Ok(result) => result?,
+            Err(_) => {
+                if let Some(driver) = driver.take() {
+                    let (_, output, category) = driver.finish_after_panic();
+                    eprintln!(
+                        "views-write acceptance child {category} during paired {name}: {}",
+                        stderr_metrics(&output.stderr).summary()
+                    );
+                }
+                return Err(TestError::Assertion {
+                    message: "views-write child paired call failed".to_owned(),
+                });
+            }
+        };
+        Ok([
+            acceptance_call_from_response(&responses[0])?,
+            acceptance_call_from_response(&responses[1])?,
+        ])
     }
 
     fn metrics(&self) -> TestResult<AcceptanceMetricsSnapshot> {
@@ -1024,6 +1107,17 @@ impl SpawnedViewsWriteDriver {
 struct AcceptanceCall {
     is_error: bool,
     structured: Value,
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn acceptance_call_from_response(response: &Value) -> TestResult<AcceptanceCall> {
+    let result = response.get("result").ok_or_else(|| TestError::Assertion {
+        message: "views-write child omitted tool result".to_owned(),
+    })?;
+    Ok(AcceptanceCall {
+        is_error: result["isError"].as_bool().unwrap_or(false),
+        structured: result["structuredContent"].clone(),
+    })
 }
 
 async fn run_spawned_standard_baseline(scenario: ScenarioId) {
@@ -1519,6 +1613,30 @@ impl ViewsWriteDriver {
         }
     }
 
+    fn call_pair(
+        &mut self,
+        name: &'static str,
+        first: Value,
+        second: Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = TestResult<[AcceptanceCall; 2]>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            match self {
+                Self::Direct(driver) => {
+                    Ok(driver
+                        .call_pair(name, first, second)
+                        .await
+                        .map(|result| AcceptanceCall {
+                            is_error: result.is_error.unwrap_or(false),
+                            structured: result.structured_content.unwrap_or(Value::Null),
+                        }))
+                }
+                Self::Spawned(driver) => driver.call_pair(name, first, second),
+            }
+        })
+    }
+
     fn finish(&self) -> TestResult<()> {
         if let Self::Spawned(driver) = self {
             driver.finish()?;
@@ -1552,6 +1670,7 @@ fn acceptance_mode_name(
             AcceptanceMutationMode::CancelRemoveBeforeMark => "remove-before",
             AcceptanceMutationMode::CancelRemoveAfterMark => "remove-after",
             AcceptanceMutationMode::ClassifyAdd403 => "classify-403",
+            AcceptanceMutationMode::ConcurrentAdd => "concurrent-add",
         }
     };
     Ok(format!("{protocol}-{stage}"))
@@ -1636,7 +1755,11 @@ async fn acceptance_call_with_metrics(
     let before = driver.metrics()?;
     let result = driver.call(name, arguments).await?;
     let after = driver.metrics()?;
-    if metrics_delta(before, after) != expected {
+    let actual = metrics_delta(before, after);
+    if actual != expected {
+        eprintln!(
+            "views-write acceptance metrics mismatch for {name}: actual={actual:?} expected={expected:?}"
+        );
         return Err(TestError::Assertion {
             message: "views-write acceptance metrics mismatch".to_owned(),
         });
@@ -1667,39 +1790,155 @@ fn require_membership_result(
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn require_tool_error(
+    result: &AcceptanceCall,
+    code: &str,
+    context: &'static str,
+) -> TestResult<()> {
+    if !result.is_error || result.structured["code"] != code {
+        return Err(TestError::Assertion {
+            message: context.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn require_exact_canonical_members(
+    ctx: &TestContext,
+    collection_id: &str,
+    expected: &[&str],
+) -> TestResult<Vec<String>> {
+    let page = ctx
+        .client
+        .collection_membership_page(&ctx.space_id, collection_id, 61, None)
+        .await?;
+    let mut actual_members = page
+        .object_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut expected_members = expected.to_vec();
+    actual_members.sort_unstable();
+    expected_members.sort_unstable();
+    if page.continuation.is_some() || actual_members != expected_members {
+        return Err(TestError::Assertion {
+            message: "canonical collection members changed outside the target scope".to_owned(),
+        });
+    }
+    Ok(page.object_ids)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn require_exact_fixture_states(
+    ctx: &TestContext,
+    collection_id: &str,
+    seed_id: &str,
+    target_id: &str,
+    target_state: anytype::views::CollectionMembershipState,
+    control_id: &str,
+) -> TestResult<()> {
+    for (object_id, expected) in [
+        (seed_id, anytype::views::CollectionMembershipState::Present),
+        (target_id, target_state),
+        (
+            control_id,
+            anytype::views::CollectionMembershipState::Absent,
+        ),
+    ] {
+        let observed = ctx
+            .client
+            .observe_collection_membership(&ctx.space_id, collection_id, object_id)
+            .await?;
+        if observed.state != expected {
+            return Err(TestError::Assertion {
+                message: "collection membership escaped the A/B/C test scope".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[derive(Clone, Copy)]
+struct ViewsWriteFixture<'a> {
+    collection_id: &'a str,
+    query_id: &'a str,
+    seed_id: &'a str,
+    target_id: &'a str,
+    control_id: &'a str,
+    saved_view_id: &'a str,
+}
+
+#[cfg(feature = "acceptance-harness")]
 async fn run_views_write_transport_scenario(
     ctx: &TestContext,
     transport: ViewsWriteTransport,
-    collection_id: &str,
-    query_id: &str,
-    object_id: &str,
-    saved_view_id: &str,
+    fixture: ViewsWriteFixture<'_>,
 ) -> TestResult<Vec<AcceptanceCall>> {
+    let ViewsWriteFixture {
+        collection_id,
+        query_id,
+        seed_id,
+        target_id,
+        control_id,
+        saved_view_id,
+    } = fixture;
     let args = json!({
         "space":ctx.space_id,
         "collection_id":collection_id,
-        "object_id":object_id
+        "object_id":target_id
     });
     let mut transcript = Vec::new();
     let mut driver = views_write_driver(ctx, transport, AcceptanceMutationMode::Normal, false)?;
 
-    let query_rejection = acceptance_call_with_metrics(
-        &mut driver,
-        "collection_member_add",
-        json!({
-            "space":ctx.space_id,
-            "collection_id":query_id,
-            "object_id":object_id
-        }),
-        expected_metrics(1, 0, 0, 0, 0),
+    require_exact_canonical_members(ctx, collection_id, &[seed_id]).await?;
+    require_exact_fixture_states(
+        ctx,
+        collection_id,
+        seed_id,
+        target_id,
+        anytype::views::CollectionMembershipState::Absent,
+        control_id,
     )
     .await?;
-    if !query_rejection.is_error || query_rejection.structured["code"] != "upstream" {
-        return Err(TestError::Assertion {
-            message: "query rejection was not exact".to_owned(),
-        });
+
+    for (name, arguments) in [
+        (
+            "collection_member_list",
+            json!({
+                "space":ctx.space_id,
+                "collection_id":query_id,
+                "limit":1
+            }),
+        ),
+        (
+            "collection_member_add",
+            json!({
+                "space":ctx.space_id,
+                "collection_id":query_id,
+                "object_id":target_id
+            }),
+        ),
+        (
+            "collection_member_remove",
+            json!({
+                "space":ctx.space_id,
+                "collection_id":query_id,
+                "object_id":target_id
+            }),
+        ),
+    ] {
+        let rejection = acceptance_call_with_metrics(
+            &mut driver,
+            name,
+            arguments,
+            expected_metrics(1, 0, 0, 0, 0),
+        )
+        .await?;
+        require_tool_error(&rejection, "upstream", "Set/query rejection was not exact")?;
+        transcript.push(rejection);
     }
-    transcript.push(query_rejection);
 
     for (mode, code) in [
         (AcceptanceMutationMode::CancelAddBeforeMark, "upstream"),
@@ -1721,6 +1960,7 @@ async fn run_views_write_transport_scenario(
         cancellation.finish()?;
         transcript.push(result);
     }
+    require_exact_canonical_members(ctx, collection_id, &[seed_id]).await?;
 
     let added = acceptance_call_with_metrics(
         &mut driver,
@@ -1729,8 +1969,9 @@ async fn run_views_write_transport_scenario(
         expected_metrics(5, 2, 5, 1, 0),
     )
     .await?;
-    require_membership_result(&added, collection_id, object_id, "present")?;
+    require_membership_result(&added, collection_id, target_id, "present")?;
     transcript.push(added);
+    require_exact_canonical_members(ctx, collection_id, &[seed_id, target_id]).await?;
 
     for (mode, code) in [
         (AcceptanceMutationMode::CancelRemoveBeforeMark, "upstream"),
@@ -1752,6 +1993,15 @@ async fn run_views_write_transport_scenario(
         cancellation.finish()?;
         transcript.push(result);
     }
+    require_exact_fixture_states(
+        ctx,
+        collection_id,
+        seed_id,
+        target_id,
+        anytype::views::CollectionMembershipState::Present,
+        control_id,
+    )
+    .await?;
 
     let add_noop = acceptance_call_with_metrics(
         &mut driver,
@@ -1760,11 +2010,69 @@ async fn run_views_write_transport_scenario(
         expected_metrics(2, 1, 2, 0, 0),
     )
     .await?;
-    require_membership_result(&add_noop, collection_id, object_id, "present")?;
+    require_membership_result(&add_noop, collection_id, target_id, "present")?;
     transcript.push(add_noop);
+    let canonical_order =
+        require_exact_canonical_members(ctx, collection_id, &[seed_id, target_id]).await?;
 
-    let mut cursor = None;
-    let mut canonical_ids = Vec::new();
+    let first = acceptance_call_with_metrics(
+        &mut driver,
+        "collection_member_list",
+        json!({
+            "space":ctx.space_id,
+            "collection_id":collection_id,
+            "limit":1
+        }),
+        expected_metrics(1, 0, 1, 0, 0),
+    )
+    .await?;
+    if first.is_error {
+        return Err(TestError::Assertion {
+            message: "canonical first membership page failed".to_owned(),
+        });
+    }
+    let first_cursor = first.structured["next_cursor"]
+        .as_str()
+        .ok_or_else(|| TestError::Assertion {
+            message: "two-member fixture omitted its continuation cursor".to_owned(),
+        })?
+        .to_owned();
+    for mismatch_input in [
+        json!({
+            "space":ctx.space_id,
+            "collection_id":collection_id,
+            "limit":2,
+            "cursor":first_cursor.clone()
+        }),
+        json!({
+            "space":ctx.space_id,
+            "collection_id":query_id,
+            "limit":1,
+            "cursor":first_cursor.clone()
+        }),
+    ] {
+        let mismatch = acceptance_call_with_metrics(
+            &mut driver,
+            "collection_member_list",
+            mismatch_input,
+            expected_metrics(0, 0, 0, 0, 0),
+        )
+        .await?;
+        require_tool_error(
+            &mismatch,
+            "validation",
+            "cursor mismatch was not rejected before membership I/O",
+        )?;
+        transcript.push(mismatch);
+    }
+
+    let mut cursor = Some(first_cursor);
+    let mut canonical_ids = first.structured["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["object_id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
     loop {
         let mut input = json!({
             "space":ctx.space_id,
@@ -1798,9 +2106,9 @@ async fn run_views_write_transport_scenario(
             break;
         }
     }
-    if !canonical_ids.contains(&object_id.to_owned()) {
+    if canonical_ids != canonical_order {
         return Err(TestError::Assertion {
-            message: "canonical pagination omitted present member".to_owned(),
+            message: "canonical pagination did not preserve exact A/B membership".to_owned(),
         });
     }
     let presentation = ctx
@@ -1810,7 +2118,7 @@ async fn run_views_write_transport_scenario(
         .limit(61)
         .list()
         .await?;
-    if presentation.items.iter().any(|item| item.id == object_id) {
+    if presentation.items.iter().any(|item| item.id == target_id) {
         return Err(TestError::Assertion {
             message: "saved-view filtering altered canonical membership".to_owned(),
         });
@@ -1823,7 +2131,7 @@ async fn run_views_write_transport_scenario(
         expected_metrics(5, 2, 5, 0, 1),
     )
     .await?;
-    require_membership_result(&removed, collection_id, object_id, "absent")?;
+    require_membership_result(&removed, collection_id, target_id, "absent")?;
     transcript.push(removed);
 
     let remove_noop = acceptance_call_with_metrics(
@@ -1833,64 +2141,124 @@ async fn run_views_write_transport_scenario(
         expected_metrics(2, 1, 3, 0, 0),
     )
     .await?;
-    require_membership_result(&remove_noop, collection_id, object_id, "absent")?;
+    require_membership_result(&remove_noop, collection_id, target_id, "absent")?;
     transcript.push(remove_noop);
     driver.finish()?;
 
-    let canonical = ctx
-        .client
-        .collection_membership_page(&ctx.space_id, collection_id, 61, None)
-        .await?;
-    if canonical.object_ids.contains(&object_id.to_owned()) {
-        return Err(TestError::Assertion {
-            message: "canonical membership retained removed member".to_owned(),
-        });
-    }
-    let survived = ctx.client.object(&ctx.space_id, object_id).get().await?;
-    if survived.id != object_id || survived.space_id != ctx.space_id {
-        return Err(TestError::Assertion {
-            message: "membership removal changed the member object".to_owned(),
-        });
-    }
-
-    let mut read_only = views_write_driver(ctx, transport, AcceptanceMutationMode::Normal, true)?;
-    let read_only_result = acceptance_call_with_metrics(
-        &mut read_only,
-        "collection_member_add",
-        args.clone(),
-        expected_metrics(0, 0, 0, 0, 0),
+    require_exact_canonical_members(ctx, collection_id, &[seed_id]).await?;
+    require_exact_fixture_states(
+        ctx,
+        collection_id,
+        seed_id,
+        target_id,
+        anytype::views::CollectionMembershipState::Absent,
+        control_id,
     )
     .await?;
-    if !read_only_result.is_error || read_only_result.structured["code"] != "validation" {
+
+    let mut concurrent =
+        views_write_driver(ctx, transport, AcceptanceMutationMode::ConcurrentAdd, false)?;
+    let before = concurrent.metrics()?;
+    let concurrent_results = concurrent
+        .call_pair("collection_member_add", args.clone(), args.clone())
+        .await?;
+    let delta = metrics_delta(before, concurrent.metrics()?);
+    let verification_observers =
+        delta
+            .observer_attempts
+            .checked_sub(2)
+            .ok_or_else(|| TestError::Assertion {
+                message: "concurrent add omitted one of its two preflight observers".to_owned(),
+            })?;
+    if delta.add_dispatches != 2
+        || delta.remove_dispatches != 0
+        || delta.http_logical != 6 + 2 * verification_observers
+        || delta.http_physical != delta.http_logical
+        || delta.query_rounds != 6 + 2 * verification_observers
+        || delta.subscribe_attempts != delta.query_rounds
+        || delta.foreground_close_attempts != delta.query_rounds
+        || delta.foreground_close_successes != delta.query_rounds
+        || delta.fallback_close_attempts != 0
+    {
         return Err(TestError::Assertion {
-            message: "read-only mutation gate was not exact".to_owned(),
+            message: "concurrent add aggregate work was not exact".to_owned(),
         });
     }
-    read_only.finish()?;
-    transcript.push(read_only_result);
-
-    let mut classify = views_write_driver(
+    let mut successful = 0;
+    for result in concurrent_results {
+        if result.is_error {
+            require_tool_error(
+                &result,
+                "conflict",
+                "concurrent add returned an unsafe failure category",
+            )?;
+        } else {
+            require_membership_result(&result, collection_id, target_id, "present")?;
+            successful += 1;
+        }
+    }
+    if successful == 0 {
+        return Err(TestError::Assertion {
+            message: "concurrent add produced no verified success".to_owned(),
+        });
+    }
+    require_exact_canonical_members(ctx, collection_id, &[seed_id, target_id]).await?;
+    require_exact_fixture_states(
         ctx,
-        transport,
-        AcceptanceMutationMode::ClassifyAdd403,
-        false,
-    )?;
-    for _ in 0..2 {
-        let rejection = acceptance_call_with_metrics(
-            &mut classify,
-            "collection_member_add",
+        collection_id,
+        seed_id,
+        target_id,
+        anytype::views::CollectionMembershipState::Present,
+        control_id,
+    )
+    .await?;
+    let concurrent_cleanup = acceptance_call_with_metrics(
+        &mut concurrent,
+        "collection_member_remove",
+        args.clone(),
+        expected_metrics(5, 2, 5, 0, 1),
+    )
+    .await?;
+    require_membership_result(&concurrent_cleanup, collection_id, target_id, "absent")?;
+    transcript.push(concurrent_cleanup);
+    concurrent.finish()?;
+    require_exact_canonical_members(ctx, collection_id, &[seed_id]).await?;
+    require_exact_fixture_states(
+        ctx,
+        collection_id,
+        seed_id,
+        target_id,
+        anytype::views::CollectionMembershipState::Absent,
+        control_id,
+    )
+    .await?;
+
+    let mut read_only = views_write_driver(ctx, transport, AcceptanceMutationMode::Normal, true)?;
+    for name in ["collection_member_add", "collection_member_remove"] {
+        let read_only_result = acceptance_call_with_metrics(
+            &mut read_only,
+            name,
             args.clone(),
             expected_metrics(0, 0, 0, 0, 0),
         )
         .await?;
-        if !rejection.is_error || rejection.structured["code"] != "authentication" {
+        require_tool_error(
+            &read_only_result,
+            "validation",
+            "read-only mutation gate was not exact",
+        )?;
+        transcript.push(read_only_result);
+    }
+    read_only.finish()?;
+
+    for object_id in [seed_id, target_id, control_id] {
+        let survived = ctx.client.object(&ctx.space_id, object_id).get().await?;
+        if survived.id != object_id || survived.space_id != ctx.space_id {
             return Err(TestError::Assertion {
-                message: "offline 403 classification was not exact".to_owned(),
+                message: "collection workflow changed an A/B/C object".to_owned(),
             });
         }
-        transcript.push(rejection);
     }
-    classify.finish()?;
     Ok(transcript)
 }
 
@@ -1987,6 +2355,15 @@ async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
                 })
                 .await?;
                 ctx.register_object(&object_a.id);
+                let object_b = retry_definitive_rate_limit("stdio member B", || async {
+                    ctx.client
+                        .new_object(&ctx.space_id, "page")
+                        .name(format!("MCP stdio member B {suffix}"))
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_object(&object_b.id);
                 let object_c = retry_definitive_rate_limit("stdio member C", || async {
                     ctx.client
                         .new_object(&ctx.space_id, "page")
@@ -2028,34 +2405,51 @@ async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
                     .await?;
                 ctx.add_collection_name_filter_fixture(&collection.id, &saved_view.id, &name_a)
                     .await?;
+                let fixture = ViewsWriteFixture {
+                    collection_id: &collection.id,
+                    query_id: &query.id,
+                    seed_id: &object_a.id,
+                    target_id: &object_b.id,
+                    control_id: &object_c.id,
+                    saved_view_id: &saved_view.id,
+                };
 
                 let direct = Box::pin(run_views_write_transport_scenario(
                     ctx.as_ref(),
                     ViewsWriteTransport::Direct,
-                    &collection.id,
-                    &query.id,
-                    &object_c.id,
-                    &saved_view.id,
+                    fixture,
                 ))
-                .await?;
+                .await
+                .map_err(|_| {
+                    eprintln!("views-write direct acceptance stage failed");
+                    TestError::Assertion {
+                        message: "direct views-write acceptance stage".to_owned(),
+                    }
+                })?;
                 let stable = Box::pin(run_views_write_transport_scenario(
                     ctx.as_ref(),
                     ViewsWriteTransport::Stable,
-                    &collection.id,
-                    &query.id,
-                    &object_c.id,
-                    &saved_view.id,
+                    fixture,
                 ))
-                .await?;
+                .await
+                .map_err(|_| {
+                    eprintln!("views-write stable acceptance stage failed");
+                    TestError::Assertion {
+                        message: "stable views-write acceptance stage".to_owned(),
+                    }
+                })?;
                 let preview = Box::pin(run_views_write_transport_scenario(
                     ctx.as_ref(),
                     ViewsWriteTransport::Preview,
-                    &collection.id,
-                    &query.id,
-                    &object_c.id,
-                    &saved_view.id,
+                    fixture,
                 ))
-                .await?;
+                .await
+                .map_err(|_| {
+                    eprintln!("views-write preview acceptance stage failed");
+                    TestError::Assertion {
+                        message: "preview views-write acceptance stage".to_owned(),
+                    }
+                })?;
                 if direct != stable || direct != preview {
                     return Err(TestError::Assertion {
                         message: "direct, stable, and preview results diverged".to_owned(),

@@ -106,6 +106,8 @@ pub enum AcceptanceMutationMode {
     CancelRemoveAfterMark,
     /// Exercise only the production 403 classifier without upstream I/O.
     ClassifyAdd403,
+    /// Hold two absent-state add calls at the pre-dispatch boundary.
+    ConcurrentAdd,
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -248,9 +250,11 @@ impl crate::optional_toolsets::OptionalToolsetRegistry for ViewsWriteAcceptanceR
                 } else {
                     cancellation
                 };
-                self.handlers
-                    .call_tool(request, runtime, cursors, handler_cancellation)
-                    .await
+                Box::pin(
+                    self.handlers
+                        .call_tool(request, runtime, cursors, handler_cancellation),
+                )
+                .await
             };
             if let Some(recorder) = self.recorder.as_ref() {
                 recorder.record(runtime.client());
@@ -264,7 +268,7 @@ impl crate::optional_toolsets::OptionalToolsetRegistry for ViewsWriteAcceptanceR
 fn acceptance_handlers(
     mode: AcceptanceMutationMode,
 ) -> Result<CollectionMemberHandlers, SchemaContractError> {
-    let cancel: MutationDispatchHook = std::sync::Arc::new(CancellationToken::cancel);
+    let cancel = cancellation_hook();
     let hooks = match mode {
         AcceptanceMutationMode::CancelAddBeforeMark => CollectionMutationHooks {
             before_add: Some(cancel),
@@ -282,6 +286,19 @@ fn acceptance_handlers(
             after_remove_mark: Some(cancel),
             ..CollectionMutationHooks::default()
         },
+        AcceptanceMutationMode::ConcurrentAdd => {
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let before_add: MutationDispatchHook = std::sync::Arc::new(move |_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                Box::pin(async move {
+                    barrier.wait().await;
+                })
+            });
+            CollectionMutationHooks {
+                before_add: Some(before_add),
+                ..CollectionMutationHooks::default()
+            }
+        }
         AcceptanceMutationMode::Normal | AcceptanceMutationMode::ClassifyAdd403 => {
             CollectionMutationHooks::default()
         }
@@ -356,6 +373,17 @@ impl ViewsWriteAcceptanceDirect {
             )
             .await
             .unwrap_or_else(|_| tool_error(&ToolError::upstream()))
+    }
+
+    /// Dispatches two calls concurrently through the actual reviewed router.
+    pub async fn call_pair(
+        &self,
+        name: &'static str,
+        first: serde_json::Value,
+        second: serde_json::Value,
+    ) -> [CallToolResult; 2] {
+        let (first, second) = tokio::join!(self.call(name, first), self.call(name, second));
+        [first, second]
     }
 
     #[must_use]
@@ -450,6 +478,16 @@ pub async fn serve_acceptance_stdio_from_env() -> Result<(), Box<dyn std::error:
             ProtocolMode::Experimental20260728,
             false,
             AcceptanceMutationMode::ClassifyAdd403,
+        ),
+        "stable-concurrent-add" => (
+            ProtocolMode::Stable,
+            false,
+            AcceptanceMutationMode::ConcurrentAdd,
+        ),
+        "preview-concurrent-add" => (
+            ProtocolMode::Experimental20260728,
+            false,
+            AcceptanceMutationMode::ConcurrentAdd,
         ),
         _ => return Err("acceptance harness mode is invalid".into()),
     };
@@ -923,7 +961,20 @@ impl CollectionMemberListHandlers {
 }
 
 #[cfg(any(test, feature = "acceptance-harness"))]
-type MutationDispatchHook = std::sync::Arc<dyn Fn(&CancellationToken) + Send + Sync>;
+type MutationDispatchHook = std::sync::Arc<
+    dyn Fn(CancellationToken) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(any(test, feature = "acceptance-harness"))]
+fn cancellation_hook() -> MutationDispatchHook {
+    std::sync::Arc::new(|cancellation| {
+        Box::pin(async move {
+            cancellation.cancel();
+        })
+    })
+}
 
 #[derive(Clone, Default)]
 struct CollectionMutationHooks {
@@ -1183,14 +1234,10 @@ impl CollectionMemberHandlers {
     ) -> Result<CallToolResult, ErrorData> {
         match request.name.as_ref() {
             COLLECTION_MEMBER_LIST => {
-                self.list
-                    .call_tool(request, runtime, cursors, cancellation)
-                    .await
+                Box::pin(self.list.call_tool(request, runtime, cursors, cancellation)).await
             }
             COLLECTION_MEMBER_ADD | COLLECTION_MEMBER_REMOVE => {
-                self.mutations
-                    .call_tool(request, runtime, cancellation)
-                    .await
+                Box::pin(self.mutations.call_tool(request, runtime, cancellation)).await
             }
             _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
         }
@@ -1300,7 +1347,7 @@ fn unsafe_membership_identity(_: DomainValueError) -> HandlerOperationError {
 async fn run_add_before_hook(hooks: &CollectionMutationHooks, cancellation: &CancellationToken) {
     #[cfg(any(test, feature = "acceptance-harness"))]
     if let Some(hook) = hooks.before_add.as_ref() {
-        hook(cancellation);
+        hook(cancellation.clone()).await;
         tokio::task::yield_now().await;
     }
     #[cfg(not(any(test, feature = "acceptance-harness")))]
@@ -1313,7 +1360,7 @@ async fn run_add_after_mark_hook(
 ) {
     #[cfg(any(test, feature = "acceptance-harness"))]
     if let Some(hook) = hooks.after_add_mark.as_ref() {
-        hook(cancellation);
+        hook(cancellation.clone()).await;
         tokio::task::yield_now().await;
     }
     #[cfg(not(any(test, feature = "acceptance-harness")))]
@@ -1323,7 +1370,7 @@ async fn run_add_after_mark_hook(
 async fn run_remove_before_hook(hooks: &CollectionMutationHooks, cancellation: &CancellationToken) {
     #[cfg(any(test, feature = "acceptance-harness"))]
     if let Some(hook) = hooks.before_remove.as_ref() {
-        hook(cancellation);
+        hook(cancellation.clone()).await;
         tokio::task::yield_now().await;
     }
     #[cfg(not(any(test, feature = "acceptance-harness")))]
@@ -1336,7 +1383,7 @@ async fn run_remove_after_mark_hook(
 ) {
     #[cfg(any(test, feature = "acceptance-harness"))]
     if let Some(hook) = hooks.after_remove_mark.as_ref() {
-        hook(cancellation);
+        hook(cancellation.clone()).await;
         tokio::task::yield_now().await;
     }
     #[cfg(not(any(test, feature = "acceptance-harness")))]
@@ -1468,7 +1515,7 @@ fn domain_error(_: DomainValueError) -> HandlerError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fmt, future::Future, sync::Arc, time::Duration};
+    use std::{collections::BTreeMap, fmt, future::Future, time::Duration};
 
     use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
     use anytype::test_util::{
@@ -2813,7 +2860,7 @@ mod tests {
         object_id: &str,
         after_mark: bool,
     ) {
-        let cancel: MutationDispatchHook = Arc::new(CancellationToken::cancel);
+        let cancel = cancellation_hook();
         let hooks = if after_mark {
             CollectionMutationHooks {
                 after_add_mark: Some(cancel),
@@ -2882,7 +2929,7 @@ mod tests {
         object_id: &str,
         after_mark: bool,
     ) {
-        let cancel: MutationDispatchHook = Arc::new(CancellationToken::cancel);
+        let cancel = cancellation_hook();
         let hooks = if after_mark {
             CollectionMutationHooks {
                 after_remove_mark: Some(cancel),
