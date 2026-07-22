@@ -17,6 +17,12 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[cfg(feature = "acceptance-harness")]
+use any_mcp::collection_member_toolset::{
+    AcceptanceMetricsSnapshot, AcceptanceMutationMode, ViewsWriteAcceptanceDirect,
+};
+#[cfg(feature = "acceptance-harness")]
+use anytype::test_util::retry_definitive_rate_limit;
 use anytype::{
     error::AnytypeError,
     prelude::{AnytypeClient, ClientConfig, Color, Tag},
@@ -839,6 +845,187 @@ fn spawn_disposable_standard_driver(
     })
 }
 
+#[cfg(feature = "acceptance-harness")]
+fn spawn_disposable_views_write_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    mode: &str,
+) -> TestResult<SpawnedViewsWriteDriver> {
+    let child_environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| TestError::Assertion {
+            message: "disposable callback omitted its child environment".to_owned(),
+        })?
+        .clone();
+    let metrics_path =
+        std::env::temp_dir().join(format!("any-mcp-views-write-metrics-{}", unique_suffix()));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-views-write-acceptance"));
+    command.arg(&metrics_path).arg(mode);
+    child_environment.configure(&mut command)?;
+    let options = if mode.starts_with("preview-") {
+        DriverOptions::PREVIEW
+    } else {
+        DriverOptions::STANDARD
+    };
+    let cleanup_path = metrics_path.clone();
+    let driver = ctx.spawn_owned_child(move || {
+        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(command, options, None))));
+        let stopped = Arc::clone(&driver);
+        (driver, move || {
+            *cleanup_record.lock().expect("child cleanup record lock") =
+                ChildCleanupRecord::Attempted;
+            let result = lock_driver(&stopped)
+                .take()
+                .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
+            let _ = std::fs::remove_file(&cleanup_path);
+            match result {
+                Ok(()) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Stopped;
+                    Ok(())
+                }
+                Err(_) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Failed;
+                    Err(TestError::Assertion {
+                        message: "registered views-write stdio child did not stop cleanly"
+                            .to_owned(),
+                    })
+                }
+            }
+        })
+    })?;
+    Ok(SpawnedViewsWriteDriver {
+        driver,
+        metrics_path,
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+struct SpawnedViewsWriteDriver {
+    driver: Arc<Mutex<Option<StdioDriver>>>,
+    metrics_path: PathBuf,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl SpawnedViewsWriteDriver {
+    fn offline_classification(mode: &str) -> TestResult<Self> {
+        let metrics_path = std::env::temp_dir().join(format!(
+            "any-mcp-views-write-offline-metrics-{}",
+            unique_suffix()
+        ));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-views-write-acceptance"));
+        command.env_clear().arg(&metrics_path).arg(mode);
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
+        let options = if mode.starts_with("preview-") {
+            DriverOptions::PREVIEW
+        } else {
+            DriverOptions::STANDARD
+        };
+        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(command, options, None))));
+        let value = Self {
+            driver,
+            metrics_path,
+        };
+        value.initialize()?;
+        Ok(value)
+    }
+
+    fn initialize(&self) -> TestResult<()> {
+        let mut driver = lock_driver(&self.driver);
+        let initialized = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            driver
+                .as_mut()
+                .ok_or_else(|| TestError::Assertion {
+                    message: "registered views-write child disappeared".to_owned(),
+                })?
+                .initialize();
+            Ok(())
+        }));
+        match initialized {
+            Ok(result) => result,
+            Err(_) => {
+                if let Some(driver) = driver.take() {
+                    let (_, _, category) = driver.finish_after_panic();
+                    eprintln!("views-write acceptance child initialization failed: {category}");
+                }
+                Err(TestError::Assertion {
+                    message: "views-write child initialization failed".to_owned(),
+                })
+            }
+        }
+    }
+
+    fn call(&self, name: &'static str, arguments: Value) -> TestResult<AcceptanceCall> {
+        let mut driver = lock_driver(&self.driver);
+        let response = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            driver
+                .as_mut()
+                .ok_or_else(|| TestError::Assertion {
+                    message: "registered views-write child disappeared".to_owned(),
+                })
+                .map(|driver| {
+                    driver.request("tools/call", json!({"name":name,"arguments":arguments}))
+                })
+        }));
+        let response = match response {
+            Ok(result) => result?,
+            Err(_) => {
+                if let Some(driver) = driver.take() {
+                    let (_, _, category) = driver.finish_after_panic();
+                    eprintln!("views-write acceptance child {category} during {name}");
+                }
+                return Err(TestError::Assertion {
+                    message: "views-write child call failed".to_owned(),
+                });
+            }
+        };
+        let result = response.get("result").ok_or_else(|| TestError::Assertion {
+            message: "views-write child omitted tool result".to_owned(),
+        })?;
+        Ok(AcceptanceCall {
+            is_error: result["isError"].as_bool().unwrap_or(false),
+            structured: result["structuredContent"].clone(),
+        })
+    }
+
+    fn metrics(&self) -> TestResult<AcceptanceMetricsSnapshot> {
+        let encoded =
+            std::fs::read_to_string(&self.metrics_path).map_err(|_| TestError::Assertion {
+                message: "read views-write child metrics".to_owned(),
+            })?;
+        let line = encoded
+            .lines()
+            .next_back()
+            .ok_or_else(|| TestError::Assertion {
+                message: "views-write child metrics are empty".to_owned(),
+            })?;
+        serde_json::from_str(line).map_err(|_| TestError::Assertion {
+            message: "decode views-write child metrics".to_owned(),
+        })
+    }
+
+    fn finish(&self) -> TestResult<()> {
+        if let Some(driver) = lock_driver(&self.driver).take() {
+            driver.try_finish().map_err(|_| TestError::Assertion {
+                message: "views-write child did not stop cleanly".to_owned(),
+            })?;
+        }
+        let _ = std::fs::remove_file(&self.metrics_path);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AcceptanceCall {
+    is_error: bool,
+    structured: Value,
+}
+
 async fn run_spawned_standard_baseline(scenario: ScenarioId) {
     let record = Arc::new(Mutex::new(CaseRecord::default()));
     let captured = Arc::clone(&record);
@@ -1285,6 +1472,606 @@ async fn headless_stdio_members_minimizes_personal_data() {
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned members suite skipped before callback: {reason:?}");
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[derive(Clone, Copy, Debug)]
+enum ViewsWriteTransport {
+    Direct,
+    Stable,
+    Preview,
+}
+
+#[cfg(feature = "acceptance-harness")]
+enum ViewsWriteDriver {
+    Direct(Box<ViewsWriteAcceptanceDirect>),
+    Spawned(Box<SpawnedViewsWriteDriver>),
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl ViewsWriteDriver {
+    fn call(
+        &mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = TestResult<AcceptanceCall>> + Send + '_>>
+    {
+        Box::pin(async move {
+            match self {
+                Self::Direct(driver) => {
+                    let result = driver.call(name, arguments).await;
+                    Ok(AcceptanceCall {
+                        is_error: result.is_error.unwrap_or(false),
+                        structured: result.structured_content.unwrap_or(Value::Null),
+                    })
+                }
+                Self::Spawned(driver) => driver.call(name, arguments),
+            }
+        })
+    }
+
+    fn metrics(&self) -> TestResult<AcceptanceMetricsSnapshot> {
+        match self {
+            Self::Direct(driver) => Ok(driver.metrics()),
+            Self::Spawned(driver) => driver.metrics(),
+        }
+    }
+
+    fn finish(&self) -> TestResult<()> {
+        if let Self::Spawned(driver) = self {
+            driver.finish()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn acceptance_mode_name(
+    transport: ViewsWriteTransport,
+    mode: AcceptanceMutationMode,
+    read_only: bool,
+) -> TestResult<String> {
+    let protocol = match transport {
+        ViewsWriteTransport::Stable => "stable",
+        ViewsWriteTransport::Preview => "preview",
+        ViewsWriteTransport::Direct => {
+            return Err(TestError::Assertion {
+                message: "direct acceptance has no process mode".to_owned(),
+            });
+        }
+    };
+    let stage = if read_only {
+        "read-only"
+    } else {
+        match mode {
+            AcceptanceMutationMode::Normal => "normal",
+            AcceptanceMutationMode::CancelAddBeforeMark => "add-before",
+            AcceptanceMutationMode::CancelAddAfterMark => "add-after",
+            AcceptanceMutationMode::CancelRemoveBeforeMark => "remove-before",
+            AcceptanceMutationMode::CancelRemoveAfterMark => "remove-after",
+            AcceptanceMutationMode::ClassifyAdd403 => "classify-403",
+        }
+    };
+    Ok(format!("{protocol}-{stage}"))
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn views_write_driver(
+    ctx: &TestContext,
+    transport: ViewsWriteTransport,
+    mode: AcceptanceMutationMode,
+    read_only: bool,
+) -> TestResult<ViewsWriteDriver> {
+    match transport {
+        ViewsWriteTransport::Direct => {
+            ViewsWriteAcceptanceDirect::new(ctx.client.clone(), read_only, mode)
+                .map(Box::new)
+                .map(ViewsWriteDriver::Direct)
+                .map_err(|_| TestError::Assertion {
+                    message: "construct direct views-write acceptance driver".to_owned(),
+                })
+        }
+        ViewsWriteTransport::Stable | ViewsWriteTransport::Preview => {
+            let mode_name = acceptance_mode_name(transport, mode, read_only)?;
+            let cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+            let driver = spawn_disposable_views_write_driver(ctx, cleanup, &mode_name)?;
+            driver.initialize()?;
+            Ok(ViewsWriteDriver::Spawned(Box::new(driver)))
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn metrics_delta(
+    before: AcceptanceMetricsSnapshot,
+    after: AcceptanceMetricsSnapshot,
+) -> AcceptanceMetricsSnapshot {
+    AcceptanceMetricsSnapshot {
+        http_logical: after.http_logical - before.http_logical,
+        http_physical: after.http_physical - before.http_physical,
+        observer_attempts: after.observer_attempts - before.observer_attempts,
+        query_rounds: after.query_rounds - before.query_rounds,
+        subscribe_attempts: after.subscribe_attempts - before.subscribe_attempts,
+        foreground_close_attempts: after.foreground_close_attempts
+            - before.foreground_close_attempts,
+        foreground_close_successes: after.foreground_close_successes
+            - before.foreground_close_successes,
+        fallback_close_attempts: after.fallback_close_attempts - before.fallback_close_attempts,
+        add_dispatches: after.add_dispatches - before.add_dispatches,
+        remove_dispatches: after.remove_dispatches - before.remove_dispatches,
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn expected_metrics(
+    http: u64,
+    observers: u64,
+    queries: u64,
+    adds: u64,
+    removes: u64,
+) -> AcceptanceMetricsSnapshot {
+    AcceptanceMetricsSnapshot {
+        http_logical: http,
+        http_physical: http,
+        observer_attempts: observers,
+        query_rounds: queries,
+        subscribe_attempts: queries,
+        foreground_close_attempts: queries,
+        foreground_close_successes: queries,
+        fallback_close_attempts: 0,
+        add_dispatches: adds,
+        remove_dispatches: removes,
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn acceptance_call_with_metrics(
+    driver: &mut ViewsWriteDriver,
+    name: &'static str,
+    arguments: Value,
+    expected: AcceptanceMetricsSnapshot,
+) -> TestResult<AcceptanceCall> {
+    let before = driver.metrics()?;
+    let result = driver.call(name, arguments).await?;
+    let after = driver.metrics()?;
+    if metrics_delta(before, after) != expected {
+        return Err(TestError::Assertion {
+            message: "views-write acceptance metrics mismatch".to_owned(),
+        });
+    }
+    Ok(result)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn require_membership_result(
+    result: &AcceptanceCall,
+    collection_id: &str,
+    object_id: &str,
+    membership: &str,
+) -> TestResult<()> {
+    if result.is_error
+        || result.structured
+            != json!({
+                "collection_id":collection_id,
+                "object_id":object_id,
+                "membership":membership
+            })
+    {
+        return Err(TestError::Assertion {
+            message: "views-write acceptance returned wrong membership identity".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_views_write_transport_scenario(
+    ctx: &TestContext,
+    transport: ViewsWriteTransport,
+    collection_id: &str,
+    query_id: &str,
+    object_id: &str,
+    saved_view_id: &str,
+) -> TestResult<Vec<AcceptanceCall>> {
+    let args = json!({
+        "space":ctx.space_id,
+        "collection_id":collection_id,
+        "object_id":object_id
+    });
+    let mut transcript = Vec::new();
+    let mut driver = views_write_driver(ctx, transport, AcceptanceMutationMode::Normal, false)?;
+
+    let query_rejection = acceptance_call_with_metrics(
+        &mut driver,
+        "collection_member_add",
+        json!({
+            "space":ctx.space_id,
+            "collection_id":query_id,
+            "object_id":object_id
+        }),
+        expected_metrics(1, 0, 0, 0, 0),
+    )
+    .await?;
+    if !query_rejection.is_error || query_rejection.structured["code"] != "upstream" {
+        return Err(TestError::Assertion {
+            message: "query rejection was not exact".to_owned(),
+        });
+    }
+    transcript.push(query_rejection);
+
+    for (mode, code) in [
+        (AcceptanceMutationMode::CancelAddBeforeMark, "upstream"),
+        (AcceptanceMutationMode::CancelAddAfterMark, "conflict"),
+    ] {
+        let mut cancellation = views_write_driver(ctx, transport, mode, false)?;
+        let result = acceptance_call_with_metrics(
+            &mut cancellation,
+            "collection_member_add",
+            args.clone(),
+            expected_metrics(2, 1, 3, 0, 0),
+        )
+        .await?;
+        if !result.is_error || result.structured["code"] != code {
+            return Err(TestError::Assertion {
+                message: "add cancellation boundary was not exact".to_owned(),
+            });
+        }
+        cancellation.finish()?;
+        transcript.push(result);
+    }
+
+    let added = acceptance_call_with_metrics(
+        &mut driver,
+        "collection_member_add",
+        args.clone(),
+        expected_metrics(5, 2, 5, 1, 0),
+    )
+    .await?;
+    require_membership_result(&added, collection_id, object_id, "present")?;
+    transcript.push(added);
+
+    for (mode, code) in [
+        (AcceptanceMutationMode::CancelRemoveBeforeMark, "upstream"),
+        (AcceptanceMutationMode::CancelRemoveAfterMark, "conflict"),
+    ] {
+        let mut cancellation = views_write_driver(ctx, transport, mode, false)?;
+        let result = acceptance_call_with_metrics(
+            &mut cancellation,
+            "collection_member_remove",
+            args.clone(),
+            expected_metrics(2, 1, 2, 0, 0),
+        )
+        .await?;
+        if !result.is_error || result.structured["code"] != code {
+            return Err(TestError::Assertion {
+                message: "remove cancellation boundary was not exact".to_owned(),
+            });
+        }
+        cancellation.finish()?;
+        transcript.push(result);
+    }
+
+    let add_noop = acceptance_call_with_metrics(
+        &mut driver,
+        "collection_member_add",
+        args.clone(),
+        expected_metrics(2, 1, 2, 0, 0),
+    )
+    .await?;
+    require_membership_result(&add_noop, collection_id, object_id, "present")?;
+    transcript.push(add_noop);
+
+    let mut cursor = None;
+    let mut canonical_ids = Vec::new();
+    loop {
+        let mut input = json!({
+            "space":ctx.space_id,
+            "collection_id":collection_id,
+            "limit":1
+        });
+        if let Some(token) = cursor.take() {
+            input["cursor"] = Value::String(token);
+        }
+        let page = acceptance_call_with_metrics(
+            &mut driver,
+            "collection_member_list",
+            input,
+            expected_metrics(1, 0, 1, 0, 0),
+        )
+        .await?;
+        if page.is_error {
+            return Err(TestError::Assertion {
+                message: "canonical membership page failed".to_owned(),
+            });
+        }
+        canonical_ids.extend(
+            page.structured["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item["object_id"].as_str().map(str::to_owned)),
+        );
+        cursor = page.structured["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    if !canonical_ids.contains(&object_id.to_owned()) {
+        return Err(TestError::Assertion {
+            message: "canonical pagination omitted present member".to_owned(),
+        });
+    }
+    let presentation = ctx
+        .client
+        .view_list_objects(&ctx.space_id, collection_id)
+        .view(saved_view_id)
+        .limit(61)
+        .list()
+        .await?;
+    if presentation.items.iter().any(|item| item.id == object_id) {
+        return Err(TestError::Assertion {
+            message: "saved-view filtering altered canonical membership".to_owned(),
+        });
+    }
+
+    let removed = acceptance_call_with_metrics(
+        &mut driver,
+        "collection_member_remove",
+        args.clone(),
+        expected_metrics(5, 2, 5, 0, 1),
+    )
+    .await?;
+    require_membership_result(&removed, collection_id, object_id, "absent")?;
+    transcript.push(removed);
+
+    let remove_noop = acceptance_call_with_metrics(
+        &mut driver,
+        "collection_member_remove",
+        args.clone(),
+        expected_metrics(2, 1, 3, 0, 0),
+    )
+    .await?;
+    require_membership_result(&remove_noop, collection_id, object_id, "absent")?;
+    transcript.push(remove_noop);
+    driver.finish()?;
+
+    let canonical = ctx
+        .client
+        .collection_membership_page(&ctx.space_id, collection_id, 61, None)
+        .await?;
+    if canonical.object_ids.contains(&object_id.to_owned()) {
+        return Err(TestError::Assertion {
+            message: "canonical membership retained removed member".to_owned(),
+        });
+    }
+    let survived = ctx.client.object(&ctx.space_id, object_id).get().await?;
+    if survived.id != object_id || survived.space_id != ctx.space_id {
+        return Err(TestError::Assertion {
+            message: "membership removal changed the member object".to_owned(),
+        });
+    }
+
+    let mut read_only = views_write_driver(ctx, transport, AcceptanceMutationMode::Normal, true)?;
+    let read_only_result = acceptance_call_with_metrics(
+        &mut read_only,
+        "collection_member_add",
+        args.clone(),
+        expected_metrics(0, 0, 0, 0, 0),
+    )
+    .await?;
+    if !read_only_result.is_error || read_only_result.structured["code"] != "validation" {
+        return Err(TestError::Assertion {
+            message: "read-only mutation gate was not exact".to_owned(),
+        });
+    }
+    read_only.finish()?;
+    transcript.push(read_only_result);
+
+    let mut classify = views_write_driver(
+        ctx,
+        transport,
+        AcceptanceMutationMode::ClassifyAdd403,
+        false,
+    )?;
+    for _ in 0..2 {
+        let rejection = acceptance_call_with_metrics(
+            &mut classify,
+            "collection_member_add",
+            args.clone(),
+            expected_metrics(0, 0, 0, 0, 0),
+        )
+        .await?;
+        if !rejection.is_error || rejection.structured["code"] != "authentication" {
+            return Err(TestError::Assertion {
+                message: "offline 403 classification was not exact".to_owned(),
+            });
+        }
+        transcript.push(rejection);
+    }
+    classify.finish()?;
+    Ok(transcript)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+async fn offline_direct_stable_preview_403_mapping_is_exact_and_io_free() {
+    use anytype::prelude::{ClientConfig, HttpCredentials};
+
+    let client = AnytypeClient::with_config(ClientConfig {
+        base_url: Some("http://127.0.0.1:1".to_owned()),
+        keystore: Some("env".to_owned()),
+        keystore_service: Some("views-write-offline-direct".to_owned()),
+        app_name: "views-write-offline-direct".to_owned(),
+        disable_cache: true,
+        ..ClientConfig::default()
+    })
+    .expect("offline direct classifier client");
+    client.set_api_key(HttpCredentials::new("offline-direct-token"));
+    let direct =
+        ViewsWriteAcceptanceDirect::new(client, false, AcceptanceMutationMode::ClassifyAdd403)
+            .expect("offline direct classifier");
+    let stable = SpawnedViewsWriteDriver::offline_classification("stable-classify-403")
+        .expect("offline stable classifier child");
+    let preview = SpawnedViewsWriteDriver::offline_classification("preview-classify-403")
+        .expect("offline preview classifier child");
+    let mut drivers = [
+        ViewsWriteDriver::Direct(Box::new(direct)),
+        ViewsWriteDriver::Spawned(Box::new(stable)),
+        ViewsWriteDriver::Spawned(Box::new(preview)),
+    ];
+    let arguments = json!({
+        "space":"bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "collection_id":"bafyreicccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "object_id":"bafyreiooooooooooooooooooooooooooooooooooooooooooooooooooo"
+    });
+    let expected_rejection = json!({
+        "code":"authentication",
+        "message":"Anytype authentication failed. Verify the configured credentials and retry."
+    });
+    let mut baseline = None;
+    for driver in &mut drivers {
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let result = acceptance_call_with_metrics(
+                driver,
+                "collection_member_add",
+                arguments.clone(),
+                expected_metrics(0, 0, 0, 0, 0),
+            )
+            .await
+            .expect("offline 403 classification call");
+            assert!(result.is_error);
+            assert_eq!(result.structured, expected_rejection);
+            results.push(result);
+        }
+        if let Some(expected) = baseline.as_ref() {
+            assert_eq!(&results, expected);
+        } else {
+            baseline = Some(results);
+        }
+        driver.finish().expect("offline classifier shutdown");
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-views-write-stdio",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let suffix = unique_suffix();
+                let collection_type = ctx
+                    .create_collection_type_fixture(format!("MCP stdio collection {suffix}"))
+                    .await?;
+                let collection = ctx
+                    .create_collection_fixture(
+                        &collection_type,
+                        format!("MCP stdio members {suffix}"),
+                    )
+                    .await?;
+                let name_a = format!("MCP stdio member A {suffix}");
+                let object_a = retry_definitive_rate_limit("stdio member A", || async {
+                    ctx.client
+                        .new_object(&ctx.space_id, "page")
+                        .name(&name_a)
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_object(&object_a.id);
+                let object_c = retry_definitive_rate_limit("stdio member C", || async {
+                    ctx.client
+                        .new_object(&ctx.space_id, "page")
+                        .name(format!("MCP stdio member C {suffix}"))
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_object(&object_c.id);
+                let set_type = ctx
+                    .client
+                    .types(&ctx.space_id)
+                    .list()
+                    .await?
+                    .items
+                    .iter()
+                    .find(|typ| typ.layout == anytype::objects::ObjectLayout::Set)
+                    .cloned()
+                    .ok_or_else(|| TestError::Assertion {
+                        message: "disposable space has no Set-layout type".to_owned(),
+                    })?;
+                let query = retry_definitive_rate_limit("stdio query", || async {
+                    ctx.client
+                        .new_object(&ctx.space_id, &set_type.key)
+                        .name(format!("MCP stdio query {suffix}"))
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_object(&query.id);
+                ctx.client
+                    .view_add_objects(&ctx.space_id, &collection.id, [&object_a.id])
+                    .await?;
+                let saved_view = ctx
+                    .create_collection_view_fixture(
+                        &collection.id,
+                        format!("MCP stdio only A {suffix}"),
+                    )
+                    .await?;
+                ctx.add_collection_name_filter_fixture(&collection.id, &saved_view.id, &name_a)
+                    .await?;
+
+                let direct = Box::pin(run_views_write_transport_scenario(
+                    ctx.as_ref(),
+                    ViewsWriteTransport::Direct,
+                    &collection.id,
+                    &query.id,
+                    &object_c.id,
+                    &saved_view.id,
+                ))
+                .await?;
+                let stable = Box::pin(run_views_write_transport_scenario(
+                    ctx.as_ref(),
+                    ViewsWriteTransport::Stable,
+                    &collection.id,
+                    &query.id,
+                    &object_c.id,
+                    &saved_view.id,
+                ))
+                .await?;
+                let preview = Box::pin(run_views_write_transport_scenario(
+                    ctx.as_ref(),
+                    ViewsWriteTransport::Preview,
+                    &collection.id,
+                    &query.id,
+                    &object_c.id,
+                    &saved_view.id,
+                ))
+                .await?;
+                if direct != stable || direct != preview {
+                    return Err(TestError::Assertion {
+                        message: "direct, stable, and preview results diverged".to_owned(),
+                    });
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned views-write acceptance");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("spawned views-write acceptance skipped before callback: {reason:?}");
         }
     }
 }
@@ -1891,5 +2678,33 @@ mod keystore_tests {
         for secret in [HTTP_TOKEN, CIPHER, BODY] {
             assert!(!report.contains(secret));
         }
+    }
+
+    #[test]
+    fn shipped_binary_rejects_views_write_before_credentials_or_protocol_input() {
+        const HTTP_TOKEN: &str = "unreachable-views-write-secret";
+        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+        command
+            .env("ANY_MCP_TOOLSETS", "views-write")
+            .env("ANYTYPE_URL", "http://127.0.0.1:1")
+            .env("ANYTYPE_KEYSTORE", "env")
+            .env("ANYTYPE_KEY_HTTP_TOKEN", HTTP_TOKEN)
+            .env_remove("ANY_MCP_PROTOCOL");
+        let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(2));
+        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+            .expect_err("unsupported production selector exits before reading stdin");
+        let panic_text = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic");
+        assert_eq!(panic_text, "bounded protocol process failed: child_eof");
+        let failure = process
+            .take_failure()
+            .expect("unsupported selector retains bounded startup evidence");
+        let stderr = String::from_utf8_lossy(&failure.output.stderr);
+        assert!(stderr.contains("unsupported optional toolset selector"));
+        assert!(!stderr.contains(HTTP_TOKEN));
+        assert!(failure.output.stdout.is_empty());
     }
 }

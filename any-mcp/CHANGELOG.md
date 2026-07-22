@@ -68,8 +68,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   cover the exact nine-tool inventory and cleanup without mock or fault
   servers; independent property-scoped API reads verify the created and updated
   tag IDs, names, colors, and ownership rather than trusting MCP output alone.
-- Add the production-unlinked `collection_member_list` read slice for the
-  future `views-write` registry. The strict tool resolves one space, binds an
+- Add the production-unlinked `collection_member_list`,
+  `collection_member_add`, and `collection_member_remove` slice for the future
+  `views-write` registry. The strict list tool resolves one space, binds an
   opaque cursor to the exact resolved space, collection, limit, registry, and
   operation, and delegates one page to `anytype-api`'s canonical direct
   membership primitive. Results expose only ordered `object_id` values, cap
@@ -77,14 +78,51 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   evidence in process-local cursor state, and fail closed on identity,
   counter, duplicate, shift, or terminal-arithmetic inconsistencies. The
   locked maximum result is 33,650 bytes and 31,770 `o200k_base` tokens; 62 is
-  rejected. Direct-router and production stdio protocol tests use an
-  authenticated disposable collection whose saved view hides one still-listed
-  member. Stable-ID calls prove exactly one logical/physical HTTP GET, one
+  rejected. Direct-router tests and a feature-gated, test-only spawned stdio
+  child use an authenticated disposable collection whose saved view hides one
+  still-listed member. The child runs the real stdio server path without
+  linking `views-write` into the shipped binary, which still rejects that
+  selector before protocol input or credential I/O. The two desired-state mutations accept only exact collection and
+  object IDs, use the independent canonical observer for preflight and
+  verification, return zero-write success when already desired, and otherwise
+  dispatch one non-replayed POST or one logical replay-safe DELETE. Successful
+  writes require a complete observation within ten attempts; post-dispatch
+  cancellation, malformed success, retry-admission status, transport failure,
+  or incomplete evidence returns fixed reread guidance without redispatch.
+  Stable-ID list calls prove exactly one logical/physical HTTP GET, one
   canonical membership round, one subscribe, one confirmed foreground close,
   zero cleanup fallbacks, and cursor-mismatch rejection with zero membership
-  I/O through both transports. Deterministic transport-fault cases remain
-  deferred to the P4 fault injector, and the incomplete registry stays
-  unavailable until `any-uda.4`.
+  I/O. One shared direct, spawned-stable-stdio, and spawned-preview-stdio
+  mutation scenario asserts Set/query rejection, add/no-op/remove/no-op, both
+  sides of both cancellation markers, read-only zero-I/O rejection, exact full
+  identity, canonical `limit=1` pagination, saved-view independence, object
+  survival, transport parity, and exact logical/physical HTTP, observer, query,
+  subscribe, foreground-close, fallback, and write deltas. Test-only child
+  modes append payload-free counter snapshots to a private file. Canonical
+  presence is checked after the repeated add no-op and before the actual
+  remove. A separate offline direct/stable/preview process test invokes the
+  same production 403 classifier twice and proves authentication mapping,
+  parity, no redispatch, and zero HTTP/mutation work; it is explicitly not a
+  substitute for genuine live permission denial. Add treats only completed
+  400/401/403/404/409/422 POST statuses as
+  definitive; redirects, 408/410/425/429, every other 4xx, 5xx, transport, and
+  malformed-success outcomes are indeterminate. Token snapshots lock all
+  three contributions under stable and preview protocol envelopes and the complete
+  61-item result. Deterministic transport-fault cases remain deferred to the
+  P4 fault injector. The registry stays unavailable until `any-uda.4`.
+  Genuine live collection POST 403 evidence remains unsafe without a
+  disposable non-owner collection and owner cleanup; read-only fixtures remain
+  untouched and invalid credentials are not treated as permission evidence.
+  An earlier live attempt could not enter the scenario because disposable-space
+  creation applied but its response never completed; every ledger-named space
+  was removed with absence proved. A later run entered the shared scenario and
+  exposed debug-build worker stack overflows in add and list, now corrected by
+  boxing their operation/executor boundaries. The next run reached stable
+  `CancelAddBeforeMark` but its add response timed out with empty child stderr;
+  cleanup acknowledged deletion and proved absence. Injected cancellation now
+  uses a handler-local token instead of canceling rmcp's response channel. This
+  final correction passes offline gates and awaits an authorized live rerun and
+  independent review.
 - Add the production-unlinked four-workflow `chats` read slice through
   `anytype-api` only: bounded chat discovery, opaque older-message pagination,
   exact message reads, and in-chat full-text search. The minimized projections

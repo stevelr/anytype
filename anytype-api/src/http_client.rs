@@ -240,6 +240,15 @@ pub(crate) struct RawHttpResponse {
     pub(crate) body: Bytes,
 }
 
+/// Result of a completed mutation whose exact HTTP rejection status is part of
+/// the caller's safety decision.
+pub(crate) enum PreservedStatusResponse<T> {
+    /// The server returned a successful status and a valid response body.
+    Success(T),
+    /// The server completed the response with this exact non-success status.
+    Rejected { status: u16 },
+}
+
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpRequest")
@@ -809,6 +818,31 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// Makes one authenticated POST attempt while preserving its exact
+    /// completed non-success status.
+    ///
+    /// This path is intentionally narrow: it never follows redirects, retries,
+    /// or maps statuses into broader [`AnytypeError`] variants. Transport,
+    /// response-read, and deserialization failures remain errors because they
+    /// do not prove the mutation outcome.
+    pub(crate) async fn post_request_preserve_status<T: DeserializeOwned, B: Serialize + Sync>(
+        &self,
+        path: &str,
+        body: &B,
+        query: QueryWithFilters,
+    ) -> Result<PreservedStatusResponse<T>> {
+        let req = HttpRequest {
+            method: Method::POST,
+            path: path.into(),
+            query: query.params,
+            body: Some(Bytes::from(
+                serde_json::to_vec(body)
+                    .map_err(|source| AnytypeError::Serialization { source })?,
+            )),
+        };
+        self.send_preserving_status(req).await
+    }
+
     /// Makes an authenticated POST whose successful JSON may contain a
     /// complete document body.
     pub(crate) async fn post_document_request<T: DeserializeOwned, B: Serialize + Sync>(
@@ -1244,6 +1278,95 @@ impl HttpClient {
     pub(crate) async fn send<T: DeserializeOwned>(&self, req: HttpRequest) -> Result<T> {
         self.send_with_limit(req, self.response_limits.json_bytes)
             .await
+    }
+
+    async fn send_preserving_status<T: DeserializeOwned>(
+        &self,
+        req: HttpRequest,
+    ) -> Result<PreservedStatusResponse<T>> {
+        self.limits.validate_query(&req.query)?;
+        if let Some(ref body) = req.body {
+            self.limits.validate_body(
+                body,
+                &format!("http {} {}", req.method, diagnostic_path(&req.path)),
+            )?;
+        }
+        let api_key = self.get_api_key();
+        let Some(token) = api_key.token() else {
+            return Err(AnytypeError::Auth {
+                message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
+            });
+        };
+        self.metrics.increment_logical_operations();
+        let full_url = format!("{}{}", self.base_url, req.path);
+        let body = req.body.clone().unwrap_or_default();
+        let body_size = body.len() as u64;
+        log_request(&req);
+        self.metrics.increment_requests();
+        self.metrics.add_bytes_sent(body_size);
+        debug!(
+            target: "anytype::http",
+            http_method = %req.method,
+            http_path = %diagnostic_path(&req.path),
+            physical_attempt = 1,
+            "HTTP physical attempt"
+        );
+        let response = self
+            .client
+            .request(req.method.clone(), full_url)
+            .query(&req.query)
+            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .map_err(|source| {
+                self.metrics.increment_errors();
+                log_http_transport(&req, 1);
+                AnytypeError::Http {
+                    method: req.method.to_string(),
+                    url: req.path.clone(),
+                    source,
+                }
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                self.metrics.increment_rate_limit_errors();
+            } else {
+                self.metrics.increment_errors();
+            }
+            log_http_status(&req, status, "preserved_status", 1);
+            return Ok(PreservedStatusResponse::Rejected {
+                status: status.as_u16(),
+            });
+        }
+        let body = match self
+            .read_bounded(
+                response,
+                self.response_limits.json_bytes,
+                req.method.as_str(),
+                &req.path,
+            )
+            .await
+        {
+            Ok(body) => body,
+            Err(error) => {
+                self.metrics.increment_errors();
+                return Err(error);
+            }
+        };
+        log_response(&req.path, &body);
+        let value = match deserialize_json(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                self.metrics.increment_errors();
+                return Err(error);
+            }
+        };
+        self.metrics.increment_success();
+        Ok(PreservedStatusResponse::Success(value))
     }
 
     #[allow(clippy::too_many_lines)]

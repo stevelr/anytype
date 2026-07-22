@@ -135,6 +135,22 @@ impl RuntimeConfig {
         })
     }
 
+    /// Loads environment configuration against a test-owned optional registry
+    /// inventory without changing the production-linked inventory.
+    #[cfg(feature = "acceptance-harness")]
+    pub(crate) fn from_env_with_optional_metadata(
+        optional_metadata: &[OptionalToolsetMetadata],
+    ) -> Result<Self, ConfigError> {
+        Self::from_lookup_with_optional_metadata(
+            |name| match std::env::var(name) {
+                Ok(value) => Ok(Some(value)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::non_unicode(name)),
+            },
+            optional_metadata,
+        )
+    }
+
     /// Builds the `anytype-api` configuration without copying credentials into
     /// the MCP runtime.
     #[must_use]
@@ -166,7 +182,7 @@ impl RuntimeConfig {
         Self::from_lookup_with_optional_metadata(lookup, &metadata)
     }
 
-    fn from_lookup_with_optional_metadata<F>(
+    pub(crate) fn from_lookup_with_optional_metadata<F>(
         lookup: F,
         optional_metadata: &[OptionalToolsetMetadata],
     ) -> Result<Self, ConfigError>

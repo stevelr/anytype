@@ -287,9 +287,10 @@ pub mod prelude {
         },
         // Views (Lists, Collections, Queries)
         views::{
-            CollectionMembershipContinuation, CollectionMembershipEvidenceKind,
-            CollectionMembershipMetricsSnapshot, CollectionMembershipObservation,
-            CollectionMembershipPage, CollectionMembershipState, View, ViewLayout,
+            CollectionMemberAddOutcome, CollectionMembershipContinuation,
+            CollectionMembershipEvidenceKind, CollectionMembershipMetricsSnapshot,
+            CollectionMembershipObservation, CollectionMembershipPage, CollectionMembershipState,
+            View, ViewLayout,
         },
     };
     pub use crate::{

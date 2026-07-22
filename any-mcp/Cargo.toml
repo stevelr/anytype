@@ -19,6 +19,17 @@ description = "Bounded, workflow-oriented Model Context Protocol server for Anyt
 [[bin]]
 name = "any-mcp"
 
+[[bin]]
+name = "any-mcp-views-write-acceptance"
+path = "src/bin/views_write_acceptance.rs"
+required-features = ["acceptance-harness"]
+
+[features]
+default = []
+# Builds a test-only stdio child that composes the reviewed, production-unlinked
+# views-write slice. This is not a supported server binary or registry link.
+acceptance-harness = []
+
 [dependencies]
 anytype.workspace = true
 base64.workspace = true
