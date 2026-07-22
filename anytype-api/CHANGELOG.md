@@ -26,6 +26,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Refresh the live mutation retry inventory for the seven bounded fixture
+  setup retries now owned by `test_util`, restoring the full integration gate.
 - Member reads now accept the REST API's bounded `_participant` IDs and
   network identities as safe URL path segments instead of incorrectly
   requiring every member reference to have object-CID shape. The fixed
