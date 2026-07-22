@@ -282,8 +282,8 @@ pub mod prelude {
         // Views (Lists, Collections, Queries)
         views::{
             CollectionMembershipContinuation, CollectionMembershipEvidenceKind,
-            CollectionMembershipObservation, CollectionMembershipPage, CollectionMembershipState,
-            View, ViewLayout,
+            CollectionMembershipMetricsSnapshot, CollectionMembershipObservation,
+            CollectionMembershipPage, CollectionMembershipState, View, ViewLayout,
         },
     };
     pub use crate::{

@@ -32,7 +32,16 @@
 //! # }
 //! ```
 
-use std::{fmt::Write as _, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    fmt::Write as _,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anytype_rpc::{
     anytype::rpc::object::{search_subscribe, search_unsubscribe},
@@ -70,6 +79,46 @@ const SPACE_ID_KEY: &str = "spaceId";
 const ARCHIVED_KEY: &str = "isArchived";
 const DELETED_KEY: &str = "isDeleted";
 const RESOLVED_LAYOUT_KEY: &str = "resolvedLayout";
+
+/// Cumulative work counters for canonical collection-membership reads.
+///
+/// The counters are owned by [`AnytypeClient`] and shared by its clones. They
+/// expose transport work without retaining subscription IDs, object IDs, or
+/// upstream payloads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CollectionMembershipMetricsSnapshot {
+    /// Complete canonical membership query rounds entered.
+    pub query_rounds: u64,
+    /// `ObjectSearchSubscribe` RPCs polled by those rounds.
+    pub subscribe_attempts: u64,
+    /// Foreground `ObjectSearchUnsubscribe` cleanup attempts.
+    pub foreground_close_attempts: u64,
+    /// Foreground cleanup attempts that confirmed release.
+    pub foreground_close_successes: u64,
+    /// Detached close fallbacks polled after cancellation or failed cleanup.
+    pub fallback_close_attempts: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CollectionMembershipMetrics {
+    query_rounds: AtomicU64,
+    subscribe_attempts: AtomicU64,
+    foreground_close_attempts: AtomicU64,
+    foreground_close_successes: AtomicU64,
+    fallback_close_attempts: AtomicU64,
+}
+
+impl CollectionMembershipMetrics {
+    pub(crate) fn snapshot(&self) -> CollectionMembershipMetricsSnapshot {
+        CollectionMembershipMetricsSnapshot {
+            query_rounds: self.query_rounds.load(Ordering::Relaxed),
+            subscribe_attempts: self.subscribe_attempts.load(Ordering::Relaxed),
+            foreground_close_attempts: self.foreground_close_attempts.load(Ordering::Relaxed),
+            foreground_close_successes: self.foreground_close_successes.load(Ordering::Relaxed),
+            fallback_close_attempts: self.fallback_close_attempts.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Exact direct-membership state established by a complete bounded read.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -169,11 +218,16 @@ type MembershipCleanupAction = Arc<dyn Fn() -> MembershipCleanupFuture + Send + 
 /// either RPC boundary drops the guard and starts one detached, bounded retry.
 struct MembershipSubscriptionGuard {
     action: MembershipCleanupAction,
+    metrics: Option<Arc<CollectionMembershipMetrics>>,
     armed: bool,
 }
 
 impl MembershipSubscriptionGuard {
-    fn new(grpc: AnytypeGrpcClient, subscription_id: String) -> Self {
+    fn new(
+        grpc: AnytypeGrpcClient,
+        subscription_id: String,
+        metrics: Arc<CollectionMembershipMetrics>,
+    ) -> Self {
         let action: MembershipCleanupAction = Arc::new(move || {
             let grpc = grpc.clone();
             let subscription_id = subscription_id.clone();
@@ -181,6 +235,7 @@ impl MembershipSubscriptionGuard {
         });
         Self {
             action,
+            metrics: Some(metrics),
             armed: true,
         }
     }
@@ -189,15 +244,38 @@ impl MembershipSubscriptionGuard {
     fn from_action(action: MembershipCleanupAction) -> Self {
         Self {
             action,
+            metrics: None,
+            armed: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_action_with_metrics(
+        action: MembershipCleanupAction,
+        metrics: Arc<CollectionMembershipMetrics>,
+    ) -> Self {
+        Self {
+            action,
+            metrics: Some(metrics),
             armed: true,
         }
     }
 
     async fn cleanup(&mut self) -> Result<()> {
+        if let Some(metrics) = self.metrics.as_ref() {
+            metrics
+                .foreground_close_attempts
+                .fetch_add(1, Ordering::Relaxed);
+        }
         let result = (self.action)().await.map_err(|_| {
             membership_evidence_error(CollectionMembershipEvidenceKind::CleanupFailed)
         });
         if result.is_ok() {
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics
+                    .foreground_close_successes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             self.armed = false;
         }
         result
@@ -210,8 +288,14 @@ impl Drop for MembershipSubscriptionGuard {
             return;
         }
         let action = Arc::clone(&self.action);
+        let metrics = self.metrics.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
+                if let Some(metrics) = metrics.as_ref() {
+                    metrics
+                        .fallback_close_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 let _ = action().await;
             });
         }
@@ -723,6 +807,10 @@ async fn canonical_membership_page_query(
     limit: u32,
     continuation: Option<&CollectionMembershipContinuation>,
 ) -> Result<CollectionMembershipPage> {
+    client
+        .collection_membership_metrics
+        .query_rounds
+        .fetch_add(1, Ordering::Relaxed);
     let grpc = client.grpc_client().await?;
     let subscription_id = new_membership_subscription_id()?;
     let mut commands = grpc.client_commands();
@@ -735,7 +823,10 @@ async fn canonical_membership_page_query(
     );
     let mut request = with_token_request(Request::new(request), grpc.token())?;
     request.set_timeout(MEMBERSHIP_RPC_TIMEOUT);
-    let mut cleanup = MembershipSubscriptionGuard::new(grpc, subscription_id.clone());
+    let metrics = Arc::clone(&client.collection_membership_metrics);
+    let mut cleanup =
+        MembershipSubscriptionGuard::new(grpc, subscription_id.clone(), Arc::clone(&metrics));
+    metrics.subscribe_attempts.fetch_add(1, Ordering::Relaxed);
     let response = match tokio::time::timeout(
         MEMBERSHIP_RPC_TIMEOUT,
         commands.object_search_subscribe(request),
@@ -957,13 +1048,20 @@ async fn exact_membership_query(
     collection_id: Option<&str>,
     object_id: &str,
 ) -> Result<MembershipQueryState> {
+    client
+        .collection_membership_metrics
+        .query_rounds
+        .fetch_add(1, Ordering::Relaxed);
     let grpc = client.grpc_client().await?;
     let subscription_id = new_membership_subscription_id()?;
     let mut commands = grpc.client_commands();
     let request = membership_query_request(space_id, collection_id, object_id, &subscription_id);
     let mut request = with_token_request(Request::new(request), grpc.token())?;
     request.set_timeout(MEMBERSHIP_RPC_TIMEOUT);
-    let mut cleanup = MembershipSubscriptionGuard::new(grpc, subscription_id.clone());
+    let metrics = Arc::clone(&client.collection_membership_metrics);
+    let mut cleanup =
+        MembershipSubscriptionGuard::new(grpc, subscription_id.clone(), Arc::clone(&metrics));
+    metrics.subscribe_attempts.fetch_add(1, Ordering::Relaxed);
     let response = match tokio::time::timeout(
         MEMBERSHIP_RPC_TIMEOUT,
         commands.object_search_subscribe(request),
@@ -1945,14 +2043,24 @@ mod tests {
     async fn confirmed_membership_cleanup_disarms_lifecycle_guard() {
         let cleaned = Arc::new(Notify::new());
         let calls = Arc::new(AtomicUsize::new(0));
+        let metrics = Arc::new(CollectionMembershipMetrics::default());
         let action = successful_cleanup_action(Arc::clone(&calls), Arc::clone(&cleaned));
         {
-            let mut guard = MembershipSubscriptionGuard::from_action(action);
+            let mut guard =
+                MembershipSubscriptionGuard::from_action_with_metrics(action, Arc::clone(&metrics));
             guard.cleanup().await.expect("explicit cleanup");
         }
         cleaned.notified().await;
         tokio::task::yield_now().await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            metrics.snapshot(),
+            CollectionMembershipMetricsSnapshot {
+                foreground_close_attempts: 1,
+                foreground_close_successes: 1,
+                ..CollectionMembershipMetricsSnapshot::default()
+            }
+        );
     }
 
     #[tokio::test]
@@ -2003,6 +2111,7 @@ mod tests {
     async fn membership_page_cleanup_failure_is_typed_and_has_one_fallback() {
         let calls = Arc::new(AtomicUsize::new(0));
         let fallback = Arc::new(Notify::new());
+        let metrics = Arc::new(CollectionMembershipMetrics::default());
         let action: MembershipCleanupAction = Arc::new({
             let calls = Arc::clone(&calls);
             let fallback = Arc::clone(&fallback);
@@ -2019,7 +2128,8 @@ mod tests {
                 })
             }
         });
-        let mut guard = MembershipSubscriptionGuard::from_action(action);
+        let mut guard =
+            MembershipSubscriptionGuard::from_action_with_metrics(action, Arc::clone(&metrics));
         let mut response = page_response(vec![record(PAGE_A, SPACE_ID)], 1, 0, 0);
         response.sub_id = "different-subscription".to_owned();
         assert_evidence_kind(
@@ -2041,6 +2151,14 @@ mod tests {
             .expect("one bounded fallback cleanup");
         tokio::task::yield_now().await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            metrics.snapshot(),
+            CollectionMembershipMetricsSnapshot {
+                foreground_close_attempts: 1,
+                fallback_close_attempts: 1,
+                ..CollectionMembershipMetricsSnapshot::default()
+            }
+        );
     }
 
     fn object_fixture(id: &str, space_id: &str, layout: ObjectLayout) -> Object {

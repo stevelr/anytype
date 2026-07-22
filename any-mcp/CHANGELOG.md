@@ -19,8 +19,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   locked maximum result is 33,650 bytes and 31,770 `o200k_base` tokens; 62 is
   rejected. Direct-router and production stdio protocol tests use an
   authenticated disposable collection whose saved view hides one still-listed
-  member. Deterministic transport-fault cases remain deferred to the P4 fault
-  injector, and the incomplete registry stays unavailable until `any-uda.4`.
+  member. Stable-ID calls prove exactly one logical/physical HTTP GET, one
+  canonical membership round, one subscribe, one confirmed foreground close,
+  zero cleanup fallbacks, and cursor-mismatch rejection with zero membership
+  I/O through both transports. Deterministic transport-fault cases remain
+  deferred to the P4 fault injector, and the incomplete registry stays
+  unavailable until `any-uda.4`.
 - Amend the approved `views-write` canonical membership-page prerequisite to
   match real Heart offset-window evidence: `total` and exact row arithmetic
   establish terminal versus continued pages, while Heart's relative

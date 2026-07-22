@@ -260,6 +260,7 @@ pub struct AnytypeClient {
     pub(crate) cache: Arc<AnytypeCache>,
     pub(crate) grpc: Arc<Mutex<Option<AnytypeGrpcClient>>>,
     pub(crate) type_property_metrics: Arc<crate::types::TypePropertyClassificationMetrics>,
+    pub(crate) collection_membership_metrics: Arc<crate::views::CollectionMembershipMetrics>,
 }
 
 impl std::fmt::Debug for AnytypeClient {
@@ -374,6 +375,9 @@ impl AnytypeClient {
             grpc: Arc::new(Mutex::new(None)),
             type_property_metrics: Arc::new(
                 crate::types::TypePropertyClassificationMetrics::default(),
+            ),
+            collection_membership_metrics: Arc::new(
+                crate::views::CollectionMembershipMetrics::default(),
             ),
         })
     }
@@ -554,6 +558,14 @@ impl AnytypeClient {
         &self,
     ) -> crate::types::TypePropertyClassificationMetricsSnapshot {
         self.type_property_metrics.snapshot()
+    }
+
+    /// Returns cumulative canonical collection-membership work counters.
+    #[must_use]
+    pub fn collection_membership_metrics(
+        &self,
+    ) -> crate::views::CollectionMembershipMetricsSnapshot {
+        self.collection_membership_metrics.snapshot()
     }
 
     /// Enables cache.

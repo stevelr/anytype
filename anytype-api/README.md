@@ -650,6 +650,11 @@ closed instead of producing an empty or truncated page. Separate pages are not
 snapshot-isolated; restart from the first page after concurrent membership
 changes.
 
+`client.collection_membership_metrics()` returns cumulative, payload-free
+counters for query rounds, subscribe attempts, foreground close attempts and
+successes, and fallback close attempts. Cloned clients share the same counters;
+the snapshot never retains collection, object, or subscription identifiers.
+
 ## Status and Compatibility
 
 The crate has 100% coverage of the Anytype REST api 2025-11-08.
