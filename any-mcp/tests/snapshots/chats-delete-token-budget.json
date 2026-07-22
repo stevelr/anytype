@@ -1,0 +1,14 @@
+{
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)",
+  "catalog_ceiling_tokens": 2000,
+  "catalog": {
+    "tools": ["chat_message_delete"],
+    "sha256": "f8b89c645b5aecefcd882c978385665c5678ab5116bd382bb7c929a41058a33f",
+    "tokens": 654
+  },
+  "maximum_result": {
+    "sha256": "4a1595775eadafab46f05af7368e93ba0ef934c63ffd310069ed272e358beccb",
+    "structured_bytes": 197,
+    "encoded_result_tokens": 196
+  }
+}
