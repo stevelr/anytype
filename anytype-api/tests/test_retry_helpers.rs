@@ -140,7 +140,7 @@ fn live_mutation_retry_inventory_is_current() {
             "test_filters.rs",
             include_str!("test_filters.rs"),
             0,
-            24,
+            25,
             0,
             0,
         ),
@@ -226,6 +226,6 @@ fn live_mutation_retry_inventory_is_current() {
         excluded_calls += excluded;
     }
 
-    assert_eq!(setup_calls, 125);
+    assert_eq!(setup_calls, 126);
     assert_eq!(excluded_calls, 60);
 }

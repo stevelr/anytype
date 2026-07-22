@@ -44,6 +44,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Empty-filter integration coverage now creates and cleanup-registers its own
+  exact object instead of assuming the ambient test space is nonempty.
 - Space creation now rejects an empty name through configured client limits
   before HTTP dispatch; the live validation suite no longer creates untracked
   unnamed spaces while probing server-dependent behavior.
