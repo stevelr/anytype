@@ -145,13 +145,44 @@ impl AnytypeClient {
     /// # }
     /// ```
     pub async fn resolve_space_id(&self, space_id_or_name: &str) -> Result<String> {
+        self.resolve_space_id_with_page_limit(space_id_or_name, None)
+            .await
+    }
+
+    /// Resolves a space name or ID while bounding each resolver page body.
+    ///
+    /// Stable IDs return without I/O. A nonzero `page_response_limit` applies
+    /// independently to every physical page response used by name resolution.
+    pub async fn resolve_space_id_bounded(
+        &self,
+        space_id_or_name: &str,
+        page_response_limit: u64,
+    ) -> Result<String> {
+        if page_response_limit == 0 {
+            return Err(AnytypeError::Validation {
+                message: "space resolver page response limit must be nonzero".to_owned(),
+            });
+        }
+        self.resolve_space_id_with_page_limit(space_id_or_name, Some(page_response_limit))
+            .await
+    }
+
+    async fn resolve_space_id_with_page_limit(
+        &self,
+        space_id_or_name: &str,
+        page_response_limit: Option<u64>,
+    ) -> Result<String> {
         if looks_like_object_id(space_id_or_name) {
             return Ok(space_id_or_name.to_string());
         }
 
         let needle = space_id_or_name.to_lowercase();
+        let mut request = self.spaces().limit(RESOLVE_PAGE_SIZE);
+        if let Some(limit) = page_response_limit {
+            request = request.response_limit_bytes(limit);
+        }
         let matches = scan_paged_matches(
-            self.spaces().limit(RESOLVE_PAGE_SIZE).list().await?,
+            request.list().await?,
             "space",
             space_id_or_name,
             |space| space.name.to_lowercase() == needle,

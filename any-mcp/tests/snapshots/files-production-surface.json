@@ -1,0 +1,198 @@
+{
+  "read_only_catalog_sha256": "3f4fad407847007b7f116da4bb8ee271e46c81c7035b4fcab9725433d3b4776f",
+  "read_only_resource_templates": {
+    "resourceTemplates": [
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "Read one previously identified, hash-bound Anytype file byte chunk.",
+        "name": "anytype_file_bytes",
+        "title": "Anytype file byte chunk",
+        "uriTemplate": "anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}"
+      },
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "A complete bounded Anytype document body",
+        "mimeType": "text/markdown",
+        "name": "anytype_document",
+        "title": "Anytype document",
+        "uriTemplate": "anytype://spaces/{space_id}/objects/{object_id}"
+      }
+    ]
+  },
+  "read_only_status_call": {
+    "content": [
+      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+    ],
+    "isError": false,
+    "structuredContent": { "active_toolsets": ["files"], "configured_toolsets": ["files"] }
+  },
+  "read_only_tool_names": [
+    "file_metadata",
+    "file_read",
+    "object_get",
+    "object_search",
+    "optional_toolset_status",
+    "property_list",
+    "server_status",
+    "space_list",
+    "tag_list",
+    "template_list",
+    "type_list",
+    "view_list",
+    "view_object_list"
+  ],
+  "read_write_catalog_sha256": "c6dd89f5bf2d6a82ef64db1896dfd984ecee7bd0685c24d6b07d17ad83205ca5",
+  "read_write_resource_templates": {
+    "resourceTemplates": [
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "Read one previously identified, hash-bound Anytype file byte chunk.",
+        "name": "anytype_file_bytes",
+        "title": "Anytype file byte chunk",
+        "uriTemplate": "anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}"
+      },
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "A complete bounded Anytype document body",
+        "mimeType": "text/markdown",
+        "name": "anytype_document",
+        "title": "Anytype document",
+        "uriTemplate": "anytype://spaces/{space_id}/objects/{object_id}"
+      }
+    ]
+  },
+  "read_write_status_call": {
+    "content": [
+      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+    ],
+    "isError": false,
+    "structuredContent": { "active_toolsets": ["files"], "configured_toolsets": ["files"] }
+  },
+  "read_write_tool_names": [
+    "file_metadata",
+    "file_read",
+    "file_upload",
+    "object_archive",
+    "object_create",
+    "object_edit",
+    "object_get",
+    "object_search",
+    "object_update",
+    "optional_toolset_status",
+    "property_list",
+    "server_status",
+    "space_list",
+    "tag_list",
+    "template_list",
+    "type_list",
+    "view_list",
+    "view_object_list"
+  ],
+  "stdio_read_only_catalog_control": {
+    "cacheScope": "public",
+    "resultType": "complete",
+    "ttlMs": 3600000
+  },
+  "stdio_read_only_catalog_sha256": "8e9496e86995a0c425c530ca6df846d51fcb5bade122d24a8133759a9095e920",
+  "stdio_read_only_resource_templates": {
+    "cacheScope": "public",
+    "resourceTemplates": [
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "Read one previously identified, hash-bound Anytype file byte chunk.",
+        "name": "anytype_file_bytes",
+        "title": "Anytype file byte chunk",
+        "uriTemplate": "anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}"
+      },
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "A complete bounded Anytype document body",
+        "mimeType": "text/markdown",
+        "name": "anytype_document",
+        "title": "Anytype document",
+        "uriTemplate": "anytype://spaces/{space_id}/objects/{object_id}"
+      }
+    ],
+    "resultType": "complete",
+    "ttlMs": 3600000
+  },
+  "stdio_read_only_status_call": {
+    "content": [
+      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": { "active_toolsets": ["files"], "configured_toolsets": ["files"] }
+  },
+  "stdio_read_only_tool_names": [
+    "file_metadata",
+    "file_read",
+    "object_get",
+    "object_search",
+    "optional_toolset_status",
+    "property_list",
+    "server_status",
+    "space_list",
+    "tag_list",
+    "template_list",
+    "type_list",
+    "view_list",
+    "view_object_list"
+  ],
+  "stdio_read_write_catalog_control": {
+    "cacheScope": "public",
+    "resultType": "complete",
+    "ttlMs": 3600000
+  },
+  "stdio_read_write_catalog_sha256": "31b6cd9eaf22ff0475ffbcd3275b9ca4635ef39239f73ad40dbeac1a0167e1a9",
+  "stdio_read_write_resource_templates": {
+    "cacheScope": "public",
+    "resourceTemplates": [
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "Read one previously identified, hash-bound Anytype file byte chunk.",
+        "name": "anytype_file_bytes",
+        "title": "Anytype file byte chunk",
+        "uriTemplate": "anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}"
+      },
+      {
+        "annotations": { "audience": ["user", "assistant"], "priority": 0.5 },
+        "description": "A complete bounded Anytype document body",
+        "mimeType": "text/markdown",
+        "name": "anytype_document",
+        "title": "Anytype document",
+        "uriTemplate": "anytype://spaces/{space_id}/objects/{object_id}"
+      }
+    ],
+    "resultType": "complete",
+    "ttlMs": 3600000
+  },
+  "stdio_read_write_status_call": {
+    "content": [
+      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": { "active_toolsets": ["files"], "configured_toolsets": ["files"] }
+  },
+  "stdio_read_write_tool_names": [
+    "file_metadata",
+    "file_read",
+    "file_upload",
+    "object_archive",
+    "object_create",
+    "object_edit",
+    "object_get",
+    "object_search",
+    "object_update",
+    "optional_toolset_status",
+    "property_list",
+    "server_status",
+    "space_list",
+    "tag_list",
+    "template_list",
+    "type_list",
+    "view_list",
+    "view_object_list"
+  ]
+}

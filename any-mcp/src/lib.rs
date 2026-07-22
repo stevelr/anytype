@@ -21,8 +21,9 @@
 //! - [`ApplicationProfile::Standard`] advertises the complete fourteen-tool
 //!   Phase 1 catalog; read-only standard retains its ten read tools.
 //! - [`OptionalToolsetSelection`] is empty unless `ANY_MCP_TOOLSETS` names a
-//!   complete registry linked into the binary. `members` is the only linked
-//!   optional registry; incomplete slices such as chat reads remain unavailable.
+//!   complete registry linked into the binary. The default-off `members` and
+//!   `files` registries are linked; incomplete slices such as chat reads remain
+//!   unavailable and Phase 1 remains the default catalog.
 //! - Resources advertise only the canonical
 //!   `anytype://spaces/{space_id}/objects/{object_id}` template. Instance
 //!   listing is empty and document discovery remains paginated through
@@ -62,7 +63,6 @@ pub mod cursor;
 pub mod discovery;
 pub mod domain;
 pub mod error;
-#[cfg(test)]
 mod file_content;
 pub mod filters;
 pub mod handler_support;

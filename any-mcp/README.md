@@ -146,8 +146,8 @@ stated maximum.
 - `ANY_MCP_TOOLSETS` is absent by default. A present selector is an exact,
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
-  fail closed without being echoed. `members` is the only production-linked
-  optional registry; incomplete registries such as `chats` remain rejected;
+  fail closed without being echoed. The linked production names are `members`
+  and `files`; incomplete registries such as `chats` remain rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
@@ -330,12 +330,13 @@ and resource names return method-not-found before argument decoding or I/O.
 Stable and experimental protocol modes use the same composed catalog.
 
 Only `compact` and `standard` application profiles exist. The optional
-`members` registry is linked and can be selected explicitly with
-`ANY_MCP_TOOLSETS=members`; it is absent by default. Proposed `schema`,
-`views-write`, `files`, `chats`, and `admin` toolsets are not selectable in
-this release. Some have production-unlinked implementation slices, but their
-names become valid selectors only when a complete independently reviewed
-production registry is linked.
+`members` and `files` registries are linked and can be selected explicitly with
+`ANY_MCP_TOOLSETS=members`, `ANY_MCP_TOOLSETS=files`, or a comma-separated
+selection; they are absent by default. Proposed `schema`, `views-write`,
+`chats`, and `admin` toolsets are not selectable in this release. Some have
+production-unlinked implementation slices, but their names become valid
+selectors only when a complete independently reviewed production registry is
+linked.
 
 The production-unlinked schema-space slice implements `space_create` and
 `space_update` for later composition into that complete `schema` registry.
@@ -448,8 +449,9 @@ malformed-success, 5xx, and connection-fault injection remain deferred to the
 external P4 design. The slice stays absent from production discovery until the
 complete independently reviewed `schema` registry lands.
 
-The production-unlinked `files` read slice now provides the reusable internal
-contracts and handlers for that eventual registry. `file_metadata` performs an
+The default-off `files` registry provides `file_metadata`, `file_read`, and
+`file_upload` in read-write mode; read-only mode removes only `file_upload`.
+`file_metadata` performs an
 exact object-identity preflight and bounded `HEAD`; `file_read` returns at most
 65,536 bytes with reconciled range, size, MIME, strong ETag, and modification
 date evidence. Successful reads contain compact structured metadata once plus
@@ -459,15 +461,16 @@ hash-bound
 `anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}` URI;
 the matching internal resource reader re-fetches the exact range and rejects
 identity, length, representation, or digest drift as not found. Text frames are
-capped at 70,000 encoded bytes and all file results at 96 KiB. This slice uses
-`anytype-api` only and is covered through scripted HTTP and preview stdio
-dispatch, but it is intentionally absent from production discovery until the
-remaining files workflows and real-headless acceptance are complete. The
-entire module is compiled only for tests, and the internal handlers currently
-reject non-ID space references before I/O. They must not be production-linked
-until `anytype-api` exposes the approved 1-MiB/page resolver plus caller-scoped
-cumulative retry and error-evidence controls; the generic
-`resolve_space_id` path is intentionally not used by this slice.
+capped at 70,000 encoded bytes and all file results at 96 KiB. `file_upload`
+accepts only canonical inline base64 of 1 through 65,536 decoded bytes and
+never accepts a host path or URL. It sends one multipart POST under a
+71,680-byte request ceiling, retains the candidate, and requires an exact
+object preflight, metadata `HEAD`, and complete bounded hash readback. Same-key
+retries never repeat the POST: verified results are reused and retained
+candidates receive safe read-only reverification. Space names use bounded
+1-MiB resolver pages; stable IDs avoid resolver I/O. The registry uses HTTP
+only, lists no resource instances, and exposes the same single hash-bound
+resource template in both access modes.
 
 The server also advertises static resource and tool capabilities without
 `listChanged` or resource subscriptions. `resources/templates/list` exposes
@@ -798,6 +801,29 @@ cover schema/runtime parity, cursor binding, authorization, ambiguity,
 returned identity, malformed values, cancellation, timeout, 5xx handling,
 redaction, and the aggregate ceilings. Ignored disposable-space tests retain
 the real-server happy path.
+
+### Optional files workflows
+
+Set `ANY_MCP_TOOLSETS=files` before startup to add `file_metadata`,
+`file_read`, `file_upload`, the hash-bound file-byte resource template, and the
+common `optional_toolset_status` tool. The selector remains default-off and uses
+HTTP only. Read-only mode keeps metadata, reads, and resource reads while
+removing upload before argument decoding or upstream access.
+
+One upload request carries only a bounded display name, optional MIME essence,
+canonical base64 bytes, and a process-local idempotency key. It has no host
+path, URL, delete, preload, rich-file, or filesystem-root surface. File reads
+return at most 65,536 bytes as exactly one native image/audio/text/blob content
+block plus bounded structured metadata; the returned URI can reread only that
+exact hash-bound chunk.
+
+Resolution, cohort admission and waiting, the single POST, and complete
+verification share one absolute invocation deadline. A waiter never extends
+the leader's deadline. Admission lock contention is deadline-bound, and an
+expired admission cannot return cached success or retain an unsupervised
+running entry. Upload cohorts are isolated per runtime and invalidated
+by the client's non-secret HTTP credential generation, so replacing or
+clearing credentials cannot replay a success cached for an earlier principal.
 
 ### Document resources
 

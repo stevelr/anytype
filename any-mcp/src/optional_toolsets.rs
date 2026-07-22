@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cursor::CursorStore,
+    file_content::FILE_CONTENT_REGISTRY,
     member_toolset::MEMBERS_REGISTRY,
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     runtime::RuntimeContext,
@@ -331,7 +332,8 @@ pub fn production_optional_registries() -> &'static [&'static dyn OptionalToolse
     &PRODUCTION_OPTIONAL_REGISTRIES
 }
 
-static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 1] = [MEMBERS_REGISTRY];
+static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 2] =
+    [MEMBERS_REGISTRY, &FILE_CONTENT_REGISTRY];
 
 /// Returns immutable production metadata without building schemas or clients.
 #[must_use]

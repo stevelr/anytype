@@ -100,3 +100,12 @@ read-only composition is 10,044 tokens. The 132,038-token representative
 maximum result uses 100 distinct valid 256-character IDs and deterministic
 token-dense 512-scalar Unicode local names, avoiding an unrealistically
 compressible repeated-character corpus.
+
+`files-token-budget.json` locks the files registry's complete standard
+read-write/read-only compositions, common status contribution, per-tool and
+maximum result costs, and exact multipart body evidence. Its maximum upload
+request uses U+10FFFF, an actual four-byte UTF-8 scalar, at every scalar-bound
+SpaceRef, FileName, and IdempotencyKey field. The companion
+`files-production-surface.json` locks the exact composed tool order and hashes,
+resource templates, optional status calls, and preview-stdio cache/completion
+behavior.

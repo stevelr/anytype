@@ -235,6 +235,9 @@ impl<'a> FilesClient<'a> {
             created_in_context_ref: None,
             file_name: None,
             mime: None,
+            multipart_limit_bytes: None,
+            response_limit_bytes: None,
+            error_limit_bytes: None,
         }
     }
 
@@ -366,6 +369,9 @@ impl<'a> FilesClient<'a> {
             mime: None,
             data: None,
             source_path: None,
+            multipart_limit_bytes: None,
+            response_limit_bytes: None,
+            error_limit_bytes: None,
         }
     }
 
@@ -999,6 +1005,9 @@ pub struct FileHttpUploadRequest<'a> {
     mime: Option<String>,
     data: Option<Bytes>,
     source_path: Option<PathBuf>,
+    multipart_limit_bytes: Option<u64>,
+    response_limit_bytes: Option<u64>,
+    error_limit_bytes: Option<u64>,
 }
 
 impl FileHttpUploadRequest<'_> {
@@ -1033,6 +1042,27 @@ impl FileHttpUploadRequest<'_> {
         self
     }
 
+    /// Set the maximum complete serialized multipart request-body bytes.
+    #[must_use]
+    pub const fn multipart_limit_bytes(mut self, limit: u64) -> Self {
+        self.multipart_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Set the maximum successful upload response-body bytes.
+    #[must_use]
+    pub const fn response_limit_bytes(mut self, limit: u64) -> Self {
+        self.response_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Set the maximum definitive-error response-body bytes.
+    #[must_use]
+    pub const fn error_limit_bytes(mut self, limit: u64) -> Self {
+        self.error_limit_bytes = Some(limit);
+        self
+    }
+
     /// Perform the upload, returning the server's [`FileUploadResponse`].
     ///
     /// # Errors
@@ -1047,6 +1077,11 @@ impl FileHttpUploadRequest<'_> {
             self.source_path,
             self.file_name,
             self.mime,
+            FileHttpUploadLimits {
+                multipart: self.multipart_limit_bytes,
+                response: self.response_limit_bytes,
+                error: self.error_limit_bytes,
+            },
         )
         .await
     }
@@ -1543,6 +1578,9 @@ pub struct FileUploadRequest<'a> {
     created_in_context_ref: Option<String>,
     file_name: Option<String>,
     mime: Option<String>,
+    multipart_limit_bytes: Option<u64>,
+    response_limit_bytes: Option<u64>,
+    error_limit_bytes: Option<u64>,
 }
 
 impl FileUploadRequest<'_> {
@@ -1570,6 +1608,27 @@ impl FileUploadRequest<'_> {
     #[must_use]
     pub fn mime(mut self, mime: impl Into<String>) -> Self {
         self.mime = Some(mime.into());
+        self
+    }
+
+    /// Set the maximum complete serialized multipart request-body bytes.
+    #[must_use]
+    pub const fn multipart_limit_bytes(mut self, limit: u64) -> Self {
+        self.multipart_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Set the maximum successful upload response-body bytes.
+    #[must_use]
+    pub const fn response_limit_bytes(mut self, limit: u64) -> Self {
+        self.response_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Set the maximum definitive-error response-body bytes.
+    #[must_use]
+    pub const fn error_limit_bytes(mut self, limit: u64) -> Self {
+        self.error_limit_bytes = Some(limit);
         self
     }
 
@@ -1619,6 +1678,11 @@ impl FileUploadRequest<'_> {
                 source_path,
                 self.file_name,
                 self.mime,
+                FileHttpUploadLimits {
+                    multipart: self.multipart_limit_bytes,
+                    response: self.response_limit_bytes,
+                    error: self.error_limit_bytes,
+                },
             )
             .await?;
             return Ok(file_from_http_upload(&self.space_id, response));
@@ -1765,6 +1829,7 @@ async fn http_upload_file(
     source_path: Option<PathBuf>,
     file_name: Option<String>,
     mime: Option<String>,
+    limits: FileHttpUploadLimits,
 ) -> Result<FileUploadResponse> {
     let (bytes, name) = match (data, source_path) {
         (Some(data), path) => (
@@ -1796,18 +1861,84 @@ async fn http_upload_file(
         }
     };
 
-    let mut part = reqwest::multipart::Part::bytes(bytes.to_vec())
-        .file_name(name.unwrap_or_else(|| "file".to_string()));
-    if let Some(mime) = mime {
+    let name = name.unwrap_or_else(|| "file".to_string());
+    let mut part = reqwest::multipart::Part::bytes(bytes.to_vec()).file_name(name.clone());
+    if let Some(mime) = mime.as_ref() {
         part = part
-            .mime_str(&mime)
+            .mime_str(mime)
             .map_err(|err| AnytypeError::Validation {
                 message: format!("invalid mime type: {err}"),
             })?;
     }
     let form = reqwest::multipart::Form::new().part("file", part);
+    let serialized_body_bytes =
+        multipart_body_bytes(form.boundary(), &name, mime.as_deref(), bytes.len() as u64)?;
     let path = format!("/v1/spaces/{space_id}/files");
-    client.client.post_multipart(&path, form).await
+    client
+        .client
+        .post_multipart_with_limits(
+            &path,
+            form,
+            Some(serialized_body_bytes),
+            limits.multipart,
+            limits.response,
+            limits.error,
+        )
+        .await
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FileHttpUploadLimits {
+    multipart: Option<u64>,
+    response: Option<u64>,
+    error: Option<u64>,
+}
+
+fn multipart_body_bytes(
+    boundary: &str,
+    file_name: &str,
+    mime: Option<&str>,
+    data_bytes: u64,
+) -> Result<u64> {
+    let escaped_file_name_bytes = file_name
+        .bytes()
+        .try_fold(0_u64, |length, byte| {
+            length.checked_add(if matches!(byte, b'\\' | b'"' | b'\r' | b'\n') {
+                2
+            } else {
+                1
+            })
+        })
+        .ok_or_else(|| AnytypeError::Validation {
+            message: "multipart filename length overflowed".to_owned(),
+        })?;
+    let header_bytes = (b"Content-Disposition: form-data; name=\"file\"; filename=\"".len() as u64)
+        .checked_add(escaped_file_name_bytes)
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| {
+            mime.map_or(Some(value), |mime| {
+                value
+                    .checked_add(b"\r\nContent-Type: ".len() as u64)
+                    .and_then(|value| value.checked_add(mime.len() as u64))
+            })
+        })
+        .ok_or_else(|| AnytypeError::Validation {
+            message: "multipart header length overflowed".to_owned(),
+        })?;
+    let boundary_bytes = boundary.len() as u64;
+    2_u64
+        .checked_add(boundary_bytes)
+        .and_then(|value| value.checked_add(2))
+        .and_then(|value| value.checked_add(header_bytes))
+        .and_then(|value| value.checked_add(4))
+        .and_then(|value| value.checked_add(data_bytes))
+        .and_then(|value| value.checked_add(2))
+        .and_then(|value| value.checked_add(2))
+        .and_then(|value| value.checked_add(boundary_bytes))
+        .and_then(|value| value.checked_add(4))
+        .ok_or_else(|| AnytypeError::Validation {
+            message: "multipart request length overflowed".to_owned(),
+        })
 }
 
 fn file_from_http_upload(space_id: &str, response: FileUploadResponse) -> FileObject {
@@ -2365,7 +2496,7 @@ mod tests {
 
     use super::{
         FileSource, FileStyle, FileType, FileUploadResponse, file_from_http_upload,
-        upload_uses_rest,
+        multipart_body_bytes, upload_uses_rest,
     };
     use crate::{
         client::{AnytypeClient, ClientConfig},
@@ -2522,6 +2653,29 @@ mod tests {
         assert!(matches!(file.file_type, FileType::File));
         assert!(matches!(file.style, FileStyle::Auto));
         assert!(file.details.is_null());
+    }
+
+    #[test]
+    fn multipart_length_accounts_for_complete_framing_and_escaped_filename() {
+        let boundary = "0123456789abcdef0123456789abcdef";
+        let plain = multipart_body_bytes(boundary, "a__b.txt", Some("text/plain"), 5)
+            .expect("plain multipart length");
+        let escaped = multipart_body_bytes(boundary, "a\\\"b.txt", Some("text/plain"), 5)
+            .expect("escaped multipart length");
+        assert_eq!(escaped, plain + 2);
+
+        let maximum = multipart_body_bytes(
+            boundary,
+            &"é".repeat(512),
+            Some("application/octet-stream"),
+            65_536,
+        )
+        .expect("maximum files-toolset multipart length");
+        assert!(maximum <= 71_680);
+        assert!(
+            multipart_body_bytes(boundary, "file", None, 71_680).expect("over-limit fixture")
+                > 71_680
+        );
     }
 
     #[test]

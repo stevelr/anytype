@@ -13,6 +13,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   filter-add RPC and requires the server-assigned filter identity plus exact
   proto and REST readback before returning, enabling real-server tests to prove
   that canonical direct membership remains independent of view presentation.
+- Add per-upload multipart request, successful response, and error-response
+  byte ceilings for REST file uploads. The builder computes the complete
+  serialized one-part body before authentication or I/O, and the upload POST
+  is never replayed by middleware. Add bounded space-name resolution whose
+  finite response ceiling applies independently to every resolver page while
+  stable IDs still return without a request.
+- Add a non-secret in-memory HTTP credential generation counter. It advances
+  on every set or clear operation so process-local coordination can invalidate
+  principal-bound results without retaining or hashing bearer material. The
+  credential and generation are replaced under one lock, so observers cannot
+  see new or cleared credentials paired with the preceding generation.
+
 - Add canonical manual-collection membership pages independent of saved views,
   filters, and Kanban presentation. Exact collection REST identity, preserved
   native collection order with no ineffective `id` sort, 1..61 public pages,

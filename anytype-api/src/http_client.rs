@@ -45,6 +45,8 @@ pub struct HttpMetrics {
     total_requests: AtomicU64,
     /// Total number of physical HTTP attempts, including automatic replays
     physical_attempts: AtomicU64,
+    /// Total number of multipart POST requests dispatched
+    multipart_posts: AtomicU64,
     /// Total number of successful responses (2xx status codes)
     successful_responses: AtomicU64,
     /// Total number of error responses (non-2xx status codes, excluding rate limit errors)
@@ -72,6 +74,7 @@ impl HttpMetrics {
             logical_operations: self.logical_operations.load(Ordering::Relaxed),
             total_requests: self.total_requests.load(Ordering::Relaxed),
             physical_attempts: self.physical_attempts.load(Ordering::Relaxed),
+            multipart_posts: self.multipart_posts.load(Ordering::Relaxed),
             successful_responses: self.successful_responses.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
             retries: self.retries.load(Ordering::Relaxed),
@@ -89,6 +92,10 @@ impl HttpMetrics {
     fn increment_requests(&self) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         self.physical_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn increment_multipart_posts(&self) {
+        self.multipart_posts.fetch_add(1, Ordering::Relaxed);
     }
 
     fn increment_success(&self) {
@@ -130,6 +137,8 @@ pub struct HttpMetricsSnapshot {
     pub total_requests: u64,
     /// Total number of physical HTTP attempts, including automatic replays
     pub physical_attempts: u64,
+    /// Total number of multipart POST requests dispatched
+    pub multipart_posts: u64,
     /// Total number of successful responses (2xx status codes)
     pub successful_responses: u64,
     /// Total number of error responses (non-2xx status codes, excluding rate limit errors)
@@ -150,10 +159,11 @@ impl std::fmt::Display for HttpMetricsSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "logical_operations={} requests={} physical_attempts={} success={} errors={} retries={} rate_limit={}/{}s sent={} recv={}",
+            "logical_operations={} requests={} physical_attempts={} multipart_posts={} success={} errors={} retries={} rate_limit={}/{}s sent={} recv={}",
             self.logical_operations,
             self.total_requests,
             self.physical_attempts,
+            self.multipart_posts,
             self.successful_responses,
             self.errors,
             self.retries,
@@ -271,7 +281,7 @@ pub struct HttpClient {
     /// Base URL for API requests (e.g., "<http://localhost:31009>")
     pub base_url: String,
 
-    pub api_key: Arc<Mutex<HttpCredentials>>,
+    credential_state: Arc<Mutex<HttpCredentialState>>,
 
     limits: ValidationLimits,
 
@@ -282,6 +292,12 @@ pub struct HttpClient {
 
     /// HTTP request/response metrics
     pub metrics: Arc<HttpMetrics>,
+}
+
+#[derive(Clone)]
+struct HttpCredentialState {
+    credentials: HttpCredentials,
+    generation: u64,
 }
 
 impl fmt::Debug for HttpClient {
@@ -468,7 +484,10 @@ impl HttpClient {
         Ok(Self {
             client,
             base_url,
-            api_key: Arc::new(Mutex::new(http_creds)),
+            credential_state: Arc::new(Mutex::new(HttpCredentialState {
+                credentials: http_creds,
+                generation: 0,
+            })),
             limits,
             response_limits,
             rate_limit_max_retries,
@@ -552,24 +571,31 @@ impl HttpClient {
 
     /// Returns true if `api_key` has been initialized.
     pub fn has_key(&self) -> bool {
-        self.api_key.lock().has_creds()
+        self.credential_state.lock().credentials.has_creds()
     }
 
     /// Sets the API key for authenticated requests.
     pub fn set_api_key(&self, api_key: HttpCredentials) {
-        let mut write_key = self.api_key.lock();
-        *write_key = api_key;
+        let mut state = self.credential_state.lock();
+        state.credentials = api_key;
+        state.generation = state.generation.saturating_add(1);
     }
 
     /// Clears the api key if set. (in memory, does not change keystore)
     pub fn clear_api_key(&self) {
-        let mut write_key = self.api_key.lock();
-        *write_key = HttpCredentials::default();
+        let mut state = self.credential_state.lock();
+        state.credentials = HttpCredentials::default();
+        state.generation = state.generation.saturating_add(1);
+    }
+
+    /// Returns the non-secret generation of the in-memory HTTP credentials.
+    pub fn credential_generation(&self) -> u64 {
+        self.credential_state.lock().generation
     }
 
     /// Returns http token from memory (Does not refresh from keystore)
     pub(crate) fn get_api_key(&self) -> HttpCredentials {
-        self.api_key.lock().clone()
+        self.credential_state.lock().credentials.clone()
     }
 
     /// Makes an authenticated DELETE request.
@@ -1106,15 +1132,52 @@ impl HttpClient {
         }
     }
 
-    /// Makes an authenticated `multipart/form-data` POST request.
-    ///
-    /// Used for file upload (`POST /v1/spaces/{space_id}/files`). The JSON
-    /// response body is deserialized into `T`.
-    pub(crate) async fn post_multipart<T: DeserializeOwned>(
+    /// Makes one non-replayed multipart POST under caller-specific byte limits.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn post_multipart_with_limits<T: DeserializeOwned>(
         &self,
         path: &str,
         form: reqwest::multipart::Form,
+        serialized_body_bytes: Option<u64>,
+        request_body_limit: Option<u64>,
+        response_body_limit: Option<u64>,
+        error_body_limit: Option<u64>,
     ) -> Result<T> {
+        if let Some(limit) = request_body_limit {
+            if limit == 0 {
+                return Err(AnytypeError::Validation {
+                    message: "multipart request limit must be nonzero".to_owned(),
+                });
+            }
+            let actual = serialized_body_bytes.ok_or_else(|| AnytypeError::Validation {
+                message: "multipart request length is unavailable".to_owned(),
+            })?;
+            if actual > limit {
+                return Err(AnytypeError::Validation {
+                    message: format!(
+                        "multipart request body exceeds the {limit}-byte request limit"
+                    ),
+                });
+            }
+        }
+        let response_body_limit = response_body_limit.unwrap_or(self.response_limits.json_bytes);
+        if response_body_limit == 0 || response_body_limit > self.response_limits.json_bytes {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "multipart response limit must be between 1 and {} bytes",
+                    self.response_limits.json_bytes
+                ),
+            });
+        }
+        let error_body_limit = error_body_limit.unwrap_or(self.response_limits.error_bytes);
+        if error_body_limit == 0 || error_body_limit > self.response_limits.error_bytes {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "multipart error response limit must be between 1 and {} bytes",
+                    self.response_limits.error_bytes
+                ),
+            });
+        }
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
@@ -1125,6 +1188,10 @@ impl HttpClient {
         debug!(path = %diagnostic_path(path), "post_multipart");
         self.metrics.increment_logical_operations();
         self.metrics.increment_requests();
+        self.metrics.increment_multipart_posts();
+        if let Some(actual) = serialized_body_bytes {
+            self.metrics.add_bytes_sent(actual);
+        }
         let response = self
             .client
             .post(&full_url)
@@ -1142,7 +1209,12 @@ impl HttpClient {
         if !response.status().is_success() {
             self.metrics.increment_errors();
             let code = response.status().as_u16();
-            let message = self.read_error_body(response, "post", path).await?;
+            let message = String::from_utf8_lossy(
+                &self
+                    .read_bounded(response, error_body_limit, "post", path)
+                    .await?,
+            )
+            .into_owned();
             return Err(AnytypeError::ApiError {
                 code,
                 method: "post".to_string(),
@@ -1151,7 +1223,7 @@ impl HttpClient {
             });
         }
         let data = match self
-            .read_bounded(response, self.response_limits.json_bytes, "post", path)
+            .read_bounded(response, response_body_limit, "post", path)
             .await
         {
             Ok(data) => data,
@@ -1175,7 +1247,7 @@ impl HttpClient {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn send_with_limit<T: DeserializeOwned>(
+    pub(crate) async fn send_with_limit<T: DeserializeOwned>(
         &self,
         req: HttpRequest,
         response_limit: u64,
@@ -1501,6 +1573,14 @@ pub trait GetPaged {
         query: QueryWithFilters,
     ) -> Result<super::paged::PagedResult<T>>;
 
+    /// Makes a paginated GET whose every page uses the same response ceiling.
+    async fn get_request_paged_with_limit<T: DeserializeOwned + Send + 'static>(
+        &self,
+        path: &str,
+        query: QueryWithFilters,
+        response_limit: u64,
+    ) -> Result<super::paged::PagedResult<T>>;
+
     async fn post_request_paged<T: DeserializeOwned + Send + 'static, B: Serialize + Sync>(
         &self,
         path: &str,
@@ -1526,7 +1606,48 @@ impl GetPaged for Arc<HttpClient> {
             body: None,
         };
         let response: PaginatedResponse<T> = self.send(req.clone()).await?;
-        Ok(super::paged::PagedResult::new(response, self.clone(), req))
+        Ok(super::paged::PagedResult::new(
+            response,
+            self.clone(),
+            req,
+            None,
+        ))
+    }
+
+    async fn get_request_paged_with_limit<T: DeserializeOwned + Send + 'static>(
+        &self,
+        path: &str,
+        query: QueryWithFilters,
+        response_limit: u64,
+    ) -> Result<super::paged::PagedResult<T>> {
+        query.validate().map_err(|err| AnytypeError::Validation {
+            message: format!(
+                "get_request_paged_with_limit {} {err}",
+                diagnostic_path(path)
+            ),
+        })?;
+        if response_limit == 0 || response_limit > self.response_limits.document_bytes {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "paged response limit must be between 1 and {} bytes",
+                    self.response_limits.document_bytes
+                ),
+            });
+        }
+        let req = HttpRequest {
+            method: Method::GET,
+            path: path.into(),
+            query: query.params,
+            body: None,
+        };
+        let response: PaginatedResponse<T> =
+            self.send_with_limit(req.clone(), response_limit).await?;
+        Ok(super::paged::PagedResult::new(
+            response,
+            self.clone(),
+            req,
+            Some(response_limit),
+        ))
     }
 
     /// Makes an authenticated POST request that returns a `PagedResult` for pagination support.
@@ -1549,7 +1670,12 @@ impl GetPaged for Arc<HttpClient> {
             )),
         };
         let response: PaginatedResponse<T> = self.send(req.clone()).await?;
-        Ok(super::paged::PagedResult::new(response, self.clone(), req))
+        Ok(super::paged::PagedResult::new(
+            response,
+            self.clone(),
+            req,
+            None,
+        ))
     }
 }
 
@@ -1642,7 +1768,7 @@ fn is_idempotent_method(method: &Method) -> bool {
 mod tests {
     use std::{
         io::{self, Write},
-        sync::{Arc, Mutex, Once},
+        sync::{Arc, Barrier, Mutex, Once},
         time::Duration,
     };
 
@@ -1736,6 +1862,91 @@ mod tests {
             file_bytes: 1024,
             chat_sse_event_bytes: 1024,
         }
+    }
+
+    fn credential_test_client() -> Arc<HttpClient> {
+        Arc::new(
+            HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                "http://127.0.0.1:1".to_owned(),
+                ValidationLimits::default(),
+                test_limits(4, 8, 4),
+                1,
+                HttpCredentials::new("old-token"),
+            )
+            .expect("credential test client"),
+        )
+    }
+
+    #[test]
+    fn credential_replacement_and_generation_are_one_atomic_state_transition() {
+        let client = credential_test_client();
+        let set_barrier = Arc::new(Barrier::new(3));
+        let writer = {
+            let client = client.clone();
+            let barrier = set_barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                client.set_api_key(HttpCredentials::new("new-token"));
+            })
+        };
+        let reader = {
+            let client = client.clone();
+            let barrier = set_barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let state = client.credential_state.lock();
+                (
+                    state.credentials.token().map(str::to_owned),
+                    state.generation,
+                )
+            })
+        };
+        set_barrier.wait();
+        writer.join().expect("set writer");
+        let set_observation = reader.join().expect("set reader");
+        assert!(
+            matches!(
+                set_observation,
+                (Some(ref token), 0) if token == "old-token"
+            ) || matches!(
+                set_observation,
+                (Some(ref token), 1) if token == "new-token"
+            )
+        );
+
+        let clear_barrier = Arc::new(Barrier::new(3));
+        let writer = {
+            let client = client.clone();
+            let barrier = clear_barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                client.clear_api_key();
+            })
+        };
+        let reader = {
+            let client = client.clone();
+            let barrier = clear_barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let state = client.credential_state.lock();
+                (
+                    state.credentials.token().map(str::to_owned),
+                    state.generation,
+                )
+            })
+        };
+        clear_barrier.wait();
+        writer.join().expect("clear writer");
+        let clear_observation = reader.join().expect("clear reader");
+        assert!(
+            matches!(
+                clear_observation,
+                (Some(ref token), 1) if token == "new-token"
+            ) || matches!(clear_observation, (None, 2))
+        );
+        assert_eq!(client.credential_generation(), 2);
+        assert!(!client.has_key());
     }
 
     async fn serve_once(response: Vec<u8>) -> (Arc<HttpClient>, JoinHandle<()>) {
@@ -2506,7 +2717,7 @@ mod tests {
         let (client, server) = serve_once(response).await;
         let form = reqwest::multipart::Form::new().text("file", "content");
         let error = client
-            .post_multipart::<()>("/test", form)
+            .post_multipart_with_limits::<()>("/test", form, Some(123), None, None, None)
             .await
             .expect_err("multipart JSON response must be bounded");
 
@@ -2515,6 +2726,12 @@ mod tests {
             crate::error::AnytypeError::ResponseTooLarge { limit: 4, .. }
         ));
         server.await.expect("server task");
+        let metrics = client.metrics_snapshot();
+        assert_eq!(metrics.logical_operations, 1);
+        assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.physical_attempts, 1);
+        assert_eq!(metrics.multipart_posts, 1);
+        assert_eq!(metrics.bytes_sent, 123);
     }
 
     #[tokio::test]
