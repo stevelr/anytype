@@ -514,6 +514,13 @@ read-after-write check must bypass the process space cache. It performs one
 scoped REST GET, rejects a response carrying a different space ID, and returns
 the exact result without reading or priming the cache.
 
+Property and tag mutation builders also provide `no_cache_refresh()`. The
+default behavior continues to refresh a primed property cache, including all
+tag pages for select properties. The cache-independent mode performs no hidden
+tag reads after the write and instead invalidates that space's property cache;
+use `property(...).get_direct()` and an explicitly limited `tags(...).limit(n)`
+page for bounded semantic readback.
+
 ## Type Property Classification (REST + gRPC)
 
 `Type.properties` is the REST server's flattened visible list: featured
