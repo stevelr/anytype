@@ -44,6 +44,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Space creation now rejects an empty name through configured client limits
+  before HTTP dispatch; the live validation suite no longer creates untracked
+  unnamed spaces while probing server-dependent behavior.
 - Unauthenticated live tests now use unique empty file keystores, so valid
   ambient `env` credentials cannot silently authenticate their control clients.
 - Text-property integration setup now uses the existing finite definitive-429

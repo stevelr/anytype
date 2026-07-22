@@ -301,6 +301,7 @@ fn exact_space_response(response: SpaceResponse, expected_id: &str) -> Result<Sp
 #[derive(Debug)]
 pub struct NewSpaceRequest {
     client: Arc<HttpClient>,
+    limits: ValidationLimits,
     name: String,
     description: Option<String>,
     verify_policy: VerifyPolicy,
@@ -311,11 +312,13 @@ impl NewSpaceRequest {
     /// Creates a new `NewSpaceRequest`.
     pub(crate) fn new(
         client: Arc<HttpClient>,
+        limits: ValidationLimits,
         name: impl Into<String>,
         verify_config: Option<VerifyConfig>,
     ) -> Self {
         Self {
             client,
+            limits,
             name: name.into(),
             description: None,
             verify_policy: VerifyPolicy::Default,
@@ -361,8 +364,10 @@ impl NewSpaceRequest {
     /// The newly created space.
     ///
     /// # Errors
-    /// - [`AnytypeError::Validation`] if required fields are invalid
+    /// - [`AnytypeError::Validation`] if the name is empty or exceeds the configured limit
     pub async fn create(self) -> Result<Space> {
+        self.limits.validate_name(&self.name, "space")?;
+
         let request_body = CreateSpaceRequestBody {
             name: self.name,
             description: self.description,
@@ -996,7 +1001,12 @@ impl AnytypeClient {
     /// # }
     /// ```
     pub fn new_space(&self, name: impl Into<String>) -> NewSpaceRequest {
-        NewSpaceRequest::new(self.client.clone(), name, self.config.verify.clone())
+        NewSpaceRequest::new(
+            self.client.clone(),
+            self.config.limits.clone(),
+            name,
+            self.config.verify.clone(),
+        )
     }
 
     /// Searches for a space by name.

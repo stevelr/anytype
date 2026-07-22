@@ -754,6 +754,8 @@ When the real server's mutation rate limit remains enabled, use
 `cargo test -- --test-threads=1` to keep the full live suite from flooding its
 shared endpoint. Pagination coverage owns a uniquely filtered, cleanup-tracked
 object cohort and does not depend on unrelated ambient-space objects.
+Space-creation requests validate a nonempty bounded name before HTTP; validation
+coverage never probes this rule by creating an untracked unnamed space.
 
 Integration tests require a running Anytype server and environment variables. See `src/client.rs` for details.
 
