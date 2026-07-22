@@ -432,6 +432,22 @@ most six physical attempts. Exact injected retry sequences remain deferred
 with the other transport faults rather than being emulated by a semantic
 server.
 
+The production-unlinked schema-property slice implements `property_create`
+and `property_update` through `anytype-api` only. Create accepts every closed
+property format, restricts an optional 1..20 tag batch to select formats,
+deduplicates retries with an optional process-local key, disables hidden cache
+refresh work, verifies property metadata through direct reads, and consumes
+exactly one terminal 20-item tag page. Update resolves and preflights one exact
+property, returns semantic no-ops without a PATCH, otherwise sends one
+non-replayed PATCH, preserves format and tags, and verifies the required name
+plus optional key. Both workflows expose only bounded property/tag summaries.
+Direct-router and preview-stdio acceptance covers primed and unprimed caches,
+exact logical/physical counters, the 20/21 boundary, cancellation, auth,
+idempotency, and cleanup-owned disposable real-server properties. Latency,
+malformed-success, 5xx, and connection-fault injection remain deferred to the
+external P4 design. The slice stays absent from production discovery until the
+complete independently reviewed `schema` registry lands.
+
 The production-unlinked `files` read slice now provides the reusable internal
 contracts and handlers for that eventual registry. `file_metadata` performs an
 exact object-identity preflight and bounded `HEAD`; `file_read` returns at most

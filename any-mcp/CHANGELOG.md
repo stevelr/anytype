@@ -50,6 +50,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   rejects cursor/limit mismatch before I/O, checks ambiguity and fixed
   redaction, proves one logical HTTP call and at most six physical attempts per
   stable-ID read, and proves exact cleanup.
+- Add the production-unlinked schema property slice with exact
+  `property_create` and `property_update` contracts. The handlers enforce all
+  closed formats, select-only 1..20 tag batches, exact create idempotency,
+  cache-independent one-write mutations, semantic update no-ops, direct
+  property verification, a single exact terminal tag page, minimized outputs,
+  conservative post-dispatch uncertainty, and format/tag preservation.
+  Direct and preview-stdio disposable real-server coverage locks primed and
+  unprimed cache behavior, exact logical/physical counters, 20/21 boundaries,
+  cancellation, authentication, cleanup, and production-unlinked registry
+  status; external latency and transport fault cases remain behind the P4
+  fault-injection design.
 - Amend the approved `views-write` canonical membership-page prerequisite to
   match real Heart offset-window evidence: `total` and exact row arithmetic
   establish terminal versus continued pages, while Heart's relative
