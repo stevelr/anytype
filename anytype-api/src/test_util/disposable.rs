@@ -36,6 +36,10 @@ const PROCESS_GATE_ENV: &str = "ANYTYPE_DISPOSABLE_TEST_PROCESS";
 const RECOVER_STOPPED_RUN_ENV: &str = "ANYTYPE_DISPOSABLE_RECOVER_STOPPED_RUN";
 const CHILD_ENV_LIMIT: usize = 16_384;
 const ARG_MAX_RESERVE: usize = 4_096;
+const READINESS_TIMEOUT: Duration = Duration::from_secs(20);
+const READINESS_MAX_ATTEMPTS: usize = 50;
+const PAGE_TYPE_REFERENCE: &str = "@page";
+const PAGE_TYPE_KEY: &str = "page";
 const CREDENTIAL_NAMES: [&str; 4] = [
     "ANYTYPE_KEY_HTTP_TOKEN",
     "ANYTYPE_KEY_ACCOUNT_ID",
@@ -134,6 +138,35 @@ impl DisposableTestError {
     pub fn category(&self) -> &'static str {
         self.category.as_str()
     }
+
+    /// Returns the secret-safe setup stage and category, when available.
+    ///
+    /// Readiness, callback, and cleanup failures return `None`. The diagnostic
+    /// never contains an Anytype identifier, name, endpoint, credential, or
+    /// upstream body.
+    #[must_use]
+    pub fn setup_failure(&self) -> Option<(&'static str, &'static str)> {
+        match self.source.as_deref() {
+            Some(TestError::DisposableSetup { stage, category }) => Some((*stage, *category)),
+            _ => None,
+        }
+    }
+
+    /// Returns the final secret-safe readiness stage, category, and attempt count.
+    ///
+    /// Other setup and cleanup failures return `None`. The diagnostic never
+    /// contains an Anytype identifier, endpoint, credential, or upstream body.
+    #[must_use]
+    pub fn readiness_failure(&self) -> Option<(&'static str, &'static str, usize)> {
+        match self.source.as_deref() {
+            Some(TestError::DisposableReadiness {
+                stage,
+                category,
+                attempts,
+            }) => Some((*stage, *category, *attempts)),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for DisposableTestError {
@@ -148,6 +181,8 @@ impl fmt::Debug for DisposableTestError {
             .debug_struct("DisposableTestError")
             .field("category", &self.category.as_str())
             .field("primary_error_retained", &self.source.is_some())
+            .field("setup_failure", &self.setup_failure())
+            .field("readiness_failure", &self.readiness_failure())
             .field("evidence", &self.evidence)
             .finish()
     }
@@ -1345,6 +1380,144 @@ enum ExactSpace {
     Present(Space),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReadinessFailure {
+    stage: &'static str,
+    category: &'static str,
+}
+
+impl ReadinessFailure {
+    const fn new(stage: &'static str, category: &'static str) -> Self {
+        Self { stage, category }
+    }
+
+    fn from_api(stage: &'static str, error: &AnytypeError) -> Self {
+        Self::new(stage, error.diagnostic().variant)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadinessAttempt {
+    Ready,
+    Retry(ReadinessFailure),
+    Terminal(ReadinessFailure),
+}
+
+#[derive(Debug, Default)]
+struct ReadinessConvergence {
+    attempts: usize,
+    last_failure: Option<ReadinessFailure>,
+}
+
+impl ReadinessConvergence {
+    fn observe(&mut self, observation: ReadinessAttempt) -> ReadinessAttempt {
+        self.attempts = self.attempts.saturating_add(1);
+        match observation {
+            ReadinessAttempt::Ready => ReadinessAttempt::Ready,
+            ReadinessAttempt::Retry(failure) => {
+                self.last_failure = Some(failure);
+                ReadinessAttempt::Retry(failure)
+            }
+            ReadinessAttempt::Terminal(failure) => {
+                self.last_failure = Some(failure);
+                ReadinessAttempt::Terminal(failure)
+            }
+        }
+    }
+
+    fn error(&self) -> TestError {
+        let failure = self
+            .last_failure
+            .unwrap_or(ReadinessFailure::new("readiness", "not_observed"));
+        TestError::DisposableReadiness {
+            stage: failure.stage,
+            category: failure.category,
+            attempts: self.attempts,
+        }
+    }
+
+    fn mark_timeout(&mut self) {
+        self.last_failure = Some(ReadinessFailure::new("readiness", "timeout"));
+    }
+}
+
+fn readiness_error_is_terminal(error: &AnytypeError) -> bool {
+    match error {
+        AnytypeError::ApiError { code, .. } => {
+            (400..=499).contains(code) && !matches!(code, 404 | 408 | 409 | 425 | 429)
+        }
+        AnytypeError::Auth { .. }
+        | AnytypeError::Unauthorized
+        | AnytypeError::Forbidden
+        | AnytypeError::Validation { .. }
+        | AnytypeError::NoKeyStore
+        | AnytypeError::KeyStore { .. }
+        | AnytypeError::CacheDisabled
+        | AnytypeError::Ambiguous { .. }
+        | AnytypeError::ResolutionLimitExceeded { .. }
+        | AnytypeError::Serialization { .. }
+        | AnytypeError::Deserialization { .. }
+        | AnytypeError::ResponseTooLarge { .. }
+        | AnytypeError::Other { .. } => true,
+        _ => false,
+    }
+}
+
+fn classify_readiness_api_failure(stage: &'static str, error: &AnytypeError) -> ReadinessAttempt {
+    let failure = ReadinessFailure::from_api(stage, error);
+    if readiness_error_is_terminal(error) {
+        ReadinessAttempt::Terminal(failure)
+    } else {
+        ReadinessAttempt::Retry(failure)
+    }
+}
+
+async fn readiness_attempt(
+    client: &AnytypeClient,
+    prefix: &DisposablePrefix,
+    space_id: &str,
+) -> ReadinessAttempt {
+    match exact_space(client, space_id).await {
+        Ok(ExactSpace::Absent) => {
+            return ReadinessAttempt::Retry(ReadinessFailure::new("space", "not_found"));
+        }
+        Ok(ExactSpace::Present(space)) if !prefix.authorizes(&space.name) => {
+            return ReadinessAttempt::Terminal(ReadinessFailure::new("space", "identity_mismatch"));
+        }
+        Ok(ExactSpace::Present(_)) => {}
+        Err(TestError::Api { source }) => {
+            return classify_readiness_api_failure("space", &source);
+        }
+        Err(_) => {
+            return ReadinessAttempt::Terminal(ReadinessFailure::new("space", "invalid_evidence"));
+        }
+    }
+
+    let resolved = match client.resolve_type(space_id, PAGE_TYPE_REFERENCE).await {
+        Ok(typ) => typ,
+        Err(error) => return classify_readiness_api_failure("type_resolve", &error),
+    };
+    if resolved.key != PAGE_TYPE_KEY || resolved.archived {
+        return ReadinessAttempt::Terminal(ReadinessFailure::new(
+            "type_resolve",
+            "identity_mismatch",
+        ));
+    }
+
+    let direct = match client.get_type(space_id, &resolved.id).get_direct().await {
+        Ok(typ) => typ,
+        Err(error) => return classify_readiness_api_failure("type_direct", &error),
+    };
+    if direct.id != resolved.id || direct.key != PAGE_TYPE_KEY || direct.archived {
+        return ReadinessAttempt::Terminal(ReadinessFailure::new(
+            "type_direct",
+            "identity_mismatch",
+        ));
+    }
+
+    ReadinessAttempt::Ready
+}
+
 async fn exact_space(client: &AnytypeClient, space_id: &str) -> TestResult<ExactSpace> {
     match client.space(space_id).get().await {
         Ok(space) => {
@@ -1374,15 +1547,26 @@ fn validate_created_space(
     created: &Space,
     ambient_space_ids: &[String],
 ) -> TestResult<()> {
-    limits.validate_id(&created.id, "disposable space")?;
-    if created.object != SpaceModel::Space
-        || created.name != expected_name
-        || !prefix.authorizes(&created.name)
-        || ambient_space_ids.iter().any(|id| id == &created.id)
-    {
-        return Err(config_error("invalid disposable create response"));
+    if limits.validate_id(&created.id, "disposable space").is_err() {
+        return Err(setup_error("create_response", "invalid_id"));
+    }
+    if created.object != SpaceModel::Space {
+        return Err(setup_error("create_response", "model_mismatch"));
+    }
+    if created.name != expected_name || !prefix.authorizes(&created.name) {
+        return Err(setup_error("create_response", "name_mismatch"));
+    }
+    if ambient_space_ids.iter().any(|id| id == &created.id) {
+        return Err(setup_error("create_response", "ambient_collision"));
     }
     Ok(())
+}
+
+fn classify_disposable_space_create_error(error: AnytypeError) -> TestError {
+    match super::classify_space_create_error(error) {
+        TestError::SpaceCreateIndeterminate => setup_error("space_create", "indeterminate"),
+        _ => setup_error("space_create", "api_rejected"),
+    }
 }
 
 async fn wait_ready(
@@ -1390,27 +1574,41 @@ async fn wait_ready(
     prefix: &DisposablePrefix,
     space_id: &str,
 ) -> TestResult<()> {
-    let config = client.get_config().verify.clone().unwrap_or_default();
+    let mut config = client.get_config().verify.clone().unwrap_or_default();
+    config.timeout = READINESS_TIMEOUT;
+    config.max_attempts = READINESS_MAX_ATTEMPTS;
     let deadline = Instant::now() + config.timeout;
-    let attempts = config.max_attempts.max(1);
     let mut delay = config.initial_delay;
-    for attempt in 0..attempts {
-        if let ExactSpace::Present(space) = exact_space(client, space_id).await?
-            && prefix.authorizes(&space.name)
-            && client
-                .resolve_type(space_id, "page")
-                .await
-                .is_ok_and(|typ| typ.key == "page" && !typ.archived)
-        {
-            return Ok(());
-        }
-        if attempt + 1 == attempts || Instant::now() >= deadline {
+    let mut convergence = ReadinessConvergence::default();
+    for attempt in 0..config.max_attempts {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            convergence.mark_timeout();
             break;
         }
-        tokio::time::sleep(delay).await;
+        let observation =
+            tokio::time::timeout(remaining, readiness_attempt(client, prefix, space_id))
+                .await
+                .unwrap_or_else(|_| {
+                    ReadinessAttempt::Terminal(ReadinessFailure::new("readiness", "timeout"))
+                });
+        match convergence.observe(observation) {
+            ReadinessAttempt::Ready => return Ok(()),
+            ReadinessAttempt::Terminal(_) => break,
+            ReadinessAttempt::Retry(_) => {}
+        }
+        if attempt + 1 == config.max_attempts {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            convergence.mark_timeout();
+            break;
+        }
+        tokio::time::sleep(delay.min(remaining)).await;
         delay = delay.saturating_mul(2).min(config.max_delay);
     }
-    Err(config_error("disposable space readiness unproven"))
+    Err(convergence.error())
 }
 
 async fn delete_known_space(
@@ -1813,9 +2011,13 @@ fn guarded_finish_state(state: HarnessState, evidence: &mut CleanupEvidence) {
 /// construction. Its case-insensitive prefix grants deletion authority over
 /// every matching current space name. The helper acquires a backend-wide
 /// process lock, persists a recovery ledger, sweeps interrupted matching runs,
-/// creates a cryptographically unique space, waits for direct cache-disabled
-/// readiness, runs child cleanup, deletes by exact ID after two fresh name
-/// checks, proves absence independently, and performs a final sweep.
+/// creates a cryptographically unique space, and gives its scoped REST state at
+/// most 20 seconds and 50 attempts to converge. Readiness requires an exact
+/// `@page` key resolution followed by a cache-independent direct GET whose ID,
+/// key, archive state, and requested space path all agree. Terminal failures
+/// expose only a closed stage/category and attempt count. The helper then runs
+/// child cleanup, deletes by exact ID after two fresh name checks, proves
+/// absence independently, and performs a final sweep.
 ///
 /// The operator must reserve the prefix exclusively for tests and must not
 /// create, rename, or delete spaces through another client while this helper
@@ -1956,7 +2158,7 @@ where
                 .no_verify()
                 .create()
                 .await
-                .map_err(super::classify_space_create_error)
+                .map_err(classify_disposable_space_create_error)
         })
         .await
         {
@@ -2173,6 +2375,10 @@ fn config_error(message: &str) -> TestError {
     }
 }
 
+fn setup_error(stage: &'static str, category: &'static str) -> TestError {
+    TestError::DisposableSetup { stage, category }
+}
+
 #[cfg(unix)]
 #[allow(clippy::unnecessary_wraps)]
 fn platform_isolation_admission() -> Result<(), DisposableSkip> {
@@ -2198,6 +2404,93 @@ mod tests {
             ledger: StageOutcome::Success,
             panic_payloads: Vec::new(),
         }
+    }
+
+    fn setup_diagnostic(error: TestError) -> DisposableTestError {
+        finish_outcomes::<()>(Ok(Err(error)), clean_evidence()).unwrap_err()
+    }
+
+    #[test]
+    fn readiness_budget_is_exact_and_finite() {
+        assert_eq!(READINESS_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(READINESS_MAX_ATTEMPTS, 50);
+    }
+
+    #[test]
+    fn readiness_convergence_accepts_a_delayed_exact_result() {
+        let pending = ReadinessFailure::new("type_resolve", "not_found");
+        let mut convergence = ReadinessConvergence::default();
+
+        assert_eq!(
+            convergence.observe(ReadinessAttempt::Retry(pending)),
+            ReadinessAttempt::Retry(pending)
+        );
+        assert_eq!(
+            convergence.observe(ReadinessAttempt::Retry(pending)),
+            ReadinessAttempt::Retry(pending)
+        );
+        assert_eq!(
+            convergence.observe(ReadinessAttempt::Ready),
+            ReadinessAttempt::Ready
+        );
+        assert_eq!(convergence.attempts, 3);
+    }
+
+    #[test]
+    fn readiness_identity_mismatch_is_terminal_and_sanitized() {
+        let mismatch = ReadinessFailure::new("type_direct", "identity_mismatch");
+        let mut convergence = ReadinessConvergence::default();
+
+        assert_eq!(
+            convergence.observe(ReadinessAttempt::Terminal(mismatch)),
+            ReadinessAttempt::Terminal(mismatch)
+        );
+        assert!(matches!(
+            convergence.error(),
+            TestError::DisposableReadiness {
+                stage: "type_direct",
+                category: "identity_mismatch",
+                attempts: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn readiness_timeout_replaces_transient_failure_without_unbounded_attempts() {
+        let mut convergence = ReadinessConvergence::default();
+        let _ = convergence.observe(ReadinessAttempt::Retry(ReadinessFailure::new(
+            "space",
+            "not_found",
+        )));
+        convergence.mark_timeout();
+
+        assert!(matches!(
+            convergence.error(),
+            TestError::DisposableReadiness {
+                stage: "readiness",
+                category: "timeout",
+                attempts: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn readiness_failure_is_reported_after_successful_cleanup() {
+        let primary = TestError::DisposableReadiness {
+            stage: "type_resolve",
+            category: "not_found",
+            attempts: READINESS_MAX_ATTEMPTS,
+        };
+        let error = finish_outcomes::<()>(Ok(Err(primary)), clean_evidence()).unwrap_err();
+
+        assert_eq!(
+            error.readiness_failure(),
+            Some(("type_resolve", "not_found", READINESS_MAX_ATTEMPTS))
+        );
+        assert_eq!(error.evidence.child, StageOutcome::Success);
+        assert_eq!(error.evidence.delete, StageOutcome::DeleteAcknowledged);
+        assert_eq!(error.evidence.absence, StageOutcome::Verified);
+        assert_eq!(error.evidence.ledger, StageOutcome::Success);
     }
 
     #[test]
@@ -2319,13 +2612,49 @@ mod tests {
     }
 
     #[test]
-    fn created_identity_cannot_alias_an_ambient_space() {
+    fn create_response_setup_diagnostics_cover_every_closed_branch() {
         let prefix = DisposablePrefix::parse("xtest".to_owned()).unwrap();
         let expected_name = "xtest-created";
         let created = test_space(7, expected_name.to_owned());
         let limits = crate::validation::ValidationLimits::default();
         assert!(validate_created_space(&limits, &prefix, expected_name, &created, &[]).is_ok());
-        assert!(
+
+        let mut invalid_id = created.clone();
+        invalid_id.id = "secret-invalid-id".to_owned();
+        let error = setup_diagnostic(
+            validate_created_space(&limits, &prefix, expected_name, &invalid_id, &[]).unwrap_err(),
+        );
+        assert_eq!(
+            error.setup_failure(),
+            Some(("create_response", "invalid_id"))
+        );
+        assert!(!format!("{error:?}").contains("secret-invalid-id"));
+
+        let mut wrong_model = created.clone();
+        wrong_model.object = SpaceModel::Chat;
+        let error = setup_diagnostic(
+            validate_created_space(&limits, &prefix, expected_name, &wrong_model, &[]).unwrap_err(),
+        );
+        assert_eq!(
+            error.setup_failure(),
+            Some(("create_response", "model_mismatch"))
+        );
+
+        let mut wrong_name = created.clone();
+        wrong_name.name = "secret-response-name".to_owned();
+        let error = setup_diagnostic(
+            validate_created_space(&limits, &prefix, expected_name, &wrong_name, &[]).unwrap_err(),
+        );
+        assert_eq!(
+            error.setup_failure(),
+            Some(("create_response", "name_mismatch"))
+        );
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("setup_failure: Some((\"create_response\", \"name_mismatch\"))"));
+        assert!(!rendered.contains("secret-response-name"));
+        assert!(!rendered.contains(expected_name));
+
+        let error = setup_diagnostic(
             validate_created_space(
                 &limits,
                 &prefix,
@@ -2333,8 +2662,49 @@ mod tests {
                 &created,
                 std::slice::from_ref(&created.id),
             )
-            .is_err()
+            .unwrap_err(),
         );
+        assert_eq!(
+            error.setup_failure(),
+            Some(("create_response", "ambient_collision"))
+        );
+    }
+
+    #[test]
+    fn space_create_setup_diagnostics_discard_upstream_values() {
+        const SECRET: &str = "secret-create-response-body";
+        let rejected = setup_diagnostic(classify_disposable_space_create_error(
+            AnytypeError::ApiError {
+                code: 418,
+                method: "POST".to_owned(),
+                url: "http://secret.invalid/v1/spaces".to_owned(),
+                message: SECRET.to_owned(),
+            },
+        ));
+        assert_eq!(
+            rejected.setup_failure(),
+            Some(("space_create", "api_rejected"))
+        );
+
+        let indeterminate = setup_diagnostic(classify_disposable_space_create_error(
+            AnytypeError::ResponseTooLarge {
+                limit: 1,
+                declared: Some(2),
+            },
+        ));
+        assert_eq!(
+            indeterminate.setup_failure(),
+            Some(("space_create", "indeterminate"))
+        );
+        for rendered in [
+            rejected.to_string(),
+            format!("{rejected:?}"),
+            indeterminate.to_string(),
+            format!("{indeterminate:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET));
+            assert!(!rendered.contains("secret.invalid"));
+        }
     }
 
     #[test]
@@ -3077,6 +3447,25 @@ mod tests {
         assert_eq!(error.evidence.delete, StageOutcome::Panic);
         assert_eq!(error.evidence.absence, StageOutcome::Verified);
         assert_eq!(error.evidence.ledger, StageOutcome::Error);
+    }
+
+    #[test]
+    fn cleanup_precedence_retains_closed_setup_diagnostic() {
+        let mut absence = clean_evidence();
+        absence.absence = StageOutcome::Unproven;
+        let error = finish_outcomes::<()>(
+            Ok(Err(setup_error("create_response", "name_mismatch"))),
+            absence,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.category, DisposableErrorCategory::AbsenceUnproven);
+        assert_eq!(
+            error.setup_failure(),
+            Some(("create_response", "name_mismatch"))
+        );
+        assert_eq!(error.readiness_failure(), None);
+        assert_eq!(error.evidence.absence, StageOutcome::Unproven);
     }
 
     #[test]

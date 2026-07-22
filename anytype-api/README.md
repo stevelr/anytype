@@ -1064,9 +1064,15 @@ disk-backed enumerate-before-delete offset-pagination plans recover interrupted
 matching runs without a count ceiling or an in-memory inventory. Each fixed
 pagination window shares one deadline; a changing total discards the plan and
 restarts at offset zero. New names use 128 bits of operating-system randomness.
-Readiness, the two immediate
-pre-delete checks, and final absence proof all use cache-disabled direct exact-ID
-reads. The helper cleans registered children first and retains callback,
+Readiness has a hard 20-second and 50-attempt budget. It resolves the exact
+`@page` key without a cache, then direct-GETs that returned type through the same
+validated space path and requires identical ID, `page` key, and non-archived
+state. A failure reports only its final closed stage/category and completed
+attempt count. Create failures likewise expose only a closed setup stage and
+category, distinguishing rejected or indeterminate requests from invalid ID,
+model, name, or ambient-identity evidence without rendering response values.
+The two immediate pre-delete checks and final absence proof also
+use cache-disabled direct exact-ID reads. The helper cleans registered children first and retains callback,
 cleanup, deletion, absence, ledger, and panic outcomes; an unproven absence is
 always dominant without discarding the original typed error or simultaneous
 cleanup evidence. Remote backends require an equivalent scheduler lease and are
