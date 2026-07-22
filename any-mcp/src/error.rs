@@ -186,6 +186,7 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::TooManyRetries { .. }
         | AnytypeError::Deserialization { .. }
         | AnytypeError::BodyGraph { .. }
+        | AnytypeError::BodyMutationIndeterminate { .. }
         | AnytypeError::VerifyTimeout { .. }
         | AnytypeError::Other { .. } => false,
     }
@@ -296,6 +297,9 @@ impl ToolError {
         if error.is_authentication() {
             return AnytypeErrorMapping::Ready(Self::authentication());
         }
+        if matches!(error, AnytypeError::BodyMutationIndeterminate { .. }) {
+            return AnytypeErrorMapping::Ready(Self::mutation_indeterminate());
+        }
 
         let code = match error {
             AnytypeError::Auth { .. }
@@ -330,7 +334,8 @@ impl ToolError {
             AnytypeError::ApiError { code: 404, .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
                 code: 409 | 412, ..
-            } => ToolErrorCode::Conflict,
+            }
+            | AnytypeError::BodyMutationIndeterminate { .. } => ToolErrorCode::Conflict,
             AnytypeError::Http { .. }
             | AnytypeError::InvalidFileResponseHeader { .. }
             | AnytypeError::ChatSseTransport { .. }
@@ -592,6 +597,16 @@ mod tests {
                 ToolErrorCode::Upstream,
             ),
             (
+                AnytypeError::BodyMutationIndeterminate {
+                    object_id: "SECRET_OBJECT".to_owned(),
+                    block_id: None,
+                    attempts: 2,
+                    timeout: Duration::from_secs(1),
+                    observed: None,
+                },
+                ToolErrorCode::Conflict,
+            ),
+            (
                 AnytypeError::Other {
                     message: "SECRET_OTHER".to_owned(),
                 },
@@ -740,6 +755,22 @@ mod tests {
                 "message": "The mutation may have applied. Reread the object before retrying to avoid applying it twice."
             })
         );
+    }
+
+    #[test]
+    fn body_mutation_indeterminate_maps_directly_to_reread_conflict() {
+        let source = anytype::error::AnytypeError::BodyMutationIndeterminate {
+            object_id: "SECRET_OBJECT".to_owned(),
+            block_id: None,
+            attempts: 1,
+            timeout: Duration::from_secs(1),
+            observed: None,
+        };
+        let AnytypeErrorMapping::Ready(mapped) = ToolError::from_anytype(&source) else {
+            panic!("body mutation uncertainty never requires candidates");
+        };
+        assert_eq!(mapped, ToolError::mutation_indeterminate());
+        assert!(!serde_json::to_string(&mapped).unwrap().contains("SECRET"));
     }
 
     #[test]

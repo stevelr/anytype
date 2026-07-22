@@ -11,7 +11,6 @@ use crate::{Result, error::AnytypeError};
 /// Trait for gRPC response error types with `code` and `description` fields.
 pub(crate) trait GrpcError {
     fn code(&self) -> i32;
-    fn description(&self) -> &str;
 }
 
 /// Check a gRPC response error field, returning `Err` if the code is non-zero.
@@ -20,11 +19,7 @@ pub(crate) fn ensure_error_ok<T: GrpcError>(error: Option<&T>, action: &str) -> 
         && error.code() != 0
     {
         return Err(AnytypeError::Other {
-            message: format!(
-                "{action} failed: {} (code {})",
-                error.description(),
-                error.code()
-            ),
+            message: format!("{action} failed with fixed code {}", error.code()),
         });
     }
     Ok(())
@@ -54,7 +49,6 @@ macro_rules! impl_grpc_error {
         $(
             impl GrpcError for $ty {
                 fn code(&self) -> i32 { self.code }
-                fn description(&self) -> &str { &self.description }
             }
         )+
     };
@@ -118,3 +112,30 @@ impl_grpc_error!(
 use anytype_rpc::anytype::rpc::workspace::open as workspace_open;
 
 impl_grpc_error!(workspace_open::response::Error);
+
+// body-block mutations
+use anytype_rpc::anytype::rpc::{
+    block::{
+        create as block_create, list_delete as block_list_delete, list_move_to_existing_object,
+        list_set_align, list_set_background_color, list_set_vertical_align,
+    },
+    block_div, block_latex, block_link, block_table, block_text,
+};
+
+impl_grpc_error!(
+    block_create::response::Error,
+    block_list_delete::response::Error,
+    list_move_to_existing_object::response::Error,
+    list_set_align::response::Error,
+    list_set_background_color::response::Error,
+    list_set_vertical_align::response::Error,
+    block_text::set_text::response::Error,
+    block_text::set_color::response::Error,
+    block_text::set_style::response::Error,
+    block_text::set_checked::response::Error,
+    block_text::set_icon::response::Error,
+    block_latex::set_text::response::Error,
+    block_table::create::response::Error,
+    block_div::list_set_style::response::Error,
+    block_link::list_set_appearance::response::Error,
+);
