@@ -25,6 +25,31 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   I/O through both transports. Deterministic transport-fault cases remain
   deferred to the P4 fault injector, and the incomplete registry stays
   unavailable until `any-uda.4`.
+- Add the production-unlinked four-workflow `chats` read slice through
+  `anytype-api` only: bounded chat discovery, opaque older-message pagination,
+  exact message reads, and in-chat full-text search. The minimized projections
+  expose canonical UTC-millisecond timestamps, Unicode-safe text prefixes and
+  counts, formatting/attachment summary flags, and no rich blocks, reactions,
+  attachment details, or private REST state. Process-local cursors seal the
+  validated upstream history anchor plus page number, bind offset cursors to
+  resolved scope/query/limit, reject duplicates and non-progress, and cap one
+  history lineage at 64 pages. Pure tests lock schemas, bounds, minimization,
+  cursor secrecy, and 32/48-KiB result ceilings; direct-router and preview-stdio
+  acceptance uses one cleanup-owned disposable real chat. The slice remains
+  absent from production discovery until the complete independently reviewed
+  six-tool registry lands; deterministic transport faults remain deferred to
+  the P4 fault-injection service.
+  Independent review corrections now reject every non-chat upstream layout,
+  lock compact/standard and read-write/read-only catalog hashes plus
+  adversarial maximum result bytes/tokens in a tokenizer-versioned snapshot,
+  including typed exact-limit/plus-one fixtures with four-byte Unicode,
+  combining marks, escaped and prompt-injection text. Exact projection-key and
+  identifier checks fail closed on returned-ID mismatch and malformed IDs. The
+  disposable real-server suite continues and restarts chat, history, and search
+  lineages through direct dispatch and one persistent preview-stdio session,
+  rejects cursor/limit mismatch before I/O, checks ambiguity and fixed
+  redaction, proves one logical HTTP call and at most six physical attempts per
+  stable-ID read, and proves exact cleanup.
 - Amend the approved `views-write` canonical membership-page prerequisite to
   match real Heart offset-window evidence: `total` and exact row arithmetic
   establish terminal versus continued pages, while Heart's relative
