@@ -37,6 +37,11 @@ use crate::{
     object_edit::{ObjectEditInput, ObjectEditOutput, object_edit, object_edit_tool},
     object_read::{ObjectGetInput, ObjectReadHandlers, ObjectSearchInput},
     object_update::{ObjectUpdateInput, ObjectUpdateOutput, object_update, object_update_tool},
+    optional_toolsets::{
+        OptionalCatalog, OptionalToolsetRegistry, OptionalToolsetStatusInput,
+        OptionalToolsetStatusOutput, compose_optional_catalog, optional_toolset_status_tool,
+        production_optional_registries,
+    },
     protocol::WorkflowTool,
     resources::AnytypeResources,
     result::tool_error,
@@ -111,6 +116,11 @@ struct ServerState {
     object_edit_contract: WorkflowTool<ObjectEditOutput>,
     object_archive_contract: WorkflowTool<ObjectArchiveOutput>,
     resources: AnytypeResources,
+    resource_instances: Vec<rmcp::model::Resource>,
+    resource_templates: Vec<rmcp::model::ResourceTemplate>,
+    optional_catalog: OptionalCatalog,
+    optional_status_contract: Option<WorkflowTool<OptionalToolsetStatusOutput>>,
+    linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],
 }
 
 /// MCP handler backed by one authenticated runtime and one static catalog.
@@ -148,9 +158,17 @@ impl AnyMcpServer {
     /// or if a typed schema, cursor store, or exact static inventory cannot be
     /// constructed safely.
     pub fn new(runtime: RuntimeContext) -> Result<Self, ServerBuildError> {
+        Self::new_with_optional_registries(runtime, production_optional_registries())
+    }
+
+    fn new_with_optional_registries(
+        runtime: RuntimeContext,
+        linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],
+    ) -> Result<Self, ServerBuildError> {
         let availability = runtime.startup_status();
         if !availability.http_available
-            || (runtime.profile().requires_grpc(runtime.is_read_only())
+            || ((runtime.profile().requires_grpc(runtime.is_read_only())
+                || runtime.optional_toolsets().requires_grpc())
                 && !availability.grpc_available)
         {
             return Err(ServerBuildError);
@@ -212,8 +230,58 @@ impl AnyMcpServer {
             };
             selected && !(runtime.is_read_only() && !READ_TOOL_NAMES.contains(&name))
         });
+        let resources = AnytypeResources::new(runtime.clone());
+        let mut resource_instances = resources
+            .list_resources(None)
+            .map_err(ServerBuildError::resource)?
+            .resources;
+        let mut resource_templates = resources
+            .list_resource_templates(None)
+            .map_err(ServerBuildError::resource)?
+            .resource_templates;
+        let reserved_resources = resource_instances
+            .iter()
+            .map(|resource| resource.uri.as_ref())
+            .collect::<Vec<_>>();
+        let reserved_templates = resource_templates
+            .iter()
+            .map(|template| template.uri_template.as_ref())
+            .collect::<Vec<_>>();
+        let optional_catalog = compose_optional_catalog(
+            runtime.optional_toolsets(),
+            linked_optional_registries,
+            runtime.is_read_only(),
+            &ALL_TOOL_NAMES,
+            &reserved_resources,
+            &reserved_templates,
+        )
+        .map_err(ServerBuildError::optional)?;
+        let optional_tool_names = optional_catalog
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        tools.extend(optional_catalog.tools.iter().cloned());
+        let optional_status_contract = if optional_catalog.is_selected() {
+            let contract = optional_toolset_status_tool().map_err(ServerBuildError::schema)?;
+            tools.push(contract.as_tool().clone());
+            Some(contract)
+        } else {
+            None
+        };
+        resource_instances.extend(optional_catalog.resources.iter().cloned());
+        resource_instances.sort_by(|left, right| left.uri.cmp(&right.uri));
+        resource_templates.extend(optional_catalog.resource_templates.iter().cloned());
+        resource_templates.sort_by(|left, right| left.uri_template.cmp(&right.uri_template));
+
         tools.sort_by(|left, right| left.name.cmp(&right.name));
-        validate_catalog(&tools, runtime.profile(), runtime.is_read_only())?;
+        validate_catalog(
+            &tools,
+            runtime.profile(),
+            runtime.is_read_only(),
+            &optional_tool_names,
+            optional_catalog.is_selected(),
+        )?;
 
         Ok(Self {
             runtime: runtime.clone(),
@@ -227,7 +295,12 @@ impl AnyMcpServer {
                 object_update_contract,
                 object_edit_contract,
                 object_archive_contract,
-                resources: AnytypeResources::new(runtime),
+                resources,
+                resource_instances,
+                resource_templates,
+                optional_catalog,
+                optional_status_contract,
+                linked_optional_registries,
             }),
         })
     }
@@ -259,16 +332,44 @@ impl AnyMcpServer {
         request: CallToolRequestParams,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
-        if request.task.is_some() {
-            return Err(invalid_arguments());
-        }
         let name = request.name.as_ref();
         let selected_by_profile = match self.runtime.profile() {
             ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
             ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
         };
-        if !selected_by_profile {
+        let optional_selected = self
+            .state
+            .optional_catalog
+            .registry_for_tool(name)
+            .is_some()
+            || self.state.optional_catalog.is_read_only_mutation(name)
+            || (name == "optional_toolset_status" && self.state.optional_catalog.is_selected());
+        if !selected_by_profile && !optional_selected {
             return Err(ErrorData::method_not_found::<CallToolRequestMethod>());
+        }
+        if request.task.is_some() {
+            return Err(invalid_arguments());
+        }
+        if self.state.optional_catalog.is_read_only_mutation(name) {
+            return Ok(tool_error(&ToolError::read_only()));
+        }
+        if name == "optional_toolset_status" {
+            let _input = decode_arguments::<OptionalToolsetStatusInput>(request.arguments)?;
+            let contract = self
+                .state
+                .optional_status_contract
+                .as_ref()
+                .ok_or_else(|| {
+                    ErrorData::internal_error("Optional status contract unavailable.", None)
+                })?;
+            return contract
+                .success(self.state.optional_catalog.status())
+                .map_err(|_| ErrorData::internal_error("Optional status encoding failed.", None));
+        }
+        if let Some(registry) = self.state.optional_catalog.registry_for_tool(name) {
+            return registry
+                .call_tool(request, &self.runtime, cancellation)
+                .await;
         }
         let arguments = request.arguments;
         match request.name.as_ref() {
@@ -389,14 +490,20 @@ impl AnyMcpServer {
         &self,
         request: Option<PaginatedRequestParams>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        self.state.resources.list_resources(request)
+        reject_static_cursor(request)?;
+        Ok(ListResourcesResult::with_all_items(
+            self.state.resource_instances.clone(),
+        ))
     }
 
     pub(crate) fn list_resource_templates_wire(
         &self,
         request: Option<PaginatedRequestParams>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        self.state.resources.list_resource_templates(request)
+        reject_static_cursor(request)?;
+        Ok(ListResourceTemplatesResult::with_all_items(
+            self.state.resource_templates.clone(),
+        ))
     }
 
     pub(crate) async fn read_resource_wire(
@@ -404,6 +511,25 @@ impl AnyMcpServer {
         request: ReadResourceRequestParams,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<ReadResourceResult, ErrorData> {
+        if let Some(registry) = self
+            .state
+            .optional_catalog
+            .registry_for_resource(&request.uri)
+        {
+            return registry
+                .read_resource(request, &self.runtime, cancellation)
+                .await;
+        }
+        if self
+            .state
+            .linked_optional_registries
+            .iter()
+            .any(|registry| registry.owns_resource_uri(&request.uri))
+        {
+            return Err(ErrorData::method_not_found::<
+                rmcp::model::ReadResourceRequestMethod,
+            >());
+        }
         self.state
             .resources
             .read_resource(request, cancellation)
@@ -513,18 +639,29 @@ fn validate_catalog(
     tools: &[Tool],
     profile: ApplicationProfile,
     read_only: bool,
+    optional_tool_names: &[String],
+    include_optional_status: bool,
 ) -> Result<(), ServerBuildError> {
-    let expected: &[&str] = match (profile, read_only) {
+    let phase_one: &[&str] = match (profile, read_only) {
         (ApplicationProfile::Compact, true) => &COMPACT_READ_TOOL_NAMES,
         (ApplicationProfile::Compact, false) => &COMPACT_TOOL_NAMES,
         (ApplicationProfile::Standard, true) => &READ_TOOL_NAMES,
         (ApplicationProfile::Standard, false) => &ALL_TOOL_NAMES,
     };
+    let mut expected = phase_one
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    expected.extend(optional_tool_names.iter().cloned());
+    if include_optional_status {
+        expected.push("optional_toolset_status".to_owned());
+    }
+    expected.sort();
     if tools.len() != expected.len()
         || tools
             .iter()
             .map(|tool| tool.name.as_ref())
-            .ne(expected.iter().copied())
+            .ne(expected.iter().map(String::as_str))
     {
         return Err(ServerBuildError);
     }
@@ -543,6 +680,14 @@ impl ServerBuildError {
     fn cursor(_: CursorStoreError) -> Self {
         Self
     }
+
+    fn optional(_: crate::optional_toolsets::OptionalCatalogError) -> Self {
+        Self
+    }
+
+    fn resource(_: ErrorData) -> Self {
+        Self
+    }
 }
 
 impl fmt::Display for ServerBuildError {
@@ -556,6 +701,10 @@ impl std::error::Error for ServerBuildError {}
 #[cfg(test)]
 #[path = "server/headless_integration.rs"]
 mod headless_integration;
+
+#[cfg(test)]
+#[path = "server/optional_registry.rs"]
+mod optional_registry;
 
 #[cfg(test)]
 mod tests {

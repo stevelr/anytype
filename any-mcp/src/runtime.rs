@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
+    optional_toolsets::OptionalToolsetSelection,
     server::AnyMcpServer,
 };
 
@@ -53,6 +54,7 @@ pub struct RuntimeContext {
     startup_status: StartupStatus,
     profile: ApplicationProfile,
     read_only: bool,
+    optional_toolsets: OptionalToolsetSelection,
 }
 
 impl fmt::Debug for RuntimeContext {
@@ -63,6 +65,10 @@ impl fmt::Debug for RuntimeContext {
             .field("startup_status", &self.startup_status)
             .field("profile", &self.profile)
             .field("read_only", &self.read_only)
+            .field(
+                "optional_toolset_count",
+                &self.optional_toolsets.names().len(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -89,20 +95,22 @@ impl RuntimeContext {
         let startup_status = verify_startup_probes(
             auth.http.is_authenticated(),
             auth.grpc.is_authenticated(),
-            config.profile.requires_grpc(config.read_only),
+            config.profile.requires_grpc(config.read_only)
+                || config.optional_toolsets.requires_grpc(),
             config.startup_timeout,
             || client.ping_http(),
             || client.ping_grpc(),
         )
         .await?;
 
-        Ok(Self::from_parts_with_profile(
+        Ok(Self::from_parts_with_profile_and_optional_toolsets(
             client,
             config.max_concurrency,
             config.request_timeout,
             startup_status,
             config.profile,
             config.read_only,
+            config.optional_toolsets.clone(),
         ))
     }
 
@@ -128,6 +136,12 @@ impl RuntimeContext {
     #[must_use]
     pub const fn profile(&self) -> ApplicationProfile {
         self.profile
+    }
+
+    /// Returns the canonical startup-selected optional registry set.
+    #[must_use]
+    pub const fn optional_toolsets(&self) -> &OptionalToolsetSelection {
+        &self.optional_toolsets
     }
 
     /// Starts process shutdown, rejects new work, and cancels running or
@@ -292,6 +306,7 @@ impl RuntimeContext {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_parts_with_profile(
         client: AnytypeClient,
         max_concurrency: usize,
@@ -299,6 +314,26 @@ impl RuntimeContext {
         startup_status: StartupStatus,
         profile: ApplicationProfile,
         read_only: bool,
+    ) -> Self {
+        Self::from_parts_with_profile_and_optional_toolsets(
+            client,
+            max_concurrency,
+            request_timeout,
+            startup_status,
+            profile,
+            read_only,
+            OptionalToolsetSelection::default(),
+        )
+    }
+
+    pub(crate) fn from_parts_with_profile_and_optional_toolsets(
+        client: AnytypeClient,
+        max_concurrency: usize,
+        request_timeout: Duration,
+        startup_status: StartupStatus,
+        profile: ApplicationProfile,
+        read_only: bool,
+        optional_toolsets: OptionalToolsetSelection,
     ) -> Self {
         Self {
             client: Arc::new(client),
@@ -309,6 +344,7 @@ impl RuntimeContext {
             startup_status,
             profile,
             read_only,
+            optional_toolsets,
         }
     }
 }

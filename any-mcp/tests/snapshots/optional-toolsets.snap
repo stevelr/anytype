@@ -1,0 +1,289 @@
+{
+  "catalogs": [
+    {
+      "read_only": false,
+      "resource_templates": [
+        {
+          "description": "Bounded test-only alpha item",
+          "name": "alpha_item",
+          "uriTemplate": "anytype://optional/alpha/items/{item_id}"
+        }
+      ],
+      "resources": [
+        {
+          "description": "Bounded test-only alpha resource",
+          "name": "alpha_resource",
+          "uri": "anytype://optional/alpha"
+        }
+      ],
+      "tools": [
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "description": "Read the bounded test-only alpha state.",
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "name": "alpha_read",
+          "outputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "complete": {
+                "description": "Whether the test-only operation completed.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "complete"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": false
+          },
+          "description": "Update the bounded test-only alpha state.",
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "name": "alpha_write",
+          "outputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "complete": {
+                "description": "Whether the test-only operation completed.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "complete"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "description": "Read the bounded test-only beta state.",
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "name": "beta_read",
+          "outputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "complete": {
+                "description": "Whether the test-only operation completed.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "complete"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "description": "Inspect configured and active optional Anytype toolsets for this startup. Returns canonical selector names and no secrets.",
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "name": "optional_toolset_status",
+          "outputSchema": {
+            "$defs": {
+              "ToolsetName": {
+                "maxLength": 32,
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9-]{0,31}$",
+                "type": "string"
+              }
+            },
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "active_toolsets": {
+                "description": "Canonical selected names contributing an admitted contract.",
+                "items": {
+                  "$ref": "#/$defs/ToolsetName"
+                },
+                "maxItems": 16,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "configured_toolsets": {
+                "description": "Canonical names requested at startup.",
+                "items": {
+                  "$ref": "#/$defs/ToolsetName"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "configured_toolsets",
+              "active_toolsets"
+            ],
+            "type": "object"
+          }
+        }
+      ]
+    },
+    {
+      "read_only": true,
+      "resource_templates": [
+        {
+          "description": "Bounded test-only alpha item",
+          "name": "alpha_item",
+          "uriTemplate": "anytype://optional/alpha/items/{item_id}"
+        }
+      ],
+      "resources": [
+        {
+          "description": "Bounded test-only alpha resource",
+          "name": "alpha_resource",
+          "uri": "anytype://optional/alpha"
+        }
+      ],
+      "tools": [
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "description": "Read the bounded test-only alpha state.",
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "name": "alpha_read",
+          "outputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "complete": {
+                "description": "Whether the test-only operation completed.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "complete"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "description": "Read the bounded test-only beta state.",
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "name": "beta_read",
+          "outputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "complete": {
+                "description": "Whether the test-only operation completed.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "complete"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "description": "Inspect configured and active optional Anytype toolsets for this startup. Returns canonical selector names and no secrets.",
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "name": "optional_toolset_status",
+          "outputSchema": {
+            "$defs": {
+              "ToolsetName": {
+                "maxLength": 32,
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9-]{0,31}$",
+                "type": "string"
+              }
+            },
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "active_toolsets": {
+                "description": "Canonical selected names contributing an admitted contract.",
+                "items": {
+                  "$ref": "#/$defs/ToolsetName"
+                },
+                "maxItems": 16,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "configured_toolsets": {
+                "description": "Canonical names requested at startup.",
+                "items": {
+                  "$ref": "#/$defs/ToolsetName"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "configured_toolsets",
+              "active_toolsets"
+            ],
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

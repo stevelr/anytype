@@ -355,8 +355,11 @@ pub(crate) mod config {
     /// Default pagination limit (API spec: 100)
     pub const DEFAULT_PAGINATION_LIMIT: u32 = 100;
 
-    /// Max retries for HTTP client
+    /// Maximum status or transport retries for one HTTP request.
     pub const MAX_RETRIES: u32 = 3;
+
+    /// Hard ceiling for physical attempts made by one replay-safe HTTP request.
+    pub const MAX_HTTP_REQUEST_ATTEMPTS: u32 = 6;
 
     // Validation limits
     pub const VALIDATION_MARKDOWN_MAX_LEN: u64 = 10 * 1024 * 1024;
