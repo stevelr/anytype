@@ -63,7 +63,10 @@ where a list endpoint requires URL query values. The client does not coerce
 strings to numbers or booleans, accept checkbox `1`/`0` aliases, or emulate
 server filtering after pagination. See the workspace
 [filter status](../FILTER_STATUS.md) for the live compatibility matrix and
-the disposition of the historical upstream limitation.
+the disposition of the historical upstream limitation. On `anytype-cli` 0.3.6,
+all eleven cleanup-owned object-list cases return HTTP 400; scoped search passes
+six exact-identity cases and fails five bounded semantic checks. The upstream
+object-list issue therefore remains open.
 
 ### Bounded HTTP responses
 
@@ -1074,7 +1077,12 @@ model, name, or ambient-identity evidence without rendering response values.
 The numeric/checkbox acceptance callback similarly reports only a closed
 fixture or comparison stage and a payload-free `TestError`/API diagnostic
 category, which proves whether execution crossed the callback boundary without
-exposing fixture identities, queries, endpoints, or upstream bodies.
+exposing fixture identities, queries, endpoints, or upstream bodies. Its
+ignored compatibility matrix executes all eleven fixed cases independently on
+both endpoints even when an earlier check fails, then reports all 22 static
+endpoint/case pairs in canonical order with only their closed categories and
+validated HTTP status/classes when available. The regression assertion is
+evaluated only after disposable cleanup completes.
 All three diagnostic paths store exhaustive enums rather than caller-provided
 strings, so `Display`, `Debug`, and accessors can render only the documented
 closed vocabulary. The filter fixture resolves its prerequisite `due_date`

@@ -16,7 +16,6 @@ use std::{
 pub use anytype::test_util::{TestContext, TestResult, retry_definitive_rate_limit};
 use anytype::{prelude::*, test_util::TestError};
 use tokio::time::sleep;
-use tracing::error;
 
 // =============================================================================
 // Test Helpers
@@ -117,6 +116,18 @@ pub async fn lookup_property_tag_with_retry(
 /// # Returns
 /// The created type key.
 pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String> {
+    ensure_properties_and_type_with_logging(ctx, true).await
+}
+
+/// Creates the filter fixture without rendering request or fixture values.
+pub async fn ensure_properties_and_type_quiet(ctx: &TestContext) -> TestResult<String> {
+    ensure_properties_and_type_with_logging(ctx, false).await
+}
+
+async fn ensure_properties_and_type_with_logging(
+    ctx: &TestContext,
+    emit_values: bool,
+) -> TestResult<String> {
     // Due Date/due_date Date
     match ctx
         .client
@@ -124,7 +135,9 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
         .await
     {
         Err(AnytypeError::NotFound { .. }) => {
-            eprintln!("due_date not found in space {}, creating", ctx.space_id);
+            if emit_values {
+                eprintln!("due_date not found in space {}, creating", ctx.space_id);
+            }
             match retry_definitive_rate_limit("due_date setup property", || async {
                 ctx.client
                     .new_property(&ctx.space_id, "Due Date", PropertyFormat::Date)
@@ -144,7 +157,9 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
                             .resolve_property_id(&ctx.space_id, "due_date")
                             .await?;
                     } else {
-                        eprintln!("creating due_date: {e}");
+                        if emit_values {
+                            eprintln!("creating due_date: {e}");
+                        }
                         return Err(e.into());
                     }
                 }
@@ -158,7 +173,9 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
 
     // create a type with these properties
     let type_key = unique_type_key("my_page");
-    eprintln!("creating type {type_key} in space {}", ctx.space_id);
+    if emit_values {
+        eprintln!("creating type {type_key} in space {}", ctx.space_id);
+    }
     match retry_definitive_rate_limit("filter setup type", || async {
         ctx.client
             .new_type(&ctx.space_id, "MyPage")
@@ -177,7 +194,9 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
             ctx.register_type(&typ.id);
         }
         Err(e) => {
-            error!("creating type {type_key}: {e:?}");
+            if emit_values {
+                eprintln!("creating type {type_key}: {e}");
+            }
             return Err(e.into());
         }
     }
