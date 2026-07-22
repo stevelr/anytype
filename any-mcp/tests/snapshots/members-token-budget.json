@@ -1,0 +1,14 @@
+{
+  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
+  "base_catalog_tokens": 9658,
+  "composed_total_tokens": 11333,
+  "member_catalog_ceiling_tokens": 1500,
+  "per_tool_tokens": {
+    "member_get": 637,
+    "member_list": 782
+  },
+  "read_only_composed_total_tokens": 10044,
+  "representative_max_result_tokens": 132038,
+  "selected": ["members"],
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
+}

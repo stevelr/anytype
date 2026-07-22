@@ -13,6 +13,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   production-stdio real-server cases. Independent stable REST exports and
   fresh `ObjectShow` identity/type/order reads prove byte and typed-semantic
   stability for the approved rich cohort while recording block-ID churn.
+- Design the default-off `views-write` collection-membership registry with
+  canonical filter-independent list pages, verified single-object add/remove
+  desired states, finite HTTP and gRPC work budgets, conservative
+  post-dispatch uncertainty, and direct plus spawned-stdio disposable
+  real-server acceptance. Review corrections fix the token-dense measured
+  result maximum at 61 items, define strict ordered overlap pagination and
+  counter evidence, reject overlap-only continuation pages, disambiguate POST
+  rejection semantics, and require cross-platform gates. The selector remains
+  unsupported until independent review and implementation are complete.
+- Add the explicitly selected, read-only `members` toolset with bounded
+  `member_list` pagination and exact `member_get` reads. Results expose only
+  validated member IDs, explicit space-local names, closed roles, and closed
+  statuses; network identities, global names, and icons never enter MCP
+  schemas, results, or diagnostics. Direct-router and production-stdio
+  fixtures cover strict runtime inputs, cursor binding, permissions,
+  ambiguity, response identity, controlled failures, malformed values,
+  redaction, and logical plus physical work ceilings. Disposable real-server
+  scenarios verify the same minimized happy-path wire contract.
 - Add ignored serial production-stdio disposable lifecycle sentinels that
   prove exact create/read object and space identity, registered fallible child
   shutdown, cleanup before a deliberate callback panic resumes, and exact
@@ -98,6 +116,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Classify bounded collection-membership evidence failures from `anytype-api`
+  as fixed upstream MCP errors and redacted health diagnostics.
 - Classify the bounded and malformed file-response evidence errors introduced
   by `anytype-api` exhaustively: header-budget failures map to
   `bounded_result`, malformed upstream file headers map to `upstream`, mutation

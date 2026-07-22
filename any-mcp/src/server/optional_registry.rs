@@ -116,6 +116,7 @@ impl OptionalToolsetRegistry for AlphaRegistry {
         &'a self,
         request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
+        _cursors: &'a crate::cursor::CursorStore,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async move {
@@ -198,6 +199,7 @@ impl OptionalToolsetRegistry for BetaRegistry {
         &'a self,
         request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
+        _cursors: &'a crate::cursor::CursorStore,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async move {
@@ -249,6 +251,7 @@ impl OptionalToolsetRegistry for GammaRegistry {
         &'a self,
         request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
+        _cursors: &'a crate::cursor::CursorStore,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async move {
@@ -936,6 +939,7 @@ impl OptionalToolsetRegistry for CollisionRegistry {
         &'a self,
         _request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
+        _cursors: &'a crate::cursor::CursorStore,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async { Err(ErrorData::method_not_found::<CallToolRequestMethod>()) })

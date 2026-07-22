@@ -329,7 +329,9 @@ environment, credential, resolver, or upstream access. Disabled optional tool
 and resource names return method-not-found before argument decoding or I/O.
 Stable and experimental protocol modes use the same composed catalog.
 
-Only `compact` and `standard` exist. Proposed `schema`, `members`,
+Only `compact` and `standard` application profiles exist. The optional
+`members` registry is linked and can be selected explicitly with
+`ANY_MCP_TOOLSETS=members`; it is absent by default. Proposed `schema`,
 `views-write`, `files`, `chats`, and `admin` toolsets are not implemented or
 selectable in this release. Their names become valid selectors only when a
 complete independently reviewed production registry is linked.
@@ -607,9 +609,10 @@ Phase 1 read path.
   post-pagination emulation. `object_search` accepts the recursive expression;
   `space_list`, `type_list`, `property_list`, `tag_list`, `template_list`, and
   `view_object_list` accept one nonempty flat `and` conjunction. `view_list`
-  has no upstream filter builder and rejects a `filters` field. Current members,
-  chat, and file toolsets remain unimplemented even though their future API
-  builders can accept flat filters. Filter count, value count, nesting depth, scalar
+  has no upstream filter builder and rejects a `filters` field. The optional
+  members tools accept no raw filter; current chat and file toolsets remain
+  unimplemented even though their future API builders can accept flat filters.
+  Filter count, value count, nesting depth, scalar
   lengths, arrays, and numeric magnitude are bounded. Set operands advertise
   1..100 values, and the recursive expression schema requires at least one
   nonempty condition or child array while retaining omission defaults.
@@ -637,6 +640,31 @@ All omittable read-input fields distinguish omission from explicit JSON
 never broaden a scoped search to global search or a selected projection to all
 properties. Space-scoped type resolver results are revalidated as bounded,
 nonempty type keys before they enter a cursor binding or upstream search.
+
+### Optional member discovery
+
+Set `ANY_MCP_TOOLSETS=members` before startup to add `member_list`,
+`member_get`, and the common `optional_toolset_status` tool. The registry uses
+HTTP only and remains available in read-only mode. `member_list` resolves one
+space and returns exactly one checked upstream page with the common default 20
+and maximum 100 item limits; continuation cursors bind the resolved space and
+requested limit. `member_get` performs one exact scoped read and rejects a
+mismatched returned identity.
+
+Member results contain only `id`, an optional explicit space-local `name`,
+`role`, and `status`. They never expose network identity, global/fallback name,
+or icon data. Upstream authorization remains authoritative, and disabled
+member tool calls fail before argument decoding or upstream access.
+
+Both tools apply the common request cancellation, timeout, retry, and redacted
+diagnostic controls. A name resolver uses at most 11 logical HTTP operations;
+one list or exact-get operation adds one, for a worst case of 12 logical
+operations and 72 physical attempts. Each replay-safe operation stops after
+six physical attempts. Offline direct-router and production-stdio fixtures
+cover schema/runtime parity, cursor binding, authorization, ambiguity,
+returned identity, malformed values, cancellation, timeout, 5xx handling,
+redaction, and the aggregate ceilings. Ignored disposable-space tests retain
+the real-server happy path.
 
 ### Document resources
 

@@ -31,6 +31,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+use crate::optional_toolsets::{OptionalToolsetSelection, production_optional_metadata};
 use crate::runtime::{RuntimeContext, StartupStatus};
 
 #[path = "../../tests/support/live_scenario.rs"]
@@ -74,6 +75,31 @@ async fn live_server_with(
         read_only,
     );
     AnyMcpServer::new(runtime).expect("production MCP catalog")
+}
+
+async fn live_members_server(ctx: &TestContext, read_only: bool) -> AnyMcpServer {
+    ctx.client
+        .ping_http()
+        .await
+        .expect("members suite requires authenticated HTTP");
+    let selected = OptionalToolsetSelection::parse(
+        Some("members".to_owned()),
+        &production_optional_metadata(),
+    )
+    .expect("complete members registry");
+    let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+        ctx.client.clone(),
+        1,
+        Duration::from_secs(30),
+        StartupStatus {
+            http_available: true,
+            grpc_available: false,
+        },
+        ApplicationProfile::Compact,
+        read_only,
+        selected,
+    );
+    AnyMcpServer::new(runtime).expect("production members MCP catalog")
 }
 
 async fn call(server: &AnyMcpServer, name: &'static str, value: Value) -> CallToolResult {
@@ -2014,6 +2040,77 @@ direct_baseline_test!(
     ScenarioId::MarkdownNoop
 );
 direct_baseline_test!(headless_direct_standard_archive, ScenarioId::Archive);
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_direct_members_minimizes_personal_data() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-direct-members",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let server = live_members_server(ctx.as_ref(), false).await;
+                let tools = server
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.as_ref())
+                    .collect::<Vec<_>>();
+                assert!(tools.contains(&"member_list"));
+                assert!(tools.contains(&"member_get"));
+                assert!(tools.contains(&"optional_toolset_status"));
+                let status = success(&server, "optional_toolset_status", json!({})).await;
+                assert_eq!(status["configured_toolsets"], json!(["members"]));
+                assert_eq!(status["active_toolsets"], json!(["members"]));
+
+                let page = success(
+                    &server,
+                    "member_list",
+                    json!({"space": ctx.space_id, "limit": 100}),
+                )
+                .await;
+                let items = page["items"].as_array().expect("members page items");
+                assert!(!items.is_empty(), "disposable space has an owner member");
+                assert!(page.get("next_cursor").is_none());
+                for item in items {
+                    let wire = item.to_string();
+                    for forbidden in ["identity", "global_name", "globalName", "icon"] {
+                        assert!(!wire.contains(forbidden));
+                    }
+                    let id = item["id"].as_str().expect("exact member id");
+                    let exact = success(
+                        &server,
+                        "member_get",
+                        json!({"space": ctx.space_id, "member_id": id}),
+                    )
+                    .await;
+                    assert_eq!(exact["member"], *item);
+                }
+
+                let read_only = live_members_server(ctx.as_ref(), true).await;
+                let read_only_tools = read_only
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.as_ref())
+                    .collect::<Vec<_>>();
+                assert!(read_only_tools.contains(&"member_list"));
+                assert!(read_only_tools.contains(&"member_get"));
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct members suite");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("direct members suite skipped before callback: {reason:?}");
+        }
+    }
+}
 
 #[tokio::test]
 #[ignore = "requires source .test-env and an authenticated headless Anytype server"]

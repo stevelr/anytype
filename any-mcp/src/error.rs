@@ -186,6 +186,7 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::TooManyRetries { .. }
         | AnytypeError::Deserialization { .. }
         | AnytypeError::BodyGraph { .. }
+        | AnytypeError::CollectionMembershipEvidence { .. }
         | AnytypeError::BodyMutationIndeterminate { .. }
         | AnytypeError::VerifyTimeout { .. }
         | AnytypeError::Other { .. } => false,
@@ -347,6 +348,7 @@ impl ToolError {
             | AnytypeError::Grpc { .. }
             | AnytypeError::CacheDisabled
             | AnytypeError::BodyGraph { .. }
+            | AnytypeError::CollectionMembershipEvidence { .. }
             | AnytypeError::VerifyTimeout { .. }
             | AnytypeError::Other { .. } => ToolErrorCode::Upstream,
         };

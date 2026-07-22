@@ -583,6 +583,9 @@ impl UpstreamDiagnostic {
             AnytypeError::Grpc { .. } | AnytypeError::GrpcUnavailable { .. } => Self::new("grpc"),
             AnytypeError::CacheDisabled => Self::new("cache"),
             AnytypeError::BodyGraph { .. } => Self::new("body_graph"),
+            AnytypeError::CollectionMembershipEvidence { .. } => {
+                Self::new("collection_membership_evidence")
+            }
             AnytypeError::BodyMutationIndeterminate { .. } => {
                 Self::new("body_mutation_indeterminate")
             }

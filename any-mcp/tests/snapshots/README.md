@@ -32,7 +32,8 @@ cargo test -p any-mcp server::optional_registry::write_optional_snapshots -- --i
 ```
 
 Review both complete diffs before accepting them. The registries are test-only;
-production accepts no optional selector until a complete domain registry lands.
+they exercise the common composition seam independently of linked production
+registries.
 
 ## Token budget
 
@@ -90,3 +91,12 @@ the one common-status allowance rather than assigning that cost to every
 registry. The fixture also locks the canonical selected sets, base catalog
 SHA-256, each optional tool's standalone contribution, and the 29-token maximum
 representative result for all three test domains.
+
+`members-token-budget.json` locks the first linked production registry against
+the same compact base hash. The two member tools contribute 1,419 standalone
+tokens, below their 1,500-token domain ceiling; the complete selected catalog
+is 11,333 tokens including the separately owned common status tool. The
+read-only composition is 10,044 tokens. The 132,038-token representative
+maximum result uses 100 distinct valid 256-character IDs and deterministic
+token-dense 512-scalar Unicode local names, avoiding an unrealistically
+compressible repeated-character corpus.

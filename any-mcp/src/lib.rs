@@ -62,6 +62,7 @@ pub mod error;
 pub mod filters;
 pub mod handler_support;
 pub mod logging;
+pub mod member_toolset;
 pub mod mutation_value;
 pub mod object_archive;
 pub mod object_create;

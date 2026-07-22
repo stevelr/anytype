@@ -121,6 +121,7 @@ struct ServerState {
     optional_catalog: OptionalCatalog,
     optional_status_contract: Option<WorkflowTool<OptionalToolsetStatusOutput>>,
     linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],
+    cursors: Arc<CursorStore>,
 }
 
 /// MCP handler backed by one authenticated runtime and one static catalog.
@@ -177,8 +178,8 @@ impl AnyMcpServer {
         let discovery = DiscoveryHandlers::new(runtime.clone(), cursors.clone());
         let object_read = ObjectReadHandlers::new(runtime.clone(), cursors.clone())
             .map_err(ServerBuildError::schema)?;
-        let view_read =
-            ViewReadHandlers::new(runtime.clone(), cursors).map_err(ServerBuildError::schema)?;
+        let view_read = ViewReadHandlers::new(runtime.clone(), cursors.clone())
+            .map_err(ServerBuildError::schema)?;
         let object_create =
             ObjectCreateHandlers::new(runtime.clone()).map_err(ServerBuildError::schema)?;
         let object_update_contract = object_update_tool().map_err(ServerBuildError::schema)?;
@@ -301,6 +302,7 @@ impl AnyMcpServer {
                 optional_catalog,
                 optional_status_contract,
                 linked_optional_registries,
+                cursors,
             }),
         })
     }
@@ -368,7 +370,7 @@ impl AnyMcpServer {
         }
         if let Some(registry) = self.state.optional_catalog.registry_for_tool(name) {
             return registry
-                .call_tool(request, &self.runtime, cancellation)
+                .call_tool(request, &self.runtime, &self.state.cursors, cancellation)
                 .await;
         }
         let arguments = request.arguments;
@@ -611,7 +613,7 @@ impl AnyMcpServer {
     }
 }
 
-fn decode_arguments<T: DeserializeOwned>(
+pub(crate) fn decode_arguments<T: DeserializeOwned>(
     arguments: Option<rmcp::model::JsonObject>,
 ) -> Result<T, ErrorData> {
     serde_json::from_value(Value::Object(arguments.unwrap_or_default()))
