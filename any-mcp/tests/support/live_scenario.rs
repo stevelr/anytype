@@ -5,7 +5,12 @@
 
 //! Transport-neutral scenarios and live-coverage ownership declarations.
 
-use std::{collections::HashSet, future::Future, pin::Pin, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    future::Future,
+    pin::Pin,
+    time::Duration,
+};
 
 use anytype::{
     body::{BlockContent, BodySnapshot, MarkKind},
@@ -45,6 +50,503 @@ pub trait McpDriver {
         &'a mut self,
         uri: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>>;
+}
+
+/// Runs a fixture-heavy live scenario on an isolated test runtime.
+pub fn run_live_scenario_on_large_stack<F, Fut>(thread_name: &str, scenario: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(thread_name.to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build fixture-heavy live scenario runtime")
+                .block_on(scenario());
+        })
+        .expect("spawn fixture-heavy live scenario thread")
+        .join()
+        .expect("fixture-heavy live scenario thread");
+}
+
+/// Content-free result of the representative-layout scenario.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LayoutScenarioEvidence {
+    pub collection_id: String,
+    pub grid_view_id: String,
+    pub kanban_view_id: String,
+    pub moved_item_id: String,
+    pub member_ids: Vec<String>,
+}
+
+struct PageWalk {
+    items: Vec<Value>,
+    pages: usize,
+}
+
+async fn collect_id_pages(
+    driver: &mut impl McpDriver,
+    tool: &'static str,
+    base: Value,
+    id_pointer: &'static str,
+    max_pages: usize,
+) -> Result<PageWalk, String> {
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut seen_ids = HashSet::new();
+    let mut items = Vec::new();
+    for page_number in 0..max_pages {
+        let mut input = base
+            .as_object()
+            .cloned()
+            .ok_or_else(|| format!("{tool} page input must be an object"))?;
+        input.insert("limit".to_owned(), json!(1));
+        if let Some(cursor) = cursor.take() {
+            input.insert("cursor".to_owned(), Value::String(cursor));
+        }
+        let page = driver.call_tool(tool, Value::Object(input)).await?;
+        let page_items = page["items"]
+            .as_array()
+            .ok_or_else(|| format!("{tool} items must be an array"))?;
+        require(page_items.len() <= 1, &format!("{tool} honors limit one"))?;
+        for item in page_items {
+            let id = item
+                .pointer(id_pointer)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{tool} item omitted its identity"))?;
+            require(
+                seen_ids.insert(id.to_owned()),
+                &format!("{tool} item progress"),
+            )?;
+            items.push(item.clone());
+        }
+        let Some(next) = page.get("next_cursor").and_then(Value::as_str) else {
+            return Ok(PageWalk {
+                items,
+                pages: page_number + 1,
+            });
+        };
+        require(
+            seen_cursors.insert(next.to_owned()),
+            &format!("{tool} cursor progress"),
+        )?;
+        cursor = Some(next.to_owned());
+    }
+    Err(format!("{tool} did not terminate within {max_pages} pages"))
+}
+
+async fn canonical_members(ctx: &TestContext, collection_id: &str) -> Result<Vec<String>, String> {
+    let page = ctx
+        .client
+        .collection_membership_page(&ctx.space_id, collection_id, 61, None)
+        .await
+        .map_err(|_| "read independent canonical membership".to_owned())?;
+    require(
+        page.continuation.is_none(),
+        "independent canonical membership terminates",
+    )?;
+    Ok(page.object_ids)
+}
+
+async fn mcp_members(
+    driver: &mut impl McpDriver,
+    space_id: &str,
+    collection_id: &str,
+) -> Result<(Vec<String>, usize), String> {
+    let walk = collect_id_pages(
+        driver,
+        "collection_member_list",
+        json!({"space":space_id,"collection_id":collection_id}),
+        "/object_id",
+        16,
+    )
+    .await?;
+    let members = walk
+        .items
+        .into_iter()
+        .map(|item| {
+            item["object_id"]
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "collection_member_list omitted object_id".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((members, walk.pages))
+}
+
+/// Exercises ordinary MCP workflows across basic, collection, grid, filtered,
+/// and Kanban layouts without introducing a layout-specific protocol surface.
+pub fn run_representative_layout_scenario<'a>(
+    driver: &'a mut impl McpDriver,
+    ctx: &'a TestContext,
+) -> Pin<Box<dyn Future<Output = Result<LayoutScenarioEvidence, String>> + 'a>> {
+    Box::pin(async move {
+        const REQUIRED: [&str; 8] = [
+            "collection_member_add",
+            "collection_member_list",
+            "collection_member_remove",
+            "object_get",
+            "object_update",
+            "type_list",
+            "view_list",
+            "view_object_list",
+        ];
+        const FORBIDDEN: [&str; 4] = [
+            "kanban_column_move",
+            "kanban_get",
+            "layout_get",
+            "view_filter_set",
+        ];
+        let tools = driver.list_tools().await?;
+        for required in REQUIRED {
+            require(
+                tools.iter().any(|name| name == required),
+                &format!("representative layout scenario requires {required}"),
+            )?;
+        }
+        for forbidden in FORBIDDEN {
+            require(
+                !tools.iter().any(|name| name == forbidden),
+                &format!("layout-specific tool must remain absent: {forbidden}"),
+            )?;
+        }
+
+        let suffix = unique_suffix();
+        let fixture_name = format!("MCP representative layout {suffix}");
+        let mut fixture = Box::pin(ctx.create_kanban_fixture(&fixture_name))
+            .await
+            .map_err(|_| "create cleanup-owned representative Kanban fixture".to_owned())?;
+        let first_item = fixture
+            .items
+            .first()
+            .ok_or_else(|| "Kanban fixture omitted its first item".to_owned())?;
+        let first_item_id = first_item.object.id.clone();
+        let first_item_name = first_item
+            .object
+            .name
+            .clone()
+            .ok_or_else(|| "Kanban fixture item omitted its name".to_owned())?;
+        let removed_item_id = fixture
+            .items
+            .get(2)
+            .map(|item| item.object.id.clone())
+            .ok_or_else(|| "Kanban fixture omitted its third item".to_owned())?;
+        let destination_id = fixture
+            .columns
+            .get(1)
+            .map(|column| column.id.clone())
+            .ok_or_else(|| "Kanban fixture omitted its destination column".to_owned())?;
+
+        let expected_type_layouts = BTreeMap::from([
+            (fixture.item_type.id.clone(), "basic".to_owned()),
+            (fixture.collection_type.id.clone(), "collection".to_owned()),
+        ]);
+        let mut observed_type_layouts = BTreeMap::new();
+        let mut observed_type_pages = 0;
+        for _ in 0..10 {
+            let types = collect_id_pages(
+                driver,
+                "type_list",
+                json!({
+                    "space":ctx.space_id,
+                    "filters":{
+                        "operator":"and",
+                        "conditions":[{
+                            "format":"text",
+                            "property_key":"name",
+                            "condition":"contains",
+                            "value":fixture_name
+                        }]
+                    }
+                }),
+                "/id",
+                8,
+            )
+            .await?;
+            observed_type_pages = types.pages;
+            observed_type_layouts.clear();
+            for item in &types.items {
+                if let (Some(id), Some(layout)) = (item["id"].as_str(), item["layout"].as_str())
+                    && expected_type_layouts.contains_key(id)
+                {
+                    observed_type_layouts.insert(id.to_owned(), layout.to_owned());
+                }
+            }
+            if observed_type_layouts == expected_type_layouts && types.pages == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        require(
+            observed_type_layouts == expected_type_layouts && observed_type_pages == 2,
+            "type_list preserves representative basic and collection layouts",
+        )?;
+
+        for (object_id, expected_type_key) in [
+            (first_item_id.as_str(), fixture.item_type.key.as_str()),
+            (
+                fixture.collection.id.as_str(),
+                fixture.collection_type.key.as_str(),
+            ),
+        ] {
+            let object = driver
+                .call_tool(
+                    "object_get",
+                    json!({"space":ctx.space_id,"object_id":object_id}),
+                )
+                .await?;
+            require(
+                object.pointer("/object/summary/id").and_then(Value::as_str) == Some(object_id)
+                    && object
+                        .pointer("/object/summary/type_key")
+                        .and_then(Value::as_str)
+                        == Some(expected_type_key),
+                "object_get preserves representative object type identity",
+            )?;
+        }
+
+        let views = collect_id_pages(
+            driver,
+            "view_list",
+            json!({"space":ctx.space_id,"list_id":fixture.collection.id}),
+            "/id",
+            16,
+        )
+        .await?;
+        require(
+            views.pages >= 2,
+            "view_list follows a limit-one continuation",
+        )?;
+        let view_layouts = views
+            .items
+            .iter()
+            .filter_map(|item| Some((item["id"].as_str()?, item["layout"].as_str()?)))
+            .collect::<BTreeMap<_, _>>();
+        require(
+            view_layouts.get(fixture.view.id.as_str()) == Some(&"kanban"),
+            "view_list preserves the Kanban layout",
+        )?;
+        let grid_view_id = view_layouts
+            .iter()
+            .find_map(|(id, layout)| (*layout == "grid").then(|| (*id).to_owned()))
+            .ok_or_else(|| "view_list omitted the representative grid layout".to_owned())?;
+
+        let canonical_before = canonical_members(ctx, &fixture.collection.id).await?;
+        require(
+            canonical_before.len() == fixture.items.len()
+                && fixture
+                    .items
+                    .iter()
+                    .all(|item| canonical_before.contains(&item.object.id)),
+            "independent canonical membership contains every Kanban card",
+        )?;
+        let (mcp_before, before_pages) =
+            mcp_members(driver, &ctx.space_id, &fixture.collection.id).await?;
+        require(
+            mcp_before == canonical_before && before_pages == canonical_before.len(),
+            "collection_member_list matches independent canonical order",
+        )?;
+
+        let updated = driver
+            .call_tool(
+                "object_update",
+                json!({
+                    "space":ctx.space_id,
+                    "object_id":first_item_id,
+                    "properties":[{
+                        "format":"select",
+                        "key":fixture.status_property.key,
+                        "select":destination_id
+                    }]
+                }),
+            )
+            .await?;
+        require(
+            updated.pointer("/object/id").and_then(Value::as_str) == Some(first_item_id.as_str()),
+            "ordinary object_update preserves moved card identity",
+        )?;
+        let moved = ctx
+            .client
+            .object(&ctx.space_id, &first_item_id)
+            .get()
+            .await
+            .map_err(|_| "independently read moved Kanban card".to_owned())?;
+        require(
+            moved
+                .get_property_select(&fixture.status_property.key)
+                .map(|tag| tag.id.as_str())
+                == Some(destination_id.as_str()),
+            "ordinary Select-property update moves the Kanban card",
+        )?;
+        if let Some(item) = fixture
+            .items
+            .iter_mut()
+            .find(|item| item.object.id == first_item_id)
+        {
+            item.object = moved;
+            item.column_id = Some(destination_id.clone());
+        }
+
+        let destination_items = collect_id_pages(
+            driver,
+            "view_object_list",
+            json!({
+                "space":ctx.space_id,
+                "list_id":fixture.collection.id,
+                "view":fixture.view.id,
+                "property_keys":[fixture.status_property.key],
+                "filters":{
+                    "operator":"and",
+                    "conditions":[{
+                        "format":"select",
+                        "property_key":fixture.status_property.key,
+                        "condition":"in",
+                        "values":[destination_id]
+                    }]
+                }
+            }),
+            "/summary/id",
+            8,
+        )
+        .await?;
+        let expected_destination_ids = fixture
+            .items
+            .iter()
+            .filter(|item| item.column_id.as_deref() == Some(destination_id.as_str()))
+            .map(|item| item.object.id.as_str())
+            .collect::<BTreeSet<_>>();
+        require(
+            destination_items.pages == 2,
+            "filtered Kanban view follows its limit-one continuation",
+        )?;
+        let actual_destination_ids = destination_items
+            .items
+            .iter()
+            .filter_map(|item| item.pointer("/summary/id").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+        require(
+            expected_destination_ids.len() == 2
+                && actual_destination_ids == expected_destination_ids,
+            "filtered Kanban pagination returns the exact destination column",
+        )?;
+
+        let removed = driver
+            .call_tool(
+                "collection_member_remove",
+                json!({
+                    "space":ctx.space_id,
+                    "collection_id":fixture.collection.id,
+                    "object_id":removed_item_id
+                }),
+            )
+            .await?;
+        require(
+            removed["collection_id"] == fixture.collection.id
+                && removed["object_id"] == removed_item_id
+                && removed["membership"] == "absent",
+            "collection_member_remove returns exact absence evidence",
+        )?;
+        let after_remove = canonical_members(ctx, &fixture.collection.id).await?;
+        let (mcp_after_remove, remove_pages) =
+            mcp_members(driver, &ctx.space_id, &fixture.collection.id).await?;
+        require(
+            !after_remove.contains(&removed_item_id)
+                && mcp_after_remove == after_remove
+                && remove_pages == after_remove.len(),
+            "removed card is absent from canonical membership",
+        )?;
+        let survived = ctx
+            .client
+            .object(&ctx.space_id, &removed_item_id)
+            .get()
+            .await
+            .map_err(|_| "removed collection member object must survive".to_owned())?;
+        require(
+            survived.id == removed_item_id,
+            "collection removal does not delete the card",
+        )?;
+
+        let added = driver
+            .call_tool(
+                "collection_member_add",
+                json!({
+                    "space":ctx.space_id,
+                    "collection_id":fixture.collection.id,
+                    "object_id":removed_item_id
+                }),
+            )
+            .await?;
+        require(
+            added["collection_id"] == fixture.collection.id
+                && added["object_id"] == removed_item_id
+                && added["membership"] == "present",
+            "collection_member_add returns exact presence evidence",
+        )?;
+        let canonical_after = canonical_members(ctx, &fixture.collection.id).await?;
+        let (mcp_after_add, add_pages) =
+            mcp_members(driver, &ctx.space_id, &fixture.collection.id).await?;
+        require(
+            canonical_after.contains(&removed_item_id)
+                && mcp_after_add == canonical_after
+                && add_pages == canonical_after.len(),
+            "re-added card returns to canonical paginated membership",
+        )?;
+
+        Box::pin(ctx.add_collection_name_filter_fixture(
+            &fixture.collection.id,
+            &fixture.view.id,
+            &first_item_name,
+        ))
+        .await
+        .map_err(|_| "configure cleanup-owned filtered Kanban view".to_owned())?;
+        let canonical_filtered = canonical_members(ctx, &fixture.collection.id).await?;
+        let (mcp_filtered, filtered_member_pages) =
+            mcp_members(driver, &ctx.space_id, &fixture.collection.id).await?;
+        require(
+            canonical_filtered == canonical_after
+                && mcp_filtered == canonical_after
+                && filtered_member_pages == canonical_after.len(),
+            "saved-view filtering preserves exact canonical membership",
+        )?;
+        let filtered_after = collect_id_pages(
+            driver,
+            "view_object_list",
+            json!({
+                "space":ctx.space_id,
+                "list_id":fixture.collection.id,
+                "view":fixture.view.id
+            }),
+            "/summary/id",
+            8,
+        )
+        .await?;
+        require(
+            filtered_after.pages == 1
+                && filtered_after.items.len() == 1
+                && filtered_after.items[0]
+                    .pointer("/summary/id")
+                    .and_then(Value::as_str)
+                    == Some(first_item_id.as_str()),
+            "membership and column mutations preserve saved-view filtering",
+        )?;
+        require(
+            canonical_filtered.len() > filtered_after.items.len()
+                && canonical_filtered.iter().any(|id| id == &first_item_id),
+            "canonical membership remains independent of filter visibility",
+        )?;
+
+        Ok(LayoutScenarioEvidence {
+            collection_id: fixture.collection.id,
+            grid_view_id,
+            kanban_view_id: fixture.view.id,
+            moved_item_id: first_item_id,
+            member_ids: canonical_filtered,
+        })
+    })
 }
 
 /// Cleanup-owned identities and unique text for the complete chats scenario.

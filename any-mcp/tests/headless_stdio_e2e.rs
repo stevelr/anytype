@@ -42,7 +42,8 @@ mod support;
 use support::{
     live_scenario::{
         ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
-        run_chats_registry_scenario, run_scenario, validate_live_ownership,
+        run_chats_registry_scenario, run_live_scenario_on_large_stack,
+        run_representative_layout_scenario, run_scenario, validate_live_ownership,
     },
     process::{ProcessOutput, ProtocolProcess},
 };
@@ -72,6 +73,11 @@ impl DriverOptions {
     };
     const PREVIEW: Self = Self {
         profile: "compact",
+        read_only: false,
+        preview: true,
+    };
+    const PREVIEW_STANDARD: Self = Self {
+        profile: "standard",
         read_only: false,
         preview: true,
     };
@@ -317,6 +323,28 @@ fn remove_sqlite_snapshot(path: &Path) {
     }
 }
 
+fn configure_stdio_command(command: &mut Command, options: DriverOptions, toolsets: Option<&str>) {
+    command
+        .env("ANY_MCP_PROFILE", options.profile)
+        .env(
+            "ANY_MCP_READ_ONLY",
+            if options.read_only { "1" } else { "0" },
+        )
+        .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "15")
+        .env("ANY_MCP_REQUEST_TIMEOUT_SECS", "30")
+        .env("RUST_LOG", "any_mcp=info");
+    if let Some(toolsets) = toolsets {
+        command.env("ANY_MCP_TOOLSETS", toolsets);
+    } else {
+        command.env_remove("ANY_MCP_TOOLSETS");
+    }
+    if options.preview {
+        command.env("ANY_MCP_PROTOCOL", "experimental-2026-07-28");
+    } else {
+        command.env_remove("ANY_MCP_PROTOCOL");
+    }
+}
+
 impl StdioDriver {
     fn start(options: DriverOptions) -> Self {
         Self::start_with_toolsets(options, None)
@@ -332,25 +360,7 @@ impl StdioDriver {
         let (keystore, isolated_specification) = TemporaryKeystore::isolate_environment()
             .unwrap_or_else(|error| panic!("isolate live-test keystore: {error}"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
-        command
-            .env("ANY_MCP_PROFILE", options.profile)
-            .env(
-                "ANY_MCP_READ_ONLY",
-                if options.read_only { "1" } else { "0" },
-            )
-            .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "15")
-            .env("ANY_MCP_REQUEST_TIMEOUT_SECS", "30")
-            .env("RUST_LOG", "any_mcp=info");
-        if let Some(toolsets) = toolsets {
-            command.env("ANY_MCP_TOOLSETS", toolsets);
-        } else {
-            command.env_remove("ANY_MCP_TOOLSETS");
-        }
-        if options.preview {
-            command.env("ANY_MCP_PROTOCOL", "experimental-2026-07-28");
-        } else {
-            command.env_remove("ANY_MCP_PROTOCOL");
-        }
+        configure_stdio_command(&mut command, options, toolsets);
         if let Some(specification) = isolated_specification {
             command.env("ANYTYPE_KEYSTORE", specification);
         }
@@ -855,6 +865,15 @@ fn spawn_disposable_standard_driver(
     ctx: &TestContext,
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
 ) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
+    spawn_disposable_driver(ctx, cleanup_record, DriverOptions::STANDARD, None)
+}
+
+fn spawn_disposable_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    options: DriverOptions,
+    toolsets: Option<&str>,
+) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
     let child_environment = ctx
         .disposable_child_environment()
         .ok_or_else(|| TestError::Assertion {
@@ -863,12 +882,11 @@ fn spawn_disposable_standard_driver(
         .clone();
     let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
     child_environment.configure(&mut command)?;
+    // Only strict, non-secret MCP selectors are overlaid after the disposable
+    // environment clears ambient state and installs environment credentials.
+    configure_stdio_command(&mut command, options, toolsets);
     ctx.spawn_owned_child(move || {
-        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(
-            command,
-            DriverOptions::STANDARD,
-            None,
-        ))));
+        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(command, options, None))));
         let stopped = Arc::clone(&driver);
         (driver, move || {
             *cleanup_record.lock().expect("child cleanup record lock") =
@@ -1710,6 +1728,171 @@ async fn headless_stdio_chats_registry_runs_stable_and_preview_workflows() {
             eprintln!("spawned chats registry suite skipped before callback: {reason:?}");
         }
     }
+}
+
+fn layouts_process_failure(
+    label: &str,
+    stage: &str,
+    driver: StdioDriver,
+) -> anytype::test_util::TestError {
+    let (transcript, output, category) = driver.finish_after_panic();
+    let stderr = stderr_metrics(&output.stderr);
+    let (requests, results, tool_errors) = process_metrics(&transcript);
+    eprintln!(
+        "spawned representative-layout process failed: transport={label} stage={stage} category={category} requests={requests} results={results} tool_errors={tool_errors} stderr={}",
+        stderr.summary()
+    );
+    TestError::Assertion {
+        message: "spawned representative-layout process failed".to_owned(),
+    }
+}
+
+fn take_registered_layout_driver(
+    driver: &Arc<Mutex<Option<StdioDriver>>>,
+) -> TestResult<StdioDriver> {
+    lock_driver(driver)
+        .take()
+        .ok_or_else(|| TestError::Assertion {
+            message: "registered representative-layout child disappeared".to_owned(),
+        })
+}
+
+async fn run_spawned_layout_transport(
+    label: &str,
+    options: DriverOptions,
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+) -> TestResult<()> {
+    let driver = spawn_disposable_driver(ctx, cleanup_record, options, Some("views-write"))?;
+    if std::panic::catch_unwind(AssertUnwindSafe(|| {
+        lock_driver(&driver)
+            .as_mut()
+            .expect("registered representative-layout child remains owned")
+            .initialize();
+    }))
+    .is_err()
+    {
+        let driver = take_registered_layout_driver(&driver)?;
+        return Err(layouts_process_failure(label, "initialize", driver));
+    }
+    let mut owned = OwnedStdioDriver {
+        driver: Arc::clone(&driver),
+    };
+    let result = AssertUnwindSafe(run_representative_layout_scenario(&mut owned, ctx))
+        .catch_unwind()
+        .await;
+    drop(owned);
+    let driver = take_registered_layout_driver(&driver)?;
+    match result {
+        Ok(Ok(evidence)) => {
+            if evidence.member_ids.len() != 3 || evidence.kanban_view_id == evidence.grid_view_id {
+                let _ = driver.try_finish();
+                return Err(TestError::Assertion {
+                    message: "spawned representative-layout evidence mismatch".to_owned(),
+                });
+            }
+            let (transcript, output) = driver.try_finish().map_err(|_| TestError::Assertion {
+                message: "registered representative-layout child did not stop cleanly".to_owned(),
+            })?;
+            let stderr = stderr_metrics(&output.stderr);
+            if stderr.stack_overflow != 0 || stderr.panic != 0 || stderr.fatal != 0 {
+                eprintln!(
+                    "spawned representative-layout emitted fatal diagnostics: transport={label} stderr={}",
+                    stderr.summary()
+                );
+                return Err(TestError::Assertion {
+                    message: "spawned representative-layout emitted fatal diagnostics".to_owned(),
+                });
+            }
+            if transcript.contains("MCP representative layout") {
+                return Err(TestError::Assertion {
+                    message: "spawned representative-layout transcript exposed fixture text"
+                        .to_owned(),
+                });
+            }
+            Ok(())
+        }
+        Ok(Err(_)) => {
+            let _ = driver.try_finish();
+            eprintln!("spawned representative-layout scenario failed: transport={label}");
+            Err(TestError::Assertion {
+                message: "spawned representative-layout scenario failed".to_owned(),
+            })
+        }
+        Err(_) => Err(layouts_process_failure(label, "scenario", driver)),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+fn headless_stdio_ordinary_tools_cover_representative_layouts() {
+    run_live_scenario_on_large_stack("stdio-representative-layouts", || async {
+        let callback_ran = Arc::new(AtomicBool::new(false));
+        let callback_flag = Arc::clone(&callback_ran);
+        let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+        let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+        let stable_callback_cleanup = Arc::clone(&stable_cleanup);
+        let preview_callback_cleanup = Arc::clone(&preview_cleanup);
+        let outcome = Box::pin(with_disposable_space_context(
+            "any-mcp-stdio-layouts",
+            move |ctx| {
+                callback_flag.store(true, Ordering::SeqCst);
+                Box::pin(async move {
+                    for (label, options, cleanup_record) in [
+                        ("stable", DriverOptions::STANDARD, stable_callback_cleanup),
+                        (
+                            "preview",
+                            DriverOptions::PREVIEW_STANDARD,
+                            preview_callback_cleanup,
+                        ),
+                    ] {
+                        Box::pin(run_spawned_layout_transport(
+                            label,
+                            options,
+                            ctx.as_ref(),
+                            cleanup_record,
+                        ))
+                        .await?;
+                    }
+                    Ok(())
+                })
+            },
+        ))
+        .await
+        .expect("cleanup-safe spawned representative-layout suite");
+        match outcome {
+            DisposableRun::Completed(()) => {
+                assert!(callback_ran.load(Ordering::SeqCst));
+                assert_eq!(
+                    *stable_cleanup.lock().expect("stable child cleanup record"),
+                    ChildCleanupRecord::Stopped
+                );
+                assert_eq!(
+                    *preview_cleanup
+                        .lock()
+                        .expect("preview child cleanup record"),
+                    ChildCleanupRecord::Stopped
+                );
+            }
+            DisposableRun::Skipped(reason) => {
+                assert!(!callback_ran.load(Ordering::SeqCst));
+                assert_eq!(
+                    *stable_cleanup.lock().expect("stable child cleanup record"),
+                    ChildCleanupRecord::NotRun
+                );
+                assert_eq!(
+                    *preview_cleanup
+                        .lock()
+                        .expect("preview child cleanup record"),
+                    ChildCleanupRecord::NotRun
+                );
+                eprintln!(
+                    "spawned representative-layout suite skipped before callback: {reason:?}"
+                );
+            }
+        }
+    });
 }
 
 #[cfg(feature = "acceptance-harness")]
