@@ -22,9 +22,8 @@
 //!   Phase 1 catalog; read-only standard retains its ten read tools.
 //! - [`OptionalToolsetSelection`] is empty unless `ANY_MCP_TOOLSETS` names a
 //!   complete registry linked into the binary. The default-off `members`,
-//!   `files`, nine-tool `schema`, and three-tool `views-write` registries are
-//!   linked; incomplete slices such as chat reads remain unavailable and
-//!   Phase 1 remains the default catalog.
+//!   `members`, `files`, nine-tool `schema`, three-tool `views-write`, and
+//!   six-tool `chats` registries are linked; Phase 1 remains the default catalog.
 //! - Resources advertise only the canonical
 //!   `anytype://spaces/{space_id}/objects/{object_id}` template. Instance
 //!   listing is empty and document discovery remains paginated through
@@ -62,6 +61,7 @@
 pub mod chat_add_toolset;
 pub mod chat_delete_toolset;
 pub mod chat_read_toolset;
+pub mod chats_toolset;
 pub mod collection_member_toolset;
 pub mod config;
 mod create_idempotency;

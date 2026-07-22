@@ -25,6 +25,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    chats_toolset::CHATS_REGISTRY,
     collection_member_toolset::VIEWS_WRITE_REGISTRY,
     cursor::CursorStore,
     file_content::FILE_CONTENT_REGISTRY,
@@ -334,7 +335,8 @@ pub fn production_optional_registries() -> &'static [&'static dyn OptionalToolse
     &PRODUCTION_OPTIONAL_REGISTRIES
 }
 
-static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 4] = [
+static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 5] = [
+    CHATS_REGISTRY,
     MEMBERS_REGISTRY,
     &FILE_CONTENT_REGISTRY,
     SCHEMA_REGISTRY,

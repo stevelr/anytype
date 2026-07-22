@@ -5,8 +5,7 @@
 
 //! Verified deletion of one exact chat message.
 //!
-//! This slice stays production-unlinked until the complete `chats` registry is
-//! assembled and independently reviewed.
+//! The complete production `chats` registry composes this reviewed slice.
 
 use std::{borrow::Cow, fmt, future::Future, pin::Pin, time::Instant};
 

@@ -8,6 +8,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Link the complete default-off `chats` production registry through HTTP-only
+  `anytype-api` workflows. Read-write mode exposes exactly `chat_list`,
+  `chat_message_list`, `chat_message_get`, `chat_message_search`,
+  `chat_message_add`, and `chat_message_delete`; read-only mode retains the four
+  reads, with common `optional_toolset_status` counted once. The immutable
+  descriptor composes the independently reviewed slices with per-runtime
+  mutation state, no resources, templates, gRPC, rich-message, streaming, or
+  deferred names. No-selection Phase 1 catalogs, status, transport, and token
+  output remain byte-identical. A canonical `o200k_base` snapshot locks all
+  six per-tool costs, the 5,609-token read-write and 3,811-token read-only
+  domain totals beneath 8,500/6,500 ceilings, full profile/access/mixed
+  catalogs, and the component adversarial result boundaries. Direct stable and
+  preview dispatch preserve identical contracts; absent and read-only calls
+  stop before decoding or HTTP. The cleanup-owned real-server scenarios cover
+  list, history, search, exact get, add/replay/conflict, delete, and verified
+  absence without a mock server. Synthetic latency, connection, malformed,
+  forced-5xx, and retry-maximum cases remain deferred to the P4 fault-injection
+  design.
 - Add the production-unlinked `chat_message_delete` mutation slice through
   `anytype-api` REST only. Its closed input requires an exact space, chat,
   message, canonical UTC-millisecond `expected_modified_at`, and the literal

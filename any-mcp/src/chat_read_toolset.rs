@@ -46,10 +46,14 @@ use crate::{
     validation::{Omittable, optional_non_null_schema},
 };
 
-const CHAT_LIST: &str = "chat_list";
-const CHAT_MESSAGE_LIST: &str = "chat_message_list";
-const CHAT_MESSAGE_GET: &str = "chat_message_get";
-const CHAT_MESSAGE_SEARCH: &str = "chat_message_search";
+/// Exact bounded chat-list tool name.
+pub const CHAT_LIST: &str = "chat_list";
+/// Exact bounded chat-history tool name.
+pub const CHAT_MESSAGE_LIST: &str = "chat_message_list";
+/// Exact bounded chat-message detail tool name.
+pub const CHAT_MESSAGE_GET: &str = "chat_message_get";
+/// Exact bounded in-chat message-search tool name.
+pub const CHAT_MESSAGE_SEARCH: &str = "chat_message_search";
 const CHAT_LIST_DEFAULT_LIMIT: u16 = 10;
 const CHAT_LIST_MAX_LIMIT: u16 = 20;
 const MESSAGE_DEFAULT_LIMIT: u16 = 8;
@@ -446,8 +450,7 @@ static CHAT_READ_REGISTRY_IMPL: ChatReadRegistry = ChatReadRegistry;
 
 /// Returns the complete four-tool chat-read registry.
 ///
-/// The descriptor remains production-unlinked until the complete six-tool
-/// `chats` toolset is assembled and independently reviewed.
+/// The descriptor is a component of the complete production `chats` registry.
 #[must_use]
 pub fn chat_read_registry() -> &'static dyn OptionalToolsetRegistry {
     &CHAT_READ_REGISTRY_IMPL
@@ -491,19 +494,19 @@ impl OptionalToolsetRegistry for ChatReadRegistry {
             match request.name.as_ref() {
                 CHAT_LIST => {
                     let input = decode_arguments::<ChatListInput>(request.arguments)?;
-                    Ok(chat_list(runtime, cursors, input, cancellation).await)
+                    Ok(Box::pin(chat_list(runtime, cursors, input, cancellation)).await)
                 }
                 CHAT_MESSAGE_LIST => {
                     let input = decode_arguments::<ChatMessageListInput>(request.arguments)?;
-                    Ok(chat_message_list(runtime, cursors, input, cancellation).await)
+                    Ok(Box::pin(chat_message_list(runtime, cursors, input, cancellation)).await)
                 }
                 CHAT_MESSAGE_GET => {
                     let input = decode_arguments::<ChatMessageGetInput>(request.arguments)?;
-                    Ok(chat_message_get(runtime, input, cancellation).await)
+                    Ok(Box::pin(chat_message_get(runtime, input, cancellation)).await)
                 }
                 CHAT_MESSAGE_SEARCH => {
                     let input = decode_arguments::<ChatMessageSearchInput>(request.arguments)?;
-                    Ok(chat_message_search(runtime, cursors, input, cancellation).await)
+                    Ok(Box::pin(chat_message_search(runtime, cursors, input, cancellation)).await)
                 }
                 _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
             }
@@ -1665,13 +1668,13 @@ mod tests {
     }
 
     #[test]
-    fn read_slice_is_composable_but_not_production_linked() {
+    fn read_slice_is_composable_and_production_registry_is_linked() {
         assert_eq!(chat_read_registry().metadata().name, "chats");
         assert_eq!(chat_read_registry().catalog_token_ceiling(), 6_500);
         assert!(
             production_optional_metadata()
                 .iter()
-                .all(|metadata| metadata.name != "chats")
+                .any(|metadata| { metadata == &OptionalToolsetMetadata::new("chats", false) })
         );
     }
 

@@ -47,6 +47,193 @@ pub trait McpDriver {
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>>;
 }
 
+/// Cleanup-owned identities and unique text for the complete chats scenario.
+pub struct ChatsRegistryFixture<'a> {
+    pub space_id: &'a str,
+    pub chat_id: &'a str,
+    pub seed_message_id: &'a str,
+    pub search_query: &'a str,
+    pub add_text: &'a str,
+    pub idempotency_key: &'a str,
+}
+
+/// Content-minimized evidence returned by the complete chats scenario.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChatsRegistryEvidence {
+    pub chat_id: String,
+    pub seed_message_id: String,
+    pub added_message_id: String,
+    pub deleted: bool,
+}
+
+fn page_contains_id(page: &Value, id: &str) -> bool {
+    page["items"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["id"] == id))
+}
+
+fn search_contains_id(page: &Value, id: &str) -> bool {
+    page["items"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["message"]["id"] == id))
+}
+
+/// Runs all six production chat tools through one transport-neutral driver.
+pub async fn run_chats_registry_scenario(
+    driver: &mut impl McpDriver,
+    fixture: ChatsRegistryFixture<'_>,
+) -> Result<ChatsRegistryEvidence, String> {
+    const CHAT_NAMES: [&str; 6] = [
+        "chat_list",
+        "chat_message_add",
+        "chat_message_delete",
+        "chat_message_get",
+        "chat_message_list",
+        "chat_message_search",
+    ];
+    let tools = driver.list_tools().await?;
+    let actual = tools
+        .iter()
+        .filter(|name| name.starts_with("chat_"))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if actual != CHAT_NAMES {
+        return Err("chats registry inventory differs from the reviewed six tools".to_owned());
+    }
+
+    let chats = driver
+        .call_tool("chat_list", json!({"space":fixture.space_id,"limit":20}))
+        .await?;
+    if !page_contains_id(&chats, fixture.chat_id) {
+        return Err("chat_list omitted the cleanup-owned chat".to_owned());
+    }
+    let history = driver
+        .call_tool(
+            "chat_message_list",
+            json!({"space":fixture.space_id,"chat_id":fixture.chat_id,"limit":12}),
+        )
+        .await?;
+    if !page_contains_id(&history, fixture.seed_message_id) {
+        return Err("chat_message_list omitted the cleanup-owned seed".to_owned());
+    }
+    let mut search_observed = false;
+    for attempt in 0..20 {
+        let search = driver
+            .call_tool(
+                "chat_message_search",
+                json!({
+                    "space":fixture.space_id,
+                    "chat_id":fixture.chat_id,
+                    "query":fixture.search_query,
+                    "limit":12
+                }),
+            )
+            .await?;
+        if search_contains_id(&search, fixture.seed_message_id) {
+            search_observed = true;
+            break;
+        }
+        if attempt != 19 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    if !search_observed {
+        return Err("chat_message_search omitted the cleanup-owned seed".to_owned());
+    }
+
+    let add_input = json!({
+        "space":fixture.space_id,
+        "chat_id":fixture.chat_id,
+        "text":fixture.add_text,
+        "idempotency_key":fixture.idempotency_key,
+    });
+    let added = driver
+        .call_tool("chat_message_add", add_input.clone())
+        .await?;
+    let message_id = added["message"]["id"]
+        .as_str()
+        .ok_or_else(|| "chat_message_add omitted the assigned ID".to_owned())?
+        .to_owned();
+    let modified_at = added["message"]["modified_at"]
+        .as_str()
+        .ok_or_else(|| "chat_message_add omitted the canonical timestamp".to_owned())?
+        .to_owned();
+    if added["message"]["text"] != fixture.add_text || added["idempotency"]["key_reused"] != false {
+        return Err("chat_message_add returned incorrect first-call evidence".to_owned());
+    }
+
+    let replay = driver
+        .call_tool("chat_message_add", add_input.clone())
+        .await?;
+    if replay["message"]["id"] != message_id || replay["idempotency"]["key_reused"] != true {
+        return Err("chat_message_add replay changed identity or missed reuse".to_owned());
+    }
+    let detail = driver
+        .call_tool(
+            "chat_message_get",
+            json!({
+                "space":fixture.space_id,
+                "chat_id":fixture.chat_id,
+                "message_id":message_id,
+            }),
+        )
+        .await?;
+    if detail["message"]["id"] != message_id || detail["message"]["text"] != fixture.add_text {
+        return Err("chat_message_get disagreed with verified add".to_owned());
+    }
+
+    let conflict = driver
+        .call_tool_error(
+            "chat_message_add",
+            json!({
+                "space":fixture.space_id,
+                "chat_id":fixture.chat_id,
+                "text":format!("{} conflict", fixture.add_text),
+                "idempotency_key":fixture.idempotency_key,
+            }),
+        )
+        .await?;
+    if conflict != "conflict" {
+        return Err("changed chat add replay was not a conflict".to_owned());
+    }
+
+    let deleted = driver
+        .call_tool(
+            "chat_message_delete",
+            json!({
+                "space":fixture.space_id,
+                "chat_id":fixture.chat_id,
+                "message_id":message_id,
+                "expected_modified_at":modified_at,
+                "confirm_delete":"delete_message",
+            }),
+        )
+        .await?;
+    if deleted["message_id"] != message_id || deleted["deleted"] != true {
+        return Err("chat_message_delete omitted verified absence".to_owned());
+    }
+    let absence = driver
+        .call_tool_error(
+            "chat_message_get",
+            json!({
+                "space":fixture.space_id,
+                "chat_id":fixture.chat_id,
+                "message_id":message_id,
+            }),
+        )
+        .await?;
+    if absence != "not_found" {
+        return Err("deleted chat message remained readable".to_owned());
+    }
+
+    Ok(ChatsRegistryEvidence {
+        chat_id: fixture.chat_id.to_owned(),
+        seed_message_id: fixture.seed_message_id.to_owned(),
+        added_message_id: message_id,
+        deleted: true,
+    })
+}
+
 /// Stable identifiers for every executable live scenario.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScenarioId {
