@@ -553,6 +553,17 @@ same type and reconciles the REST definitions against Heart's authoritative
 returned `recommended` list is the complete non-featured set replaced by
 `UpdateTypeRequest::properties` and cleared by `clear_properties`.
 
+`ObjectShow` and its exact matching `ObjectClose` both carry tonic deadlines
+and outer timeouts. A close guard is armed before show dispatch; cancellation
+or timeout during either boundary starts at most one detached five-second
+close fallback. `classify_properties()` uses the five-second Show maximum,
+while `classify_properties_with_deadline()` accepts a nonzero Show budget of at
+most five seconds. Every explicit or detached close owns a fresh independent
+five-second window, even when a caller's readback budget has expired. Public
+counters expose Show, Close, fallback, and confirmed cleanup success/failure
+work without retaining payloads. Cleanup failures take precedence over Show
+response errors.
+
 The source lists are capped at 1,000 combined links. Duplicate, overlapping,
 malformed, missing, extra, or cross-source-inconsistent evidence fails the
 whole read rather than truncating or guessing. The transports are not an

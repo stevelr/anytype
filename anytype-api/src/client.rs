@@ -259,6 +259,7 @@ pub struct AnytypeClient {
     pub(crate) keystore: KeyStore,
     pub(crate) cache: Arc<AnytypeCache>,
     pub(crate) grpc: Arc<Mutex<Option<AnytypeGrpcClient>>>,
+    pub(crate) type_property_metrics: Arc<crate::types::TypePropertyClassificationMetrics>,
 }
 
 impl std::fmt::Debug for AnytypeClient {
@@ -371,6 +372,9 @@ impl AnytypeClient {
             keystore,
             cache: Arc::new(cache),
             grpc: Arc::new(Mutex::new(None)),
+            type_property_metrics: Arc::new(
+                crate::types::TypePropertyClassificationMetrics::default(),
+            ),
         })
     }
 
@@ -542,6 +546,14 @@ impl AnytypeClient {
     #[must_use]
     pub fn http_metrics(&self) -> HttpMetricsSnapshot {
         self.client.metrics_snapshot()
+    }
+
+    /// Returns cumulative type-property classification RPC ownership metrics.
+    #[must_use]
+    pub fn type_property_classification_metrics(
+        &self,
+    ) -> crate::types::TypePropertyClassificationMetricsSnapshot {
+        self.type_property_metrics.snapshot()
     }
 
     /// Enables cache.

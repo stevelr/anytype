@@ -190,6 +190,7 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::Deserialization { .. }
         | AnytypeError::BodyGraph { .. }
         | AnytypeError::CollectionMembershipEvidence { .. }
+        | AnytypeError::TypePropertyClassification { .. }
         | AnytypeError::BodyMutationIndeterminate { .. }
         | AnytypeError::VerifyTimeout { .. }
         | AnytypeError::Other { .. } => false,
@@ -355,6 +356,7 @@ impl ToolError {
             | AnytypeError::CacheDisabled
             | AnytypeError::BodyGraph { .. }
             | AnytypeError::CollectionMembershipEvidence { .. }
+            | AnytypeError::TypePropertyClassification { .. }
             | AnytypeError::VerifyTimeout { .. }
             | AnytypeError::Other { .. } => ToolErrorCode::Upstream,
         };

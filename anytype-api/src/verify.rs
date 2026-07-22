@@ -103,6 +103,37 @@ where
     Fut: Future<Output = Result<T>>,
     Ready: FnMut(&T) -> bool,
 {
+    let mut fetch = fetch;
+    verify_with_retry_policy(
+        config,
+        obj_type,
+        key,
+        move |_| fetch(),
+        ready,
+        semantic_retryable,
+    )
+    .await
+}
+
+/// Repeatedly fetches a value while exposing the current remaining wall-clock
+/// budget to each attempt.
+///
+/// This is the deadline-aware form of [`verify_semantic`]. It is intended for
+/// compound reads whose inner RPC must carry a deadline no greater than the
+/// verifier's remaining timeout. The supplied duration is always nonzero and
+/// already includes delays and work spent by earlier attempts.
+pub async fn verify_semantic_with_remaining<T, Fut, Fetch, Ready>(
+    config: &VerifyConfig,
+    obj_type: &str,
+    key: &str,
+    fetch: Fetch,
+    ready: Ready,
+) -> Result<T>
+where
+    Fetch: FnMut(Duration) -> Fut,
+    Fut: Future<Output = Result<T>>,
+    Ready: FnMut(&T) -> bool,
+{
     verify_with_retry_policy(config, obj_type, key, fetch, ready, semantic_retryable).await
 }
 
@@ -115,7 +146,7 @@ async fn verify_with_retry_policy<T, Fut, Fetch, Ready, Retryable>(
     retryable: Retryable,
 ) -> Result<T>
 where
-    Fetch: FnMut() -> Fut,
+    Fetch: FnMut(Duration) -> Fut,
     Fut: Future<Output = Result<T>>,
     Ready: FnMut(&T) -> bool,
     Retryable: Fn(&AnytypeError) -> bool,
@@ -137,7 +168,7 @@ where
         }
 
         attempts += 1;
-        let fetched = match tokio::time::timeout(remaining, fetch()).await {
+        let fetched = match tokio::time::timeout(remaining, fetch(remaining)).await {
             Ok(result) => result,
             Err(_) => {
                 return Err(verify_timeout(
@@ -239,7 +270,16 @@ where
     Fetch: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    verify_with_retry_policy(config, obj_type, key, fetch, |_| true, legacy_retryable).await
+    let mut fetch = fetch;
+    verify_with_retry_policy(
+        config,
+        obj_type,
+        key,
+        move |_| fetch(),
+        |_| true,
+        legacy_retryable,
+    )
+    .await
 }
 
 fn legacy_retryable(error: &AnytypeError) -> bool {

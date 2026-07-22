@@ -33,6 +33,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   semantic readback, plus an opaque disposable-test claim that safely registers
   a space created through another reviewed client surface immediately after
   its exact response is returned.
+- Make type-property classification finite and cancellation-safe with bounded
+  tonic and outer `ObjectShow`/`ObjectClose` deadlines, an owned close guard,
+  one detached cleanup fallback, payload-free lifecycle errors, and a
+  remaining-budget verifier seam for compound MCP readback rounds. Show and
+  Close own independent windows, cleanup errors take precedence, and public
+  payload-free counters expose Show, Close, fallback, and confirmed cleanup
+  success/exhaustion work.
 - Add a bounded direct collection-membership observation that exact-checks
   space, collection, and object identity, rejects Set/query lists, and combines
   a canonical collection-scoped Heart query with independent unscoped index

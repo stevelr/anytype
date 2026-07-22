@@ -319,6 +319,14 @@ pub enum AnytypeError {
         kind: crate::views::CollectionMembershipEvidenceKind,
     },
 
+    /// A finite type-property classification could not complete its owned
+    /// `ObjectShow`/`ObjectClose` lifecycle.
+    #[snafu(display("Type property classification failed: {kind}"))]
+    TypePropertyClassification {
+        /// Closed payload-free lifecycle failure classification.
+        kind: crate::types::TypePropertyClassificationErrorKind,
+    },
+
     /// The previous operation could not be confirmed within the expected time interval.
     /// For more information, see the notes about eventual consistency in the project [README](../README.md).
     #[snafu(display(
@@ -458,6 +466,9 @@ impl AnytypeError {
             Self::CollectionMembershipEvidence { .. } => {
                 ("collection_membership_evidence", None, None, None)
             }
+            Self::TypePropertyClassification { .. } => {
+                ("type_property_classification", None, None, None)
+            }
             Self::VerifyTimeout { .. } => ("verify_timeout", None, None, None),
             Self::Other { .. } => ("other", None, None, None),
         };
@@ -512,6 +523,7 @@ impl AnytypeError {
             | Self::BodyGraph { .. }
             | Self::BodyMutationIndeterminate { .. }
             | Self::CollectionMembershipEvidence { .. }
+            | Self::TypePropertyClassification { .. }
             | Self::VerifyTimeout { .. }
             | Self::Other { .. } => false,
         }

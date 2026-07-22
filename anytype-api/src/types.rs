@@ -57,7 +57,16 @@
 //! - [`NewTypeRequest`] - Builder for creating types
 //! - [`ListTypesRequest`] - Builder for listing types
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anytype_rpc::anytype::rpc::object::{close as object_close, show as object_show};
 use anytype_rpc::model;
@@ -77,6 +86,45 @@ use crate::{
     prelude::*,
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
 };
+
+/// Longest per-RPC deadline accepted by the finite type-property classifier.
+pub const MAX_TYPE_PROPERTY_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cumulative work counters for type-property classification RPC ownership.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypePropertyClassificationMetricsSnapshot {
+    /// `ObjectShow` RPCs polled by the classifier.
+    pub show_attempts: u64,
+    /// `ObjectClose` RPCs polled by explicit cleanup or the detached fallback.
+    pub close_attempts: u64,
+    /// Detached cleanup fallbacks started after cancellation or failed cleanup.
+    pub close_fallbacks: u64,
+    /// Explicit or detached close attempts that confirmed cleanup.
+    pub cleanup_successes: u64,
+    /// Explicit or detached close attempts that did not confirm cleanup.
+    pub cleanup_failures: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TypePropertyClassificationMetrics {
+    show_attempts: AtomicU64,
+    close_attempts: AtomicU64,
+    close_fallbacks: AtomicU64,
+    cleanup_successes: AtomicU64,
+    cleanup_failures: AtomicU64,
+}
+
+impl TypePropertyClassificationMetrics {
+    pub(crate) fn snapshot(&self) -> TypePropertyClassificationMetricsSnapshot {
+        TypePropertyClassificationMetricsSnapshot {
+            show_attempts: self.show_attempts.load(Ordering::Relaxed),
+            close_attempts: self.close_attempts.load(Ordering::Relaxed),
+            close_fallbacks: self.close_fallbacks.load(Ordering::Relaxed),
+            cleanup_successes: self.cleanup_successes.load(Ordering::Relaxed),
+            cleanup_failures: self.cleanup_failures.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Maximum number of featured and ordinary recommended property links
 /// accepted by one exact type-property classification read.
@@ -183,6 +231,131 @@ pub struct TypePropertyClassification {
     /// This is the exact set replaced by [`UpdateTypeRequest::properties`] or
     /// removed by [`UpdateTypeRequest::clear_properties`].
     pub recommended: Vec<Property>,
+}
+
+/// Payload-free failure classification for the finite property-classification
+/// lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum TypePropertyClassificationErrorKind {
+    /// `ObjectShow` exceeded its caller-selected finite RPC deadline.
+    RpcDeadline,
+    /// The matching `ObjectClose` could not be confirmed within its deadline.
+    CleanupFailed,
+    /// No Tokio runtime was available to own the close fallback.
+    RuntimeUnavailable,
+}
+
+type TypePropertyCleanupFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+type TypePropertyCleanupAction = Arc<dyn Fn(Duration) -> TypePropertyCleanupFuture + Send + Sync>;
+
+/// Owns the matching close for one type-property `ObjectShow` boundary.
+struct TypePropertyCloseGuard {
+    action: TypePropertyCleanupAction,
+    runtime: tokio::runtime::Handle,
+    metrics: Option<Arc<TypePropertyClassificationMetrics>>,
+    armed: bool,
+}
+
+impl TypePropertyCloseGuard {
+    fn new(
+        grpc: anytype_rpc::client::AnytypeGrpcClient,
+        space_id: String,
+        type_id: String,
+        metrics: Arc<TypePropertyClassificationMetrics>,
+    ) -> Result<Self> {
+        let runtime = classification_runtime_handle()?;
+        let raw_action: TypePropertyCleanupAction = Arc::new(move |timeout| {
+            let grpc = grpc.clone();
+            let space_id = space_id.clone();
+            let type_id = type_id.clone();
+            Box::pin(
+                async move { close_type_property_view(grpc, space_id, type_id, timeout).await },
+            )
+        });
+        let action = instrument_cleanup_action(raw_action, Arc::clone(&metrics));
+        Ok(Self {
+            action,
+            runtime,
+            metrics: Some(metrics),
+            armed: true,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_action(action: TypePropertyCleanupAction) -> Self {
+        Self {
+            action,
+            runtime: tokio::runtime::Handle::current(),
+            metrics: None,
+            armed: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_action_with_metrics(
+        action: TypePropertyCleanupAction,
+        metrics: Arc<TypePropertyClassificationMetrics>,
+    ) -> Self {
+        Self {
+            action: instrument_cleanup_action(action, Arc::clone(&metrics)),
+            runtime: tokio::runtime::Handle::current(),
+            metrics: Some(metrics),
+            armed: true,
+        }
+    }
+
+    async fn cleanup(&mut self, timeout: Duration) -> Result<()> {
+        match (self.action)(timeout).await {
+            Ok(()) => {
+                self.armed = false;
+                Ok(())
+            }
+            Err(_) => classification_error(TypePropertyClassificationErrorKind::CleanupFailed),
+        }
+    }
+}
+
+fn instrument_cleanup_action(
+    action: TypePropertyCleanupAction,
+    metrics: Arc<TypePropertyClassificationMetrics>,
+) -> TypePropertyCleanupAction {
+    Arc::new(move |timeout| {
+        let action = Arc::clone(&action);
+        let metrics = Arc::clone(&metrics);
+        Box::pin(async move {
+            metrics.close_attempts.fetch_add(1, Ordering::Relaxed);
+            let result = action(timeout).await;
+            if result.is_ok() {
+                metrics.cleanup_successes.fetch_add(1, Ordering::Relaxed);
+            } else {
+                metrics.cleanup_failures.fetch_add(1, Ordering::Relaxed);
+            }
+            result
+        })
+    })
+}
+
+fn classification_runtime_handle() -> Result<tokio::runtime::Handle> {
+    tokio::runtime::Handle::try_current().map_err(|_| {
+        classification_error_value(TypePropertyClassificationErrorKind::RuntimeUnavailable)
+    })
+}
+
+impl Drop for TypePropertyCloseGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let action = Arc::clone(&self.action);
+        let metrics = self.metrics.clone();
+        self.runtime.spawn(async move {
+            if let Some(metrics) = metrics.as_ref() {
+                metrics.close_fallbacks.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = action(MAX_TYPE_PROPERTY_RPC_TIMEOUT).await;
+        });
+    }
 }
 
 impl TypePropertyClassification {
@@ -368,8 +541,8 @@ impl TypeRequest {
     ///
     /// One direct REST type GET supplies public property definitions. One gRPC
     /// `ObjectShow` supplies the separate source ID lists because the REST wire
-    /// model flattens them. The shown view is released with a best-effort
-    /// `ObjectClose`. The combined source-list size is capped by
+    /// model flattens them. The shown view is released with a finite,
+    /// cancellation-resilient owned `ObjectClose`. The combined source-list size is capped by
     /// [`MAX_TYPE_PROPERTY_LINKS`], and the read fails whole on duplicate,
     /// overlapping, missing, extra, malformed, or inconsistent evidence.
     ///
@@ -384,13 +557,48 @@ impl TypeRequest {
     /// - [`AnytypeError::Other`] for malformed, oversized, or inconsistent
     ///   upstream evidence
     pub async fn classify_properties(self) -> Result<TypePropertyClassification> {
+        self.classify_properties_with_deadline(MAX_TYPE_PROPERTY_RPC_TIMEOUT)
+            .await
+    }
+
+    /// Reads the exact property classification with a caller-selected finite
+    /// deadline for `ObjectShow`.
+    ///
+    /// The deadline must be nonzero and no greater than
+    /// [`MAX_TYPE_PROPERTY_RPC_TIMEOUT`]. Every explicit or detached
+    /// `ObjectClose` receives its own fresh [`MAX_TYPE_PROPERTY_RPC_TIMEOUT`]
+    /// deadline. The close lifecycle is owned before show dispatch, so dropping
+    /// this future during show or close starts one detached close fallback on
+    /// the current Tokio runtime.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::Validation`] if IDs or the deadline are invalid
+    /// - [`AnytypeError::TypePropertyClassification`] for an RPC deadline or
+    ///   unconfirmed cleanup
+    /// - the errors documented by [`Self::classify_properties`]
+    pub async fn classify_properties_with_deadline(
+        self,
+        rpc_timeout: Duration,
+    ) -> Result<TypePropertyClassification> {
         self.limits.validate_id(&self.space_id, "space_id")?;
         self.limits.validate_id(&self.type_id, "type_id")?;
+        ensure!(
+            !rpc_timeout.is_zero() && rpc_timeout <= MAX_TYPE_PROPERTY_RPC_TIMEOUT,
+            ValidationSnafu {
+                message: "type property RPC deadline must be between zero and five seconds"
+                    .to_owned(),
+            }
+        );
 
         let typ = self.fetch_direct().await?;
-        let (featured_ids, recommended_ids) =
-            fetch_type_property_source_ids(&self.api, &self.limits, &self.space_id, &self.type_id)
-                .await?;
+        let (featured_ids, recommended_ids) = fetch_type_property_source_ids(
+            &self.api,
+            &self.limits,
+            &self.space_id,
+            &self.type_id,
+            rpc_timeout,
+        )
+        .await?;
         classify_type_properties(typ.properties, featured_ids, recommended_ids)
     }
 
@@ -443,6 +651,7 @@ async fn fetch_type_property_source_ids(
     limits: &ValidationLimits,
     space_id: &str,
     type_id: &str,
+    rpc_timeout: Duration,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let grpc = client.grpc_client().await?;
     let mut commands = grpc.client_commands();
@@ -453,27 +662,76 @@ async fn fetch_type_property_source_ids(
         include_relations_as_dependent_objects: false,
         ..Default::default()
     };
-    let request = with_token_request(Request::new(request), grpc.token())?;
-    let response = commands
-        .object_show(request)
-        .await
-        .map_err(grpc_status)?
-        .into_inner();
-    ensure_error_ok(response.error.as_ref(), "type property source read")?;
-
-    let close = object_close::Request {
-        context_id: type_id.to_owned(),
-        object_id: type_id.to_owned(),
-        space_id: space_id.to_owned(),
+    let mut request = with_token_request(Request::new(request), grpc.token())?;
+    request.set_timeout(rpc_timeout);
+    let metrics = Arc::clone(&client.type_property_metrics);
+    let mut cleanup = TypePropertyCloseGuard::new(
+        grpc,
+        space_id.to_owned(),
+        type_id.to_owned(),
+        Arc::clone(&metrics),
+    )?;
+    metrics.show_attempts.fetch_add(1, Ordering::Relaxed);
+    let response = match tokio::time::timeout(rpc_timeout, commands.object_show(request)).await {
+        Ok(Ok(response)) => response.into_inner(),
+        Ok(Err(status)) => {
+            let show_error = grpc_status(status);
+            cleanup.cleanup(MAX_TYPE_PROPERTY_RPC_TIMEOUT).await?;
+            return Err(show_error);
+        }
+        Err(_) => {
+            cleanup.cleanup(MAX_TYPE_PROPERTY_RPC_TIMEOUT).await?;
+            return classification_error(TypePropertyClassificationErrorKind::RpcDeadline);
+        }
     };
-    if let Ok(close) = with_token_request(Request::new(close), grpc.token()) {
-        let _ = commands.object_close(close).await;
-    }
+    let response_error = ensure_error_ok(response.error.as_ref(), "type property source read");
+    let cleanup_result = cleanup.cleanup(MAX_TYPE_PROPERTY_RPC_TIMEOUT).await;
+    finish_type_property_show(response_error, cleanup_result)?;
 
     let view = response.object_view.ok_or_else(|| AnytypeError::Other {
         message: "type property source read returned no object view".to_owned(),
     })?;
     type_property_source_ids_from_view(&view, limits, type_id)
+}
+
+fn finish_type_property_show(
+    response_result: Result<()>,
+    cleanup_result: Result<()>,
+) -> Result<()> {
+    cleanup_result?;
+    response_result
+}
+
+async fn close_type_property_view(
+    grpc: anytype_rpc::client::AnytypeGrpcClient,
+    space_id: String,
+    type_id: String,
+    rpc_timeout: Duration,
+) -> Result<()> {
+    let mut commands = grpc.client_commands();
+    let close = object_close::Request {
+        context_id: type_id.clone(),
+        object_id: type_id,
+        space_id,
+    };
+    let mut close = with_token_request(Request::new(close), grpc.token())?;
+    close.set_timeout(rpc_timeout);
+    let response = tokio::time::timeout(rpc_timeout, commands.object_close(close))
+        .await
+        .map_err(|_| {
+            classification_error_value(TypePropertyClassificationErrorKind::CleanupFailed)
+        })?
+        .map_err(grpc_status)?
+        .into_inner();
+    ensure_error_ok(response.error.as_ref(), "type property source cleanup")
+}
+
+fn classification_error<T>(kind: TypePropertyClassificationErrorKind) -> Result<T> {
+    Err(classification_error_value(kind))
+}
+
+fn classification_error_value(kind: TypePropertyClassificationErrorKind) -> AnytypeError {
+    AnytypeError::TypePropertyClassification { kind }
 }
 
 fn type_property_source_ids_from_view(
@@ -1445,6 +1703,17 @@ impl AnytypeClient {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        future::pending,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use tokio::sync::Notify;
+
     use super::*;
 
     fn valid_id(suffix: char) -> String {
@@ -1480,6 +1749,205 @@ mod tests {
             key: key.to_string(),
             format: PropertyFormat::Text,
         }
+    }
+
+    #[test]
+    fn type_property_cleanup_requires_an_owning_runtime() {
+        let error = classification_runtime_handle().expect_err("missing Tokio runtime");
+        assert!(matches!(
+            error,
+            AnytypeError::TypePropertyClassification {
+                kind: TypePropertyClassificationErrorKind::RuntimeUnavailable
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn type_property_deadline_is_validated_before_transport() {
+        let client = AnytypeClient::with_config(crate::client::ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            disable_cache: true,
+            ..crate::client::ClientConfig::default()
+        })
+        .expect("deadline test client");
+        for deadline in [
+            Duration::ZERO,
+            MAX_TYPE_PROPERTY_RPC_TIMEOUT + Duration::from_nanos(1),
+        ] {
+            let error = client
+                .get_type(valid_id('b'), valid_id('c'))
+                .classify_properties_with_deadline(deadline)
+                .await
+                .expect_err("invalid deadline");
+            assert!(matches!(error, AnytypeError::Validation { .. }));
+        }
+        assert_eq!(client.http_metrics().logical_operations, 0);
+    }
+
+    fn successful_cleanup_action(
+        calls: Arc<AtomicUsize>,
+        cleaned: Arc<Notify>,
+    ) -> TypePropertyCleanupAction {
+        Arc::new(move |_| {
+            let calls = Arc::clone(&calls);
+            let cleaned = Arc::clone(&cleaned);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                cleaned.notify_one();
+                Ok(())
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn type_property_guard_closes_when_show_boundary_is_cancelled() {
+        let armed = Arc::new(Notify::new());
+        let cleaned = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let action = successful_cleanup_action(Arc::clone(&calls), Arc::clone(&cleaned));
+        let task = tokio::spawn({
+            let armed = Arc::clone(&armed);
+            async move {
+                let _guard = TypePropertyCloseGuard::from_action(action);
+                armed.notify_one();
+                pending::<()>().await;
+            }
+        });
+        armed.notified().await;
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(1), cleaned.notified())
+            .await
+            .expect("cancelled show guard cleanup");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn type_property_guard_uses_one_fallback_when_close_is_cancelled() {
+        let started = Arc::new(Notify::new());
+        let recovered = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let action: TypePropertyCleanupAction = Arc::new({
+            let calls = Arc::clone(&calls);
+            let started = Arc::clone(&started);
+            let recovered = Arc::clone(&recovered);
+            move |_| {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                let started = Arc::clone(&started);
+                let recovered = Arc::clone(&recovered);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        started.notify_one();
+                        pending::<()>().await;
+                    }
+                    recovered.notify_one();
+                    Ok(())
+                })
+            }
+        });
+        let task = tokio::spawn(async move {
+            let mut guard = TypePropertyCloseGuard::from_action(action);
+            let _ = guard.cleanup(Duration::from_secs(1)).await;
+        });
+        started.notified().await;
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(1), recovered.notified())
+            .await
+            .expect("cancelled close guard fallback");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn confirmed_type_property_close_disarms_guard() {
+        let cleaned = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let action = successful_cleanup_action(Arc::clone(&calls), Arc::clone(&cleaned));
+        {
+            let mut guard = TypePropertyCloseGuard::from_action(action);
+            guard
+                .cleanup(Duration::from_secs(1))
+                .await
+                .expect("explicit close");
+        }
+        cleaned.notified().await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn type_property_close_failure_is_typed_and_payload_free() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let durations = Arc::new(Mutex::new(Vec::new()));
+        let action: TypePropertyCleanupAction = Arc::new({
+            let calls = Arc::clone(&calls);
+            let durations = Arc::clone(&durations);
+            move |duration| {
+                let calls = Arc::clone(&calls);
+                durations.lock().expect("duration lock").push(duration);
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(AnytypeError::Other {
+                        message: "secret upstream payload".to_owned(),
+                    })
+                })
+            }
+        });
+        let metrics = Arc::new(TypePropertyClassificationMetrics::default());
+        let mut guard =
+            TypePropertyCloseGuard::from_action_with_metrics(action, Arc::clone(&metrics));
+        let error = guard
+            .cleanup(Duration::from_millis(1))
+            .await
+            .expect_err("cleanup failure");
+        assert!(matches!(
+            error,
+            AnytypeError::TypePropertyClassification {
+                kind: TypePropertyClassificationErrorKind::CleanupFailed
+            }
+        ));
+        assert!(!format!("{error:?}").contains("secret upstream payload"));
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while metrics.snapshot().close_attempts < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fallback exhaustion metrics");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            metrics.snapshot(),
+            TypePropertyClassificationMetricsSnapshot {
+                show_attempts: 0,
+                close_attempts: 2,
+                close_fallbacks: 1,
+                cleanup_successes: 0,
+                cleanup_failures: 2,
+            }
+        );
+        assert_eq!(
+            *durations.lock().expect("duration lock"),
+            vec![Duration::from_millis(1), MAX_TYPE_PROPERTY_RPC_TIMEOUT]
+        );
+    }
+
+    #[test]
+    fn type_property_cleanup_failure_precedes_show_application_error() {
+        let response = Err(AnytypeError::Other {
+            message: "show application payload".to_owned(),
+        });
+        let cleanup = Err(classification_error_value(
+            TypePropertyClassificationErrorKind::CleanupFailed,
+        ));
+        let error = finish_type_property_show(response, cleanup).expect_err("cleanup precedence");
+        assert!(matches!(
+            error,
+            AnytypeError::TypePropertyClassification {
+                kind: TypePropertyClassificationErrorKind::CleanupFailed
+            }
+        ));
+        assert!(!format!("{error:?}").contains("show application payload"));
     }
 
     #[test]
