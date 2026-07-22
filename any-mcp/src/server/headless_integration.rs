@@ -77,11 +77,19 @@ async fn live_server_with(
 }
 
 async fn call(server: &AnyMcpServer, name: &'static str, value: Value) -> CallToolResult {
-    Box::pin(server.dispatch_tool(
-        CallToolRequestParams::new(name).with_arguments(arguments(value)),
-        &CancellationToken::new(),
-    ))
+    // Poll the aggregate debug dispatch from its own runtime task so the
+    // fixture-heavy caller stack unwinds before the selected handler runs.
+    let server = server.clone();
+    tokio::spawn(async move {
+        let cancellation = CancellationToken::new();
+        Box::pin(server.dispatch_tool(
+            CallToolRequestParams::new(name).with_arguments(arguments(value)),
+            &cancellation,
+        ))
+        .await
+    })
     .await
+    .expect("live production router task")
     .expect("well-formed production router call")
 }
 
@@ -692,234 +700,247 @@ async fn assert_live_filter_result(
 
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_shared_filters_conform_and_preserve_server_pagination() {
-    Box::pin(with_test_context(|ctx| {
-        Box::pin(async move {
-            const FIXTURE_COUNT: usize = 3;
-            const MAX_INDEX_ATTEMPTS: usize = 20;
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-shared-filters",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                const FIXTURE_COUNT: usize = 3;
+                const MAX_INDEX_ATTEMPTS: usize = 20;
 
-            let server = live_server(ctx.as_ref()).await;
-            let suffix = unique_suffix();
-            let type_key = format!("mcp_filter_conformance_{suffix}");
-            let number_key = format!("mcp_filter_number_{suffix}");
-            let checkbox_key = format!("mcp_filter_checkbox_{suffix}");
+                let server = live_server(ctx.as_ref()).await;
+                let suffix = unique_suffix();
+                let type_key = format!("mcp_filter_conformance_{suffix}");
+                let number_key = format!("mcp_filter_number_{suffix}");
+                let checkbox_key = format!("mcp_filter_checkbox_{suffix}");
 
-            let type_ = ctx
-                .client
-                .new_type(&ctx.space_id, format!("MCP filter conformance {suffix}"))
-                .key(&type_key)
-                .ensure_available()
-                .create()
-                .await
-                .expect("create cleanup-owned filter type");
-            ctx.register_type(&type_.id);
-
-            let number_property = ctx
-                .client
-                .new_property(
-                    &ctx.space_id,
-                    format!("MCP filter number {suffix}"),
-                    PropertyFormat::Number,
-                )
-                .key(&number_key)
-                .ensure_available()
-                .create()
-                .await
-                .expect("create cleanup-owned number property");
-            ctx.register_property(&number_property.id);
-            let checkbox_property = ctx
-                .client
-                .new_property(
-                    &ctx.space_id,
-                    format!("MCP filter checkbox {suffix}"),
-                    PropertyFormat::Checkbox,
-                )
-                .key(&checkbox_key)
-                .ensure_available()
-                .create()
-                .await
-                .expect("create cleanup-owned checkbox property");
-            ctx.register_property(&checkbox_property.id);
-
-            let mut expected_ids = Vec::with_capacity(FIXTURE_COUNT);
-            for index in 0..FIXTURE_COUNT {
-                let object = ctx
+                let type_ = ctx
                     .client
-                    .new_object(&ctx.space_id, &type_key)
-                    .name(format!("MCP filter {index:02} {suffix}"))
-                    .set_number(
-                        &number_key,
-                        i64::try_from(index).expect("small fixture index"),
-                    )
-                    .set_checkbox(&checkbox_key, index % 2 == 0)
+                    .new_type(&ctx.space_id, format!("MCP filter conformance {suffix}"))
+                    .key(&type_key)
                     .ensure_available()
                     .create()
                     .await
-                    .expect("create cleanup-owned filter object");
-                ctx.register_object(&object.id);
-                expected_ids.push(object.id.clone());
-            }
+                    .expect("create cleanup-owned filter type");
+                ctx.register_type(&type_.id);
 
-            for (index, object_id) in expected_ids.iter().enumerate() {
-                let object = ctx
+                let number_property = ctx
                     .client
-                    .object(&ctx.space_id, object_id)
-                    .get()
+                    .new_property(
+                        &ctx.space_id,
+                        format!("MCP filter number {suffix}"),
+                        PropertyFormat::Number,
+                    )
+                    .key(&number_key)
+                    .ensure_available()
+                    .create()
                     .await
-                    .expect("independently read filter fixture");
-                assert_eq!(object.id, *object_id);
-                assert_eq!(
-                    object.get_property_i64(&number_key),
-                    Some(i64::try_from(index).expect("small fixture index"))
-                );
-                assert_eq!(
-                    object.get_property_bool(&checkbox_key),
-                    Some(index % 2 == 0)
-                );
-            }
+                    .expect("create cleanup-owned number property");
+                ctx.register_property(&number_property.id);
+                let checkbox_property = ctx
+                    .client
+                    .new_property(
+                        &ctx.space_id,
+                        format!("MCP filter checkbox {suffix}"),
+                        PropertyFormat::Checkbox,
+                    )
+                    .key(&checkbox_key)
+                    .ensure_available()
+                    .create()
+                    .await
+                    .expect("create cleanup-owned checkbox property");
+                ctx.register_property(&checkbox_property.id);
 
-            ctx.client
-                .resolve_space_id(&ctx.space_id)
-                .await
-                .expect("warm exact space resolution");
-            assert_eq!(
+                let mut expected_ids = Vec::with_capacity(FIXTURE_COUNT);
+                for index in 0..FIXTURE_COUNT {
+                    let object = ctx
+                        .client
+                        .new_object(&ctx.space_id, &type_key)
+                        .name(format!("MCP filter {index:02} {suffix}"))
+                        .set_number(
+                            &number_key,
+                            i64::try_from(index).expect("small fixture index"),
+                        )
+                        .set_checkbox(&checkbox_key, index % 2 == 0)
+                        .ensure_available()
+                        .create()
+                        .await
+                        .expect("create cleanup-owned filter object");
+                    ctx.register_object(&object.id);
+                    expected_ids.push(object.id.clone());
+                }
+
+                for (index, object_id) in expected_ids.iter().enumerate() {
+                    let object = ctx
+                        .client
+                        .object(&ctx.space_id, object_id)
+                        .get()
+                        .await
+                        .expect("independently read filter fixture");
+                    assert_eq!(object.id, *object_id);
+                    assert_eq!(
+                        object.get_property_i64(&number_key),
+                        Some(i64::try_from(index).expect("small fixture index"))
+                    );
+                    assert_eq!(
+                        object.get_property_bool(&checkbox_key),
+                        Some(index % 2 == 0)
+                    );
+                }
+
                 ctx.client
-                    .resolve_type_key(&ctx.space_id, &format!("@{type_key}"))
+                    .resolve_space_id(&ctx.space_id)
                     .await
-                    .expect("warm exact type resolution"),
-                type_key
-            );
+                    .expect("warm exact space resolution");
+                assert_eq!(
+                    ctx.client
+                        .resolve_type_key(&ctx.space_id, &format!("@{type_key}"))
+                        .await
+                        .expect("warm exact type resolution"),
+                    type_key
+                );
 
-            assert_live_filter_result(
-                ctx.as_ref(),
-                &server,
-                &type_key,
-                Filter::number_greater(&number_key, -1),
-                json!({
-                    "format": "number",
-                    "property_key": number_key.as_str(),
-                    "condition": "gt",
-                    "value": -1
-                }),
-                &expected_ids,
-                "numeric filter",
-            )
-            .await;
-            let checked_ids = expected_ids.iter().step_by(2).cloned().collect::<Vec<_>>();
-            assert_live_filter_result(
-                ctx.as_ref(),
-                &server,
-                &type_key,
-                Filter::checkbox_true(&checkbox_key),
-                json!({
-                    "format": "checkbox",
-                    "property_key": checkbox_key.as_str(),
-                    "condition": "eq",
-                    "value": true
-                }),
-                &checked_ids,
-                "checkbox filter",
-            )
-            .await;
+                assert_live_filter_result(
+                    ctx.as_ref(),
+                    &server,
+                    &type_key,
+                    Filter::number_greater(&number_key, -1),
+                    json!({
+                        "format": "number",
+                        "property_key": number_key.as_str(),
+                        "condition": "gt",
+                        "value": -1
+                    }),
+                    &expected_ids,
+                    "numeric filter",
+                )
+                .await;
+                let checked_ids = expected_ids.iter().step_by(2).cloned().collect::<Vec<_>>();
+                assert_live_filter_result(
+                    ctx.as_ref(),
+                    &server,
+                    &type_key,
+                    Filter::checkbox_true(&checkbox_key),
+                    json!({
+                        "format": "checkbox",
+                        "property_key": checkbox_key.as_str(),
+                        "condition": "eq",
+                        "value": true
+                    }),
+                    &checked_ids,
+                    "checkbox filter",
+                )
+                .await;
 
-            let expected_ids = tokio::time::timeout(Duration::from_secs(20), async {
-                for _ in 0..MAX_INDEX_ATTEMPTS {
-                    let page = execute_fixture_search(
+                let expected_ids = tokio::time::timeout(Duration::from_secs(20), async {
+                    for _ in 0..MAX_INDEX_ATTEMPTS {
+                        let page = execute_fixture_search(
+                            ctx.as_ref(),
+                            &type_key,
+                            Filter::number_greater(&number_key, -1),
+                            0,
+                            100,
+                        )
+                        .await
+                        .into_response();
+                        let observed = page
+                            .items
+                            .iter()
+                            .map(|object| object.id.clone())
+                            .collect::<Vec<_>>();
+                        if observed.len() == FIXTURE_COUNT {
+                            return observed;
+                        }
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                    panic!("filter fixtures did not become searchable within the attempt bound")
+                })
+                .await
+                .expect("filter fixtures must become searchable within twenty seconds");
+
+                let mut cursor: Option<String> = None;
+                let mut observed_ids = Vec::with_capacity(FIXTURE_COUNT);
+                for (offset, expected_id) in expected_ids.iter().enumerate() {
+                    let api_page = execute_fixture_search(
                         ctx.as_ref(),
                         &type_key,
                         Filter::number_greater(&number_key, -1),
-                        0,
-                        100,
+                        u32::try_from(offset).expect("small fixture offset"),
+                        1,
                     )
                     .await
                     .into_response();
-                    let observed = page
-                        .items
-                        .iter()
-                        .map(|object| object.id.clone())
-                        .collect::<Vec<_>>();
-                    if observed.len() == FIXTURE_COUNT {
-                        return observed;
+                    assert_eq!(
+                        api_page.pagination.offset,
+                        u32::try_from(offset).expect("small fixture offset")
+                    );
+                    assert_eq!(api_page.pagination.limit, 1);
+                    assert_eq!(api_page.pagination.total, FIXTURE_COUNT);
+                    assert_eq!(api_page.pagination.has_more, offset + 1 < FIXTURE_COUNT);
+                    assert_eq!(api_page.items.len(), 1);
+                    assert_eq!(api_page.items[0].id, *expected_id);
+
+                    let mut input = arguments(json!({
+                        "space": ctx.space_id.as_str(),
+                        "types": [format!("@{type_key}")],
+                        "filters": {
+                            "operator": "and",
+                            "conditions": [{
+                                "format": "number",
+                                "property_key": number_key.as_str(),
+                                "condition": "gt",
+                                "value": -1
+                            }]
+                        },
+                        "sort": {"property_key": "name", "direction": "asc"},
+                        "limit": 1
+                    }));
+                    if let Some(cursor) = &cursor {
+                        input.insert("cursor".to_owned(), json!(cursor));
                     }
-                    sleep(Duration::from_millis(250)).await;
+                    let before = ctx.client.http_metrics();
+                    let mcp_page = success(&server, OBJECT_SEARCH, Value::Object(input)).await;
+                    let after = ctx.client.http_metrics();
+                    assert_one_http_request(before, after, "paginated MCP filter search");
+                    let items = mcp_page["items"].as_array().expect("MCP filter page items");
+                    assert_eq!(items.len(), 1);
+                    assert_eq!(
+                        item_id(&items[0]).and_then(Value::as_str),
+                        Some(expected_id.as_str())
+                    );
+                    observed_ids.push(expected_id.clone());
+
+                    cursor = mcp_page.get("next_cursor").map(|value| {
+                        value
+                            .as_str()
+                            .filter(|cursor| !cursor.is_empty())
+                            .expect("MCP continuation cursor must be nonempty")
+                            .to_owned()
+                    });
+                    assert_eq!(cursor.is_some(), api_page.pagination.has_more);
                 }
-                panic!("filter fixtures did not become searchable within the attempt bound")
+                assert_eq!(observed_ids, expected_ids);
+                assert!(
+                    cursor.is_none(),
+                    "terminal checked server page has no cursor"
+                );
+                Ok(())
             })
-            .await
-            .expect("filter fixtures must become searchable within twenty seconds");
-
-            let mut cursor: Option<String> = None;
-            let mut observed_ids = Vec::with_capacity(FIXTURE_COUNT);
-            for (offset, expected_id) in expected_ids.iter().enumerate() {
-                let api_page = execute_fixture_search(
-                    ctx.as_ref(),
-                    &type_key,
-                    Filter::number_greater(&number_key, -1),
-                    u32::try_from(offset).expect("small fixture offset"),
-                    1,
-                )
-                .await
-                .into_response();
-                assert_eq!(
-                    api_page.pagination.offset,
-                    u32::try_from(offset).expect("small fixture offset")
-                );
-                assert_eq!(api_page.pagination.limit, 1);
-                assert_eq!(api_page.pagination.total, FIXTURE_COUNT);
-                assert_eq!(api_page.pagination.has_more, offset + 1 < FIXTURE_COUNT);
-                assert_eq!(api_page.items.len(), 1);
-                assert_eq!(api_page.items[0].id, *expected_id);
-
-                let mut input = arguments(json!({
-                    "space": ctx.space_id.as_str(),
-                    "types": [format!("@{type_key}")],
-                    "filters": {
-                        "operator": "and",
-                        "conditions": [{
-                            "format": "number",
-                            "property_key": number_key.as_str(),
-                            "condition": "gt",
-                            "value": -1
-                        }]
-                    },
-                    "sort": {"property_key": "name", "direction": "asc"},
-                    "limit": 1
-                }));
-                if let Some(cursor) = &cursor {
-                    input.insert("cursor".to_owned(), json!(cursor));
-                }
-                let before = ctx.client.http_metrics();
-                let mcp_page = success(&server, OBJECT_SEARCH, Value::Object(input)).await;
-                let after = ctx.client.http_metrics();
-                assert_one_http_request(before, after, "paginated MCP filter search");
-                let items = mcp_page["items"].as_array().expect("MCP filter page items");
-                assert_eq!(items.len(), 1);
-                assert_eq!(
-                    item_id(&items[0]).and_then(Value::as_str),
-                    Some(expected_id.as_str())
-                );
-                observed_ids.push(expected_id.clone());
-
-                cursor = mcp_page.get("next_cursor").map(|value| {
-                    value
-                        .as_str()
-                        .filter(|cursor| !cursor.is_empty())
-                        .expect("MCP continuation cursor must be nonempty")
-                        .to_owned()
-                });
-                assert_eq!(cursor.is_some(), api_page.pagination.has_more);
-            }
-            assert_eq!(observed_ids, expected_ids);
-            assert!(
-                cursor.is_none(),
-                "terminal checked server page has no cursor"
-            );
-            Ok(())
-        })
-    }))
+        },
+    ))
     .await
     .expect("cleanup-safe live shared-filter conformance");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("disposable shared-filter suite skipped before callback: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1926,31 +1947,37 @@ fn advertised_catalog_has_exact_live_scenario_ownership() {
 async fn run_direct_baseline(scenario: ScenarioId) {
     let failure = std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured = failure.clone();
-    let cleanup = Box::pin(with_test_context(move |ctx| {
-        Box::pin(async move {
-            let server = live_server(ctx.as_ref()).await;
-            let before = ctx.client.http_metrics();
-            let mut driver = DirectRouterDriver { server: &server };
-            let mut evidence = ScenarioEvidence::new(scenario);
-            if let Err(error) = run_scenario(
-                scenario,
-                &mut driver,
-                ctx.as_ref(),
-                &mut evidence,
-            )
-            .await
-            {
-                let after = ctx.client.http_metrics();
-                *captured.lock().expect("failure evidence lock") = Some(format!(
-                    "scenario={} fixtures={:?} error={} http_before={before:?} http_after={after:?}",
-                    evidence.scenario.as_str(),
-                    evidence.fixture_ids,
-                    evidence.sanitize(&error)
-                ));
-            }
-            Ok(())
-        })
-    }))
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let cleanup = Box::pin(with_disposable_space_context(
+        "any-mcp-direct-standard",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let server = live_server(ctx.as_ref()).await;
+                let before = ctx.client.http_metrics();
+                let mut driver = DirectRouterDriver { server: &server };
+                let mut evidence = ScenarioEvidence::new(scenario);
+                if let Err(error) = run_scenario(
+                    scenario,
+                    &mut driver,
+                    ctx.as_ref(),
+                    &mut evidence,
+                )
+                .await
+                {
+                    let after = ctx.client.http_metrics();
+                    *captured.lock().expect("failure evidence lock") = Some(format!(
+                        "scenario={} fixtures={:?} error={} http_before={before:?} http_after={after:?}",
+                        evidence.scenario.as_str(),
+                        evidence.fixture_ids,
+                        evidence.sanitize(&error)
+                    ));
+                }
+                Ok(())
+            })
+        },
+    ))
     .await;
     if let Some(failure) = failure.lock().expect("failure evidence lock").take() {
         panic!(
@@ -1958,13 +1985,20 @@ async fn run_direct_baseline(scenario: ScenarioId) {
             if cleanup.is_ok() { "success" } else { "failed" }
         );
     }
-    cleanup.expect("cleanup-safe direct baseline scenario");
+    match cleanup.expect("cleanup-safe disposable direct baseline scenario") {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("disposable direct baseline skipped before callback: {reason:?}");
+        }
+    }
 }
 
 macro_rules! direct_baseline_test {
     ($name:ident, $scenario:expr) => {
         #[tokio::test]
-        #[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+        #[serial_test::serial]
+        #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
         async fn $name() {
             run_direct_baseline($scenario).await;
         }

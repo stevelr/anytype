@@ -10,11 +10,16 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
-use anytype::test_util::{unique_suffix, with_test_context};
+use anytype::test_util::{
+    DisposableRun, unique_suffix, with_disposable_space_context, with_test_context,
+};
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -320,22 +325,35 @@ impl StdioDriver {
         if let Some(specification) = isolated_specification {
             command.env("ANYTYPE_KEYSTORE", specification);
         }
+        let mut driver = Self::spawn(command, options, keystore);
+        driver.initialize();
+        driver
+    }
+
+    fn spawn(
+        command: Command,
+        options: DriverOptions,
+        keystore: Option<TemporaryKeystore>,
+    ) -> Self {
         let process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(30));
-        let mut driver = Self {
+        Self {
             process,
             next_id: 1,
             options,
             _keystore: keystore,
-        };
-        if options.preview {
-            let discovered = driver.request("server/discover", json!({}));
+        }
+    }
+
+    fn initialize(&mut self) {
+        if self.options.preview {
+            let discovered = self.request("server/discover", json!({}));
             assert_eq!(discovered["result"]["resultType"], "complete");
             assert_eq!(
                 discovered["result"]["supportedVersions"],
                 json!(["2026-07-28"])
             );
         } else {
-            let initialized = driver.request(
+            let initialized = self.request(
                 "initialize",
                 json!({
                     "protocolVersion": "2025-11-25",
@@ -344,11 +362,9 @@ impl StdioDriver {
                 }),
             );
             assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
-            driver
-                .process
+            self.process
                 .notification("notifications/initialized", json!({}));
         }
-        driver
     }
 
     fn request(&mut self, method: &str, mut params: Value) -> Value {
@@ -361,6 +377,63 @@ impl StdioDriver {
         let id = self.next_id;
         self.next_id += 1;
         self.process.request(id, method, params)
+    }
+
+    fn call_tool_sync(&mut self, name: &'static str, arguments: Value) -> Result<Value, String> {
+        let response = self.request("tools/call", json!({"name": name, "arguments": arguments}));
+        tool_success(name, &response)
+    }
+
+    fn call_tool_error_sync(
+        &mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Result<String, String> {
+        let response = self.request("tools/call", json!({"name": name, "arguments": arguments}));
+        response
+            .pointer("/result/structuredContent/code")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| response_summary(name, &response))
+    }
+
+    fn list_tools_sync(&mut self) -> Result<Vec<String>, String> {
+        let response = self.request("tools/list", json!({}));
+        response["result"]["tools"]
+            .as_array()
+            .ok_or_else(|| "tools/list omitted tools".to_owned())?
+            .iter()
+            .map(|tool| {
+                tool["name"]
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| "tools/list entry omitted name".to_owned())
+            })
+            .collect()
+    }
+
+    fn list_resources_sync(&mut self) -> Result<Value, String> {
+        let response = self.request("resources/list", json!({}));
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| response_summary("resources/list", &response))
+    }
+
+    fn list_resource_templates_sync(&mut self) -> Result<Value, String> {
+        let response = self.request("resources/templates/list", json!({}));
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| response_summary("resources/templates/list", &response))
+    }
+
+    fn read_resource_sync(&mut self, uri: &str) -> Result<Value, String> {
+        let response = self.request("resources/read", json!({"uri": uri}));
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| response_summary("resources/read", &response))
     }
 
     fn finish(self) -> (String, ProcessOutput) {
@@ -385,11 +458,7 @@ impl McpDriver for StdioDriver {
         name: &'static str,
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        Box::pin(async move {
-            let response =
-                self.request("tools/call", json!({"name": name, "arguments": arguments}));
-            tool_success(name, &response)
-        })
+        Box::pin(std::future::ready(self.call_tool_sync(name, arguments)))
     }
 
     fn call_tool_error<'a>(
@@ -397,71 +466,98 @@ impl McpDriver for StdioDriver {
         name: &'static str,
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
-        Box::pin(async move {
-            let response =
-                self.request("tools/call", json!({"name": name, "arguments": arguments}));
-            response
-                .pointer("/result/structuredContent/code")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| response_summary(name, &response))
-        })
+        Box::pin(std::future::ready(
+            self.call_tool_error_sync(name, arguments),
+        ))
     }
 
     fn list_tools<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>> {
-        Box::pin(async move {
-            let response = self.request("tools/list", json!({}));
-            response["result"]["tools"]
-                .as_array()
-                .ok_or_else(|| "tools/list omitted tools".to_owned())?
-                .iter()
-                .map(|tool| {
-                    tool["name"]
-                        .as_str()
-                        .map(ToOwned::to_owned)
-                        .ok_or_else(|| "tools/list entry omitted name".to_owned())
-                })
-                .collect()
-        })
+        Box::pin(std::future::ready(self.list_tools_sync()))
     }
 
     fn list_resources<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        Box::pin(async move {
-            let response = self.request("resources/list", json!({}));
-            response
-                .get("result")
-                .cloned()
-                .ok_or_else(|| response_summary("resources/list", &response))
-        })
+        Box::pin(std::future::ready(self.list_resources_sync()))
     }
 
     fn list_resource_templates<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        Box::pin(async move {
-            let response = self.request("resources/templates/list", json!({}));
-            response
-                .get("result")
-                .cloned()
-                .ok_or_else(|| response_summary("resources/templates/list", &response))
-        })
+        Box::pin(std::future::ready(self.list_resource_templates_sync()))
     }
 
     fn read_resource<'a>(
         &'a mut self,
         uri: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        Box::pin(async move {
-            let response = self.request("resources/read", json!({"uri": uri}));
-            response
-                .get("result")
-                .cloned()
-                .ok_or_else(|| response_summary("resources/read", &response))
-        })
+        Box::pin(std::future::ready(self.read_resource_sync(uri)))
+    }
+}
+
+struct OwnedStdioDriver {
+    driver: Arc<Mutex<Option<StdioDriver>>>,
+}
+
+impl OwnedStdioDriver {
+    fn with_driver<T>(&self, operation: impl FnOnce(&mut StdioDriver) -> T) -> T {
+        let mut driver = lock_driver(&self.driver);
+        operation(
+            driver
+                .as_mut()
+                .expect("registered stdio child remains owned"),
+        )
+    }
+}
+
+impl McpDriver for OwnedStdioDriver {
+    fn call_tool<'a>(
+        &'a mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        let result = self.with_driver(|driver| driver.call_tool_sync(name, arguments));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn call_tool_error<'a>(
+        &'a mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+        let result = self.with_driver(|driver| driver.call_tool_error_sync(name, arguments));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn list_tools<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>> {
+        let result = self.with_driver(StdioDriver::list_tools_sync);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn list_resources<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        let result = self.with_driver(StdioDriver::list_resources_sync);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn list_resource_templates<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        let result = self.with_driver(StdioDriver::list_resource_templates_sync);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn read_resource<'a>(
+        &'a mut self,
+        uri: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        let result = self.with_driver(|driver| driver.read_resource_sync(uri));
+        Box::pin(std::future::ready(result))
     }
 }
 
@@ -575,6 +671,143 @@ fn process_metrics(transcript: &str) -> (usize, usize, usize) {
     )
 }
 
+fn complete_case<E>(
+    driver: StdioDriver,
+    mut evidence: ScenarioEvidence,
+    result: Result<Result<(), String>, E>,
+    options: DriverOptions,
+) -> CaseRecord {
+    let (error, transcript, output) = match result {
+        Ok(result) => {
+            let (transcript, output) = driver.finish();
+            (result.err(), transcript, output)
+        }
+        Err(_) => {
+            let (transcript, output, category) = driver.finish_after_panic();
+            (
+                Some(format!("process_category={category}")),
+                transcript,
+                output,
+            )
+        }
+    };
+    let (request_count, result_count, tool_error_count) = process_metrics(&transcript);
+    let stderr = stderr_metrics(&output.stderr);
+    let fixture_ids = std::mem::take(&mut evidence.fixture_ids);
+    CaseRecord {
+        error: error.map(|error| evidence.sanitize(&error)),
+        scenario: evidence.scenario.as_str().to_owned(),
+        fixture_ids,
+        protocol: options.metadata(),
+        transcript,
+        stderr,
+        stdout_bytes: output.stdout.len(),
+        request_count,
+        result_count,
+        tool_error_count,
+    }
+}
+
+fn lock_driver(
+    driver: &Arc<Mutex<Option<StdioDriver>>>,
+) -> std::sync::MutexGuard<'_, Option<StdioDriver>> {
+    driver
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+async fn run_spawned_standard_baseline(scenario: ScenarioId) {
+    let record = Arc::new(Mutex::new(CaseRecord::default()));
+    let captured = Arc::clone(&record);
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let cleanup = Box::pin(with_disposable_space_context(
+        "any-mcp-stdio-standard",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let child_environment = ctx
+                    .disposable_child_environment()
+                    .expect("disposable callback provides a child environment")
+                    .clone();
+                let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+                child_environment.configure(&mut command)?;
+                let driver = ctx.spawn_owned_child(move || {
+                    let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(
+                        command,
+                        DriverOptions::STANDARD,
+                        None,
+                    ))));
+                    let stopped = Arc::clone(&driver);
+                    (driver, move || {
+                        if let Some(driver) = lock_driver(&stopped).take() {
+                            let _ = driver.finish();
+                        }
+                        Ok(())
+                    })
+                })?;
+
+                let mut evidence = ScenarioEvidence::new(scenario);
+                let result = AssertUnwindSafe(async {
+                    lock_driver(&driver)
+                        .as_mut()
+                        .expect("registered stdio child remains owned")
+                        .initialize();
+                    let mut driver = OwnedStdioDriver {
+                        driver: Arc::clone(&driver),
+                    };
+                    let tools = driver.list_tools().await?;
+                    let borrowed = tools.iter().map(String::as_str).collect::<Vec<_>>();
+                    validate_live_ownership(
+                        &borrowed,
+                        &[
+                            "resources/list",
+                            "resources/read",
+                            "resources/templates/list",
+                        ],
+                    )?;
+                    run_scenario(scenario, &mut driver, ctx.as_ref(), &mut evidence).await
+                })
+                .catch_unwind()
+                .await;
+                let driver = lock_driver(&driver)
+                    .take()
+                    .expect("registered stdio child remains available for shutdown");
+                *captured.lock().expect("case record lock") =
+                    complete_case(driver, evidence, result, DriverOptions::STANDARD);
+                Ok(())
+            })
+        },
+    ))
+    .await;
+    let cleanup_status = if cleanup.is_ok() { "success" } else { "failed" };
+    let record = record.lock().expect("case record lock");
+    if let Some(error) = &record.error {
+        panic!(
+            "scenario={} fixtures={:?} {} error={} requests={} results={} tool_errors={} stdout_bytes={} cleanup={}\ntranscript:\n{}\nstderr_metrics={}",
+            record.scenario,
+            record.fixture_ids,
+            record.protocol,
+            error,
+            record.request_count,
+            record.result_count,
+            record.tool_error_count,
+            record.stdout_bytes,
+            cleanup_status,
+            record.transcript,
+            record.stderr.summary()
+        );
+    }
+    drop(record);
+    match cleanup.expect("cleanup-safe disposable spawned baseline scenario") {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("disposable spawned baseline skipped before callback: {reason:?}");
+        }
+    }
+}
+
 async fn run_spawned_baseline(scenario: ScenarioId, options: DriverOptions) {
     let mut driver = StdioDriver::start(options);
     if options.preview {
@@ -614,35 +847,8 @@ async fn run_spawned_baseline(scenario: ScenarioId, options: DriverOptions) {
             ))
             .catch_unwind()
             .await;
-            let (error, transcript, output) = match result {
-                Ok(result) => {
-                    let (transcript, output) = driver.finish();
-                    (result.err(), transcript, output)
-                }
-                Err(_) => {
-                    let (transcript, output, category) = driver.finish_after_panic();
-                    (
-                        Some(format!("process_category={category}")),
-                        transcript,
-                        output,
-                    )
-                }
-            };
-            let (request_count, result_count, tool_error_count) = process_metrics(&transcript);
-            let stderr = stderr_metrics(&output.stderr);
-            let fixture_ids = std::mem::take(&mut evidence.fixture_ids);
-            *captured.lock().expect("case record lock") = CaseRecord {
-                error: error.map(|error| evidence.sanitize(&error)),
-                scenario: evidence.scenario.as_str().to_owned(),
-                fixture_ids,
-                protocol: options.metadata(),
-                transcript,
-                stderr,
-                stdout_bytes: output.stdout.len(),
-                request_count,
-                result_count,
-                tool_error_count,
-            };
+            *captured.lock().expect("case record lock") =
+                complete_case(driver, evidence, result, options);
             Ok(())
         })
     }))
@@ -671,9 +877,10 @@ async fn run_spawned_baseline(scenario: ScenarioId, options: DriverOptions) {
 macro_rules! spawned_baseline_test {
     ($name:ident, $scenario:expr) => {
         #[tokio::test]
-        #[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+        #[serial_test::serial]
+        #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
         async fn $name() {
-            run_spawned_baseline($scenario, DriverOptions::STANDARD).await;
+            run_spawned_standard_baseline($scenario).await;
         }
     };
 }
