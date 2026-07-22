@@ -9,6 +9,11 @@
 # The anytype cli should be running and 'anytype' should be in your path. You can specify
 # the executable path with ANYTYPE_CLI_BIN, e.g., "export ANYTYPE_CLI_BIN=anytype-cli/dist/anytype"
 # 
+# Prerequisites
+# - the current user (the one that runs anytype cli) must have write access to ~/.config.
+#   anytype-cli will create dirs ~/.config/anytype/{common,data}.
+#   anytype-cli will create file ~/.anytype/config.json: to store the account key etc, if there is no OS keystore.
+# 
 # To generate grpc credentials for an external app, you need an account-key, which is printed
 # on the terminal when the cli initializes (in response to "any auth create ...").
 # This script runs the cli initialization, captures the account key, and saves it
