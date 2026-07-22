@@ -3,6 +3,7 @@ use crate::{
     pagination::PageOffset,
     validation::{ValidationCode, ValidationError, error},
 };
+use anytype::chats::MessageBeforeAnchor;
 use rmcp::schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use sha2::{Digest, Sha256};
@@ -110,16 +111,66 @@ impl EvidenceCursorState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum CursorState {
     Offset(PageOffset),
     Evidence(EvidenceCursorState),
+    MessageHistory { anchor: String, page: u8 },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct State {
     value: CursorState,
     query: QueryFingerprint,
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.value {
+            CursorState::Offset(offset) => formatter
+                .debug_struct("Offset")
+                .field("offset", offset)
+                .finish_non_exhaustive(),
+            CursorState::Evidence(evidence) => formatter
+                .debug_struct("Evidence")
+                .field("offset", &evidence.offset())
+                .field("total", &evidence.total())
+                .field("boundary_id", &"[redacted]")
+                .finish(),
+            CursorState::MessageHistory { page, .. } => formatter
+                .debug_struct("MessageHistory")
+                .field("anchor", &"[redacted]")
+                .field("page", page)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// Private state resolved from one message-history cursor.
+///
+/// Its debug representation deliberately redacts the upstream anchor.
+#[derive(Clone)]
+pub(crate) struct MessageHistoryCursorState {
+    anchor: String,
+    page: u8,
+}
+
+impl fmt::Debug for MessageHistoryCursorState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageHistoryCursorState")
+            .field("anchor", &"[redacted]")
+            .field("page", &self.page)
+            .finish()
+    }
+}
+
+impl MessageHistoryCursorState {
+    /// Consumes the state without exposing the anchor through formatting.
+    #[must_use]
+    pub(crate) fn into_parts(self) -> (String, u8) {
+        (self.anchor, self.page)
+    }
 }
 #[derive(Default)]
 struct Registry {
@@ -214,7 +265,9 @@ impl CursorStore {
         }
         match &state.value {
             CursorState::Offset(offset) => Ok(*offset),
-            CursorState::Evidence(_) => Err(error(ValidationCode::CursorMismatch)),
+            CursorState::Evidence(_) | CursorState::MessageHistory { .. } => {
+                Err(error(ValidationCode::CursorMismatch))
+            }
         }
     }
 
@@ -240,7 +293,52 @@ impl CursorStore {
         }
         match &state.value {
             CursorState::Evidence(state) => Ok(state.clone()),
-            CursorState::Offset(_) => Err(error(ValidationCode::CursorMismatch)),
+            CursorState::Offset(_) | CursorState::MessageHistory { .. } => {
+                Err(error(ValidationCode::CursorMismatch))
+            }
+        }
+    }
+
+    /// Issues an opaque cursor that privately owns one chat history anchor.
+    pub(crate) fn issue_message_history(
+        &self,
+        anchor: MessageBeforeAnchor,
+        page: u8,
+        query: QueryFingerprint,
+    ) -> Result<CursorToken, CursorStoreError> {
+        self.issue_state(
+            CursorState::MessageHistory {
+                anchor: String::from(anchor),
+                page,
+            },
+            query,
+        )
+    }
+
+    /// Resolves a message-history cursor after process and query binding.
+    pub(crate) fn resolve_message_history(
+        &self,
+        cursor: &CursorToken,
+        query: QueryFingerprint,
+    ) -> Result<MessageHistoryCursorState, ValidationError> {
+        let (instance, id) = parse(cursor.as_str())?;
+        if instance != self.instance {
+            return Err(error(ValidationCode::ExpiredCursor));
+        }
+        let r = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match r.entries.get(&id) {
+            Some(State {
+                value: CursorState::MessageHistory { anchor, page },
+                query: stored,
+            }) if *stored == query => Ok(MessageHistoryCursorState {
+                anchor: anchor.clone(),
+                page: *page,
+            }),
+            Some(_) => Err(error(ValidationCode::CursorMismatch)),
+            None => Err(error(ValidationCode::UnknownCursor)),
         }
     }
 

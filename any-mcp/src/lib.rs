@@ -21,8 +21,8 @@
 //! - [`ApplicationProfile::Standard`] advertises the complete fourteen-tool
 //!   Phase 1 catalog; read-only standard retains its ten read tools.
 //! - [`OptionalToolsetSelection`] is empty unless `ANY_MCP_TOOLSETS` names a
-//!   complete registry linked into the binary. No production optional registry
-//!   is linked yet, so Phase 1 remains the default and only current catalog.
+//!   complete registry linked into the binary. `members` is the only linked
+//!   optional registry; incomplete slices such as chat reads remain unavailable.
 //! - Resources advertise only the canonical
 //!   `anytype://spaces/{space_id}/objects/{object_id}` template. Instance
 //!   listing is empty and document discovery remains paginated through
@@ -54,6 +54,7 @@
 //! The crate README contains current host registration, complete tool semantics,
 //! protocol compatibility, token baselines, and operational guidance.
 
+pub mod chat_read_toolset;
 pub mod collection_member_toolset;
 pub mod config;
 mod create_idempotency;

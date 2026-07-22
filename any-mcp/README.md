@@ -146,8 +146,8 @@ stated maximum.
 - `ANY_MCP_TOOLSETS` is absent by default. A present selector is an exact,
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
-  fail closed without being echoed. No production optional registry is linked
-  yet, so every present selector is currently rejected;
+  fail closed without being echoed. `members` is the only production-linked
+  optional registry; incomplete registries such as `chats` remain rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
@@ -332,9 +332,10 @@ Stable and experimental protocol modes use the same composed catalog.
 Only `compact` and `standard` application profiles exist. The optional
 `members` registry is linked and can be selected explicitly with
 `ANY_MCP_TOOLSETS=members`; it is absent by default. Proposed `schema`,
-`views-write`, `files`, `chats`, and `admin` toolsets are not implemented or
-selectable in this release. Their names become valid selectors only when a
-complete independently reviewed production registry is linked.
+`views-write`, `files`, `chats`, and `admin` toolsets are not selectable in
+this release. Some have production-unlinked implementation slices, but their
+names become valid selectors only when a complete independently reviewed
+production registry is linked.
 
 The production-unlinked schema-space slice implements `space_create` and
 `space_update` for later composition into that complete `schema` registry.
@@ -400,6 +401,36 @@ a mismatched collection or limit performs zero HTTP or membership I/O. Direct
 and stdio scenarios assert the same cursor-mismatch and read-only outcomes.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
+
+The production-unlinked `chats` read slice implements `chat_list`,
+`chat_message_list`, `chat_message_get`, and `chat_message_search` for later
+composition with the separately tracked add/delete workflows. It uses REST
+through `anytype-api` only. Chat lists default to 10 and cap at 20; message
+lists and searches default to 8 and cap at 12. Older-history cursors keep one
+validated opaque server anchor and a one-based page number only in the bounded
+process-local cursor registry, never in MCP output or diagnostics, and stop at
+64 pages. Results minimize names, text, authors, timestamps, reply identity,
+formatting presence, and attachment counts; they never expose marks,
+attachment details, reactions, read state, order/state IDs, or structured
+blocks. Exact reads reject text beyond 8,192 Unicode scalar values, while list
+and search text is truncated only at scalar boundaries with exact counts and
+flags. Direct and preview-stdio acceptance uses one cleanup-owned disposable
+real chat and registered messages. Latency, dropped connections, malformed
+responses, and forced 5xx cases remain behind the P4 fault-injection design.
+Chat discovery also requires every returned object to have the exact `chat`
+layout and resolved space identity; any other upstream shape fails closed.
+The reviewed `o200k_base` snapshot locks compact and standard base/selected
+catalog hashes, read-write/read-only inventories, each tool's token cost, and
+adversarial maximum result bytes and dual-encoding tokens. Typed fixtures also
+lock maximum item counts and exact at-ceiling/plus-one encodings across
+four-byte Unicode, combining marks, escape-heavy strings, and prompt-injection
+text. The real-server acceptance runs every read through direct dispatch and
+one persistent preview-stdio session; both paths continue and restart chat,
+history, and search cursors and reject cursor/limit reuse before HTTP. Each
+ordinary stable-ID read performs exactly one logical HTTP operation with at
+most six physical attempts. Exact injected retry sequences remain deferred
+with the other transport faults rather than being emulated by a semantic
+server.
 
 The production-unlinked `files` read slice now provides the reusable internal
 contracts and handlers for that eventual registry. `file_metadata` performs an

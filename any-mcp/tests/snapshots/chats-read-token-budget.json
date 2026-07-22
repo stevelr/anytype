@@ -1,0 +1,160 @@
+{
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)",
+  "catalog_ceiling_tokens": 6500,
+  "per_tool_tokens": {
+    "chat_list": 568,
+    "chat_message_get": 877,
+    "chat_message_list": 1074,
+    "chat_message_search": 1292
+  },
+  "catalogs": {
+    "compact_base": {
+      "sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
+      "tokens": 9658,
+      "tools": ["object_edit", "object_get", "object_search", "server_status"]
+    },
+    "compact_selected": {
+      "sha256": "17558ddcee7b587705e34de08b72b55629a77bdc71cded40d8e8e2d916476f58",
+      "tokens": 13725,
+      "tools": [
+        "chat_list",
+        "chat_message_get",
+        "chat_message_list",
+        "chat_message_search",
+        "object_edit",
+        "object_get",
+        "object_search",
+        "optional_toolset_status",
+        "server_status"
+      ]
+    },
+    "compact_selected_read_only": {
+      "sha256": "f483b9a752010100d70f60f6fba95c81bf244d0a1c9a73c6bfda99976c028c85",
+      "tokens": 12436,
+      "tools": [
+        "chat_list",
+        "chat_message_get",
+        "chat_message_list",
+        "chat_message_search",
+        "object_get",
+        "object_search",
+        "optional_toolset_status",
+        "server_status"
+      ]
+    },
+    "standard_base": {
+      "sha256": "4e03af8ea8a70e14b4d75cb4f3a979e3c871f0e784888b79a0ff38b820812342",
+      "tokens": 36135,
+      "tools": [
+        "object_archive",
+        "object_create",
+        "object_edit",
+        "object_get",
+        "object_search",
+        "object_update",
+        "property_list",
+        "server_status",
+        "space_list",
+        "tag_list",
+        "template_list",
+        "type_list",
+        "view_list",
+        "view_object_list"
+      ]
+    },
+    "standard_selected": {
+      "sha256": "c2cb6c29832daa99fd1ba541c94dfa4d44899e98ee179aff382d2668821935b9",
+      "tokens": 40202,
+      "tools": [
+        "chat_list",
+        "chat_message_get",
+        "chat_message_list",
+        "chat_message_search",
+        "object_archive",
+        "object_create",
+        "object_edit",
+        "object_get",
+        "object_search",
+        "object_update",
+        "optional_toolset_status",
+        "property_list",
+        "server_status",
+        "space_list",
+        "tag_list",
+        "template_list",
+        "type_list",
+        "view_list",
+        "view_object_list"
+      ]
+    },
+    "standard_selected_read_only": {
+      "sha256": "f52fdc6589d3d788cef31891428ab1f2edbc549d66a8e5de885507ae9e5a4adc",
+      "tokens": 32947,
+      "tools": [
+        "chat_list",
+        "chat_message_get",
+        "chat_message_list",
+        "chat_message_search",
+        "object_get",
+        "object_search",
+        "optional_toolset_status",
+        "property_list",
+        "server_status",
+        "space_list",
+        "tag_list",
+        "template_list",
+        "type_list",
+        "view_list",
+        "view_object_list"
+      ]
+    }
+  },
+  "maximum_results": {
+    "chat_list": {
+      "structured_bytes": 26800,
+      "encoded_result_tokens": 13784,
+      "ceiling_bytes": 32768,
+      "admitted": true
+    },
+    "chat_message_list": {
+      "structured_bytes": 44300,
+      "encoded_result_tokens": 24296,
+      "ceiling_bytes": 49152,
+      "admitted": true
+    },
+    "chat_message_search": {
+      "structured_bytes": 54878,
+      "encoded_result_tokens": 31136,
+      "ceiling_bytes": 49152,
+      "admitted": false
+    },
+    "chat_message_get": {
+      "structured_bytes": 27216,
+      "encoded_result_tokens": 17532,
+      "ceiling_bytes": 49152,
+      "admitted": true
+    }
+  },
+  "typed_adversarial_boundaries": {
+    "chat_list": {
+      "ceiling_bytes": 32768,
+      "at_bytes": 32768,
+      "plus_one_bytes": 32769
+    },
+    "chat_message_list": {
+      "ceiling_bytes": 49152,
+      "at_bytes": 49152,
+      "plus_one_bytes": 49153
+    },
+    "chat_message_search": {
+      "ceiling_bytes": 49152,
+      "at_bytes": 49152,
+      "plus_one_bytes": 49153
+    },
+    "chat_message_get": {
+      "ceiling_bytes": 49152,
+      "at_bytes": 49152,
+      "plus_one_bytes": 49153
+    }
+  }
+}
