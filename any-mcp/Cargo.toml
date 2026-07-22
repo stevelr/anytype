@@ -47,6 +47,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tiktoken-rs = "0.12.0"
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -58,4 +59,3 @@ futures-util = "0.3.33"
 jsonschema = { version = "0.48.2", default-features = false }
 reqwest.workspace = true
 serial_test = "3.5.0"
-tiktoken-rs = "0.12.0"

@@ -5,7 +5,16 @@
 
 //! Shared finite process-local coordination for create workflows.
 
-use std::{borrow::Cow, collections::HashMap, fmt, sync::Arc, time::Instant};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+    time::Instant,
+};
 
 use rmcp::{
     model::CallToolResult,
@@ -108,6 +117,10 @@ enum StoredAttempt {
     Indeterminate {
         fingerprint: [u8; 32],
     },
+    PendingCandidate {
+        fingerprint: [u8; 32],
+        candidate: PendingCandidate,
+    },
 }
 
 pub(crate) struct Attempt {
@@ -115,6 +128,8 @@ pub(crate) struct Attempt {
     notify: Notify,
     progress: MutationProgress,
     deadline: Option<Instant>,
+    pending_candidate: Mutex<Option<PendingCandidate>>,
+    leader_cancellation: CancellationToken,
 }
 
 impl Attempt {
@@ -124,6 +139,70 @@ impl Attempt {
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+
+    pub(crate) async fn record_pending_candidate(
+        &self,
+        space_id: String,
+        object_id: String,
+    ) -> PendingCandidate {
+        let candidate = PendingCandidate::new(space_id, object_id);
+        *self.pending_candidate.lock().await = Some(candidate.clone());
+        candidate
+    }
+
+    pub(crate) fn leader_cancellation(&self) -> CancellationToken {
+        self.leader_cancellation.clone()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingCandidate(Arc<PendingCandidateInner>);
+
+pub(crate) enum PendingCandidateLookup {
+    Available(PendingCandidate),
+    Exhausted,
+    Absent,
+}
+
+struct PendingCandidateInner {
+    space_id: String,
+    object_id: String,
+    attempts: AtomicU8,
+}
+
+impl PendingCandidate {
+    fn new(space_id: String, object_id: String) -> Self {
+        Self(Arc::new(PendingCandidateInner {
+            space_id,
+            object_id,
+            attempts: AtomicU8::new(0),
+        }))
+    }
+
+    pub(crate) fn space_id(&self) -> &str {
+        &self.0.space_id
+    }
+
+    pub(crate) fn object_id(&self) -> &str {
+        &self.0.object_id
+    }
+
+    pub(crate) fn claim_get_attempt(&self) -> bool {
+        self.0
+            .attempts
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |attempts| {
+                (attempts < 3).then_some(attempts + 1)
+            })
+            .is_ok()
+    }
+
+    fn exhausted(&self) -> bool {
+        self.0.attempts.load(Ordering::Acquire) >= 3
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -184,6 +263,13 @@ impl IdempotencyStore {
                 StoredAttempt::Indeterminate { fingerprint: saved } if saved == &fingerprint => {
                     BeginAttempt::Indeterminate
                 }
+                StoredAttempt::PendingCandidate {
+                    fingerprint: saved,
+                    candidate,
+                } if saved == &fingerprint => {
+                    let _ = candidate;
+                    BeginAttempt::Indeterminate
+                }
                 _ => BeginAttempt::Conflict,
             };
         }
@@ -195,6 +281,8 @@ impl IdempotencyStore {
             notify: Notify::new(),
             progress: MutationProgress::new(),
             deadline,
+            pending_candidate: Mutex::new(None),
+            leader_cancellation: CancellationToken::new(),
         });
         entries.insert(
             key.clone(),
@@ -217,6 +305,7 @@ impl IdempotencyStore {
         attempt: &Arc<Attempt>,
         execution: CreateExecution,
     ) {
+        let pending_candidate = attempt.pending_candidate.lock().await.clone();
         let mut entries = self.entries.lock().await;
         if let Some(StoredAttempt::Running {
             fingerprint,
@@ -245,7 +334,17 @@ impl IdempotencyStore {
                     );
                 }
                 CreateDisposition::Indeterminate => {
-                    entries.insert(key.clone(), StoredAttempt::Indeterminate { fingerprint });
+                    if let Some(candidate) = pending_candidate {
+                        entries.insert(
+                            key.clone(),
+                            StoredAttempt::PendingCandidate {
+                                fingerprint,
+                                candidate,
+                            },
+                        );
+                    } else {
+                        entries.insert(key.clone(), StoredAttempt::Indeterminate { fingerprint });
+                    }
                 }
                 CreateDisposition::PreDispatchFailure => {
                     entries.remove(key);
@@ -255,6 +354,58 @@ impl IdempotencyStore {
         drop(entries);
         *attempt.result.lock().await = Some(execution.result);
         attempt.notify.notify_waiters();
+    }
+
+    pub(crate) async fn complete_pending_candidate(
+        &self,
+        key: &IdempotencyKey,
+        fingerprint: [u8; 32],
+        candidate: &PendingCandidate,
+        result: CallToolResult,
+    ) -> bool {
+        let mut entries = self.entries.lock().await;
+        let matches = entries.get(key).is_some_and(|entry| {
+            matches!(
+                entry,
+                StoredAttempt::PendingCandidate {
+                    fingerprint: saved,
+                    candidate: saved_candidate,
+                } if saved == &fingerprint && saved_candidate.same(candidate)
+            )
+        });
+        if matches {
+            entries.insert(
+                key.clone(),
+                StoredAttempt::Complete {
+                    fingerprint,
+                    result,
+                },
+            );
+        }
+        matches
+    }
+
+    pub(crate) async fn pending_candidate(
+        &self,
+        key: &IdempotencyKey,
+        fingerprint: [u8; 32],
+    ) -> PendingCandidateLookup {
+        let entries = self.entries.lock().await;
+        match entries.get(key) {
+            Some(StoredAttempt::PendingCandidate {
+                fingerprint: saved,
+                candidate,
+            }) if saved == &fingerprint && !candidate.exhausted() => {
+                PendingCandidateLookup::Available(candidate.clone())
+            }
+            Some(StoredAttempt::PendingCandidate {
+                fingerprint: saved,
+                candidate,
+            }) if saved == &fingerprint && candidate.exhausted() => {
+                PendingCandidateLookup::Exhausted
+            }
+            _ => PendingCandidateLookup::Absent,
+        }
     }
 }
 
@@ -319,6 +470,42 @@ pub(crate) async fn wait_for_attempt_until(
     }
 }
 
+pub(crate) async fn wait_for_leader_attempt_until(
+    attempt: Arc<Attempt>,
+    cancellation: &CancellationToken,
+    invocation_deadline: Instant,
+) -> CallToolResult {
+    let deadline = attempt.deadline.map_or(invocation_deadline, |leader| {
+        leader.min(invocation_deadline)
+    });
+    let leader_cancellation = attempt.leader_cancellation();
+    let mut cancellation_forwarded = false;
+    loop {
+        let notified = attempt.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(result) = attempt.result.lock().await.clone() {
+            return result;
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled(), if !cancellation_forwarded => {
+                cancellation_forwarded = true;
+                leader_cancellation.cancel();
+            },
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                leader_cancellation.cancel();
+                let error = match attempt.progress.stage() {
+                    MutationStage::PreDispatch => ToolError::upstream(),
+                    MutationStage::Dispatched => ToolError::conflict(),
+                };
+                return tool_error(&error);
+            },
+            () = &mut notified => {}
+        }
+    }
+}
+
 pub(crate) async fn finish_supervised_execution(
     task: JoinHandle<CreateExecution>,
     progress: &MutationProgress,
@@ -364,4 +551,86 @@ pub(crate) enum CreateDisposition {
     Terminal,
     Indeterminate,
     PreDispatchFailure,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key() -> IdempotencyKey {
+        IdempotencyKey::new("pending-key").expect("test key")
+    }
+
+    #[tokio::test]
+    async fn pending_candidate_get_attempts_are_lifetime_bounded_and_closed() {
+        let store = IdempotencyStore::new(1);
+        let key = key();
+        let fingerprint = [7; 32];
+        let BeginAttempt::Lead(attempt) = store.begin(key.clone(), fingerprint).await else {
+            panic!("first call leads");
+        };
+        let candidate = attempt
+            .record_pending_candidate("space".to_owned(), "object".to_owned())
+            .await;
+        assert!(candidate.claim_get_attempt());
+        store
+            .finish(
+                &key,
+                &attempt,
+                CreateExecution::new(
+                    tool_error(&ToolError::conflict()),
+                    CreateDisposition::Indeterminate,
+                ),
+            )
+            .await;
+
+        assert!(matches!(
+            store.pending_candidate(&key, fingerprint).await,
+            PendingCandidateLookup::Available(_)
+        ));
+        assert!(candidate.claim_get_attempt());
+        assert!(candidate.claim_get_attempt());
+        assert!(!candidate.claim_get_attempt());
+        assert!(matches!(
+            store.pending_candidate(&key, fingerprint).await,
+            PendingCandidateLookup::Exhausted
+        ));
+        assert!(matches!(
+            store.pending_candidate(&key, [8; 32]).await,
+            PendingCandidateLookup::Absent
+        ));
+    }
+
+    #[tokio::test]
+    async fn proven_pending_candidate_becomes_a_terminal_cached_receipt() {
+        let store = IdempotencyStore::new(1);
+        let key = key();
+        let fingerprint = [3; 32];
+        let BeginAttempt::Lead(attempt) = store.begin(key.clone(), fingerprint).await else {
+            panic!("first call leads");
+        };
+        let candidate = attempt
+            .record_pending_candidate("space".to_owned(), "object".to_owned())
+            .await;
+        store
+            .finish(
+                &key,
+                &attempt,
+                CreateExecution::new(
+                    tool_error(&ToolError::conflict()),
+                    CreateDisposition::Indeterminate,
+                ),
+            )
+            .await;
+        let receipt = CallToolResult::structured(serde_json::json!({"status":"partial"}));
+        assert!(
+            store
+                .complete_pending_candidate(&key, fingerprint, &candidate, receipt.clone(),)
+                .await
+        );
+        let BeginAttempt::Cached(cached) = store.begin(key, fingerprint).await else {
+            panic!("proven candidate is cached");
+        };
+        assert_eq!(cached.structured_content, receipt.structured_content);
+    }
 }

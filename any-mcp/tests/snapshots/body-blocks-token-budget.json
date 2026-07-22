@@ -1,0 +1,96 @@
+{
+  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
+  "compact_composed_ceiling_tokens": 35158,
+  "compact_composed_total_tokens": 33390,
+  "compact_read_only_ceiling_tokens": 12869,
+  "compact_read_only_total_tokens": 12250,
+  "paired_fixtures": {
+    "list": {
+      "error": {
+        "bytes": 331,
+        "sha256": "18f67ca8226516a9934256f3a7da26028d83c676d330237086ac0bf6cb6d0de0",
+        "tokens": 77
+      },
+      "error_complete_context_tokens": 60502,
+      "request": {
+        "bytes": 1574,
+        "sha256": "a3d016a4c003279151840381dce115e51a0c23574ae93ef64ee1f09c1cf332e0",
+        "tokens": 558
+      },
+      "success": {
+        "bytes": 654160,
+        "sha256": "ad7a7cdd569fe4adbcb61e9d16e278fa64993548a35519e14afc7c4cf43815f9",
+        "tokens": 204454
+      },
+      "success_complete_context_tokens": 264879
+    },
+    "primitive": {
+      "error": {
+        "bytes": 331,
+        "sha256": "18f67ca8226516a9934256f3a7da26028d83c676d330237086ac0bf6cb6d0de0",
+        "tokens": 77
+      },
+      "error_complete_context_tokens": 71943,
+      "request": {
+        "bytes": 36522,
+        "sha256": "f4f7b617c652268a5c4999f2be18412d4f18f99c49e33a59f2bbf7d804e965f2",
+        "tokens": 11999
+      },
+      "success": {
+        "bytes": 81912,
+        "sha256": "42c62506e17cb73ffe61be2b1ec834c6260845cc75a6000da775176debb80e07",
+        "tokens": 25507
+      },
+      "success_complete_context_tokens": 97373
+    },
+    "rich": {
+      "error": {
+        "bytes": 331,
+        "sha256": "18f67ca8226516a9934256f3a7da26028d83c676d330237086ac0bf6cb6d0de0",
+        "tokens": 77
+      },
+      "error_complete_context_tokens": 152761,
+      "request": {
+        "bytes": 281724,
+        "sha256": "e672019eac807442fca52f67a5aca4e59e8e87e312168b8ae34f4857739b7c2e",
+        "tokens": 92817
+      },
+      "success": {
+        "bytes": 15710,
+        "sha256": "396f603c1a050eb8a8d15e701b2370b8ffae35cf8b32f45430043158b9dad6e0",
+        "tokens": 2628
+      },
+      "success_complete_context_tokens": 155312
+    },
+    "rich_table_prompt_request": {
+      "bytes": 1014,
+      "sha256": "3aa9e9488c3572c1be176abc8ec5e2bdf190bb9fdfb393f9bafd9ef223170601",
+      "tokens": 265
+    }
+  },
+  "per_tool_tokens": {
+    "body_block_create": 6261,
+    "body_block_delete": 601,
+    "body_block_list": 3625,
+    "body_block_move": 3562,
+    "body_block_update": 5716,
+    "rich_page_create": 3711
+  },
+  "per_tool_ceiling_tokens": 6500,
+  "read_only_catalog_sha256": "2e51a777d440ef1ace6ce7525f85ae1ddbf04cb3e1a175d563766bcc94c89161",
+  "read_only_domain_ceiling_tokens": 4000,
+  "read_only_domain_tokens": 3625,
+  "read_only_selected_contribution_ceiling_tokens": 4500,
+  "read_only_selected_contribution_tokens": 3881,
+  "read_write_domain_ceiling_tokens": 25000,
+  "read_write_domain_tokens": 23476,
+  "selected": ["body-blocks"],
+  "selected_catalog_sha256": "831cfda9d0b8325bd23329d26f3c69e8a14f844487fea8d779299c22dfdaf2a6",
+  "selected_contribution_ceiling_tokens": 25500,
+  "selected_contribution_tokens": 23732,
+  "standard_composed_ceiling_tokens": 61635,
+  "standard_composed_total_tokens": 59867,
+  "standard_read_only_ceiling_tokens": 33380,
+  "standard_read_only_total_tokens": 32761,
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
+}

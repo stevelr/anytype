@@ -3236,6 +3236,301 @@ async fn headless_stdio_read_only_sentinel() {
     run_spawned_read_sentinel(DriverOptions::READ_ONLY).await;
 }
 
+fn take_registered_body_driver(
+    driver: &Arc<Mutex<Option<StdioDriver>>>,
+) -> TestResult<StdioDriver> {
+    lock_driver(driver)
+        .take()
+        .ok_or_else(|| sentinel_assertion("registered body-block child disappeared"))
+}
+
+fn body_tool_value(
+    driver: &mut StdioDriver,
+    name: &'static str,
+    arguments: Value,
+) -> TestResult<Value> {
+    driver
+        .call_tool_sync(name, arguments)
+        .map_err(|_| sentinel_assertion("spawned body-block call failed"))
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_body_blocks_direct_stable_preview_and_object_show() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let stable_callback_cleanup = Arc::clone(&stable_cleanup);
+    let preview_callback_cleanup = Arc::clone(&preview_cleanup);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-body-blocks",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let suffix = unique_suffix();
+                let object = ctx
+                    .client
+                    .new_object(&ctx.space_id, "page")
+                    .name(format!("MCP body blocks {suffix}"))
+                    .body("# Seed heading\n\nSeed paragraph")
+                    .create()
+                    .await?;
+                ctx.register_object(&object.id);
+
+                let stable = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    stable_callback_cleanup,
+                    DriverOptions::STANDARD,
+                    Some("body-blocks"),
+                )?;
+                let (final_snapshot_hash, rich_id, first_id, second_id) = {
+                    let mut guard = lock_driver(&stable);
+                    let driver = guard
+                        .as_mut()
+                        .ok_or_else(|| sentinel_assertion("stable body child missing"))?;
+                    driver.initialize();
+                    let tools = driver
+                        .list_tools_sync()
+                        .map_err(|_| sentinel_assertion("stable body catalog failed"))?;
+                    for name in [
+                        "body_block_list",
+                        "body_block_create",
+                        "body_block_update",
+                        "body_block_delete",
+                        "body_block_move",
+                        "rich_page_create",
+                    ] {
+                        if !tools.iter().any(|candidate| candidate == name) {
+                            return Err(sentinel_assertion("stable body catalog omitted a tool"));
+                        }
+                    }
+
+                    let initial = body_tool_value(
+                        driver,
+                        "body_block_list",
+                        json!({"space":ctx.space_id,"object_id":object.id,"limit":12}),
+                    )?;
+                    let root_id = initial["root_id"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("stable body list omitted root ID"))?
+                        .to_owned();
+                    let mut snapshot_hash = initial["snapshot_hash"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("stable body list omitted snapshot hash"))?
+                        .to_owned();
+
+                    let first = body_tool_value(
+                        driver,
+                        "body_block_create",
+                        json!({
+                            "space":ctx.space_id,
+                            "object_id":object.id,
+                            "expected_snapshot_hash":snapshot_hash,
+                            "target_block_id":root_id,
+                            "position":"last_child",
+                            "block":{"kind":"text","style":"paragraph","text":"first body block","marks":[]},
+                            "idempotency_key":format!("body-first-{suffix}")
+                        }),
+                    )?;
+                    let first_id = first["block"]["id"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("body create omitted block ID"))?
+                        .to_owned();
+                    snapshot_hash = first["snapshot_hash"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("body create omitted snapshot hash"))?
+                        .to_owned();
+
+                    let updated = body_tool_value(
+                        driver,
+                        "body_block_update",
+                        json!({
+                            "space":ctx.space_id,
+                            "object_id":object.id,
+                            "expected_snapshot_hash":snapshot_hash,
+                            "block_id":first_id,
+                            "change":{"kind":"set_text","text":"updated body block","marks":[]}
+                        }),
+                    )?;
+                    snapshot_hash = updated["snapshot_hash"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("body update omitted snapshot hash"))?
+                        .to_owned();
+
+                    let second = body_tool_value(
+                        driver,
+                        "body_block_create",
+                        json!({
+                            "space":ctx.space_id,
+                            "object_id":object.id,
+                            "expected_snapshot_hash":snapshot_hash,
+                            "target_block_id":root_id,
+                            "position":"last_child",
+                            "block":{"kind":"relation","key":"tag"},
+                            "idempotency_key":format!("body-second-{suffix}")
+                        }),
+                    )?;
+                    let second_id = second["block"]["id"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("second create omitted block ID"))?
+                        .to_owned();
+                    snapshot_hash = second["snapshot_hash"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("second create omitted snapshot hash"))?
+                        .to_owned();
+
+                    let moved = body_tool_value(
+                        driver,
+                        "body_block_move",
+                        json!({
+                            "space":ctx.space_id,
+                            "object_id":object.id,
+                            "expected_snapshot_hash":snapshot_hash,
+                            "block_id":first_id,
+                            "target_block_id":second_id,
+                            "position":"after"
+                        }),
+                    )?;
+                    snapshot_hash = moved["snapshot_hash"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("body move omitted snapshot hash"))?
+                        .to_owned();
+
+                    let deleted = body_tool_value(
+                        driver,
+                        "body_block_delete",
+                        json!({
+                            "space":ctx.space_id,
+                            "object_id":object.id,
+                            "expected_snapshot_hash":snapshot_hash,
+                            "block_id":second_id,
+                            "expected_subtree_blocks":1,
+                            "confirm_delete":"delete_subtree"
+                        }),
+                    )?;
+                    let final_snapshot_hash = deleted["snapshot_hash"]
+                        .as_str()
+                        .ok_or_else(|| sentinel_assertion("body delete omitted snapshot hash"))?
+                        .to_owned();
+
+                    let rich = body_tool_value(
+                        driver,
+                        "rich_page_create",
+                        json!({
+                            "space":ctx.space_id,
+                            "name":format!("MCP rich page {suffix}"),
+                            "idempotency_key":format!("rich-page-{suffix}"),
+                            "blocks":[
+                                {"local_key":"heading","block":{"kind":"text","style":"heading_1","text":"Rich heading","marks":[]}},
+                                {"local_key":"body","parent_key":"heading","block":{"kind":"embed","processor":"mermaid","source":"graph TD; A-->B"}}
+                            ]
+                        }),
+                    )?;
+                    let rich_id = rich["object_id"].as_str().map(str::to_owned);
+                    if let Some(rich_id) = rich_id.as_deref() {
+                        ctx.register_object(rich_id);
+                    }
+                    if rich["status"] != "complete" {
+                        return Err(sentinel_assertion("rich page did not complete"));
+                    }
+                    let rich_id = rich_id
+                        .ok_or_else(|| sentinel_assertion("rich page omitted object ID"))?
+                        .to_owned();
+                    (final_snapshot_hash, rich_id, first_id, second_id)
+                };
+                let rich_object = ctx.client.object(&ctx.space_id, &rich_id).get().await?;
+                if rich_object.id != rich_id {
+                    return Err(sentinel_assertion("rich page exact GET identity mismatch"));
+                }
+                let rich_snapshot = ctx
+                    .client
+                    .blocks()
+                    .body(&ctx.space_id, &rich_id)
+                    .fetch()
+                    .await?;
+                if rich_snapshot.object_id != rich_id || rich_snapshot.len() < 3 {
+                    return Err(sentinel_assertion("rich page ObjectShow verification failed"));
+                }
+
+                let final_snapshot = ctx
+                    .client
+                    .blocks()
+                    .body(&ctx.space_id, &object.id)
+                    .fetch()
+                    .await?;
+                if final_snapshot.object_id != object.id
+                    || final_snapshot
+                        .iter()
+                        .all(|block| block.id.as_str() != first_id)
+                    || final_snapshot
+                        .iter()
+                        .any(|block| block.id.as_str() == second_id)
+                {
+                    return Err(sentinel_assertion("primitive ObjectShow verification failed"));
+                }
+                let stable_driver = take_registered_body_driver(&stable)?;
+                let (_, stable_output) = stable_driver
+                    .try_finish()
+                    .map_err(|_| sentinel_assertion("stable body child did not stop"))?;
+                if !stable_output.stderr.is_empty()
+                    && stderr_metrics(&stable_output.stderr).panic != 0
+                {
+                    return Err(sentinel_assertion("stable body child emitted a panic"));
+                }
+
+                let preview = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    preview_callback_cleanup,
+                    DriverOptions::PREVIEW_STANDARD,
+                    Some("body-blocks"),
+                )?;
+                {
+                    let mut guard = lock_driver(&preview);
+                    let driver = guard
+                        .as_mut()
+                        .ok_or_else(|| sentinel_assertion("preview body child missing"))?;
+                    driver.initialize();
+                    let preview_list = body_tool_value(
+                        driver,
+                        "body_block_list",
+                        json!({"space":ctx.space_id,"object_id":object.id,"limit":12}),
+                    )?;
+                    if preview_list["snapshot_hash"] != final_snapshot_hash {
+                        return Err(sentinel_assertion("stable and preview body hashes diverged"));
+                    }
+                }
+                let preview_driver = take_registered_body_driver(&preview)?;
+                preview_driver
+                    .try_finish()
+                    .map_err(|_| sentinel_assertion("preview body child did not stop"))?;
+                Ok(ctx.space_id.clone())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe body-block direct/stdio acceptance");
+    match outcome {
+        DisposableRun::Completed(space_id) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *stable_cleanup.lock().expect("stable cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_fresh_space_absence(&space_id).await;
+            assert_eq!(
+                *preview_cleanup.lock().expect("preview cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+        }
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("body-block acceptance skipped before callback: {reason:?}");
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires source .test-env and an authenticated headless Anytype server"]
 async fn headless_stdio_preview_sentinel() {
