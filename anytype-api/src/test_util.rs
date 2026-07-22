@@ -44,8 +44,8 @@ use tonic::Request;
 
 mod disposable;
 pub use disposable::{
-    DisposableCallbackStage, DisposableChildEnvironment, DisposableRun, DisposableSkip,
-    DisposableTestError, disposable_callback_error, with_disposable_space_context,
+    DisposableChildEnvironment, DisposableRun, DisposableSkip, DisposableTestError,
+    disposable_callback_error, with_disposable_space_context,
 };
 
 #[allow(unused_imports)]
@@ -139,6 +139,273 @@ where
 // TestError
 // =============================================================================
 
+/// Closed stage for disposable-space setup diagnostics.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisposableSetupStage {
+    /// Dispatching the create-space request.
+    SpaceCreate,
+    /// Validating the create-space response.
+    CreateResponse,
+}
+
+/// Closed stage for disposable-space readiness diagnostics.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisposableReadinessStage {
+    /// Overall readiness deadline or observation state.
+    Readiness,
+    /// Exact space observation.
+    Space,
+    /// Exact `@page` resolution.
+    TypeResolve,
+    /// Cache-independent direct type readback.
+    TypeDirect,
+}
+
+/// Closed callback boundary used by disposable filter acceptance tests.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisposableCallbackStage {
+    /// Required property and type fixture construction.
+    Fixture,
+    /// Integer numeric equality.
+    NumberEqualInteger,
+    /// Numeric inequality.
+    NumberNotEqual,
+    /// Numeric less-than.
+    NumberLess,
+    /// Numeric less-than-or-equal.
+    NumberLessOrEqual,
+    /// Numeric greater-than.
+    NumberGreater,
+    /// Numeric greater-than-or-equal.
+    NumberGreaterOrEqual,
+    /// Negative-decimal numeric equality.
+    NumberEqualDecimal,
+    /// Checkbox equality with `true`.
+    CheckboxEqualTrue,
+    /// Checkbox equality with `false`.
+    CheckboxEqualFalse,
+    /// Checkbox inequality with `true`.
+    CheckboxNotEqualTrue,
+    /// Checkbox inequality with `false`.
+    CheckboxNotEqualFalse,
+}
+
+/// Closed, payload-free disposable diagnostic category.
+///
+/// Lifecycle diagnostics accept only the closed enums; arbitrary strings do
+/// not type-check:
+///
+/// ```compile_fail
+/// use anytype::test_util::{DisposableFailureCategory, TestError};
+/// let _ = TestError::DisposableCallback {
+///     stage: "forged-stage",
+///     category: "forged-category",
+/// };
+/// # let _ = DisposableFailureCategory::Other;
+/// ```
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisposableFailureCategory {
+    /// HTTP transport failed.
+    HttpTransport,
+    /// HTTP API returned a non-success status.
+    ApiError,
+    /// Response exceeded its byte limit.
+    ResponseTooLarge,
+    /// File-header evidence exceeded its limit.
+    FileHeaderEvidenceTooLarge,
+    /// File response header was invalid.
+    InvalidFileResponseHeader,
+    /// Chat event exceeded its limit.
+    ChatSseEventTooLarge,
+    /// Chat stream transport failed.
+    ChatSseTransport,
+    /// Chat timestamp was invalid.
+    ChatTimestamp,
+    /// Chat history evidence was incomplete.
+    ChatHistoryEvidence,
+    /// Chat edit timestamp did not advance.
+    ChatEditTimestampNotAdvanced,
+    /// Retry ceiling was exhausted.
+    TooManyRetries,
+    /// Authentication failed.
+    Auth,
+    /// Response deserialization failed.
+    Deserialization,
+    /// Request serialization failed.
+    Serialization,
+    /// Requested item was absent.
+    NotFound,
+    /// Resolution was ambiguous.
+    Ambiguous,
+    /// Resolution scan limit was exceeded.
+    ResolutionLimitExceeded,
+    /// Authentication was missing.
+    Unauthorized,
+    /// Operation was forbidden.
+    Forbidden,
+    /// Rate limit was exhausted.
+    RateLimit,
+    /// Local validation failed.
+    Validation,
+    /// Keystore configuration was absent.
+    NoKeystore,
+    /// gRPC operation failed.
+    Grpc,
+    /// gRPC service was unavailable.
+    GrpcUnavailable,
+    /// Keystore operation failed.
+    Keystore,
+    /// Operation required a disabled cache.
+    CacheDisabled,
+    /// Body graph was invalid.
+    BodyGraph,
+    /// Body mutation outcome was indeterminate.
+    BodyMutationIndeterminate,
+    /// Collection membership evidence was incomplete.
+    CollectionMembershipEvidence,
+    /// Type-property classification failed.
+    TypePropertyClassification,
+    /// Attached-discussion operation failed.
+    AttachedDiscussion,
+    /// Verification timed out.
+    VerifyTimeout,
+    /// Other payload-bearing error was redacted.
+    Other,
+    /// No readiness observation completed.
+    NotObserved,
+    /// Readiness deadline expired.
+    Timeout,
+    /// Returned identity did not match.
+    IdentityMismatch,
+    /// Evidence was structurally invalid.
+    InvalidEvidence,
+    /// Create request was definitively rejected.
+    ApiRejected,
+    /// Create request outcome was indeterminate.
+    Indeterminate,
+    /// Returned identifier was invalid.
+    InvalidId,
+    /// Returned model did not match.
+    ModelMismatch,
+    /// Returned name did not match.
+    NameMismatch,
+    /// Returned identity collided with ambient state.
+    AmbientCollision,
+    /// Environment setup failed.
+    Environment,
+    /// Configuration failed.
+    Config,
+    /// Nested readiness failure was redacted.
+    Readiness,
+    /// Nested setup failure was redacted.
+    Setup,
+    /// Nested callback failure was redacted.
+    Callback,
+    /// Test assertion failed.
+    Assertion,
+    /// Space creation may have committed.
+    SpaceCreateIndeterminate,
+}
+
+macro_rules! closed_diagnostic_display {
+    ($type:ty, {$($variant:path => $value:literal),+ $(,)?}) => {
+        impl $type {
+            const fn as_str(self) -> &'static str {
+                match self {
+                    $($variant => $value),+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $type {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+closed_diagnostic_display!(DisposableSetupStage, {
+    DisposableSetupStage::SpaceCreate => "space_create",
+    DisposableSetupStage::CreateResponse => "create_response",
+});
+closed_diagnostic_display!(DisposableReadinessStage, {
+    DisposableReadinessStage::Readiness => "readiness",
+    DisposableReadinessStage::Space => "space",
+    DisposableReadinessStage::TypeResolve => "type_resolve",
+    DisposableReadinessStage::TypeDirect => "type_direct",
+});
+closed_diagnostic_display!(DisposableCallbackStage, {
+    DisposableCallbackStage::Fixture => "fixture",
+    DisposableCallbackStage::NumberEqualInteger => "number_equal_integer",
+    DisposableCallbackStage::NumberNotEqual => "number_not_equal",
+    DisposableCallbackStage::NumberLess => "number_less",
+    DisposableCallbackStage::NumberLessOrEqual => "number_less_or_equal",
+    DisposableCallbackStage::NumberGreater => "number_greater",
+    DisposableCallbackStage::NumberGreaterOrEqual => "number_greater_or_equal",
+    DisposableCallbackStage::NumberEqualDecimal => "number_equal_decimal",
+    DisposableCallbackStage::CheckboxEqualTrue => "checkbox_equal_true",
+    DisposableCallbackStage::CheckboxEqualFalse => "checkbox_equal_false",
+    DisposableCallbackStage::CheckboxNotEqualTrue => "checkbox_not_equal_true",
+    DisposableCallbackStage::CheckboxNotEqualFalse => "checkbox_not_equal_false",
+});
+closed_diagnostic_display!(DisposableFailureCategory, {
+    DisposableFailureCategory::HttpTransport => "http_transport",
+    DisposableFailureCategory::ApiError => "api_error",
+    DisposableFailureCategory::ResponseTooLarge => "response_too_large",
+    DisposableFailureCategory::FileHeaderEvidenceTooLarge => "file_header_evidence_too_large",
+    DisposableFailureCategory::InvalidFileResponseHeader => "invalid_file_response_header",
+    DisposableFailureCategory::ChatSseEventTooLarge => "chat_sse_event_too_large",
+    DisposableFailureCategory::ChatSseTransport => "chat_sse_transport",
+    DisposableFailureCategory::ChatTimestamp => "chat_timestamp",
+    DisposableFailureCategory::ChatHistoryEvidence => "chat_history_evidence",
+    DisposableFailureCategory::ChatEditTimestampNotAdvanced => "chat_edit_timestamp_not_advanced",
+    DisposableFailureCategory::TooManyRetries => "too_many_retries",
+    DisposableFailureCategory::Auth => "auth",
+    DisposableFailureCategory::Deserialization => "deserialization",
+    DisposableFailureCategory::Serialization => "serialization",
+    DisposableFailureCategory::NotFound => "not_found",
+    DisposableFailureCategory::Ambiguous => "ambiguous",
+    DisposableFailureCategory::ResolutionLimitExceeded => "resolution_limit_exceeded",
+    DisposableFailureCategory::Unauthorized => "unauthorized",
+    DisposableFailureCategory::Forbidden => "forbidden",
+    DisposableFailureCategory::RateLimit => "rate_limit",
+    DisposableFailureCategory::Validation => "validation",
+    DisposableFailureCategory::NoKeystore => "no_keystore",
+    DisposableFailureCategory::Grpc => "grpc",
+    DisposableFailureCategory::GrpcUnavailable => "grpc_unavailable",
+    DisposableFailureCategory::Keystore => "keystore",
+    DisposableFailureCategory::CacheDisabled => "cache_disabled",
+    DisposableFailureCategory::BodyGraph => "body_graph",
+    DisposableFailureCategory::BodyMutationIndeterminate => "body_mutation_indeterminate",
+    DisposableFailureCategory::CollectionMembershipEvidence => "collection_membership_evidence",
+    DisposableFailureCategory::TypePropertyClassification => "type_property_classification",
+    DisposableFailureCategory::AttachedDiscussion => "attached_discussion",
+    DisposableFailureCategory::VerifyTimeout => "verify_timeout",
+    DisposableFailureCategory::Other => "other",
+    DisposableFailureCategory::NotObserved => "not_observed",
+    DisposableFailureCategory::Timeout => "timeout",
+    DisposableFailureCategory::IdentityMismatch => "identity_mismatch",
+    DisposableFailureCategory::InvalidEvidence => "invalid_evidence",
+    DisposableFailureCategory::ApiRejected => "api_rejected",
+    DisposableFailureCategory::Indeterminate => "indeterminate",
+    DisposableFailureCategory::InvalidId => "invalid_id",
+    DisposableFailureCategory::ModelMismatch => "model_mismatch",
+    DisposableFailureCategory::NameMismatch => "name_mismatch",
+    DisposableFailureCategory::AmbientCollision => "ambient_collision",
+    DisposableFailureCategory::Environment => "environment",
+    DisposableFailureCategory::Config => "config",
+    DisposableFailureCategory::Readiness => "readiness",
+    DisposableFailureCategory::Setup => "setup",
+    DisposableFailureCategory::Callback => "callback",
+    DisposableFailureCategory::Assertion => "assertion",
+    DisposableFailureCategory::SpaceCreateIndeterminate => "space_create_indeterminate",
+});
+
 #[doc(hidden)]
 pub type TestResult<T> = std::result::Result<T, TestError>;
 
@@ -160,9 +427,9 @@ pub enum TestError {
     ))]
     DisposableReadiness {
         /// Closed readiness stage name.
-        stage: &'static str,
+        stage: DisposableReadinessStage,
         /// Closed payload-free failure category.
-        category: &'static str,
+        category: DisposableFailureCategory,
         /// Number of completed readiness observations.
         attempts: usize,
     },
@@ -171,18 +438,18 @@ pub enum TestError {
     #[snafu(display("Disposable setup failed: stage={stage} category={category}"))]
     DisposableSetup {
         /// Closed setup stage name.
-        stage: &'static str,
+        stage: DisposableSetupStage,
         /// Closed payload-free failure category.
-        category: &'static str,
+        category: DisposableFailureCategory,
     },
 
     /// A disposable-space callback boundary failed with a closed, secret-safe cause.
     #[snafu(display("Disposable callback failed: stage={stage} category={category}"))]
     DisposableCallback {
         /// Closed callback stage name.
-        stage: &'static str,
+        stage: DisposableCallbackStage,
         /// Closed payload-free failure category.
-        category: &'static str,
+        category: DisposableFailureCategory,
     },
 
     #[snafu(display("Test assertion failed: {message}"))]

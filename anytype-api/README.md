@@ -1075,6 +1075,11 @@ The numeric/checkbox acceptance callback similarly reports only a closed
 fixture or comparison stage and a payload-free `TestError`/API diagnostic
 category, which proves whether execution crossed the callback boundary without
 exposing fixture identities, queries, endpoints, or upstream bodies.
+All three diagnostic paths store exhaustive enums rather than caller-provided
+strings, so `Display`, `Debug`, and accessors can render only the documented
+closed vocabulary. The filter fixture resolves its prerequisite `due_date`
+property through the bounded, cache-independent property resolver because the
+disposable client intentionally disables cache state.
 The two immediate pre-delete checks and final absence proof also
 use cache-disabled direct exact-ID reads. The helper cleans registered children first and retains callback,
 cleanup, deletion, absence, ledger, and panic outcomes; an unproven absence is

@@ -120,7 +120,7 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
     // Due Date/due_date Date
     match ctx
         .client
-        .lookup_property_by_key(&ctx.space_id, "due_date")
+        .resolve_property_id(&ctx.space_id, "due_date")
         .await
     {
         Err(AnytypeError::NotFound { .. }) => {
@@ -141,7 +141,7 @@ pub async fn ensure_properties_and_type(ctx: &TestContext) -> TestResult<String>
                     if is_key_already_exists_error(&e, "property key", "due_date") {
                         let _prop = ctx
                             .client
-                            .lookup_property_by_key(&ctx.space_id, "due_date")
+                            .resolve_property_id(&ctx.space_id, "due_date")
                             .await?;
                     } else {
                         eprintln!("creating due_date: {e}");

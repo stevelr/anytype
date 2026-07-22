@@ -119,6 +119,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   comparison stage and payload-free `TestError`/API diagnostic category, so
   callback execution is distinguishable from pre-callback convergence without
   exposing fixture or request values.
+  Setup, readiness, and callback evidence now uses exhaustive enums end to end,
+  preventing callers from forging diagnostic strings. The cleanup-owned filter
+  fixture also replaces its cache-only `due_date` lookup and fallback with the
+  bounded cache-independent property resolver required by disposable clients.
 - Replace the stale `anytype-heart#2879` numeric/checkbox limitation with exact
   query-encoding unit regressions and a cleanup-owned real-server matrix over
   object-list and scoped-search endpoints. The matrix covers all six numeric
