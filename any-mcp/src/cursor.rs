@@ -81,9 +81,44 @@ fn sort_json(v: &mut serde_json::Value) {
         _ => {}
     }
 }
-#[derive(Debug, Clone, Copy)]
-struct State {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvidenceCursorState {
     offset: PageOffset,
+    total: u64,
+    boundary_id: String,
+}
+
+impl EvidenceCursorState {
+    pub(crate) fn new(offset: PageOffset, total: u64, boundary_id: String) -> Self {
+        Self {
+            offset,
+            total,
+            boundary_id,
+        }
+    }
+
+    pub(crate) const fn offset(&self) -> PageOffset {
+        self.offset
+    }
+
+    pub(crate) const fn total(&self) -> u64 {
+        self.total
+    }
+
+    pub(crate) fn boundary_id(&self) -> &str {
+        &self.boundary_id
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CursorState {
+    Offset(PageOffset),
+    Evidence(EvidenceCursorState),
+}
+
+#[derive(Debug, Clone)]
+struct State {
+    value: CursorState,
     query: QueryFingerprint,
 }
 #[derive(Default)]
@@ -121,9 +156,28 @@ impl CursorStore {
         offset: PageOffset,
         query: QueryFingerprint,
     ) -> Result<CursorToken, CursorStoreError> {
+        self.issue_state(CursorState::Offset(offset), query)
+    }
+
+    pub(crate) fn issue_evidence(
+        &self,
+        state: EvidenceCursorState,
+        query: QueryFingerprint,
+    ) -> Result<CursorToken, CursorStoreError> {
+        self.issue_state(CursorState::Evidence(state), query)
+    }
+
+    fn issue_state(
+        &self,
+        value: CursorState,
+        query: QueryFingerprint,
+    ) -> Result<CursorToken, CursorStoreError> {
         let mut id = [0; 16];
         getrandom::fill(&mut id).map_err(|_| CursorStoreError)?;
-        let mut r = self.registry.lock().expect("cursor registry poisoned");
+        let mut r = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         while r.entries.contains_key(&id) {
             getrandom::fill(&mut id).map_err(|_| CursorStoreError)?;
         }
@@ -132,7 +186,7 @@ impl CursorStore {
         {
             r.entries.remove(&old);
         }
-        r.entries.insert(id, State { offset, query });
+        r.entries.insert(id, State { value, query });
         r.order.push_back(id);
         CursorToken::new(format!("c1.{}.{}", hex(&self.instance), hex(&id)))
             .map_err(|_| CursorStoreError)
@@ -147,7 +201,10 @@ impl CursorStore {
         if instance != self.instance {
             return Err(error(ValidationCode::ExpiredCursor));
         }
-        let r = self.registry.lock().expect("cursor registry poisoned");
+        let r = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = r
             .entries
             .get(&id)
@@ -155,14 +212,43 @@ impl CursorStore {
         if state.query != query {
             return Err(error(ValidationCode::CursorMismatch));
         }
-        Ok(state.offset)
+        match &state.value {
+            CursorState::Offset(offset) => Ok(*offset),
+            CursorState::Evidence(_) => Err(error(ValidationCode::CursorMismatch)),
+        }
+    }
+
+    pub(crate) fn resolve_evidence(
+        &self,
+        cursor: &CursorToken,
+        query: QueryFingerprint,
+    ) -> Result<EvidenceCursorState, ValidationError> {
+        let (instance, id) = parse(cursor.as_str())?;
+        if instance != self.instance {
+            return Err(error(ValidationCode::ExpiredCursor));
+        }
+        let r = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = r
+            .entries
+            .get(&id)
+            .ok_or_else(|| error(ValidationCode::UnknownCursor))?;
+        if state.query != query {
+            return Err(error(ValidationCode::CursorMismatch));
+        }
+        match &state.value {
+            CursorState::Evidence(state) => Ok(state.clone()),
+            CursorState::Offset(_) => Err(error(ValidationCode::CursorMismatch)),
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn entry_count(&self) -> usize {
         self.registry
             .lock()
-            .expect("cursor registry poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entries
             .len()
     }

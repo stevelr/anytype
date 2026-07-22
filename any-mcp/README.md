@@ -378,6 +378,24 @@ rejection, and catalog, adversarial-input, and maximum-result token snapshots.
 Synthetic transport failures remain deferred to the external P4
 fault-injection work.
 
+The production-unlinked `views-write` read slice implements
+`collection_member_list` through `anytype-api`'s canonical manual-membership
+page. Its exact input is `space`, `collection_id`, and optional non-null
+`limit`/`cursor`; it deliberately accepts no view, filter, sort, layout, query,
+or Kanban field. The default limit is 20 and the reviewed maximum is 61.
+Results contain only canonical-order `{ "object_id": ... }` summaries, while
+opaque process-local cursors bind the resolved space ID, exact collection,
+limit, operation, registry, preceding total, next offset, and overlap boundary.
+Saved-view presentation therefore cannot hide a direct member from this tool.
+
+The slice remains absent from production discovery until the complete
+independently reviewed `views-write` registry is linked by `any-uda.4`.
+Authenticated disposable acceptance exercises the selected test registry
+through both the direct production router and real stdio protocol frames,
+including `limit=1` continuation and a saved view that hides one member.
+Latency, dropped connections, malformed bodies, and injected 5xx behavior are
+explicitly deferred to the P4 fault-injection design.
+
 The production-unlinked `files` read slice now provides the reusable internal
 contracts and handlers for that eventual registry. `file_metadata` performs an
 exact object-identity preflight and bounded `HEAD`; `file_read` returns at most

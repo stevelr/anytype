@@ -546,7 +546,7 @@ pub(crate) fn validate_page_binding_size<P: Serialize>(
     page_query_fingerprint(tool, limit, normalized_params).map(drop)
 }
 
-fn page_query_fingerprint<P: Serialize>(
+pub(crate) fn page_query_fingerprint<P: Serialize>(
     tool: &'static str,
     limit: PageLimit,
     normalized_params: &P,

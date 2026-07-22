@@ -849,6 +849,12 @@ every REST-visible default-view field against the exact
 a distinct server-assigned ID, and complete nested-view equality before a
 finite exact two-view REST verification. Collection teardown owns the added
 view; there is no general view-create production API.
+`TestContext::add_collection_name_filter_fixture` may then add one exact-name
+filter only to that cleanup-owned view. It accepts initially unfiltered REST
+and `ObjectShow` evidence, sends one authenticated filter-add RPC, and requires
+the assigned filter ID and complete value to reread identically through both
+surfaces. Collection teardown owns the filter with the view; this remains test
+infrastructure, not a production view-filter API.
 
 Representative Kanban tests can use `TestContext::create_kanban_fixture` inside
 `with_disposable_space_context`. The helper creates and immediately registers a
