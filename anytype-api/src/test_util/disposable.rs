@@ -33,6 +33,7 @@ const PLAN_PAGE_LIMIT: u32 = 100;
 const STATE_DIR_NAME: &str = "any-mcp-tests";
 const LEDGER_VERSION: u8 = 2;
 const PROCESS_GATE_ENV: &str = "ANYTYPE_DISPOSABLE_TEST_PROCESS";
+const RECOVER_STOPPED_RUN_ENV: &str = "ANYTYPE_DISPOSABLE_RECOVER_STOPPED_RUN";
 const CHILD_ENV_LIMIT: usize = 16_384;
 const ARG_MAX_RESERVE: usize = 4_096;
 const CREDENTIAL_NAMES: [&str; 4] = [
@@ -116,10 +117,14 @@ impl DisposableTestError {
         }
     }
 
-    fn cleanup(category: DisposableErrorCategory, evidence: CleanupEvidence) -> Self {
+    fn cleanup(
+        category: DisposableErrorCategory,
+        source: Option<TestError>,
+        evidence: CleanupEvidence,
+    ) -> Self {
         Self {
             category,
-            source: None,
+            source: source.map(Box::new),
             evidence: Box::new(evidence),
         }
     }
@@ -307,6 +312,8 @@ struct RunLedger {
     #[serde(default)]
     child_state: ChildState,
     #[serde(default)]
+    recovery_action: RecoveryAction,
+    #[serde(default)]
     create_name: Option<String>,
 }
 
@@ -332,6 +339,14 @@ enum ChildState {
     NotStarted,
     Running,
     Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RecoveryAction {
+    #[default]
+    None,
+    ProveChildStoppedOrGone,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -364,6 +379,7 @@ impl ChildLedgerMarker {
             || ledger.credential_mode != "env"
             || ledger.credential_state != CredentialState::Ready
             || ledger.child_state == ChildState::Stopped
+            || ledger.recovery_action != RecoveryAction::None
         {
             return Err(config_error("invalid child-running ledger transition"));
         }
@@ -396,6 +412,7 @@ impl HarnessState {
             credential_mode: "env".to_owned(),
             credential_state: CredentialState::Ready,
             child_state: ChildState::NotStarted,
+            recovery_action: RecoveryAction::None,
             create_name: None,
         };
         let state = Self {
@@ -465,11 +482,32 @@ impl HarnessState {
             ));
         }
         self.ledger.child_state = ChildState::Running;
+        self.ledger.recovery_action = RecoveryAction::None;
         self.persist()
     }
 
     fn mark_child_stopped(&mut self) -> TestResult<()> {
         self.ledger.child_state = ChildState::Stopped;
+        self.ledger.recovery_action = RecoveryAction::None;
+        self.persist()
+    }
+
+    fn require_recovery_child_proof(&mut self) -> TestResult<()> {
+        if self.ledger.child_state != ChildState::Running {
+            return Err(config_error("recovery child proof requires running state"));
+        }
+        self.ledger.recovery_action = RecoveryAction::ProveChildStoppedOrGone;
+        self.persist()
+    }
+
+    fn confirm_recovery_child_stopped(&mut self) -> TestResult<()> {
+        if self.ledger.child_state != ChildState::Running
+            || self.ledger.recovery_action != RecoveryAction::ProveChildStoppedOrGone
+        {
+            return Err(config_error("invalid recovered-child stopped transition"));
+        }
+        self.ledger.child_state = ChildState::Stopped;
+        self.ledger.recovery_action = RecoveryAction::None;
         self.persist()
     }
 
@@ -838,12 +876,84 @@ fn read_run_ledger(path: &Path) -> TestResult<RunLedger> {
     serde_json::from_slice(&bytes).map_err(|_| config_error("malformed run ledger"))
 }
 
+fn run_handle_from_ledger_name(name: &str) -> Option<&str> {
+    name.strip_suffix(".json")
+        .filter(|handle| valid_random_handle(handle, "run"))
+}
+
+fn prepare_prior_child_recovery(
+    state: &HarnessState,
+    confirmed_stopped_run: Option<&str>,
+) -> TestResult<()> {
+    if confirmed_stopped_run.is_some_and(|name| run_handle_from_ledger_name(name).is_none()) {
+        return Err(config_error("invalid recovered-child confirmation handle"));
+    }
+    let mut confirmation_used = false;
+    let entries = fs::read_dir(&state.root).map_err(|_| config_error("enumerate run ledgers"))?;
+    for entry in entries {
+        let entry = entry.map_err(|_| config_error("enumerate run ledger"))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| config_error("invalid run ledger filename"))?;
+        if run_handle_from_ledger_name(&name).is_none() || entry.path() == state.ledger_path {
+            continue;
+        }
+        let ledger = read_run_ledger(&entry.path())?;
+        if ledger.version != LEDGER_VERSION {
+            return Err(config_error("unsupported run ledger version"));
+        }
+        if ledger.backend_key != state.ledger.backend_key {
+            continue;
+        }
+        if ledger.child_state != ChildState::Running {
+            if ledger.recovery_action != RecoveryAction::None {
+                return Err(config_error("invalid recovered-child operator action"));
+            }
+            continue;
+        }
+
+        let mut recovered = HarnessState {
+            root: state.root.clone(),
+            ledger_path: entry.path(),
+            ledger,
+        };
+        match recovered.ledger.recovery_action {
+            RecoveryAction::None => {
+                recovered.require_recovery_child_proof()?;
+                return Err(config_error(
+                    "recovered child must be proven stopped or gone before cleanup",
+                ));
+            }
+            RecoveryAction::ProveChildStoppedOrGone
+                if confirmed_stopped_run == Some(name.as_str()) =>
+            {
+                recovered.confirm_recovery_child_stopped()?;
+                confirmation_used = true;
+            }
+            RecoveryAction::ProveChildStoppedOrGone => {
+                return Err(config_error(
+                    "recovered child still requires stopped-or-gone confirmation",
+                ));
+            }
+        }
+    }
+    if confirmed_stopped_run.is_some() && !confirmation_used {
+        return Err(config_error(
+            "recovered-child confirmation was not applicable",
+        ));
+    }
+    Ok(())
+}
+
 async fn recover_prior_ledgers(
     client: &AnytypeClient,
     prefix: &DisposablePrefix,
     state: &HarnessState,
+    confirmed_stopped_run: Option<&str>,
     deadline: Instant,
 ) -> TestResult<()> {
+    prepare_prior_child_recovery(state, confirmed_stopped_run)?;
     check_deadline(deadline)?;
     let entries = fs::read_dir(&state.root).map_err(|_| config_error("enumerate run ledgers"))?;
     for entry in entries {
@@ -865,12 +975,9 @@ async fn recover_prior_ledgers(
             fsync_directory(&state.root)?;
             continue;
         }
-        let Some(handle) = name.strip_suffix(".json") else {
+        let Some(_handle) = run_handle_from_ledger_name(&name) else {
             continue;
         };
-        if !valid_random_handle(handle, "run") {
-            continue;
-        }
         let path = entry.path();
         if path == state.ledger_path {
             continue;
@@ -967,6 +1074,7 @@ struct EnvironmentProvisioning {
     config: ClientConfig,
     child: DisposableChildEnvironment,
     captured: BTreeMap<String, String>,
+    recover_stopped_run: Option<String>,
 }
 
 fn process_isolation_admission() -> Result<(), DisposableSkip> {
@@ -1006,6 +1114,7 @@ fn capture_environment() -> Result<EnvironmentProvisioning, DisposableSkip> {
             "ANYTYPE_KEYSTORE"
                 | "ANYTYPE_KEYSTORE_SERVICE"
                 | "ANYTYPE_RATE_LIMIT_MAX_RETRIES"
+                | RECOVER_STOPPED_RUN_ENV
                 | "ANYTYPE_URL"
                 | "ANYTYPE_GRPC_ENDPOINT"
                 | "SystemRoot"
@@ -1058,6 +1167,13 @@ fn capture_environment() -> Result<EnvironmentProvisioning, DisposableSkip> {
         .get("ANYTYPE_GRPC_ENDPOINT")
         .cloned()
         .ok_or(DisposableSkip::EnvironmentProvisioningUnavailable)?;
+    let recover_stopped_run = captured.get(RECOVER_STOPPED_RUN_ENV).cloned();
+    if recover_stopped_run
+        .as_deref()
+        .is_some_and(|name| run_handle_from_ledger_name(name).is_none())
+    {
+        return Err(DisposableSkip::EnvironmentProvisioningUnavailable);
+    }
     canonical_loopback_endpoint(&http)
         .and_then(|_| canonical_loopback_endpoint(&grpc))
         .map_err(|_| DisposableSkip::EnvironmentProvisioningUnavailable)?;
@@ -1117,6 +1233,7 @@ fn capture_environment() -> Result<EnvironmentProvisioning, DisposableSkip> {
             entries: Arc::new(child),
         },
         captured,
+        recover_stopped_run,
     })
 }
 
@@ -1143,6 +1260,7 @@ fn capture_relevant_environment() -> Result<BTreeMap<String, String>, ()> {
             "ANYTYPE_KEYSTORE"
                 | "ANYTYPE_KEYSTORE_SERVICE"
                 | "ANYTYPE_RATE_LIMIT_MAX_RETRIES"
+                | RECOVER_STOPPED_RUN_ENV
                 | "ANYTYPE_URL"
                 | "ANYTYPE_GRPC_ENDPOINT"
                 | "SystemRoot"
@@ -1646,7 +1764,9 @@ impl<T> Guarded<T> {
         match self {
             Self::Error(error) => DisposableTestError::setup(error, std::mem::take(evidence)),
             Self::Panic(payload) => std::panic::resume_unwind(payload),
-            Self::Value(_) => DisposableTestError::cleanup(category, std::mem::take(evidence)),
+            Self::Value(_) => {
+                DisposableTestError::cleanup(category, None, std::mem::take(evidence))
+            }
         }
     }
 
@@ -1743,6 +1863,7 @@ where
         guarded_finish_state(state, &mut evidence);
         return Err(DisposableTestError::cleanup(
             DisposableErrorCategory::HarnessStateCleanup,
+            None,
             evidence,
         ));
     }
@@ -1759,6 +1880,7 @@ where
         guarded_finish_state(state, &mut evidence);
         return Err(DisposableTestError::cleanup(
             DisposableErrorCategory::HarnessStateCleanup,
+            None,
             evidence,
         ));
     }
@@ -1766,6 +1888,7 @@ where
     let verify = client.get_config().verify.clone().unwrap_or_default();
     let sweep_deadline = || Instant::now() + verify.timeout;
     let mut mutation_possible = false;
+    let mut recovery_failed = false;
     let mut owned_id = None;
     let mut context = None;
     let mut primary: Option<std::thread::Result<TestResult<T>>> = None;
@@ -1790,12 +1913,16 @@ where
             &client,
             &prefix,
             &state,
+            provisioning.recover_stopped_run.as_deref(),
             sweep_deadline(),
         ))
         .await
         {
             Guarded::Value(()) => {}
-            failure => primary = Some(failure.into_primary_failure()),
+            failure => {
+                recovery_failed = true;
+                primary = Some(failure.into_primary_failure());
+            }
         }
     }
 
@@ -1951,8 +2078,8 @@ where
         absence.retain_panic(&mut evidence);
     }
 
-    let mut final_sweep_ok = !mutation_possible;
-    if mutation_possible {
+    let mut final_sweep_ok = !mutation_possible || recovery_failed;
+    if final_sweep_is_allowed(mutation_possible, recovery_failed) {
         let final_sweep =
             guarded_async(sweep(&client, &prefix, &mut state, sweep_deadline())).await;
         final_sweep_ok = matches!(final_sweep, Guarded::Value(()));
@@ -1992,6 +2119,10 @@ where
     finish_outcomes(primary, evidence).map(DisposableRun::Completed)
 }
 
+fn final_sweep_is_allowed(mutation_possible: bool, recovery_failed: bool) -> bool {
+    mutation_possible && !recovery_failed
+}
+
 fn finish_outcomes<T>(
     primary: std::thread::Result<TestResult<T>>,
     evidence: CleanupEvidence,
@@ -2020,7 +2151,11 @@ fn finish_outcomes<T>(
     match (primary, dominant) {
         (Ok(Ok(value)), None) => Ok(value),
         (Ok(Err(source)), None) => Err(DisposableTestError::setup(source, evidence)),
-        (Ok(_), Some(category)) => Err(DisposableTestError::cleanup(category, evidence)),
+        (Ok(result), Some(category)) => Err(DisposableTestError::cleanup(
+            category,
+            result.err(),
+            evidence,
+        )),
         (Err(payload), category) => {
             let mut evidence = evidence;
             evidence.panic_payloads.insert(0, payload);
@@ -2292,12 +2427,190 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn pre_recovery_action_ledgers_deserialize_with_no_operator_action() {
+        let root = private_test_root("legacy-recovery-action");
+        let state = HarnessState::create(root.clone(), "backend".to_owned()).unwrap();
+        let mut encoded = serde_json::to_value(&state.ledger).unwrap();
+        encoded.as_object_mut().unwrap().remove("recovery_action");
+        let decoded: RunLedger = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.recovery_action, RecoveryAction::None);
+        state.finish().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn offline_test_client() -> AnytypeClient {
         let mut config = ClientConfig::default().app_name("disposable-recovery-test");
         config.base_url = Some("http://127.0.0.1:9".to_owned());
         config.grpc_endpoint = Some("http://127.0.0.1:9".to_owned());
         config.keystore = Some("env".to_owned());
         AnytypeClient::with_config(config).unwrap()
+    }
+
+    async fn absent_space_server(
+        response_count: usize,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind absent-space recovery fixture");
+        let address = listener
+            .local_addr()
+            .expect("absent-space recovery fixture address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(response_count);
+            for _ in 0..response_count {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept absent-space request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .expect("read absent-space request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = r#"{"message":"not found"}"#;
+                let response = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write absent-space response");
+                requests.push(String::from_utf8(request).expect("recovery request is UTF-8"));
+            }
+            requests
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn recovery_test_client(base_url: String) -> AnytypeClient {
+        let mut config = ClientConfig::default().app_name("disposable-recovery-test");
+        config.base_url = Some(base_url);
+        config.grpc_endpoint = Some("http://127.0.0.1:9".to_owned());
+        config.keystore = Some("env".to_owned());
+        config.disable_cache = true;
+        let client = AnytypeClient::with_config(config).unwrap();
+        client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
+        client
+    }
+
+    #[tokio::test]
+    async fn running_child_blocks_complete_plan_until_exact_confirmation_once() {
+        let root = private_test_root("running-child-recovery");
+        let backend = "backend".to_owned();
+        let current = HarnessState::create(root.clone(), backend.clone()).unwrap();
+        let mut interrupted = HarnessState::create(root.clone(), backend).unwrap();
+        interrupted
+            .record_create_intent("xtest-recovery-owned".to_owned())
+            .unwrap();
+        let plan = interrupted.allocate_plan().unwrap();
+        let space_id = test_space_id(41);
+        open_plan_database(&plan)
+            .unwrap()
+            .execute("INSERT INTO seen(id, selected) VALUES (?1, 1)", [&space_id])
+            .unwrap();
+        interrupted.mark_plan_complete().unwrap();
+        interrupted.mark_child_running().unwrap();
+        let ledger_path = interrupted.ledger_path.clone();
+        let ledger_name = ledger_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_owned();
+        drop(interrupted);
+
+        let blocked_client = offline_test_client();
+        let before = blocked_client.http_metrics().total_requests;
+        assert!(
+            recover_prior_ledgers(
+                &blocked_client,
+                &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
+                &current,
+                None,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(blocked_client.http_metrics().total_requests, before);
+        assert_eq!(plan_selected_count(&plan).unwrap(), 1);
+        let blocked = read_run_ledger(&ledger_path).unwrap();
+        assert_eq!(blocked.child_state, ChildState::Running);
+        assert_eq!(
+            blocked.recovery_action,
+            RecoveryAction::ProveChildStoppedOrGone
+        );
+
+        assert!(
+            recover_prior_ledgers(
+                &blocked_client,
+                &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
+                &current,
+                None,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(blocked_client.http_metrics().total_requests, before);
+        assert!(plan.exists());
+        assert!(ledger_path.exists());
+
+        let (base_url, server) = absent_space_server(2).await;
+        let recovery_client = recovery_test_client(base_url);
+        recover_prior_ledgers(
+            &recovery_client,
+            &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
+            &current,
+            Some(&ledger_name),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            let request_line = request.lines().next().unwrap_or_default();
+            request_line.starts_with("GET ")
+                && request_line.contains(&space_id)
+                && request_line.ends_with(" HTTP/1.1")
+        }));
+        assert!(!plan.exists());
+        assert!(!ledger_path.exists());
+        assert!(
+            recover_prior_ledgers(
+                &recovery_client,
+                &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
+                &current,
+                Some(&ledger_name),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_err()
+        );
+
+        current.finish().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_recovery_forbids_the_caller_final_sweep() {
+        assert!(!final_sweep_is_allowed(true, true));
+        assert!(final_sweep_is_allowed(true, false));
+        assert!(!final_sweep_is_allowed(false, false));
     }
 
     #[tokio::test]
@@ -2329,6 +2642,7 @@ mod tests {
             &offline_test_client(),
             &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
             &current,
+            None,
             Instant::now() + Duration::from_secs(1),
         )
         .await
@@ -2359,6 +2673,7 @@ mod tests {
                 &offline_test_client(),
                 &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
                 &current,
+                None,
                 Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -2391,6 +2706,7 @@ mod tests {
                 &offline_test_client(),
                 &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
                 &current,
+                None,
                 Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -2458,6 +2774,7 @@ mod tests {
                 &offline_test_client(),
                 &DisposablePrefix::parse("xtest".to_owned()).unwrap(),
                 &current,
+                None,
                 Instant::now() + Duration::from_secs(1),
             ))
             .unwrap();
@@ -2701,6 +3018,65 @@ mod tests {
             error.category(),
             "disposable test harness state cleanup failed"
         );
+    }
+
+    #[test]
+    fn dominant_cleanup_categories_retain_typed_source_and_all_evidence() {
+        let absence = CleanupEvidence {
+            primary: StageOutcome::Error,
+            child: StageOutcome::Panic,
+            delete: StageOutcome::DeleteIndeterminate,
+            absence: StageOutcome::Unproven,
+            credentials: StageOutcome::Error,
+            ledger: StageOutcome::Panic,
+            panic_payloads: vec![Box::new("cleanup-panic")],
+        };
+        let error = finish_outcomes::<()>(
+            Ok(Err(TestError::Assertion {
+                message: "typed-primary".to_owned(),
+            })),
+            absence,
+        )
+        .unwrap_err();
+        assert_eq!(error.category, DisposableErrorCategory::AbsenceUnproven);
+        assert!(matches!(
+            error.source.as_deref(),
+            Some(TestError::Assertion { message }) if message == "typed-primary"
+        ));
+        assert!(std::error::Error::source(&error).is_none());
+        assert_eq!(error.evidence.primary, StageOutcome::Error);
+        assert_eq!(error.evidence.child, StageOutcome::Panic);
+        assert_eq!(error.evidence.delete, StageOutcome::DeleteIndeterminate);
+        assert_eq!(error.evidence.absence, StageOutcome::Unproven);
+        assert_eq!(error.evidence.credentials, StageOutcome::Error);
+        assert_eq!(error.evidence.ledger, StageOutcome::Panic);
+        assert_eq!(error.evidence.panic_payloads.len(), 1);
+
+        let harness = CleanupEvidence {
+            primary: StageOutcome::Error,
+            child: StageOutcome::Error,
+            delete: StageOutcome::Panic,
+            absence: StageOutcome::Verified,
+            credentials: StageOutcome::Success,
+            ledger: StageOutcome::Error,
+            panic_payloads: Vec::new(),
+        };
+        let error = finish_outcomes::<()>(
+            Ok(Err(TestError::Config {
+                message: "earlier-primary".to_owned(),
+            })),
+            harness,
+        )
+        .unwrap_err();
+        assert_eq!(error.category, DisposableErrorCategory::HarnessStateCleanup);
+        assert!(matches!(
+            error.source.as_deref(),
+            Some(TestError::Config { message }) if message == "earlier-primary"
+        ));
+        assert_eq!(error.evidence.child, StageOutcome::Error);
+        assert_eq!(error.evidence.delete, StageOutcome::Panic);
+        assert_eq!(error.evidence.absence, StageOutcome::Verified);
+        assert_eq!(error.evidence.ledger, StageOutcome::Error);
     }
 
     #[test]

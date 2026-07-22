@@ -144,6 +144,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   or mutation and no credential snapshot file is created. Registered
   idempotent child stoppers run before resource cleanup, while durable
   running/stopped state prevents final ledger cleanup if a child may survive.
+  Prior Running-child ledgers now block plan application and all final prefix
+  sweeping, durably request stopped-or-gone operator proof, and accept one
+  exact-ledger `ANYTYPE_DISPOSABLE_RECOVER_STOPPED_RUN` transition before
+  recovery. Dominant cleanup categories retain the original typed error and
+  every earlier outcome.
   Unix recovery uses no-follow directory-relative opens and unlinks; unproved
   process or Windows ACL isolation fails before credential capture or mutation.
 - Add `objects::plain_markdown_representation`, a documented closed contract

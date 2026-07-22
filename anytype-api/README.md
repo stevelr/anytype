@@ -710,7 +710,8 @@ Readiness, the two immediate
 pre-delete checks, and final absence proof all use cache-disabled direct exact-ID
 reads. The helper cleans registered children first and retains callback,
 cleanup, deletion, absence, ledger, and panic outcomes; an unproven absence is
-always dominant. Remote backends require an equivalent scheduler lease and are
+always dominant without discarding the original typed error or simultaneous
+cleanup evidence. Remote backends require an equivalent scheduler lease and are
 otherwise rejected. Operators must not create, rename, or delete spaces through
 another client while the helper holds its lease.
 Disposable runs require `ANYTYPE_KEYSTORE=env`, an explicit
@@ -728,6 +729,12 @@ the approved endpoints, finite limits, MCP settings, and exact accepted
 credential names, and rechecks the whole environment/argument block budget.
 The helper records child-running state before invoking the spawn closure and
 stops all registered children before resource cleanup and space deletion.
+Recovery refuses every cleanup plan and prefix sweep while a prior ledger says
+its child may still run. The first refusal durably records that the operator
+must prove the child stopped or is gone. Only after that proof may the operator
+set `ANYTYPE_DISPOSABLE_RECOVER_STOPPED_RUN` to the exact recorded `.json` run
+handle for one invocation; the helper persists the stopped transition before
+applying that ledger's plan, and rejects stale or repeated confirmations.
 Destructive execution is enabled only where owner and owner-only permissions
 can be proved for the runtime directory and every recovery target. Unix opens
 and removes exact components relative to verified directory handles with
