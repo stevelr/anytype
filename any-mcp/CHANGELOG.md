@@ -12,6 +12,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   prove exact create/read object and space identity, registered fallible child
   shutdown, cleanup before a deliberate callback panic resumes, and exact
   absence through a fresh cache-disabled direct exact-ID request.
+- Add the startup-only optional toolset registry foundation: exact secret-safe
+  `ANY_MCP_TOOLSETS` parsing, landed-registry resolution, deterministic typed
+  tool/resource composition, collision and ownership validation, transport
+  requirement union, read-only mutation removal, disabled-call rejection, and
+  immutable `optional_toolset_status`. Test-only registries lock profile and
+  stable/preview contract identity, representative composition snapshots, and
+  per-registry/common token ceilings while the absent selector preserves every
+  Phase 1 catalog byte and token. Nonempty selections also admit only effective
+  HTTP retry limits `1..=5` before authentication or I/O.
 - Add an ignored serial tier-2 production-router scenario proving live numeric
   and checkbox filter matches by exact identity, with continuation derived from
   checked upstream pagination and no client-side post-pagination emulation.

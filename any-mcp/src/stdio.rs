@@ -589,7 +589,7 @@ async fn handle_frame(
     });
 }
 
-async fn dispatch_modern(
+pub(crate) async fn dispatch_modern(
     server: &AnyMcpServer,
     id: Value,
     method: &str,

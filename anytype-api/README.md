@@ -124,8 +124,13 @@ set on a `ClientBuilder` passed to `AnytypeClient::with_client` are intentionall
 overridden; timeout, proxy, DNS, TLS, and user-agent customization is retained.
 
 `ClientConfig::rate_limit_max_retries` continues to control consecutive 429
-retries for replay-safe requests; zero means no retry-count cap for those
-methods. It does not opt mutation requests into retries.
+retries for replay-safe requests; zero disables that rate-limit-specific cap.
+Independently, one cumulative ceiling permits at most six physical attempts
+across 429, retryable-status, connection, and timeout failures, and the counter
+never resets when the failure class changes. It does not opt mutation requests
+into retries. HTTP metrics expose independent `logical_operations` and
+`physical_attempts` counters; the existing `total_requests` field retains its
+physical-request meaning.
 
 ### Secret-safe HTTP diagnostics
 

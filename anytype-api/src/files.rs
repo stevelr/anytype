@@ -2824,6 +2824,7 @@ mod tests {
         let requests = server.await.expect("mock server task");
         assert_eq!(requests.len(), 3);
         assert_eq!(client.http_metrics().total_requests, 3);
+        assert_eq!(client.http_metrics().logical_operations, 1);
         assert_eq!(client.http_metrics().retries, 2);
     }
 
@@ -2851,6 +2852,7 @@ mod tests {
         ));
         assert_eq!(server.await.expect("mock server task").len(), 1);
         assert_eq!(client.http_metrics().total_requests, 1);
+        assert_eq!(client.http_metrics().logical_operations, 1);
         assert_eq!(client.http_metrics().retries, 0);
     }
 
@@ -2874,6 +2876,7 @@ mod tests {
         ));
         assert_eq!(server.await.expect("mock server task").len(), 2);
         assert_eq!(client.http_metrics().total_requests, 2);
+        assert_eq!(client.http_metrics().logical_operations, 1);
         assert_eq!(client.http_metrics().retries, 1);
     }
 

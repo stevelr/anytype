@@ -64,7 +64,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and transport failures after exactly one send instead of replaying a write;
   reqwest redirects and lower-level retry policies are overridden so they
   cannot bypass method safety, leak credentials across redirects, or skew
-  request-attempt metrics
+  request-attempt metrics; replay-safe operations now share one cumulative
+  six-physical-attempt ceiling across 429, retryable-status, connection, and
+  timeout failures, with independent logical-operation and physical-attempt
+  metrics
 - examples and integration-test helpers now satisfy workspace rustdoc and lint
   checks without needless borrows
 - property updates now reject key-only requests before sending them because the

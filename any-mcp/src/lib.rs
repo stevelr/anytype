@@ -20,6 +20,9 @@
 //!   `object_edit`.
 //! - [`ApplicationProfile::Standard`] advertises the complete fourteen-tool
 //!   Phase 1 catalog; read-only standard retains its ten read tools.
+//! - [`OptionalToolsetSelection`] is empty unless `ANY_MCP_TOOLSETS` names a
+//!   complete registry linked into the binary. No production optional registry
+//!   is linked yet, so Phase 1 remains the default and only current catalog.
 //! - Resources advertise only the canonical
 //!   `anytype://spaces/{space_id}/objects/{object_id}` template. Instance
 //!   listing is empty and document discovery remains paginated through
@@ -35,8 +38,8 @@
 //! # Startup and safety
 //!
 //! [`RuntimeConfig::from_env`] validates exact protocol, profile, read-only,
-//! timeout, concurrency, and response-budget settings without echoing invalid
-//! values. [`RuntimeContext::start`] loads existing Anytype credentials and
+//! timeout, concurrency, response-budget, and optional-registry settings
+//! without echoing invalid values. [`RuntimeContext::start`] loads existing Anytype credentials and
 //! performs bounded authenticated health checks. HTTP is always required;
 //! standard read-write also requires gRPC for verified archive readback, while
 //! compact and read-only selections may run HTTP-only. [`serve_stdio`] reserves
@@ -66,6 +69,7 @@ pub mod object_edit;
 pub mod object_output;
 pub mod object_read;
 pub mod object_update;
+pub mod optional_toolsets;
 pub mod pagination;
 pub mod protocol;
 pub mod resources;
@@ -78,6 +82,7 @@ pub mod validation;
 pub mod view_handlers;
 
 pub use config::{ApplicationProfile, ProtocolMode, RuntimeConfig};
+pub use optional_toolsets::{OptionalToolsetSelection, ToolsetName};
 pub use runtime::{
     OperationContext, RuntimeContext, RuntimeError, ServeError, StartupError, StartupStatus,
     serve_stdio,

@@ -143,14 +143,22 @@ stated maximum.
 - `ANY_MCP_STARTUP_TIMEOUT_SECS` defaults to 15 and has a maximum of 120;
 - `ANY_MCP_READ_ONLY` accepts exactly `0` (default) or `1`; `1` omits all
   mutation tools and rejects stale direct mutation calls before decoding or I/O;
+- `ANY_MCP_TOOLSETS` is absent by default. A present selector is an exact,
+  comma-separated list of at most 16 linked optional registry names, sorted
+  canonically at startup. Malformed, duplicate, unknown, and unfinished names
+  fail closed without being echoed. No production optional registry is linked
+  yet, so every present selector is currently rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
   MiB, and must be at least the ordinary JSON budget.
 
-Protocol mode, catalog profile, and read-only access are independent startup
-selectors. Each uses an exact fail-closed grammar and cannot be changed by MCP
-input after startup.
+Protocol mode, catalog profile, optional toolsets, and read-only access are
+independent startup selectors. Each uses an exact fail-closed grammar and
+cannot be changed by MCP input after startup. Before any nonempty optional
+selection can authenticate or perform I/O, its effective
+`ANYTYPE_RATE_LIMIT_MAX_RETRIES` value must be in `1..=5`; empty-selection
+Phase 1 startup retains the existing `anytype-api` behavior.
 
 The response budgets are enforced while chunks arrive, before workflow
 pagination or projection. A truthful oversized `Content-Length` fails before
@@ -310,9 +318,21 @@ then filtered, so a shared tool name has an identical complete description,
 input schema, output schema, annotation, and handler in every profile.
 Unknown or non-Unicode profile values fail startup without echoing their value.
 
+The optional registry foundation composes selected typed tools, resources, and
+resource templates after the Phase 1 profile without changing any Phase 1
+contract. It sorts every inventory deterministically, rejects collisions and
+incomplete ownership, unions transport requirements, and applies read-only
+mutation removal independently of compact or standard. A nonempty selection
+also adds the immutable read-only `optional_toolset_status` tool; it reports
+only canonical configured and active registry names and performs no
+environment, credential, resolver, or upstream access. Disabled optional tool
+and resource names return method-not-found before argument decoding or I/O.
+Stable and experimental protocol modes use the same composed catalog.
+
 Only `compact` and `standard` exist. Proposed `schema`, `members`,
 `views-write`, `files`, `chats`, and `admin` toolsets are not implemented or
-selectable in this release.
+selectable in this release. Their names become valid selectors only when a
+complete independently reviewed production registry is linked.
 
 The server also advertises static resource and tool capabilities without
 `listChanged` or resource subscriptions. `resources/templates/list` exposes

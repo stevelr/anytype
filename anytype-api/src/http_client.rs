@@ -28,7 +28,8 @@ use crate::{
         MAX_JSON_RESPONSE_BYTES, ResponseLimits,
     },
     config::{
-        ANYTYPE_API_HEADER, MAX_RETRIES, RATE_LIMIT_WAIT_MAX_SECS, RATE_LIMIT_WAIT_WARN_SECS,
+        ANYTYPE_API_HEADER, MAX_HTTP_REQUEST_ATTEMPTS, MAX_RETRIES, RATE_LIMIT_WAIT_MAX_SECS,
+        RATE_LIMIT_WAIT_WARN_SECS,
     },
     filters::QueryWithFilters,
     prelude::*,
@@ -38,8 +39,12 @@ use crate::{
 /// These counters are cumulative and never reset during the client's lifetime.
 #[derive(Debug, Default)]
 pub struct HttpMetrics {
+    /// Total number of logical HTTP operations entering the request pipeline
+    logical_operations: AtomicU64,
     /// Total number of HTTP requests sent to the server (excludes cached responses)
     total_requests: AtomicU64,
+    /// Total number of physical HTTP attempts, including automatic replays
+    physical_attempts: AtomicU64,
     /// Total number of successful responses (2xx status codes)
     successful_responses: AtomicU64,
     /// Total number of error responses (non-2xx status codes, excluding rate limit errors)
@@ -64,7 +69,9 @@ impl HttpMetrics {
     /// Returns a snapshot of current metrics as plain u64 values
     pub fn snapshot(&self) -> HttpMetricsSnapshot {
         HttpMetricsSnapshot {
+            logical_operations: self.logical_operations.load(Ordering::Relaxed),
             total_requests: self.total_requests.load(Ordering::Relaxed),
+            physical_attempts: self.physical_attempts.load(Ordering::Relaxed),
             successful_responses: self.successful_responses.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
             retries: self.retries.load(Ordering::Relaxed),
@@ -75,8 +82,13 @@ impl HttpMetrics {
         }
     }
 
+    fn increment_logical_operations(&self) {
+        self.logical_operations.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn increment_requests(&self) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.physical_attempts.fetch_add(1, Ordering::Relaxed);
     }
 
     fn increment_success(&self) {
@@ -112,8 +124,12 @@ impl HttpMetrics {
 /// A point-in-time snapshot of HTTP metrics with plain u64 values.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HttpMetricsSnapshot {
+    /// Total number of logical HTTP operations entering the request pipeline
+    pub logical_operations: u64,
     /// Total number of HTTP requests sent to the server
     pub total_requests: u64,
+    /// Total number of physical HTTP attempts, including automatic replays
+    pub physical_attempts: u64,
     /// Total number of successful responses (2xx status codes)
     pub successful_responses: u64,
     /// Total number of error responses (non-2xx status codes, excluding rate limit errors)
@@ -134,8 +150,10 @@ impl std::fmt::Display for HttpMetricsSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "requests={} success={} errors={} retries={} rate_limit={}/{}s sent={} recv={}",
+            "logical_operations={} requests={} physical_attempts={} success={} errors={} retries={} rate_limit={}/{}s sent={} recv={}",
+            self.logical_operations,
             self.total_requests,
+            self.physical_attempts,
             self.successful_responses,
             self.errors,
             self.retries,
@@ -168,24 +186,30 @@ fn retry_for_status(code: StatusCode) -> bool {
     }
 }
 
-fn log_http_status(request: &HttpRequest, status: StatusCode, variant: &'static str, attempt: u32) {
+fn log_http_status(
+    request: &HttpRequest,
+    status: StatusCode,
+    variant: &'static str,
+    physical_attempt: u32,
+) {
     error!(
         target: "anytype::http",
         error_variant = variant,
         http_status = status.as_u16(),
         http_method = %request.method,
         http_path = %diagnostic_path(&request.path),
-        attempt,
+        physical_attempt,
         "HTTP request failed"
     );
 }
 
-fn log_http_transport(request: &HttpRequest) {
+fn log_http_transport(request: &HttpRequest, physical_attempt: u32) {
     error!(
         target: "anytype::http",
         error_variant = "transport",
         http_method = %request.method,
         http_path = %diagnostic_path(&request.path),
+        physical_attempt,
         "HTTP request failed"
     );
 }
@@ -672,6 +696,7 @@ impl HttpClient {
         };
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "get_streaming_request");
+        self.metrics.increment_logical_operations();
         self.metrics.increment_requests();
         let response = self
             .client
@@ -787,6 +812,7 @@ impl HttpClient {
     ) -> Result<Resp> {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "post_unauthenticated");
+        self.metrics.increment_logical_operations();
         self.metrics.increment_requests();
         let response = self
             .client
@@ -841,6 +867,7 @@ impl HttpClient {
         };
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "delete_no_content");
+        self.metrics.increment_logical_operations();
         self.metrics.increment_requests();
         let response = self
             .client
@@ -953,6 +980,7 @@ impl HttpClient {
         debug!(method = %method, path = %diagnostic_path(path), "file_request");
         let replay_safe = matches!(method, Method::GET | Method::HEAD);
         let mut attempts = 0_u32;
+        self.metrics.increment_logical_operations();
         loop {
             attempts += 1;
             self.metrics.increment_requests();
@@ -1095,6 +1123,7 @@ impl HttpClient {
         };
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "post_multipart");
+        self.metrics.increment_logical_operations();
         self.metrics.increment_requests();
         let response = self
             .client
@@ -1168,9 +1197,11 @@ impl HttpClient {
         // response proves only that a response arrived; it does not make the
         // mutation safe to send again.
         let retryable_method = allow_retries && is_idempotent_method(&req.method);
-        // attempt counter is for server busy and connection drop errors
-        // counter is reset to 0 whenever we wait based on 429 rate limit response
-        let mut attempt = 0u32;
+        // Preserve the existing stricter status/transport retry budget while
+        // one request-lifetime counter prevents mixed retry classes from
+        // exceeding the common physical-attempt ceiling.
+        let mut retry_attempt = 0u32;
+        let mut physical_attempt = 0u32;
         let mut rate_limit_retries = 0u32;
 
         // time to wait on next iteration
@@ -1190,6 +1221,7 @@ impl HttpClient {
                 message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
             });
         }
+        self.metrics.increment_logical_operations();
         let full_url = format!("{}{}", self.base_url, req.path);
         let req_builder = self
             .client
@@ -1210,7 +1242,6 @@ impl HttpClient {
                 info!("RateLimit: pausing for {} sec", wait_time.as_secs());
                 tokio::time::sleep(wait_time).await;
                 retry_wait = None;
-                attempt = 0;
             }
             let request = req_builder
                 .try_clone()
@@ -1223,8 +1254,16 @@ impl HttpClient {
                 .body(req.body.clone().unwrap_or_default());
 
             // Track request metrics
+            physical_attempt = physical_attempt.saturating_add(1);
             self.metrics.increment_requests();
             self.metrics.add_bytes_sent(body_size);
+            debug!(
+                target: "anytype::http",
+                http_method = %req.method,
+                http_path = %diagnostic_path(&req.path),
+                physical_attempt,
+                "HTTP physical attempt"
+            );
 
             match request.send().await.map_err(reqwest::Error::without_url) {
                 Ok(response) => {
@@ -1306,7 +1345,7 @@ impl HttpClient {
                                             http_status = code.as_u16(),
                                             http_method = %req.method,
                                             http_path = %diagnostic_path(&req.path),
-                                            attempt,
+                                            physical_attempt,
                                             "http 429 Rate-limit retries exceeded max={}",
                                             self.rate_limit_max_retries
                                         );
@@ -1322,7 +1361,7 @@ impl HttpClient {
                                             http_status = code.as_u16(),
                                             http_method = %req.method,
                                             http_path = %diagnostic_path(&req.path),
-                                            attempt,
+                                            physical_attempt,
                                             "http 429 Rate-limit backoff={}s exceeds max",
                                             duration.as_secs()
                                         );
@@ -1333,10 +1372,25 @@ impl HttpClient {
                                     }
                                     if duration > Duration::from_secs(RATE_LIMIT_WAIT_WARN_SECS) {
                                         warn!(
-                                            attempt,
+                                            physical_attempt,
                                             "http 429 Rate-limit backoff={}s",
                                             duration.as_secs()
                                         );
+                                    }
+                                    if physical_attempt >= MAX_HTTP_REQUEST_ATTEMPTS {
+                                        error!(
+                                            target: "anytype::http",
+                                            error_variant = "physical_attempt_limit",
+                                            http_status = code.as_u16(),
+                                            http_method = %req.method,
+                                            http_path = %diagnostic_path(&req.path),
+                                            physical_attempt,
+                                            "HTTP physical-attempt ceiling reached"
+                                        );
+                                        return Err(AnytypeError::RateLimitExceeded {
+                                            header,
+                                            duration,
+                                        });
                                     }
                                     self.metrics.increment_retries();
                                     self.metrics.add_rate_limit_delay(duration.as_secs());
@@ -1348,7 +1402,7 @@ impl HttpClient {
                         StatusCode::BAD_REQUEST /* 400 */ => {
                             self.metrics.increment_errors();
                             let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            log_http_status(&req, code, "validation", attempt);
+                            log_http_status(&req, code, "validation", physical_attempt);
                             return Err(AnytypeError::ApiError {
                                 code: code.as_u16(),
                                 method: req.method.to_string(),
@@ -1361,7 +1415,7 @@ impl HttpClient {
                          => {
                             self.metrics.increment_errors();
                             self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            log_http_status(&req, code, "not_found", attempt);
+                            log_http_status(&req, code, "not_found", physical_attempt);
                             return Err(AnytypeError::NotFound{
                                 // too generic here - we don't know whether the query
                                 // needs to be reported at higher level
@@ -1373,25 +1427,28 @@ impl HttpClient {
                             // client is not authenticated
                             self.metrics.increment_errors();
                             self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            log_http_status(&req, code, "unauthorized", attempt);
+                            log_http_status(&req, code, "unauthorized", physical_attempt);
                             return Err(AnytypeError::Unauthorized)
                         }
                         StatusCode::FORBIDDEN /* 403 */ => {
                             // client is authenticated, but does not have permission to access the object
                             self.metrics.increment_errors();
                             self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            log_http_status(&req, code, "forbidden", attempt);
+                            log_http_status(&req, code, "forbidden", physical_attempt);
                             return Err(AnytypeError::Forbidden)
                         }
                         _ => {
                             self.metrics.increment_errors();
                             let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
-                            log_http_status(&req, code, "api_error", attempt);
-                            if attempt < MAX_RETRIES && retry_for_status(code) && retryable_method
+                            log_http_status(&req, code, "api_error", physical_attempt);
+                            if retry_attempt < MAX_RETRIES
+                                && physical_attempt < MAX_HTTP_REQUEST_ATTEMPTS
+                                && retry_for_status(code)
+                                && retryable_method
                             {
-                              log_and_backoff(attempt, "retryable HTTP status").await;
+                              log_and_backoff(retry_attempt, "retryable HTTP status").await;
                               self.metrics.increment_retries();
-                              attempt += 1;
+                              retry_attempt += 1;
                               continue;
                             }
                             return Err(AnytypeError::ApiError{
@@ -1404,14 +1461,16 @@ impl HttpClient {
                     }
                 }
                 Err(err) => {
-                    log_http_transport(&req);
+                    log_http_transport(&req, physical_attempt);
                     // Check for connection or timeout errors
                     if (err.is_connect() || err.is_timeout()) && retryable_method {
                         rate_limit_retries = 0;
-                        if attempt < MAX_RETRIES {
-                            log_and_backoff(attempt, "transport failure").await;
+                        if retry_attempt < MAX_RETRIES
+                            && physical_attempt < MAX_HTTP_REQUEST_ATTEMPTS
+                        {
+                            log_and_backoff(retry_attempt, "transport failure").await;
                             self.metrics.increment_retries();
-                            attempt += 1;
+                            retry_attempt += 1;
                             continue;
                         }
                         self.metrics.increment_errors();
@@ -1841,6 +1900,7 @@ mod tests {
         assert!(requests[0].starts_with(method.as_str()));
         let metrics = client.http_metrics();
         assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.physical_attempts, 1);
         assert_eq!(metrics.retries, 0);
     }
 
@@ -1969,6 +2029,7 @@ mod tests {
         );
         let metrics = client.http_metrics();
         assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.physical_attempts, 1);
         assert_eq!(metrics.retries, 0);
     }
 
@@ -2002,6 +2063,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let metrics = client.http_metrics();
         assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.physical_attempts, 1);
         assert_eq!(metrics.retries, 0);
     }
 
@@ -2026,6 +2088,7 @@ mod tests {
             assert!(requests[0].starts_with(method.as_str()));
             let metrics = client.http_metrics();
             assert_eq!(metrics.total_requests, 1);
+            assert_eq!(metrics.physical_attempts, 1);
             assert_eq!(metrics.retries, 0);
         }
     }
@@ -2053,6 +2116,7 @@ mod tests {
         assert!(requests.iter().all(|request| request.starts_with("GET ")));
         let metrics = client.http_metrics();
         assert_eq!(metrics.total_requests, 2);
+        assert_eq!(metrics.physical_attempts, 2);
         assert_eq!(metrics.retries, 1);
         assert_eq!(metrics.rate_limit_errors, 1);
     }
@@ -2076,7 +2140,115 @@ mod tests {
         assert!(requests.iter().all(|request| request.starts_with("GET ")));
         let metrics = client.http_metrics();
         assert_eq!(metrics.total_requests, 2);
+        assert_eq!(metrics.physical_attempts, 2);
         assert_eq!(metrics.retries, 1);
+    }
+
+    #[tokio::test]
+    async fn alternating_retry_classes_never_send_a_seventh_physical_attempt() {
+        enum Reply {
+            Response(Vec<u8>),
+            Timeout,
+        }
+
+        let rate_limited = fixture_response(
+            "429 Too Many Requests",
+            "rate limited",
+            "RateLimit-Reset: 0\r\n",
+        );
+        let timed_out = fixture_response("504 Gateway Timeout", "gateway timeout", "");
+        let replies = vec![
+            Reply::Response(rate_limited.clone()),
+            Reply::Response(timed_out.clone()),
+            Reply::Timeout,
+            Reply::Response(rate_limited),
+            Reply::Response(timed_out),
+            Reply::Timeout,
+        ];
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind alternating retry fixture");
+        let address = listener.local_addr().expect("alternating fixture address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(replies.len());
+            for reply in replies {
+                let (mut socket, _) = listener.accept().await.expect("accept alternating request");
+                requests.push(read_fixture_request(&mut socket).await);
+                match reply {
+                    Reply::Response(response) => socket
+                        .write_all(&response)
+                        .await
+                        .expect("write alternating response"),
+                    Reply::Timeout => {
+                        // Hold this connection open beyond the client timeout,
+                        // while continuing to accept the next replay.
+                        std::mem::drop(tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            drop(socket);
+                        }));
+                    }
+                }
+            }
+            requests
+        });
+        let client = public_client_for(
+            format!("http://{address}"),
+            5,
+            ClientBuilder::new()
+                .no_proxy()
+                .timeout(Duration::from_millis(20)),
+        );
+
+        let error = client
+            .spaces()
+            .limit(1)
+            .list()
+            .await
+            .expect_err("sixth physical attempt must exhaust the shared ceiling");
+        assert!(
+            matches!(&error, AnytypeError::Http { .. }),
+            "unexpected terminal error: {error:?}"
+        );
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.total_requests, 6, "terminal error: {error:?}");
+        assert_eq!(metrics.logical_operations, 1);
+        assert_eq!(metrics.physical_attempts, 6);
+        assert_eq!(metrics.retries, 5);
+        assert_eq!(metrics.rate_limit_errors, 2);
+        let requests = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("alternating fixture must receive all six attempts")
+            .expect("alternating retry fixture");
+        assert_eq!(requests.len(), 6);
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_specific_unbounded_setting_still_stops_at_six_attempts() {
+        let rate_limited = fixture_response(
+            "429 Too Many Requests",
+            "rate limited",
+            "RateLimit-Reset: 0\r\n",
+        );
+        let (client, server) = public_fixture_client(vec![rate_limited; 6], 0).await;
+
+        let error = client
+            .spaces()
+            .limit(1)
+            .list()
+            .await
+            .expect_err("the request-lifetime ceiling overrides an unbounded 429 setting");
+        assert!(
+            matches!(error, AnytypeError::RateLimitExceeded { .. }),
+            "unexpected terminal error: {error:?}"
+        );
+        assert_eq!(server.await.expect("rate-limit ceiling fixture").len(), 6);
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.total_requests, 6);
+        assert_eq!(metrics.logical_operations, 1);
+        assert_eq!(metrics.physical_attempts, 6);
+        assert_eq!(metrics.retries, 5);
+        assert_eq!(metrics.rate_limit_errors, 6);
     }
 
     #[test]

@@ -1,9 +1,12 @@
 # Catalog snapshots
 
-These reviewed fixtures lock the complete compact/standard and read-write/read-only `tools/list`
-catalogs, including every description, input schema, output schema, and
-annotation. The ordinary test suite only compares against them; it never
-accepts changes automatically.
+These reviewed fixtures lock the complete compact/standard and
+read-write/read-only `tools/list` catalogs, including every description, input
+schema, output schema, and annotation. `optional-toolsets.snap` separately
+locks representative read-write/read-only composition for two complete
+test-only registries, including their tools, resources, templates, and common
+status contract. The ordinary test suite only compares against these fixtures;
+it never accepts changes automatically.
 
 The four catalog fixtures use the `.snap` extension (JSON content) because the
 tests compare them byte-for-byte against `serde_json::to_string_pretty` output;
@@ -20,6 +23,16 @@ cargo test -p any-mcp server::tests::write_catalog_snapshots -- --ignored --exac
 Review the complete fixture diff, confirm the recursive schema-bound and exact
 annotation tests pass, then run the ordinary `any-mcp` test suite. Never make
 snapshot acceptance conditional on an environment variable in CI.
+
+After intentionally changing the optional registry foundation, regenerate its
+catalog and token fixtures with:
+
+```console
+cargo test -p any-mcp server::optional_registry::write_optional_snapshots -- --ignored --exact
+```
+
+Review both complete diffs before accepting them. The registries are test-only;
+production accepts no optional selector until a complete domain registry lands.
 
 ## Token budget
 
@@ -65,3 +78,15 @@ The failure prints the exact current counts. Update the baseline only after
 confirming the 5% ceiling and the extra 2% material-growth boundary both retain
 headroom. Reductions should lower the baseline rather than preserve stale
 allowance.
+
+`optional-toolsets-token-budget.json` uses the same canonical serialization and
+`o200k_base` pipeline. The common status contract is 260 tokens under its
+500-token ceiling. Against the unchanged 9,658-token compact Phase 1 catalog,
+the representative alpha, beta, gamma, and all-enabled test catalogs are
+10,157, 10,032, 10,039, and 10,400 tokens; alpha read-only is 8,743 tokens and
+mutation-only gamma read-only is 8,625. Each registry owns an explicit
+incremental ceiling, and the all-enabled assertion composes those ceilings with
+the one common-status allowance rather than assigning that cost to every
+registry. The fixture also locks the canonical selected sets, base catalog
+SHA-256, each optional tool's standalone contribution, and the 29-token maximum
+representative result for all three test domains.

@@ -13,6 +13,12 @@ use anytype::prelude::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::optional_toolsets::{
+    OPTIONAL_TOOLSETS_ENV, OptionalRetryPolicyError, OptionalSelectorError,
+    OptionalToolsetMetadata, OptionalToolsetSelection, admit_optional_retry_policy,
+    production_optional_metadata,
+};
+
 const DEFAULT_KEYSTORE_SERVICE: &str = "anyr";
 const DEFAULT_MAX_CONCURRENCY: usize = 8;
 const MAX_MAX_CONCURRENCY: usize = 64;
@@ -23,6 +29,8 @@ const MAX_STARTUP_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_JSON_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_DOCUMENT_RESPONSE_BYTES: u64 = MAX_DOCUMENT_RESPONSE_BYTES;
 const EXPERIMENTAL_PROTOCOL_VALUE: &str = "experimental-2026-07-28";
+const ANYTYPE_RATE_LIMIT_MAX_RETRIES: &str = "ANYTYPE_RATE_LIMIT_MAX_RETRIES";
+const DEFAULT_RATE_LIMIT_MAX_RETRIES: u32 = 5;
 
 /// Stdio protocol selected for one `any-mcp` process.
 ///
@@ -83,6 +91,8 @@ pub struct RuntimeConfig {
     pub profile: ApplicationProfile,
     /// Whether the production catalog omits and rejects mutating workflows.
     pub read_only: bool,
+    /// Canonical optional registry selection resolved at startup.
+    pub optional_toolsets: OptionalToolsetSelection,
     /// Maximum number of concurrent Anytype operations.
     pub max_concurrency: usize,
     /// End-to-end timeout for one Anytype operation, including permit wait.
@@ -97,6 +107,7 @@ pub struct RuntimeConfig {
     grpc_endpoint: Option<String>,
     keystore: Option<String>,
     keystore_service: String,
+    admitted_optional_max_retries: Option<u32>,
 }
 
 impl RuntimeConfig {
@@ -107,7 +118,9 @@ impl RuntimeConfig {
     /// use `ANY_MCP_PROTOCOL`, `ANY_MCP_PROFILE`, `ANY_MCP_READ_ONLY`,
     /// `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
     /// `ANY_MCP_STARTUP_TIMEOUT_SECS`, `ANY_MCP_JSON_RESPONSE_BYTES`, and
-    /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`.
+    /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`, and `ANY_MCP_TOOLSETS`. A nonempty
+    /// optional selection also admits the effective
+    /// `ANYTYPE_RATE_LIMIT_MAX_RETRIES` policy before client construction.
     ///
     /// # Errors
     ///
@@ -126,7 +139,7 @@ impl RuntimeConfig {
     /// the MCP runtime.
     #[must_use]
     pub fn client_config(&self) -> ClientConfig {
-        ClientConfig {
+        let mut config = ClientConfig {
             base_url: self.anytype_url.clone(),
             grpc_endpoint: self.grpc_endpoint.clone(),
             keystore: self.keystore.clone(),
@@ -138,13 +151,45 @@ impl RuntimeConfig {
                 ..ResponseLimits::default()
             },
             ..ClientConfig::default()
+        };
+        if let Some(max_retries) = self.admitted_optional_max_retries {
+            config.rate_limit_max_retries = max_retries;
         }
+        config
     }
 
     fn from_lookup<F>(lookup: F) -> Result<Self, ConfigError>
     where
         F: Fn(&'static str) -> Result<Option<String>, ConfigError>,
     {
+        let metadata = production_optional_metadata();
+        Self::from_lookup_with_optional_metadata(lookup, &metadata)
+    }
+
+    fn from_lookup_with_optional_metadata<F>(
+        lookup: F,
+        optional_metadata: &[OptionalToolsetMetadata],
+    ) -> Result<Self, ConfigError>
+    where
+        F: Fn(&'static str) -> Result<Option<String>, ConfigError>,
+    {
+        let optional_value = lookup(OPTIONAL_TOOLSETS_ENV)
+            .map_err(|_| ConfigError::fixed(OptionalSelectorError::Invalid.to_string()))?;
+        let optional_toolsets = OptionalToolsetSelection::parse(optional_value, optional_metadata)
+            .map_err(|error| ConfigError::fixed(error.to_string()))?;
+        let admitted_optional_max_retries = if optional_toolsets.is_empty() {
+            None
+        } else {
+            let raw = lookup(ANYTYPE_RATE_LIMIT_MAX_RETRIES)
+                .map_err(|_| ConfigError::fixed(OptionalRetryPolicyError.to_string()))?;
+            let effective = raw
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(DEFAULT_RATE_LIMIT_MAX_RETRIES);
+            admit_optional_retry_policy(&optional_toolsets, effective)
+                .map_err(|error| ConfigError::fixed(error.to_string()))?;
+            Some(effective)
+        };
+
         let protocol_mode = parse_protocol_mode(lookup("ANY_MCP_PROTOCOL")?)?;
         let profile = parse_profile(lookup("ANY_MCP_PROFILE")?)?;
         let read_only = parse_read_only(lookup("ANY_MCP_READ_ONLY")?)?;
@@ -189,6 +234,7 @@ impl RuntimeConfig {
             protocol_mode,
             profile,
             read_only,
+            optional_toolsets,
             max_concurrency,
             request_timeout: Duration::from_secs(request_timeout_secs),
             startup_timeout: Duration::from_secs(startup_timeout_secs),
@@ -199,6 +245,7 @@ impl RuntimeConfig {
             keystore: non_empty(lookup("ANYTYPE_KEYSTORE")?),
             keystore_service: non_empty(lookup("ANYTYPE_KEYSTORE_SERVICE")?)
                 .unwrap_or_else(|| DEFAULT_KEYSTORE_SERVICE.to_string()),
+            admitted_optional_max_retries,
         })
     }
 }
@@ -266,25 +313,42 @@ where
 pub struct ConfigError {
     variable: &'static str,
     problem: &'static str,
+    fixed: Option<String>,
 }
 
 impl ConfigError {
     fn invalid(variable: &'static str, problem: &'static str) -> Self {
-        Self { variable, problem }
+        Self {
+            variable,
+            problem,
+            fixed: None,
+        }
     }
 
     fn non_unicode(variable: &'static str) -> Self {
         Self::invalid(variable, "must contain valid Unicode")
     }
+
+    fn fixed(message: String) -> Self {
+        Self {
+            variable: "",
+            problem: "",
+            fixed: Some(message),
+        }
+    }
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "invalid configuration: {} {}",
-            self.variable, self.problem
-        )
+        if let Some(fixed) = &self.fixed {
+            formatter.write_str(fixed)
+        } else {
+            write!(
+                formatter,
+                "invalid configuration: {} {}",
+                self.variable, self.problem
+            )
+        }
     }
 }
 
@@ -292,16 +356,26 @@ impl std::error::Error for ConfigError {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{cell::Cell, collections::HashMap};
 
     use super::*;
 
     fn config(values: &[(&str, &str)]) -> Result<RuntimeConfig, ConfigError> {
+        config_with_optional(values, &[])
+    }
+
+    fn config_with_optional(
+        values: &[(&str, &str)],
+        metadata: &[OptionalToolsetMetadata],
+    ) -> Result<RuntimeConfig, ConfigError> {
         let values = values
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect::<HashMap<_, _>>();
-        RuntimeConfig::from_lookup(|name| Ok(values.get(name).cloned()))
+        RuntimeConfig::from_lookup_with_optional_metadata(
+            |name| Ok(values.get(name).cloned()),
+            metadata,
+        )
     }
 
     #[test]
@@ -312,6 +386,7 @@ mod tests {
         assert_eq!(config.protocol_mode, ProtocolMode::Stable);
         assert_eq!(config.profile, ApplicationProfile::Compact);
         assert!(!config.read_only);
+        assert!(config.optional_toolsets.is_empty());
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.startup_timeout, Duration::from_secs(15));
         assert_eq!(config.json_response_bytes, 8 * 1024 * 1024);
@@ -479,5 +554,116 @@ mod tests {
             error.to_string(),
             "invalid configuration: ANY_MCP_PROFILE must contain valid Unicode"
         );
+    }
+
+    #[test]
+    fn optional_selector_is_exact_canonical_and_landed_only() {
+        let metadata = [
+            OptionalToolsetMetadata::new("zeta", false),
+            OptionalToolsetMetadata::new("alpha", false),
+        ];
+        let selected =
+            config_with_optional(&[(OPTIONAL_TOOLSETS_ENV, "zeta,alpha")], &metadata).unwrap();
+        assert_eq!(
+            selected.optional_toolsets.names().collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(selected.client_config().rate_limit_max_retries, 5);
+
+        let unsupported = config(&[(OPTIONAL_TOOLSETS_ENV, "schema")]).unwrap_err();
+        assert_eq!(
+            unsupported.to_string(),
+            "unsupported optional toolset selector"
+        );
+    }
+
+    #[test]
+    fn optional_selector_diagnostics_are_fixed_and_secret_safe() {
+        let metadata = [OptionalToolsetMetadata::new("alpha", false)];
+        for (value, expected) in [
+            ("secret_like", "invalid optional toolset selector"),
+            ("alpha,alpha", "duplicate optional toolset selector"),
+            ("secret-like", "unsupported optional toolset selector"),
+        ] {
+            let error =
+                config_with_optional(&[(OPTIONAL_TOOLSETS_ENV, value)], &metadata).unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            assert!(!error.to_string().contains(value));
+        }
+        let non_unicode = RuntimeConfig::from_lookup_with_optional_metadata(
+            |name| {
+                if name == OPTIONAL_TOOLSETS_ENV {
+                    Err(ConfigError::non_unicode(name))
+                } else {
+                    Ok(None)
+                }
+            },
+            &metadata,
+        )
+        .unwrap_err();
+        assert_eq!(non_unicode.to_string(), "invalid optional toolset selector");
+    }
+
+    #[test]
+    fn optional_retry_policy_is_admitted_before_client_construction() {
+        let metadata = [OptionalToolsetMetadata::new("alpha", false)];
+        for admitted in 1..=5 {
+            let value = admitted.to_string();
+            let config = config_with_optional(
+                &[
+                    (OPTIONAL_TOOLSETS_ENV, "alpha"),
+                    (ANYTYPE_RATE_LIMIT_MAX_RETRIES, &value),
+                ],
+                &metadata,
+            )
+            .unwrap();
+            assert_eq!(config.client_config().rate_limit_max_retries, admitted);
+        }
+        for rejected in ["0", "6", "4294967295"] {
+            let error = config_with_optional(
+                &[
+                    (OPTIONAL_TOOLSETS_ENV, "alpha"),
+                    (ANYTYPE_RATE_LIMIT_MAX_RETRIES, rejected),
+                ],
+                &metadata,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "invalid optional retry policy");
+            assert!(!error.to_string().contains(rejected));
+        }
+
+        assert!(
+            config(&[(ANYTYPE_RATE_LIMIT_MAX_RETRIES, "0")])
+                .unwrap()
+                .optional_toolsets
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn optional_selector_is_read_once_and_retry_rejection_precedes_other_config() {
+        let selector_reads = Cell::new(0usize);
+        let profile_reads = Cell::new(0usize);
+        let metadata = [OptionalToolsetMetadata::new("alpha", false)];
+        let error = RuntimeConfig::from_lookup_with_optional_metadata(
+            |name| match name {
+                OPTIONAL_TOOLSETS_ENV => {
+                    selector_reads.set(selector_reads.get() + 1);
+                    Ok(Some("alpha".to_owned()))
+                }
+                ANYTYPE_RATE_LIMIT_MAX_RETRIES => Ok(Some("0".to_owned())),
+                "ANY_MCP_PROFILE" => {
+                    profile_reads.set(profile_reads.get() + 1);
+                    Ok(Some("invalid".to_owned()))
+                }
+                _ => Ok(None),
+            },
+            &metadata,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "invalid optional retry policy");
+        assert_eq!(selector_reads.get(), 1);
+        assert_eq!(profile_reads.get(), 0);
     }
 }
