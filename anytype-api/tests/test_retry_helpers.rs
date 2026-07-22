@@ -103,12 +103,19 @@ fn live_mutation_retry_inventory_is_current() {
         (
             "../src/test_util.rs",
             include_str!("../src/test_util.rs"),
-            4,
+            7,
             0,
             0,
-            0,
+            1,
         ),
-        ("integration.rs", include_str!("integration.rs"), 1, 0, 0, 8),
+        (
+            "integration.rs",
+            include_str!("integration.rs"),
+            1,
+            0,
+            0,
+            11,
+        ),
         ("smoke_test.rs", include_str!("smoke_test.rs"), 0, 0, 0, 2),
         ("test_cache.rs", include_str!("test_cache.rs"), 0, 0, 0, 0),
         (
@@ -125,9 +132,9 @@ fn live_mutation_retry_inventory_is_current() {
             3,
             0,
             0,
-            3,
+            1,
         ),
-        ("test_chats.rs", include_str!("test_chats.rs"), 2, 0, 0, 4),
+        ("test_chats.rs", include_str!("test_chats.rs"), 3, 0, 0, 5),
         ("test_files.rs", include_str!("test_files.rs"), 0, 0, 0, 1),
         (
             "test_filters.rs",
@@ -172,7 +179,7 @@ fn live_mutation_retry_inventory_is_current() {
             0,
             12,
         ),
-        ("test_views.rs", include_str!("test_views.rs"), 2, 0, 0, 0),
+        ("test_views.rs", include_str!("test_views.rs"), 2, 0, 0, 2),
     ];
 
     let count = |source: &str, needle: &str| source.matches(needle).count();
@@ -219,6 +226,6 @@ fn live_mutation_retry_inventory_is_current() {
         excluded_calls += excluded;
     }
 
-    assert_eq!(setup_calls, 115);
-    assert_eq!(excluded_calls, 58);
+    assert_eq!(setup_calls, 119);
+    assert_eq!(excluded_calls, 63);
 }
