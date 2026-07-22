@@ -25,6 +25,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    collection_member_toolset::VIEWS_WRITE_REGISTRY,
     cursor::CursorStore,
     file_content::FILE_CONTENT_REGISTRY,
     member_toolset::MEMBERS_REGISTRY,
@@ -333,8 +334,12 @@ pub fn production_optional_registries() -> &'static [&'static dyn OptionalToolse
     &PRODUCTION_OPTIONAL_REGISTRIES
 }
 
-static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 3] =
-    [MEMBERS_REGISTRY, &FILE_CONTENT_REGISTRY, SCHEMA_REGISTRY];
+static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 4] = [
+    MEMBERS_REGISTRY,
+    &FILE_CONTENT_REGISTRY,
+    SCHEMA_REGISTRY,
+    VIEWS_WRITE_REGISTRY,
+];
 
 /// Returns immutable production metadata without building schemas or clients.
 #[must_use]

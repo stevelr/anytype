@@ -22,9 +22,9 @@
 //!   Phase 1 catalog; read-only standard retains its ten read tools.
 //! - [`OptionalToolsetSelection`] is empty unless `ANY_MCP_TOOLSETS` names a
 //!   complete registry linked into the binary. The default-off `members`,
-//!   `files`, and nine-tool `schema` registries are linked; incomplete slices
-//!   such as chat reads remain unavailable and Phase 1 remains the default
-//!   catalog.
+//!   `files`, nine-tool `schema`, and three-tool `views-write` registries are
+//!   linked; incomplete slices such as chat reads remain unavailable and
+//!   Phase 1 remains the default catalog.
 //! - Resources advertise only the canonical
 //!   `anytype://spaces/{space_id}/objects/{object_id}` template. Instance
 //!   listing is empty and document discovery remains paginated through
@@ -45,8 +45,9 @@
 //! performs bounded authenticated health checks. HTTP is always required;
 //! standard read-write also requires gRPC for verified archive readback, while
 //! compact and read-only selections may run HTTP-only unless `schema` is
-//! selected, because its bounded type classification requires gRPC through
-//! `anytype-api`. [`serve_stdio`] reserves
+//! or `views-write` is selected, because their bounded type classification or
+//! canonical membership evidence requires gRPC through `anytype-api`.
+//! [`serve_stdio`] reserves
 //! stdout for protocol frames; redacted diagnostics go to stderr.
 //!
 //! Every handler runs under shared concurrency, timeout, cancellation, response

@@ -2325,6 +2325,159 @@ async fn offline_direct_stable_preview_403_mapping_is_exact_and_io_free() {
 }
 
 #[cfg(feature = "acceptance-harness")]
+struct OwnedViewsWriteFixture {
+    collection_id: String,
+    query_id: String,
+    seed_id: String,
+    target_id: String,
+    control_id: String,
+    saved_view_id: String,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl OwnedViewsWriteFixture {
+    fn borrowed(&self) -> ViewsWriteFixture<'_> {
+        ViewsWriteFixture {
+            collection_id: &self.collection_id,
+            query_id: &self.query_id,
+            seed_id: &self.seed_id,
+            target_id: &self.target_id,
+            control_id: &self.control_id,
+            saved_view_id: &self.saved_view_id,
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn create_views_write_fixture(ctx: &TestContext) -> TestResult<OwnedViewsWriteFixture> {
+    let suffix = unique_suffix();
+    let collection_type = ctx
+        .create_collection_type_fixture(format!("MCP stdio collection {suffix}"))
+        .await?;
+    let collection_id = ctx
+        .create_collection_fixture(&collection_type, format!("MCP stdio members {suffix}"))
+        .await?
+        .id;
+    let name_a = format!("MCP stdio member A {suffix}");
+    let seed_id = retry_definitive_rate_limit("stdio member A", || async {
+        ctx.client
+            .new_object(&ctx.space_id, "page")
+            .name(&name_a)
+            .create()
+            .await
+    })
+    .await?
+    .id;
+    ctx.register_object(&seed_id);
+    let target_id = retry_definitive_rate_limit("stdio member B", || async {
+        ctx.client
+            .new_object(&ctx.space_id, "page")
+            .name(format!("MCP stdio member B {suffix}"))
+            .create()
+            .await
+    })
+    .await?
+    .id;
+    ctx.register_object(&target_id);
+    let control_id = retry_definitive_rate_limit("stdio member C", || async {
+        ctx.client
+            .new_object(&ctx.space_id, "page")
+            .name(format!("MCP stdio member C {suffix}"))
+            .create()
+            .await
+    })
+    .await?
+    .id;
+    ctx.register_object(&control_id);
+    let set_type_key = ctx
+        .client
+        .types(&ctx.space_id)
+        .list()
+        .await?
+        .items
+        .iter()
+        .find(|typ| typ.layout == anytype::objects::ObjectLayout::Set)
+        .map(|typ| typ.key.clone())
+        .ok_or_else(|| TestError::Assertion {
+            message: "disposable space has no Set-layout type".to_owned(),
+        })?;
+    let query_id = retry_definitive_rate_limit("stdio query", || async {
+        ctx.client
+            .new_object(&ctx.space_id, &set_type_key)
+            .name(format!("MCP stdio query {suffix}"))
+            .create()
+            .await
+    })
+    .await?
+    .id;
+    ctx.register_object(&query_id);
+    ctx.client
+        .view_add_objects(&ctx.space_id, &collection_id, [&seed_id])
+        .await?;
+    let saved_view_id = ctx
+        .create_collection_view_fixture(&collection_id, format!("MCP stdio only A {suffix}"))
+        .await?
+        .id;
+    ctx.add_collection_name_filter_fixture(&collection_id, &saved_view_id, &name_a)
+        .await?;
+    Ok(OwnedViewsWriteFixture {
+        collection_id,
+        query_id,
+        seed_id,
+        target_id,
+        control_id,
+        saved_view_id,
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_shared_views_write_acceptance(ctx: Arc<TestContext>) -> TestResult<()> {
+    let fixture = Box::pin(create_views_write_fixture(ctx.as_ref())).await?;
+    let direct = Box::pin(run_views_write_transport_scenario(
+        ctx.as_ref(),
+        ViewsWriteTransport::Direct,
+        fixture.borrowed(),
+    ))
+    .await
+    .map_err(|_| {
+        eprintln!("views-write direct acceptance stage failed");
+        TestError::Assertion {
+            message: "direct views-write acceptance stage".to_owned(),
+        }
+    })?;
+    let stable = Box::pin(run_views_write_transport_scenario(
+        ctx.as_ref(),
+        ViewsWriteTransport::Stable,
+        fixture.borrowed(),
+    ))
+    .await
+    .map_err(|_| {
+        eprintln!("views-write stable acceptance stage failed");
+        TestError::Assertion {
+            message: "stable views-write acceptance stage".to_owned(),
+        }
+    })?;
+    let preview = Box::pin(run_views_write_transport_scenario(
+        ctx.as_ref(),
+        ViewsWriteTransport::Preview,
+        fixture.borrowed(),
+    ))
+    .await
+    .map_err(|_| {
+        eprintln!("views-write preview acceptance stage failed");
+        TestError::Assertion {
+            message: "preview views-write acceptance stage".to_owned(),
+        }
+    })?;
+    if direct != stable || direct != preview {
+        return Err(TestError::Assertion {
+            message: "direct, stable, and preview results diverged".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
@@ -2335,129 +2488,7 @@ async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
         "any-mcp-views-write-stdio",
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
-            Box::pin(async move {
-                let suffix = unique_suffix();
-                let collection_type = ctx
-                    .create_collection_type_fixture(format!("MCP stdio collection {suffix}"))
-                    .await?;
-                let collection = ctx
-                    .create_collection_fixture(
-                        &collection_type,
-                        format!("MCP stdio members {suffix}"),
-                    )
-                    .await?;
-                let name_a = format!("MCP stdio member A {suffix}");
-                let object_a = retry_definitive_rate_limit("stdio member A", || async {
-                    ctx.client
-                        .new_object(&ctx.space_id, "page")
-                        .name(&name_a)
-                        .create()
-                        .await
-                })
-                .await?;
-                ctx.register_object(&object_a.id);
-                let object_b = retry_definitive_rate_limit("stdio member B", || async {
-                    ctx.client
-                        .new_object(&ctx.space_id, "page")
-                        .name(format!("MCP stdio member B {suffix}"))
-                        .create()
-                        .await
-                })
-                .await?;
-                ctx.register_object(&object_b.id);
-                let object_c = retry_definitive_rate_limit("stdio member C", || async {
-                    ctx.client
-                        .new_object(&ctx.space_id, "page")
-                        .name(format!("MCP stdio member C {suffix}"))
-                        .create()
-                        .await
-                })
-                .await?;
-                ctx.register_object(&object_c.id);
-                let set_type = ctx
-                    .client
-                    .types(&ctx.space_id)
-                    .list()
-                    .await?
-                    .items
-                    .iter()
-                    .find(|typ| typ.layout == anytype::objects::ObjectLayout::Set)
-                    .cloned()
-                    .ok_or_else(|| TestError::Assertion {
-                        message: "disposable space has no Set-layout type".to_owned(),
-                    })?;
-                let query = retry_definitive_rate_limit("stdio query", || async {
-                    ctx.client
-                        .new_object(&ctx.space_id, &set_type.key)
-                        .name(format!("MCP stdio query {suffix}"))
-                        .create()
-                        .await
-                })
-                .await?;
-                ctx.register_object(&query.id);
-                ctx.client
-                    .view_add_objects(&ctx.space_id, &collection.id, [&object_a.id])
-                    .await?;
-                let saved_view = ctx
-                    .create_collection_view_fixture(
-                        &collection.id,
-                        format!("MCP stdio only A {suffix}"),
-                    )
-                    .await?;
-                ctx.add_collection_name_filter_fixture(&collection.id, &saved_view.id, &name_a)
-                    .await?;
-                let fixture = ViewsWriteFixture {
-                    collection_id: &collection.id,
-                    query_id: &query.id,
-                    seed_id: &object_a.id,
-                    target_id: &object_b.id,
-                    control_id: &object_c.id,
-                    saved_view_id: &saved_view.id,
-                };
-
-                let direct = Box::pin(run_views_write_transport_scenario(
-                    ctx.as_ref(),
-                    ViewsWriteTransport::Direct,
-                    fixture,
-                ))
-                .await
-                .map_err(|_| {
-                    eprintln!("views-write direct acceptance stage failed");
-                    TestError::Assertion {
-                        message: "direct views-write acceptance stage".to_owned(),
-                    }
-                })?;
-                let stable = Box::pin(run_views_write_transport_scenario(
-                    ctx.as_ref(),
-                    ViewsWriteTransport::Stable,
-                    fixture,
-                ))
-                .await
-                .map_err(|_| {
-                    eprintln!("views-write stable acceptance stage failed");
-                    TestError::Assertion {
-                        message: "stable views-write acceptance stage".to_owned(),
-                    }
-                })?;
-                let preview = Box::pin(run_views_write_transport_scenario(
-                    ctx.as_ref(),
-                    ViewsWriteTransport::Preview,
-                    fixture,
-                ))
-                .await
-                .map_err(|_| {
-                    eprintln!("views-write preview acceptance stage failed");
-                    TestError::Assertion {
-                        message: "preview views-write acceptance stage".to_owned(),
-                    }
-                })?;
-                if direct != stable || direct != preview {
-                    return Err(TestError::Assertion {
-                        message: "direct, stable, and preview results diverged".to_owned(),
-                    });
-                }
-                Ok(())
-            })
+            Box::pin(run_shared_views_write_acceptance(ctx))
         },
     ))
     .await
@@ -3076,30 +3107,23 @@ mod keystore_tests {
     }
 
     #[test]
-    fn shipped_binary_rejects_views_write_before_credentials_or_protocol_input() {
-        const HTTP_TOKEN: &str = "unreachable-views-write-secret";
+    fn shipped_binary_accepts_views_write_selector_before_authentication() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
         command
             .env("ANY_MCP_TOOLSETS", "views-write")
-            .env("ANYTYPE_URL", "http://127.0.0.1:1")
             .env("ANYTYPE_KEYSTORE", "env")
-            .env("ANYTYPE_KEY_HTTP_TOKEN", HTTP_TOKEN)
+            .env("ANYTYPE_KEYSTORE_SERVICE", "views-write-link-process-test")
+            .env_remove("ANYTYPE_KEY_HTTP_TOKEN")
+            .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
+            .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
+            .env_remove("ANYTYPE_KEY_SESSION_TOKEN")
             .env_remove("ANY_MCP_PROTOCOL");
-        let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(2));
-        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
-            .expect_err("unsupported production selector exits before reading stdin");
-        let panic_text = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap_or("non-string panic");
-        assert_eq!(panic_text, "bounded protocol process failed: child_eof");
-        let failure = process
-            .take_failure()
-            .expect("unsupported selector retains bounded startup evidence");
-        let stderr = String::from_utf8_lossy(&failure.output.stderr);
-        assert!(stderr.contains("unsupported optional toolset selector"));
-        assert!(!stderr.contains(HTTP_TOKEN));
-        assert!(failure.output.stdout.is_empty());
+        let output = command.output().expect("run shipped any-mcp binary");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("HTTP credentials are missing"));
+        assert!(!stderr.contains("views-write"));
+        assert!(!stderr.contains("unsupported optional toolset selector"));
     }
 }
