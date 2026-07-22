@@ -399,6 +399,7 @@ impl StdioDriver {
         self.process.request(id, method, params)
     }
 
+    #[cfg(feature = "acceptance-harness")]
     fn request_pair(
         &mut self,
         method: &str,
