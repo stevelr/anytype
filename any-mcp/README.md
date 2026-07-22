@@ -693,7 +693,8 @@ runtime and advertises their static capability alongside the tool catalog.
 - `tests/support/` — shared bounded process driver, transport-neutral live
   scenario, and catalog-to-live-ownership audit.
 - `tests/headless_stdio_e2e.rs` — ignored production stdio-to-real-Anytype
-  workflow with independent `anytype-api` readback and cleanup.
+  workflow with independent `anytype-api` readback, disposable lifecycle and
+  panic sentinels, and cleanup.
 - `tests/schema/mcp-2026-07-28.json` — official draft schema used only as a
   test oracle for actual preview requests and results.
 - `STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client discovery
@@ -793,8 +794,17 @@ read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
 list filter and rejects a continuation cursor whose filter binding changes
 through both entry paths. Existing focused live regressions remain alongside
-this acceptance baseline. The direct command selects exactly 13 intended `headless_` cases;
-the spawned target contains exactly 8 ignored live cases.
+this acceptance baseline. The direct command selects exactly 13 intended
+`headless_` cases; the spawned target contains exactly 10 ignored live cases.
+
+Two spawned-stdio disposable lifecycle sentinels create and read an object by
+its exact object and space IDs through the production MCP process. The normal
+case and a deliberate callback-panic case both require the registered child
+stop-and-wait record before independently constructing a fresh cache-disabled
+client, enumerating the complete stable space inventory, and proving the exact
+disposable space ID is absent. The panic sentinel catches the resumed panic
+only outside `with_disposable_space_context`, after child and fixture cleanup
+have completed.
 
 The compact and read-only cases prove representative real reads and catalog
 filtering; direct read-only also proves defense-in-depth mutation rejection.

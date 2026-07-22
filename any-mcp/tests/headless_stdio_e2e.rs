@@ -4,6 +4,7 @@
 //! Individually selectable production-stdio-to-headless acceptance cases.
 
 use std::{
+    collections::HashSet,
     ffi::OsString,
     future::Future,
     panic::AssertUnwindSafe,
@@ -17,8 +18,12 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anytype::test_util::{
-    DisposableRun, unique_suffix, with_disposable_space_context, with_test_context,
+use anytype::{
+    prelude::{AnytypeClient, ClientConfig},
+    test_util::{
+        DisposableRun, TestContext, TestError, TestResult, unique_suffix,
+        with_disposable_space_context, with_test_context,
+    },
 };
 use futures_util::FutureExt;
 use serde_json::{Value, json};
@@ -437,9 +442,13 @@ impl StdioDriver {
     }
 
     fn finish(self) -> (String, ProcessOutput) {
+        self.try_finish()
+            .unwrap_or_else(|error| panic!("bounded stdio driver cleanup failed: {error}"))
+    }
+
+    fn try_finish(self) -> Result<(String, ProcessOutput), String> {
         let transcript = self.process.redacted_transcript();
-        let output = self.process.finish();
-        (transcript, output)
+        self.process.try_finish().map(|output| (transcript, output))
     }
 
     fn finish_after_panic(mut self) -> (String, ProcessOutput, &'static str) {
@@ -716,6 +725,58 @@ fn lock_driver(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ChildCleanupRecord {
+    #[default]
+    NotRun,
+    Attempted,
+    Stopped,
+    Failed,
+}
+
+fn spawn_disposable_standard_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
+    let child_environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| TestError::Assertion {
+            message: "disposable callback omitted its child environment".to_owned(),
+        })?
+        .clone();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+    child_environment.configure(&mut command)?;
+    ctx.spawn_owned_child(move || {
+        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(
+            command,
+            DriverOptions::STANDARD,
+            None,
+        ))));
+        let stopped = Arc::clone(&driver);
+        (driver, move || {
+            *cleanup_record.lock().expect("child cleanup record lock") =
+                ChildCleanupRecord::Attempted;
+            let result = lock_driver(&stopped)
+                .take()
+                .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
+            match result {
+                Ok(()) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Stopped;
+                    Ok(())
+                }
+                Err(_) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Failed;
+                    Err(TestError::Assertion {
+                        message: "registered stdio child did not stop cleanly".to_owned(),
+                    })
+                }
+            }
+        })
+    })
+}
+
 async fn run_spawned_standard_baseline(scenario: ScenarioId) {
     let record = Arc::new(Mutex::new(CaseRecord::default()));
     let captured = Arc::clone(&record);
@@ -726,26 +787,8 @@ async fn run_spawned_standard_baseline(scenario: ScenarioId) {
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
-                let child_environment = ctx
-                    .disposable_child_environment()
-                    .expect("disposable callback provides a child environment")
-                    .clone();
-                let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
-                child_environment.configure(&mut command)?;
-                let driver = ctx.spawn_owned_child(move || {
-                    let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(
-                        command,
-                        DriverOptions::STANDARD,
-                        None,
-                    ))));
-                    let stopped = Arc::clone(&driver);
-                    (driver, move || {
-                        if let Some(driver) = lock_driver(&stopped).take() {
-                            let _ = driver.finish();
-                        }
-                        Ok(())
-                    })
-                })?;
+                let child_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+                let driver = spawn_disposable_standard_driver(ctx.as_ref(), child_cleanup)?;
 
                 let mut evidence = ScenarioEvidence::new(scenario);
                 let result = AssertUnwindSafe(async {
@@ -806,6 +849,263 @@ async fn run_spawned_standard_baseline(scenario: ScenarioId) {
             eprintln!("disposable spawned baseline skipped before callback: {reason:?}");
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisposableSentinelMode {
+    Success,
+    Panic,
+}
+
+#[derive(Default)]
+struct DisposableSentinelIds {
+    space_id: Option<String>,
+    object_id: Option<String>,
+}
+
+fn sentinel_assertion(message: &str) -> TestError {
+    TestError::Assertion {
+        message: message.to_owned(),
+    }
+}
+
+fn fresh_no_cache_client() -> Result<AnytypeClient, String> {
+    let environment = |name: &str| {
+        std::env::var(name).map_err(|_| format!("missing required sentinel selector {name}"))
+    };
+    AnytypeClient::with_config(ClientConfig {
+        base_url: Some(environment("ANYTYPE_URL")?),
+        app_name: "any-mcp-disposable-absence".to_owned(),
+        rate_limit_max_retries: 5,
+        disable_cache: true,
+        keystore: Some("env".to_owned()),
+        keystore_service: Some(environment("ANYTYPE_KEYSTORE_SERVICE")?),
+        grpc_endpoint: Some(environment("ANYTYPE_GRPC_ENDPOINT")?),
+        ..ClientConfig::default()
+    })
+    .map_err(|_| "construct fresh no-cache sentinel client".to_owned())
+}
+
+async fn complete_space_ids(client: &AnytypeClient) -> Result<HashSet<String>, String> {
+    const PAGE_LIMIT: u32 = 100;
+    const INVENTORY_TIMEOUT: Duration = Duration::from_secs(30);
+
+    tokio::time::timeout(INVENTORY_TIMEOUT, async {
+        let mut offset = 0_u32;
+        let mut stable_total = None;
+        let mut ids = HashSet::new();
+        loop {
+            let page = client
+                .spaces()
+                .limit(PAGE_LIMIT)
+                .offset(offset)
+                .list()
+                .await
+                .map_err(|_| "read fresh sentinel space inventory".to_owned())?
+                .into_response();
+            if stable_total.is_some_and(|total| total != page.pagination.total) {
+                return Err("fresh sentinel space inventory total changed".to_owned());
+            }
+            stable_total.get_or_insert(page.pagination.total);
+            let offset_usize = usize::try_from(offset)
+                .map_err(|_| "fresh sentinel inventory offset overflow".to_owned())?;
+            let expected_len = page
+                .pagination
+                .total
+                .checked_sub(offset_usize)
+                .map(|remaining| remaining.min(PAGE_LIMIT as usize))
+                .ok_or_else(|| "fresh sentinel inventory offset exceeds total".to_owned())?;
+            let expected_more = offset_usize
+                .checked_add(PAGE_LIMIT as usize)
+                .is_some_and(|next| next < page.pagination.total);
+            if page.pagination.offset != offset
+                || page.pagination.limit != PAGE_LIMIT
+                || page.items.len() != expected_len
+                || page.pagination.has_more != expected_more
+            {
+                return Err("fresh sentinel space inventory pagination mismatch".to_owned());
+            }
+            for space in page.items {
+                if !ids.insert(space.id) {
+                    return Err("fresh sentinel space inventory repeated an id".to_owned());
+                }
+            }
+            if !expected_more {
+                return Ok(ids);
+            }
+            offset = offset
+                .checked_add(PAGE_LIMIT)
+                .ok_or_else(|| "fresh sentinel inventory offset overflow".to_owned())?;
+        }
+    })
+    .await
+    .map_err(|_| "fresh sentinel space inventory timed out".to_owned())?
+}
+
+async fn assert_fresh_space_absence(space_id: &str) {
+    let client = fresh_no_cache_client().expect("fresh no-cache sentinel client");
+    let ids = complete_space_ids(&client)
+        .await
+        .expect("complete fresh sentinel space inventory");
+    assert!(
+        !ids.contains(space_id),
+        "cleaned disposable sentinel space remains in fresh inventory"
+    );
+}
+
+async fn run_disposable_stdio_lifecycle_sentinel(mode: DisposableSentinelMode) {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let deliberate_panic = Arc::new(AtomicBool::new(false));
+    let panic_flag = Arc::clone(&deliberate_panic);
+    let ids = Arc::new(Mutex::new(DisposableSentinelIds::default()));
+    let captured_ids = Arc::clone(&ids);
+    let child_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let captured_cleanup = Arc::clone(&child_cleanup);
+
+    let invocation = AssertUnwindSafe(with_disposable_space_context(
+        match mode {
+            DisposableSentinelMode::Success => "any-mcp-stdio-lifecycle",
+            DisposableSentinelMode::Panic => "any-mcp-stdio-panic-lifecycle",
+        },
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            captured_ids
+                .lock()
+                .expect("sentinel id record lock")
+                .space_id = Some(ctx.space_id.clone());
+            Box::pin(async move {
+                let driver = spawn_disposable_standard_driver(ctx.as_ref(), captured_cleanup)?;
+                lock_driver(&driver)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("registered sentinel child disappeared"))?
+                    .initialize();
+                let mut driver = OwnedStdioDriver {
+                    driver: Arc::clone(&driver),
+                };
+                let suffix = unique_suffix();
+                let created = driver
+                    .call_tool(
+                        "object_create",
+                        json!({
+                            "space": ctx.space_id,
+                            "type": "page",
+                            "name": format!("MCP disposable sentinel {suffix}"),
+                            "idempotency_key": format!("mcp-disposable-sentinel-{suffix}")
+                        }),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("stdio sentinel object_create failed"))?;
+                let object_id = created
+                    .pointer("/object/id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| sentinel_assertion("stdio sentinel create omitted object id"))?
+                    .to_owned();
+                ctx.register_object(&object_id);
+                captured_ids
+                    .lock()
+                    .expect("sentinel id record lock")
+                    .object_id = Some(object_id.clone());
+                if created.pointer("/object/space_id").and_then(Value::as_str)
+                    != Some(ctx.space_id.as_str())
+                {
+                    return Err(sentinel_assertion(
+                        "stdio sentinel create returned the wrong space identity",
+                    ));
+                }
+
+                let read = driver
+                    .call_tool(
+                        "object_get",
+                        json!({"space": ctx.space_id, "object_id": object_id}),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("stdio sentinel object_get failed"))?;
+                if read.pointer("/object/summary/id").and_then(Value::as_str)
+                    != Some(object_id.as_str())
+                    || read
+                        .pointer("/object/summary/space_id")
+                        .and_then(Value::as_str)
+                        != Some(ctx.space_id.as_str())
+                {
+                    return Err(sentinel_assertion(
+                        "stdio sentinel read returned the wrong object identity",
+                    ));
+                }
+                let independent = ctx.client.object(&ctx.space_id, &object_id).get().await?;
+                if independent.id != object_id || independent.space_id != ctx.space_id {
+                    return Err(sentinel_assertion(
+                        "independent sentinel read returned the wrong identity",
+                    ));
+                }
+
+                if mode == DisposableSentinelMode::Panic {
+                    panic_flag.store(true, Ordering::SeqCst);
+                    panic!("intentional disposable stdio sentinel panic");
+                }
+                Ok(())
+            })
+        },
+    ))
+    .catch_unwind()
+    .await;
+
+    if let Ok(Ok(DisposableRun::Skipped(reason))) = &invocation {
+        assert!(!callback_ran.load(Ordering::SeqCst));
+        assert_eq!(
+            *child_cleanup.lock().expect("child cleanup record lock"),
+            ChildCleanupRecord::NotRun
+        );
+        eprintln!("disposable stdio lifecycle sentinel skipped before callback: {reason:?}");
+        return;
+    }
+
+    match mode {
+        DisposableSentinelMode::Success => match invocation {
+            Ok(Ok(DisposableRun::Completed(()))) => {
+                assert!(callback_ran.load(Ordering::SeqCst));
+                assert!(!deliberate_panic.load(Ordering::SeqCst));
+            }
+            Ok(Ok(DisposableRun::Skipped(_))) => unreachable!("skip handled above"),
+            Ok(Err(error)) => panic!("disposable stdio lifecycle failed: {}", error.category()),
+            Err(_) => panic!("disposable stdio lifecycle unexpectedly panicked"),
+        },
+        DisposableSentinelMode::Panic => {
+            assert!(
+                invocation.is_err(),
+                "deliberate callback panic was not resumed"
+            );
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert!(
+                deliberate_panic.load(Ordering::SeqCst),
+                "a panic occurred before the deliberate sentinel point"
+            );
+        }
+    }
+
+    assert_eq!(
+        *child_cleanup.lock().expect("child cleanup record lock"),
+        ChildCleanupRecord::Stopped,
+        "registered stdio child cleanup completed before the sentinel returned"
+    );
+    let (space_id, object_id) = {
+        let ids = ids.lock().expect("sentinel id record lock");
+        let space_id = ids
+            .space_id
+            .as_deref()
+            .expect("sentinel captured its exact space id")
+            .to_owned();
+        let object_id = ids
+            .object_id
+            .as_deref()
+            .expect("sentinel captured its exact object id")
+            .to_owned();
+        (space_id, object_id)
+    };
+    assert_fresh_space_absence(&space_id).await;
+    eprintln!(
+        "disposable stdio sentinel cleanup verified: mode={mode:?} space_id={space_id} object_id={object_id} child=stopped absence=verified"
+    );
 }
 
 async fn run_spawned_baseline(scenario: ScenarioId, options: DriverOptions) {
@@ -890,6 +1190,20 @@ spawned_baseline_test!(headless_stdio_standard_documents, ScenarioId::Documents)
 spawned_baseline_test!(headless_stdio_standard_views, ScenarioId::Views);
 spawned_baseline_test!(headless_stdio_standard_mutations, ScenarioId::Mutations);
 spawned_baseline_test!(headless_stdio_standard_archive, ScenarioId::Archive);
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_disposable_lifecycle_sentinel() {
+    run_disposable_stdio_lifecycle_sentinel(DisposableSentinelMode::Success).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_disposable_panic_cleanup_sentinel() {
+    run_disposable_stdio_lifecycle_sentinel(DisposableSentinelMode::Panic).await;
+}
 
 async fn run_spawned_read_sentinel(options: DriverOptions) {
     let mut driver = StdioDriver::start(options);

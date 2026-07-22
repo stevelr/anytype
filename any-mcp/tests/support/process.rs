@@ -257,9 +257,14 @@ impl ProtocolProcess {
     }
 
     /// Closes stdin, waits for clean exit, and returns bounded output.
-    pub fn finish(mut self) -> ProcessOutput {
-        self.shutdown(true, true)
+    pub fn finish(self) -> ProcessOutput {
+        self.try_finish()
             .unwrap_or_else(|error| panic!("bounded protocol process cleanup failed: {error}"))
+    }
+
+    /// Closes stdin and reports bounded shutdown defects without panicking.
+    pub fn try_finish(mut self) -> Result<ProcessOutput, String> {
+        self.shutdown(true, true)
     }
 }
 
