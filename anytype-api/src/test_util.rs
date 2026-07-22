@@ -18,7 +18,10 @@ use anytype_rpc::{
     anytype::{
         event::message::Value as EventValue,
         rpc::{
-            block_dataview::view::create as create_dataview_view,
+            block_dataview::{
+                relation::add as add_dataview_relation,
+                view::{create as create_dataview_view, update as update_dataview_view},
+            },
             object::{create_object_type, show as object_show},
             space::delete as space_delete,
             template::create_from_object as template_create_from_object,
@@ -50,8 +53,10 @@ use crate::{
     filters::{Filter, Query, QueryWithFilters},
     grpc_util::with_token_request,
     http_client::GetPaged,
-    objects::{DataModel, Object, ObjectLayout},
+    objects::{Color, DataModel, Object, ObjectLayout},
+    properties::{Property, PropertyFormat, SetProperty},
     spaces::{Space, SpaceModel},
+    tags::Tag,
     types::{Type, TypeLayout},
     verify::verify_semantic,
     views::ViewLayout,
@@ -59,6 +64,8 @@ use crate::{
 
 const COLLECTION_DATAVIEW_BLOCK_ID: &str = "dataview";
 const COLLECTION_VIEW_FIXTURE_SCAN_LIMIT: u32 = 1_000;
+const KANBAN_FIXTURE_PAGE_LIMIT: u32 = 2;
+const KANBAN_FIXTURE_MAX_ITEMS: usize = 32;
 const SPACE_FIXTURE_SCAN_LIMIT: u32 = 1_000;
 const SPACE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 const SPACE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
@@ -216,6 +223,38 @@ pub struct CollectionViewFixture {
     pub id: String,
     /// Exact requested view name.
     pub name: String,
+}
+
+/// One cleanup-owned card in a representative Kanban test fixture.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct KanbanItemFixture {
+    /// Exact object created for the card.
+    pub object: Object,
+    /// Expected select-tag ID, or `None` for the ungrouped column.
+    pub column_id: Option<String>,
+}
+
+/// Cleanup-owned representative Kanban layout for disposable live tests.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct KanbanFixture {
+    /// Custom basic type used by every card.
+    pub item_type: Type,
+    /// Cleanup-owned collection-layout type used by the board.
+    pub collection_type: Type,
+    /// Collection containing exactly [`items`](Self::items).
+    pub collection: Object,
+    /// Existing server view converted to Kanban layout.
+    pub view: CollectionViewFixture,
+    /// Select/status property used as the grouping relation.
+    pub status_property: Property,
+    /// Heart-internal relation key used by the Kanban dataview.
+    pub status_relation_key: String,
+    /// Exact cleanup-owned status options used by this fixture.
+    pub columns: Vec<Tag>,
+    /// Exact cleanup-owned cards and their expected columns.
+    pub items: Vec<KanbanItemFixture>,
 }
 
 /// Cleanup-owned custom type, source objects, and templates created for tests.
@@ -609,6 +648,18 @@ impl TestContext {
             .await
             .map_err(collection_view_fixture_transport_error)?
             .into_inner();
+        let returned_view_id = validate_created_collection_view_identity(
+            &create_response.view_id,
+            &request_id,
+            &existing,
+        )?;
+        if !self.cleanup.claim_collection_view_fixture(
+            &self.space_id,
+            collection_id,
+            &returned_view_id,
+        ) {
+            return Err(collection_view_fixture_code_error("view-claim"));
+        }
         let created_id = validate_created_collection_view(
             &create_response,
             &self.space_id,
@@ -646,6 +697,456 @@ impl TestContext {
             id: created_id,
             name,
         })
+    }
+
+    /// Creates a representative cleanup-owned Kanban board on a real server.
+    ///
+    /// The board uses a custom basic card type, one Select property, two
+    /// cleanup-owned options, a collection and a server-created view converted
+    /// to Kanban layout. Three cards force the verifier across two REST pages;
+    /// one starts in each named column and one starts ungrouped. Every returned
+    /// resource is registered before any follow-up read. This is test
+    /// infrastructure, not a product-level Kanban API.
+    pub async fn create_kanban_fixture(
+        &self,
+        name: impl Into<String>,
+    ) -> TestResult<KanbanFixture> {
+        let name = name.into();
+        self.client
+            .config
+            .limits
+            .validate_name(&name, "kanban fixture")?;
+        let suffix = unique_suffix();
+        let status_key = format!("kanban_status_{suffix}");
+        let type_key = format!("kanban_card_{suffix}");
+        let preexisting_types = complete_type_inventory(&self.client, &self.space_id)
+            .await
+            .map_err(|_| kanban_fixture_code_error("type-precreate-snapshot"))?;
+        let preexisting_properties =
+            complete_kanban_property_snapshot(&self.client, &self.space_id).await?;
+        let item_type = retry_definitive_rate_limit("kanban item type", || async {
+            self.client
+                .new_type(&self.space_id, format!("{name} Card"))
+                .plural_name(format!("{name} Cards"))
+                .key(&type_key)
+                .property("Board status", &status_key, PropertyFormat::Select)
+                .no_verify()
+                .create()
+                .await
+        })
+        .await?;
+        self.client
+            .config
+            .limits
+            .validate_id(&item_type.id, "kanban item type")
+            .map_err(|_| kanban_fixture_code_error("item-type-id"))?;
+        if preexisting_types.all_ids.contains(&item_type.id) {
+            return Err(kanban_fixture_code_error("item-type-preexisting"));
+        }
+        self.register_type(&item_type.id);
+        if item_type.archived
+            || item_type.key != type_key
+            || item_type.layout != ObjectLayout::Basic
+        {
+            return Err(kanban_fixture_code_error("item-type"));
+        }
+        let matching_properties = item_type
+            .properties
+            .iter()
+            .filter(|property| property.key == status_key)
+            .cloned()
+            .collect::<Vec<_>>();
+        let [status_property] = matching_properties.as_slice() else {
+            return Err(kanban_fixture_code_error("status-property-count"));
+        };
+        self.client
+            .config
+            .limits
+            .validate_id(&status_property.id, "kanban status property")
+            .map_err(|_| kanban_fixture_code_error("status-property-id"))?;
+        if preexisting_properties.contains(&status_property.id) {
+            return Err(kanban_fixture_code_error("status-property-preexisting"));
+        }
+        self.register_property(&status_property.id);
+        if status_property.format() != PropertyFormat::Select {
+            return Err(kanban_fixture_code_error("status-property-format"));
+        }
+        let status_property = status_property.clone();
+        let status_relation_key =
+            read_kanban_relation_key(&self.client, &self.space_id, &status_property).await?;
+
+        let mut columns = Vec::with_capacity(2);
+        for (label, color) in [("Backlog", Color::Ice), ("Done", Color::Lime)] {
+            let tag_name = format!("{label} {suffix}");
+            let preexisting_tags =
+                complete_kanban_tag_snapshot(&self.client, &self.space_id, &status_property.id)
+                    .await?;
+            let tag = retry_definitive_rate_limit("kanban status option", || async {
+                self.client
+                    .new_tag(&self.space_id, &status_property.id)
+                    .name(&tag_name)
+                    .color(color.clone())
+                    .no_verify()
+                    .create()
+                    .await
+            })
+            .await?;
+            self.client
+                .config
+                .limits
+                .validate_id(&tag.id, "kanban status option")
+                .map_err(|_| kanban_fixture_code_error("tag-id"))?;
+            if preexisting_tags
+                .iter()
+                .any(|existing| existing.id == tag.id)
+            {
+                return Err(kanban_fixture_code_error("tag-preexisting"));
+            }
+            if !self
+                .cleanup
+                .claim_kanban_tag_fixture(&self.space_id, &status_property.id, &tag.id)
+            {
+                return Err(kanban_fixture_code_error("tag-claim"));
+            }
+            if tag.name != tag_name {
+                return Err(kanban_fixture_code_error("tag-identity"));
+            }
+            columns.push(tag);
+        }
+
+        let collection_type = self
+            .create_collection_type_fixture(format!("{name} Board"))
+            .await?;
+        let collection = self
+            .create_collection_fixture(&collection_type, format!("{name} Board"))
+            .await?;
+        let view = self
+            .create_collection_view_fixture(&collection.id, format!("{name} Kanban"))
+            .await?;
+        self.configure_kanban_view(
+            &collection.id,
+            &view.id,
+            &status_property,
+            &status_relation_key,
+        )
+        .await?;
+
+        let preexisting_items =
+            complete_type_object_id_snapshot(&self.client, &self.space_id, &item_type.id)
+                .await
+                .map_err(|_| kanban_fixture_code_error("item-precreate-snapshot"))?;
+
+        let backlog_id = columns
+            .first()
+            .map(|column| column.id.clone())
+            .ok_or_else(|| kanban_fixture_code_error("backlog-column"))?;
+        let done_id = columns
+            .get(1)
+            .map(|column| column.id.clone())
+            .ok_or_else(|| kanban_fixture_code_error("done-column"))?;
+        let expected_columns = [Some(backlog_id), Some(done_id), None];
+        let mut items = Vec::with_capacity(expected_columns.len());
+        for (index, column_id) in expected_columns.into_iter().enumerate() {
+            let item_name = format!("{name} Card {}", index + 1);
+            let object = retry_definitive_rate_limit("kanban card", || async {
+                let mut request = self
+                    .client
+                    .new_object(&self.space_id, &item_type.key)
+                    .name(&item_name)
+                    .no_verify();
+                if let Some(column_id) = column_id.as_deref() {
+                    request = request.set_select(&status_property.key, column_id);
+                }
+                request.create().await
+            })
+            .await?;
+            self.client
+                .config
+                .limits
+                .validate_id(&object.id, "kanban card")
+                .map_err(|_| kanban_fixture_code_error("item-id"))?;
+            if preexisting_items.contains(&object.id) || self.cleanup.is_registered_id(&object.id) {
+                return Err(kanban_fixture_code_error("item-preexisting"));
+            }
+            self.register_object(&object.id);
+            if object.space_id != self.space_id
+                || object.archived
+                || object.r#type.as_ref().map(|typ| typ.id.as_str()) != Some(item_type.id.as_str())
+            {
+                return Err(kanban_fixture_code_error("item-identity"));
+            }
+            items.push(KanbanItemFixture { object, column_id });
+        }
+        self.client
+            .view_add_objects(
+                &self.space_id,
+                &collection.id,
+                items.iter().map(|item| item.object.id.clone()),
+            )
+            .await
+            .map_err(|_| kanban_fixture_code_error("collection-membership"))?;
+
+        let fixture = KanbanFixture {
+            item_type,
+            collection_type,
+            collection,
+            view,
+            status_property,
+            status_relation_key,
+            columns,
+            items,
+        };
+        self.verify_kanban_fixture(&fixture).await?;
+        Ok(fixture)
+    }
+
+    /// Verifies the complete representative Kanban fixture from independent reads.
+    pub async fn verify_kanban_fixture(&self, fixture: &KanbanFixture) -> TestResult<()> {
+        validate_kanban_fixture_registration(&self.cleanup, &self.space_id, fixture)?;
+
+        let item_type = self
+            .client
+            .get_type(&self.space_id, &fixture.item_type.id)
+            .get_direct()
+            .await
+            .map_err(|_| kanban_fixture_code_error("item-type-read"))?;
+        if item_type.archived
+            || item_type.id != fixture.item_type.id
+            || item_type.key != fixture.item_type.key
+            || item_type.layout != ObjectLayout::Basic
+        {
+            return Err(kanban_fixture_code_error("item-type-reread"));
+        }
+        let relation_matches = item_type
+            .properties
+            .iter()
+            .filter(|property| property.id == fixture.status_property.id)
+            .collect::<Vec<_>>();
+        let [relation] = relation_matches.as_slice() else {
+            return Err(kanban_fixture_code_error("missing-or-wrong-relation"));
+        };
+        if relation.key != fixture.status_property.key
+            || relation.format() != PropertyFormat::Select
+        {
+            return Err(kanban_fixture_code_error("missing-or-wrong-relation"));
+        }
+        let property = self
+            .client
+            .property(&self.space_id, &fixture.status_property.id)
+            .get_direct()
+            .await
+            .map_err(|_| kanban_fixture_code_error("status-property-read"))?;
+        if property.id != fixture.status_property.id
+            || property.key != fixture.status_property.key
+            || property.format() != PropertyFormat::Select
+        {
+            return Err(kanban_fixture_code_error("status-property-reread"));
+        }
+        let tags =
+            complete_kanban_tag_snapshot(&self.client, &self.space_id, &fixture.status_property.id)
+                .await?;
+        for expected in &fixture.columns {
+            if !tags.iter().any(|actual| actual == expected) {
+                return Err(kanban_fixture_code_error("deleted-or-changed-tag"));
+            }
+        }
+
+        let evidence = read_kanban_view_evidence(
+            &self.client,
+            &self.space_id,
+            &fixture.collection.id,
+            &fixture.view.id,
+        )
+        .await?;
+        let relation_key =
+            read_kanban_relation_key(&self.client, &self.space_id, &fixture.status_property)
+                .await?;
+        if relation_key != fixture.status_relation_key {
+            return Err(kanban_fixture_code_error("status-relation-key-changed"));
+        }
+        validate_kanban_view_evidence(
+            &evidence,
+            &fixture.status_property,
+            &fixture.status_relation_key,
+        )?;
+
+        let listed = complete_kanban_item_snapshot(
+            &self.client,
+            &self.space_id,
+            &fixture.collection.id,
+            &fixture.view.id,
+        )
+        .await?;
+        let expected_ids = fixture
+            .items
+            .iter()
+            .map(|item| item.object.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let actual_ids = listed
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<BTreeSet<_>>();
+        if expected_ids != actual_ids || expected_ids.len() != fixture.items.len() {
+            return Err(kanban_fixture_code_error("item-membership"));
+        }
+        for expected in &fixture.items {
+            let actual = self
+                .client
+                .object(&self.space_id, &expected.object.id)
+                .get()
+                .await
+                .map_err(|_| kanban_fixture_code_error("item-read"))?;
+            let actual_column = actual
+                .get_property_select(&fixture.status_property.key)
+                .map(|tag| tag.id.as_str());
+            if actual.archived
+                || actual.space_id != self.space_id
+                || actual.r#type.as_ref().map(|typ| typ.id.as_str())
+                    != Some(fixture.item_type.id.as_str())
+                || actual_column != expected.column_id.as_deref()
+            {
+                return Err(kanban_fixture_code_error("item-column"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves one cleanup-owned card by an ordinary Select property update.
+    pub async fn move_kanban_item_fixture(
+        &self,
+        fixture: &mut KanbanFixture,
+        item_id: &str,
+        column_id: &str,
+    ) -> TestResult<()> {
+        self.verify_kanban_fixture(fixture).await?;
+        if !fixture.columns.iter().any(|column| {
+            column.id == column_id
+                && self.cleanup.owns_kanban_tag_fixture(
+                    &self.space_id,
+                    &fixture.status_property.id,
+                    column_id,
+                )
+        }) {
+            return Err(kanban_fixture_code_error("move-column"));
+        }
+        let item_index = fixture
+            .items
+            .iter()
+            .position(|item| item.object.id == item_id)
+            .ok_or_else(|| kanban_fixture_code_error("move-item"))?;
+        self.client
+            .update_object(&self.space_id, item_id)
+            .set_select(&fixture.status_property.key, column_id)
+            .no_verify()
+            .update()
+            .await
+            .map_err(|_| kanban_fixture_code_error("move-update"))?;
+        let actual = self
+            .client
+            .object(&self.space_id, item_id)
+            .get()
+            .await
+            .map_err(|_| kanban_fixture_code_error("move-reread"))?;
+        if actual
+            .get_property_select(&fixture.status_property.key)
+            .map(|tag| tag.id.as_str())
+            != Some(column_id)
+        {
+            return Err(kanban_fixture_code_error("move-not-observed"));
+        }
+        let expected = fixture
+            .items
+            .get_mut(item_index)
+            .ok_or_else(|| kanban_fixture_code_error("move-index"))?;
+        expected.object = actual;
+        expected.column_id = Some(column_id.to_owned());
+        self.verify_kanban_fixture(fixture).await
+    }
+
+    async fn configure_kanban_view(
+        &self,
+        collection_id: &str,
+        view_id: &str,
+        status_property: &Property,
+        status_relation_key: &str,
+    ) -> TestResult<()> {
+        if status_property.format() != PropertyFormat::Select
+            || !self
+                .cleanup
+                .owns_collection_view_fixture(&self.space_id, collection_id, view_id)
+        {
+            return Err(kanban_fixture_code_error("configure-ownership"));
+        }
+        let mut evidence =
+            read_kanban_view_evidence(&self.client, &self.space_id, collection_id, view_id).await?;
+        if !evidence.rest_filters_empty || !evidence.view.filters.is_empty() {
+            return Err(kanban_fixture_code_error("configure-filtered-view"));
+        }
+        let grpc = self
+            .client
+            .grpc_client()
+            .await
+            .map_err(|_| kanban_fixture_code_error("configure-grpc"))?;
+        let mut commands = grpc.client_commands();
+        if !evidence.relation_links.contains(&(
+            status_relation_key.to_owned(),
+            anytype_rpc::model::RelationFormat::Status as i32,
+        )) {
+            let request = add_dataview_relation::Request {
+                context_id: collection_id.to_owned(),
+                block_id: evidence.block_id.clone(),
+                relation_keys: vec![status_relation_key.to_owned()],
+            };
+            let response = commands
+                .block_dataview_relation_add(
+                    with_token_request(Request::new(request), grpc.token())
+                        .map_err(|_| kanban_fixture_code_error("relation-auth"))?,
+                )
+                .await
+                .map_err(|_| kanban_fixture_code_error("relation-transport"))?
+                .into_inner();
+            if response.error.as_ref().map(|error| error.code) != Some(0) {
+                return Err(kanban_fixture_code_error("relation-response"));
+            }
+            evidence =
+                read_kanban_view_evidence(&self.client, &self.space_id, collection_id, view_id)
+                    .await?;
+        }
+        if !evidence.relation_links.contains(&(
+            status_relation_key.to_owned(),
+            anytype_rpc::model::RelationFormat::Status as i32,
+        )) {
+            return Err(kanban_fixture_code_error("relation-reread"));
+        }
+        let mut requested_view = evidence.view;
+        requested_view.r#type =
+            anytype_rpc::model::block::content::dataview::view::Type::Kanban as i32;
+        requested_view.group_relation_key = status_relation_key.to_owned();
+        let request = update_dataview_view::Request {
+            context_id: collection_id.to_owned(),
+            block_id: evidence.block_id.clone(),
+            view_id: view_id.to_owned(),
+            view: Some(requested_view.clone()),
+        };
+        let response = commands
+            .block_dataview_view_update(
+                with_token_request(Request::new(request), grpc.token())
+                    .map_err(|_| kanban_fixture_code_error("view-auth"))?,
+            )
+            .await
+            .map_err(|_| kanban_fixture_code_error("view-transport"))?
+            .into_inner();
+        validate_updated_kanban_view(
+            &response,
+            &self.space_id,
+            collection_id,
+            &evidence.block_id,
+            view_id,
+            &requested_view,
+        )?;
+        let verified =
+            read_kanban_view_evidence(&self.client, &self.space_id, collection_id, view_id).await?;
+        validate_kanban_view_evidence(&verified, status_property, status_relation_key)
     }
 
     /// Creates a disposable space owned by this test context.
@@ -1015,6 +1516,94 @@ enum RestCollectionViewSortType {
     Custom,
 }
 
+#[derive(Debug)]
+struct KanbanViewEvidence {
+    block_id: String,
+    view: DataviewView,
+    relation_links: Vec<(String, i32)>,
+    rest_layout: ViewLayout,
+    rest_filters_empty: bool,
+}
+
+async fn read_kanban_relation_key(
+    client: &AnytypeClient,
+    space_id: &str,
+    property: &Property,
+) -> TestResult<String> {
+    if property.format() != PropertyFormat::Select {
+        return Err(kanban_fixture_code_error("relation-key-format"));
+    }
+    let grpc = client
+        .grpc_client()
+        .await
+        .map_err(|_| kanban_fixture_code_error("relation-key-grpc-client"))?;
+    let mut commands = grpc.client_commands();
+    let response = commands
+        .object_show(
+            with_token_request(
+                Request::new(object_show::Request {
+                    object_id: property.id.clone(),
+                    space_id: space_id.to_owned(),
+                    ..Default::default()
+                }),
+                grpc.token(),
+            )
+            .map_err(|_| kanban_fixture_code_error("relation-key-auth"))?,
+        )
+        .await
+        .map_err(|_| kanban_fixture_code_error("relation-key-transport"))?
+        .into_inner();
+    if !object_show_succeeded(response.error.as_ref().map(|error| error.code)) {
+        return Err(kanban_fixture_code_error("relation-key-response"));
+    }
+    let object_view = response
+        .object_view
+        .ok_or_else(|| kanban_fixture_code_error("relation-key-view"))?;
+    if object_view.root_id != property.id {
+        return Err(kanban_fixture_code_error("relation-key-root"));
+    }
+    let mut resolved = None;
+    for details_set in object_view
+        .details
+        .iter()
+        .filter(|details| details.id == property.id)
+    {
+        let details = details_set
+            .details
+            .as_ref()
+            .ok_or_else(|| kanban_fixture_code_error("relation-key-details"))?;
+        let relation_key = match details
+            .fields
+            .get("relationKey")
+            .and_then(|value| value.kind.as_ref())
+        {
+            Some(Kind::StringValue(value)) if !value.is_empty() => value,
+            _ => return Err(kanban_fixture_code_error("relation-key-value")),
+        };
+        let unique_key = details
+            .fields
+            .get("uniqueKey")
+            .and_then(|value| value.kind.as_ref());
+        let relation_format = details
+            .fields
+            .get("relationFormat")
+            .and_then(|value| value.kind.as_ref());
+        if unique_key != Some(&Kind::StringValue(format!("rel-{relation_key}")))
+            || relation_format
+                != Some(&Kind::NumberValue(
+                    anytype_rpc::model::RelationFormat::Status as i32 as f64,
+                ))
+            || resolved
+                .as_ref()
+                .is_some_and(|existing| existing != relation_key)
+        {
+            return Err(kanban_fixture_code_error("relation-key-identity"));
+        }
+        resolved = Some(relation_key.clone());
+    }
+    resolved.ok_or_else(|| kanban_fixture_code_error("relation-key-details-count"))
+}
+
 async fn complete_collection_view_snapshot(
     client: &AnytypeClient,
     space_id: &str,
@@ -1039,6 +1628,382 @@ async fn complete_collection_view_snapshot(
         return Err(collection_view_fixture_api_error());
     }
     Ok(response.items)
+}
+
+async fn read_kanban_view_evidence(
+    client: &AnytypeClient,
+    space_id: &str,
+    collection_id: &str,
+    view_id: &str,
+) -> TestResult<KanbanViewEvidence> {
+    let rest_views = complete_collection_view_snapshot(client, space_id, collection_id)
+        .await
+        .map_err(|_| kanban_fixture_code_error("view-rest-read"))?;
+    let rest_matches = rest_views
+        .iter()
+        .filter(|view| view.id == view_id)
+        .collect::<Vec<_>>();
+    let [rest_view] = rest_matches.as_slice() else {
+        return Err(kanban_fixture_code_error("view-rest-identity"));
+    };
+
+    let grpc = client
+        .grpc_client()
+        .await
+        .map_err(|_| kanban_fixture_code_error("view-grpc-client"))?;
+    let mut commands = grpc.client_commands();
+    let request = object_show::Request {
+        object_id: collection_id.to_owned(),
+        space_id: space_id.to_owned(),
+        ..Default::default()
+    };
+    let response = commands
+        .object_show(
+            with_token_request(Request::new(request), grpc.token())
+                .map_err(|_| kanban_fixture_code_error("view-show-auth"))?,
+        )
+        .await
+        .map_err(|_| kanban_fixture_code_error("view-show-transport"))?
+        .into_inner();
+    if !object_show_succeeded(response.error.as_ref().map(|error| error.code)) {
+        return Err(kanban_fixture_code_error("view-show-response"));
+    }
+    let object_view = response
+        .object_view
+        .ok_or_else(|| kanban_fixture_code_error("view-show-missing"))?;
+    if object_view.root_id != collection_id {
+        return Err(kanban_fixture_code_error("view-show-root"));
+    }
+    let dataviews = object_view
+        .blocks
+        .iter()
+        .filter_map(|block| match block.content_value.as_ref() {
+            Some(ContentValue::Dataview(dataview)) => Some((block.id.as_str(), dataview)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(block_id, dataview)] = dataviews.as_slice() else {
+        return Err(kanban_fixture_code_error("view-dataview-count"));
+    };
+    if *block_id != COLLECTION_DATAVIEW_BLOCK_ID || !dataview.is_collection {
+        return Err(kanban_fixture_code_error("view-dataview-identity"));
+    }
+    let views = dataview
+        .views
+        .iter()
+        .filter(|view| view.id == view_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let [view] = views.as_slice() else {
+        return Err(kanban_fixture_code_error("view-proto-identity"));
+    };
+    let relation_links = dataview
+        .relation_links
+        .iter()
+        .map(|relation| (relation.key.clone(), relation.format))
+        .collect::<Vec<_>>();
+    let relation_keys = relation_links
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<BTreeSet<_>>();
+    if relation_keys.len() != dataview.relation_links.len() {
+        return Err(kanban_fixture_code_error("view-relation-duplicates"));
+    }
+    Ok(KanbanViewEvidence {
+        block_id: (*block_id).to_owned(),
+        view: view.clone(),
+        relation_links,
+        rest_layout: rest_view.layout.clone(),
+        rest_filters_empty: rest_view.filters.is_empty(),
+    })
+}
+
+fn validate_kanban_view_evidence(
+    evidence: &KanbanViewEvidence,
+    status_property: &Property,
+    status_relation_key: &str,
+) -> TestResult<()> {
+    if status_property.format() != PropertyFormat::Select {
+        return Err(kanban_fixture_code_error("view-group-format"));
+    }
+    if evidence.rest_layout != ViewLayout::Kanban
+        || anytype_rpc::model::block::content::dataview::view::Type::try_from(evidence.view.r#type)
+            .ok()
+            != Some(anytype_rpc::model::block::content::dataview::view::Type::Kanban)
+        || evidence.view.group_relation_key != status_relation_key
+    {
+        return Err(kanban_fixture_code_error("view-layout-or-group"));
+    }
+    if !evidence.rest_filters_empty || !evidence.view.filters.is_empty() {
+        return Err(kanban_fixture_code_error("view-filters"));
+    }
+    if !evidence.relation_links.contains(&(
+        status_relation_key.to_owned(),
+        anytype_rpc::model::RelationFormat::Status as i32,
+    )) {
+        return Err(kanban_fixture_code_error("view-missing-relation"));
+    }
+    Ok(())
+}
+
+fn validate_updated_kanban_view(
+    response: &update_dataview_view::Response,
+    space_id: &str,
+    collection_id: &str,
+    block_id: &str,
+    view_id: &str,
+    requested_view: &DataviewView,
+) -> TestResult<()> {
+    if response.error.as_ref().map(|error| error.code) != Some(0) {
+        return Err(kanban_fixture_code_error("view-update-response"));
+    }
+    let event = response
+        .event
+        .as_ref()
+        .ok_or_else(|| kanban_fixture_code_error("view-update-event"))?;
+    if event.context_id != collection_id {
+        return Err(kanban_fixture_code_error("view-update-context"));
+    }
+    let sets = event
+        .messages
+        .iter()
+        .filter_map(|message| match message.value.as_ref() {
+            Some(EventValue::BlockDataviewViewSet(set)) => Some((message, set)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let updates = event
+        .messages
+        .iter()
+        .filter_map(|message| match message.value.as_ref() {
+            Some(EventValue::BlockDataviewViewUpdate(update)) => Some((message, update)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if sets.len() + updates.len() != 1 {
+        return Err(kanban_fixture_code_error("view-update-event-count"));
+    }
+    if let [(message, set)] = sets.as_slice() {
+        if message.space_id == space_id
+            && set.id == block_id
+            && set.view_id == view_id
+            && set.view.as_ref() == Some(requested_view)
+        {
+            return Ok(());
+        }
+        return Err(kanban_fixture_code_error("view-update-event-identity"));
+    }
+    let [(message, update)] = updates.as_slice() else {
+        return Err(kanban_fixture_code_error("view-update-event-kind"));
+    };
+    let fields = update
+        .fields
+        .as_ref()
+        .ok_or_else(|| kanban_fixture_code_error("view-update-event-fields"))?;
+    if message.space_id != space_id
+        || update.id != block_id
+        || update.view_id != view_id
+        || !update.filter.is_empty()
+        || !update.relation.is_empty()
+        || !update.sort.is_empty()
+        || fields.r#type != requested_view.r#type
+        || fields.name != requested_view.name
+        || fields.cover_relation_key != requested_view.cover_relation_key
+        || fields.hide_icon != requested_view.hide_icon
+        || fields.card_size != requested_view.card_size
+        || fields.cover_fit != requested_view.cover_fit
+        || fields.group_relation_key != requested_view.group_relation_key
+        || fields.end_relation_key != requested_view.end_relation_key
+        || fields.group_background_colors != requested_view.group_background_colors
+        || fields.page_limit != requested_view.page_limit
+        || fields.default_template_id != requested_view.default_template_id
+        || fields.default_object_type_id != requested_view.default_object_type_id
+        || fields.wrap_content != requested_view.wrap_content
+        || fields.list_size != requested_view.list_size
+        || fields.alternate_rows != requested_view.alternate_rows
+    {
+        return Err(kanban_fixture_code_error("view-update-event-identity"));
+    }
+    Ok(())
+}
+
+async fn complete_kanban_tag_snapshot(
+    client: &AnytypeClient,
+    space_id: &str,
+    property_id: &str,
+) -> TestResult<Vec<Tag>> {
+    let mut offset = 0_u32;
+    let mut expected_total = None;
+    let mut tags = Vec::new();
+    loop {
+        let response = client
+            .tags(space_id, property_id)
+            .limit(KANBAN_FIXTURE_PAGE_LIMIT)
+            .offset(offset)
+            .list()
+            .await
+            .map_err(|_| kanban_fixture_code_error("tag-page-read"))?
+            .into_response();
+        if response.pagination.offset != offset
+            || response.pagination.limit != KANBAN_FIXTURE_PAGE_LIMIT
+            || expected_total.is_some_and(|total| total != response.pagination.total)
+            || response.pagination.total > KANBAN_FIXTURE_MAX_ITEMS
+            || response.items.len() > KANBAN_FIXTURE_PAGE_LIMIT as usize
+            || (response.pagination.has_more && response.items.is_empty())
+        {
+            return Err(kanban_fixture_code_error("tag-pagination"));
+        }
+        expected_total = Some(response.pagination.total);
+        let page_len = response.items.len();
+        tags.extend(response.items);
+        if !response.pagination.has_more {
+            break;
+        }
+        offset = offset
+            .checked_add(
+                u32::try_from(page_len).map_err(|_| kanban_fixture_code_error("tag-page-size"))?,
+            )
+            .ok_or_else(|| kanban_fixture_code_error("tag-page-overflow"))?;
+    }
+    let ids = tags
+        .iter()
+        .map(|tag| tag.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if expected_total != Some(tags.len()) || ids.len() != tags.len() {
+        return Err(kanban_fixture_code_error("tag-completeness"));
+    }
+    Ok(tags)
+}
+
+async fn complete_kanban_property_snapshot(
+    client: &AnytypeClient,
+    space_id: &str,
+) -> TestResult<BTreeSet<String>> {
+    let response = client
+        .properties(space_id)
+        .limit(COLLECTION_VIEW_FIXTURE_SCAN_LIMIT)
+        .offset(0)
+        .list()
+        .await
+        .map_err(|_| kanban_fixture_code_error("property-page-read"))?
+        .into_response();
+    if response.pagination.offset != 0
+        || response.pagination.limit != COLLECTION_VIEW_FIXTURE_SCAN_LIMIT
+        || response.pagination.has_more
+        || response.pagination.total != response.items.len()
+        || response.items.len() > COLLECTION_VIEW_FIXTURE_SCAN_LIMIT as usize
+    {
+        return Err(kanban_fixture_code_error("property-pagination"));
+    }
+    let mut ids = BTreeSet::new();
+    for property in response.items {
+        client
+            .config
+            .limits
+            .validate_id(&property.id, "kanban property evidence")
+            .map_err(|_| kanban_fixture_code_error("property-id"))?;
+        if !ids.insert(property.id) {
+            return Err(kanban_fixture_code_error("property-duplicates"));
+        }
+    }
+    Ok(ids)
+}
+
+async fn complete_kanban_item_snapshot(
+    client: &AnytypeClient,
+    space_id: &str,
+    collection_id: &str,
+    view_id: &str,
+) -> TestResult<Vec<Object>> {
+    let mut offset = 0_u32;
+    let mut expected_total = None;
+    let mut items = Vec::new();
+    loop {
+        let response = client
+            .view_list_objects(space_id, collection_id)
+            .view(view_id)
+            .limit(KANBAN_FIXTURE_PAGE_LIMIT)
+            .offset(offset)
+            .list()
+            .await
+            .map_err(|_| kanban_fixture_code_error("item-page-read"))?
+            .into_response();
+        if response.pagination.offset != offset
+            || response.pagination.limit != KANBAN_FIXTURE_PAGE_LIMIT
+            || expected_total.is_some_and(|total| total != response.pagination.total)
+            || response.pagination.total > KANBAN_FIXTURE_MAX_ITEMS
+            || response.items.len() > KANBAN_FIXTURE_PAGE_LIMIT as usize
+            || (response.pagination.has_more && response.items.is_empty())
+        {
+            return Err(kanban_fixture_code_error("item-pagination"));
+        }
+        expected_total = Some(response.pagination.total);
+        let page_len = response.items.len();
+        items.extend(response.items);
+        if !response.pagination.has_more {
+            break;
+        }
+        offset = offset
+            .checked_add(
+                u32::try_from(page_len).map_err(|_| kanban_fixture_code_error("item-page-size"))?,
+            )
+            .ok_or_else(|| kanban_fixture_code_error("item-page-overflow"))?;
+    }
+    let ids = items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if expected_total != Some(items.len()) || ids.len() != items.len() {
+        return Err(kanban_fixture_code_error("item-completeness"));
+    }
+    Ok(items)
+}
+
+fn validate_kanban_fixture_registration(
+    cleanup: &TestCleanup,
+    space_id: &str,
+    fixture: &KanbanFixture,
+) -> TestResult<()> {
+    if fixture.columns.len() != 2
+        || fixture.items.len() != 3
+        || fixture.status_property.format() != PropertyFormat::Select
+        || cleanup.collection_fixture_type_id(space_id, &fixture.collection.id)
+            != Some(fixture.collection_type.id.clone())
+        || !cleanup.owns_collection_view_fixture(space_id, &fixture.collection.id, &fixture.view.id)
+        || !cleanup.is_registered_id(&fixture.item_type.id)
+        || !cleanup.is_registered_id(&fixture.collection_type.id)
+        || !cleanup.is_registered_id(&fixture.collection.id)
+        || !cleanup.is_registered_id(&fixture.status_property.id)
+    {
+        return Err(kanban_fixture_code_error("registration"));
+    }
+    if fixture
+        .columns
+        .iter()
+        .any(|tag| !cleanup.owns_kanban_tag_fixture(space_id, &fixture.status_property.id, &tag.id))
+        || fixture
+            .items
+            .iter()
+            .any(|item| !cleanup.is_registered_id(&item.object.id))
+    {
+        return Err(kanban_fixture_code_error("child-registration"));
+    }
+    let all_ids = fixture
+        .columns
+        .iter()
+        .map(|tag| tag.id.as_str())
+        .chain(fixture.items.iter().map(|item| item.object.id.as_str()))
+        .collect::<BTreeSet<_>>();
+    if all_ids.len() != fixture.columns.len() + fixture.items.len() {
+        return Err(kanban_fixture_code_error("registration-collision"));
+    }
+    Ok(())
+}
+
+fn kanban_fixture_code_error(code: &'static str) -> TestError {
+    TestError::Assertion {
+        message: format!("cleanup-safe Kanban fixture failed: {code}"),
+    }
 }
 
 fn collection_view_ids_are_unique(views: &[RestCollectionView]) -> bool {
@@ -1227,9 +2192,8 @@ fn validate_created_collection_view(
     existing: &[RestCollectionView],
 ) -> TestResult<String> {
     if !create_collection_view_succeeded(response.error.as_ref().map(|error| error.code))
-        || !valid_collection_view_id(&response.view_id)
-        || response.view_id == request_id
-        || existing.iter().any(|view| view.id == response.view_id)
+        || validate_created_collection_view_identity(&response.view_id, request_id, existing)
+            .is_err()
     {
         return Err(collection_view_fixture_error());
     }
@@ -1261,6 +2225,20 @@ fn validate_created_collection_view(
         return Err(collection_view_fixture_error());
     }
     Ok(response.view_id.clone())
+}
+
+fn validate_created_collection_view_identity(
+    returned_view_id: &str,
+    request_id: &str,
+    existing: &[RestCollectionView],
+) -> TestResult<String> {
+    if !valid_collection_view_id(returned_view_id)
+        || returned_view_id == request_id
+        || existing.iter().any(|view| view.id == returned_view_id)
+    {
+        return Err(collection_view_fixture_error());
+    }
+    Ok(returned_view_id.to_owned())
 }
 
 fn valid_collection_view_id(id: &str) -> bool {
@@ -2028,6 +3006,8 @@ pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
     chat_messages: Mutex<BTreeSet<(String, String, String)>>,
     collection_fixtures: Mutex<BTreeSet<(String, String, String)>>,
+    collection_view_fixtures: Mutex<BTreeSet<(String, String, String)>>,
+    kanban_tag_fixtures: Mutex<BTreeSet<(String, String, String)>>,
     space_fixtures: Mutex<BTreeMap<String, String>>,
     template_resources: Mutex<Vec<TemplateFixtureResource>>,
     registered_ids: Mutex<BTreeSet<String>>,
@@ -2143,6 +3123,8 @@ impl TestCleanup {
         let objects_empty = self.objects.lock().is_empty();
         let chat_messages_empty = self.chat_messages.lock().is_empty();
         let collections_empty = self.collection_fixtures.lock().is_empty();
+        let collection_views_empty = self.collection_view_fixtures.lock().is_empty();
+        let kanban_tags_empty = self.kanban_tag_fixtures.lock().is_empty();
         let spaces_empty = self.space_fixtures.lock().is_empty();
         let templates_empty = self.template_resources.lock().is_empty();
         let registered_empty = self.registered_ids.lock().is_empty();
@@ -2150,6 +3132,8 @@ impl TestCleanup {
         objects_empty
             && chat_messages_empty
             && collections_empty
+            && collection_views_empty
+            && kanban_tags_empty
             && spaces_empty
             && templates_empty
             && registered_empty
@@ -2225,6 +3209,86 @@ impl TestCleanup {
             return None;
         }
         Some(type_id.clone())
+    }
+
+    fn claim_collection_view_fixture(
+        &self,
+        space_id: &str,
+        collection_id: &str,
+        view_id: &str,
+    ) -> bool {
+        if self
+            .collection_fixture_type_id(space_id, collection_id)
+            .is_none()
+        {
+            return false;
+        }
+        let mut registered_ids = self.registered_ids.lock();
+        let mut views = self.collection_view_fixtures.lock();
+        if registered_ids.contains(view_id)
+            || views
+                .iter()
+                .any(|(_, _, registered_view)| registered_view == view_id)
+        {
+            return false;
+        }
+        registered_ids.insert(view_id.to_owned());
+        views.insert((
+            space_id.to_owned(),
+            collection_id.to_owned(),
+            view_id.to_owned(),
+        ))
+    }
+
+    fn owns_collection_view_fixture(
+        &self,
+        space_id: &str,
+        collection_id: &str,
+        view_id: &str,
+    ) -> bool {
+        self.collection_view_fixtures.lock().contains(&(
+            space_id.to_owned(),
+            collection_id.to_owned(),
+            view_id.to_owned(),
+        ))
+    }
+
+    fn claim_kanban_tag_fixture(&self, space_id: &str, property_id: &str, tag_id: &str) -> bool {
+        let property_is_owned =
+            self.objects
+                .lock()
+                .iter()
+                .any(|(registered_space, registered_id, model)| {
+                    registered_space == space_id
+                        && registered_id == property_id
+                        && *model == DataModel::Property
+                });
+        if !property_is_owned {
+            return false;
+        }
+        let mut registered_ids = self.registered_ids.lock();
+        let mut tags = self.kanban_tag_fixtures.lock();
+        if registered_ids.contains(tag_id)
+            || tags
+                .iter()
+                .any(|(_, _, registered_tag)| registered_tag == tag_id)
+        {
+            return false;
+        }
+        registered_ids.insert(tag_id.to_owned());
+        tags.insert((
+            space_id.to_owned(),
+            property_id.to_owned(),
+            tag_id.to_owned(),
+        ))
+    }
+
+    fn owns_kanban_tag_fixture(&self, space_id: &str, property_id: &str, tag_id: &str) -> bool {
+        self.kanban_tag_fixtures.lock().contains(&(
+            space_id.to_owned(),
+            property_id.to_owned(),
+            tag_id.to_owned(),
+        ))
     }
 
     /// Remembers this property for deletion after the test
@@ -2407,6 +3471,8 @@ impl TestCleanup {
             }
         }
         self.collection_fixtures.lock().clear();
+        self.collection_view_fixtures.lock().clear();
+        self.kanban_tag_fixtures.lock().clear();
 
         // Delete disposable spaces only after their possible child resources.
         // SpaceDelete is irreversible, so this registry is private and can be
@@ -3383,7 +4449,91 @@ mod tests {
     const DEFAULT_VIEW_ID: &str = "77dbd55c-5f52-4a5b-9d73-e1a46845dd45";
     const CREATED_VIEW_ID: &str = "9c4d60de-66bb-41b9-984e-ce750e4301e1";
     const BLOCK_ID: &str = "dataview";
+    const KANBAN_RELATION_KEY: &str = "fixture_relation";
     const ARCHIVED_SOURCE_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+
+    fn kanban_status_property(format: PropertyFormat) -> Property {
+        serde_json::from_value(serde_json::json!({
+            "name": "Status",
+            "key": "fixture_status",
+            "id": "fixture-property",
+            "format": format,
+            "tags": null
+        }))
+        .expect("deserialize Kanban property fixture")
+    }
+
+    fn kanban_view_evidence() -> KanbanViewEvidence {
+        KanbanViewEvidence {
+            block_id: BLOCK_ID.to_owned(),
+            view: DataviewView {
+                r#type: anytype_rpc::model::block::content::dataview::view::Type::Kanban as i32,
+                group_relation_key: KANBAN_RELATION_KEY.to_owned(),
+                ..Default::default()
+            },
+            relation_links: vec![(
+                KANBAN_RELATION_KEY.to_owned(),
+                anytype_rpc::model::RelationFormat::Status as i32,
+            )],
+            rest_layout: ViewLayout::Kanban,
+            rest_filters_empty: true,
+        }
+    }
+
+    #[test]
+    fn kanban_view_validation_fails_closed_for_relation_format_and_filters() {
+        let property = kanban_status_property(PropertyFormat::Select);
+        assert!(
+            validate_kanban_view_evidence(&kanban_view_evidence(), &property, KANBAN_RELATION_KEY,)
+                .is_ok()
+        );
+
+        let missing = KanbanViewEvidence {
+            relation_links: Vec::new(),
+            ..kanban_view_evidence()
+        };
+        assert!(validate_kanban_view_evidence(&missing, &property, KANBAN_RELATION_KEY).is_err());
+
+        let wrong = kanban_status_property(PropertyFormat::Number);
+        assert!(
+            validate_kanban_view_evidence(&kanban_view_evidence(), &wrong, KANBAN_RELATION_KEY,)
+                .is_err()
+        );
+        assert!(
+            validate_kanban_view_evidence(&kanban_view_evidence(), &property, "wrong-relation")
+                .is_err()
+        );
+
+        let filtered = KanbanViewEvidence {
+            rest_filters_empty: false,
+            ..kanban_view_evidence()
+        };
+        assert!(validate_kanban_view_evidence(&filtered, &property, KANBAN_RELATION_KEY).is_err());
+
+        let mut proto_filtered = kanban_view_evidence();
+        proto_filtered
+            .view
+            .filters
+            .push(anytype_rpc::model::block::content::dataview::Filter::default());
+        assert!(
+            validate_kanban_view_evidence(&proto_filtered, &property, KANBAN_RELATION_KEY).is_err()
+        );
+    }
+
+    #[test]
+    fn kanban_child_claims_require_owned_parents_and_unique_ids() {
+        let cleanup = TestCleanup::default();
+        assert!(!cleanup.claim_kanban_tag_fixture(SPACE_ID, "property", "tag"));
+        assert!(!cleanup.claim_collection_view_fixture(SPACE_ID, COLLECTION_ID, "view"));
+
+        cleanup.add_property(SPACE_ID, "property");
+        assert!(cleanup.claim_kanban_tag_fixture(SPACE_ID, "property", "tag"));
+        assert!(!cleanup.claim_kanban_tag_fixture(SPACE_ID, "property", "tag"));
+
+        assert!(cleanup.claim_collection_fixture(SPACE_ID, COLLECTION_ID, COLLECTION_TYPE_ID));
+        assert!(cleanup.claim_collection_view_fixture(SPACE_ID, COLLECTION_ID, "view"));
+        assert!(!cleanup.claim_collection_view_fixture(SPACE_ID, COLLECTION_ID, "view"));
+    }
 
     #[test]
     fn chat_message_cleanup_registration_requires_one_owned_chat() {
