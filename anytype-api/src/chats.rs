@@ -3769,8 +3769,10 @@ mod tests {
     ) -> (AnytypeClient, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind mock chat server");
-        let address = listener.local_addr().expect("mock server address");
+            .expect("bind scripted chat HTTP fixture");
+        let address = listener
+            .local_addr()
+            .expect("scripted chat HTTP fixture address");
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()

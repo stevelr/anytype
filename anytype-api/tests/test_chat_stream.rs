@@ -1,236 +1,191 @@
+//! Ignored live gRPC and REST chat-stream coverage.
+//!
+//! Each test registers its chat and message immediately in a fresh
+//! prefix-authorized disposable space. Run serially with explicit
+//! disposable-process admission.
+
 mod common;
 
-use std::net::SocketAddr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use anyhow::Result;
 use anytype::{
     prelude::*,
-    test_util::{unique_suffix, with_test_context},
+    test_util::{
+        DisposableRun, TestError, TestResult, unique_suffix, with_disposable_space_context,
+    },
 };
-use chrono::Utc;
 use common::retry_definitive_rate_limit;
 use futures::StreamExt;
-use tokio::{
-    net::TcpStream,
-    time::{Duration, sleep, timeout},
-};
+use tokio::time::{Duration, timeout};
 
-async fn setup_mock_client() -> Result<(AnytypeClient, anytype::mock::MockChatServerHandle)> {
-    let temp_path = std::env::temp_dir().join(format!(
-        "anytype_chat_stream_test_{}.db",
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
-    drop(listener);
-
-    let handle = anytype::mock::MockChatServer::start(addr)?;
-    wait_for_server(addr).await?;
-
-    let mut config = ClientConfig::default().app_name("anytype-chat-stream-test");
-    config.keystore = Some(format!("file:path={}", temp_path.display()));
-    config.keystore_service = Some("anyr".to_string());
-    config.grpc_endpoint = Some(format!("http://{}", addr));
-
-    let client = AnytypeClient::with_config(config)?;
-    let keystore = client.get_key_store();
-    keystore.update_grpc_credentials(&GrpcCredentials::from_token("token-alice"))?;
-
-    Ok((client, handle))
-}
-
-#[tokio::test]
-#[serial_test::serial(chat_stream)]
-async fn chat_stream_receives_messages() -> Result<()> {
-    with_test_context(|ctx| async move {
-        let chat_name = format!("chat-stream-{}", unique_suffix());
-        let chat = retry_definitive_rate_limit("chat stream setup chat", || async {
-            ctx.client
-                .chats()
-                .in_space(&ctx.space_id)
-                .create(
-                    &chat_name,
-                    Icon::Emoji {
-                        emoji: "📡".to_string(),
-                    },
-                )
-                .create()
-                .await
-        })
-        .await?;
-        ctx.register_object(&chat.id);
-
-        let message_id = ctx
-            .client
-            .chats()
-            .send_text(&chat.id, "hello from the real server")
-            .send()
-            .await?;
-        // Subscribe after publishing so the real server's initial message
-        // snapshot deterministically verifies the gRPC stream conversion.
-        let ChatStreamHandle { mut events, .. } =
-            ctx.client.chat_stream().subscribe_chat(&chat.id).build();
-
-        let event = timeout(
-            Duration::from_secs(10),
-            wait_for_event(&mut events, |event| {
-                matches!(event, ChatEvent::MessageAdded { .. })
-            }),
-        )
-        .await
-        .expect("real chat stream event timed out")
-        .expect("real chat stream ended");
-
-        match event {
-            ChatEvent::MessageAdded { chat_id, message } => {
-                assert_eq!(chat_id, chat.id);
-                assert_eq!(message.id, message_id);
-            }
-            other => panic!("expected MessageAdded event, got {other:?}"),
+fn assert_disposable_completed(outcome: DisposableRun<()>, callback_ran: &AtomicBool, suite: &str) {
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("{suite} skipped before callback: {reason:?}");
         }
-
-        ctx.client
-            .chats()
-            .in_space(&ctx.space_id)
-            .delete_message(&chat.id, &message_id)
-            .await?;
-        Ok(())
-    })
-    .await?;
-    Ok(())
-}
-
-#[tokio::test]
-#[serial_test::serial(chat_stream)]
-async fn rest_chat_stream_receives_initial_message() -> Result<()> {
-    with_test_context(|ctx| async move {
-        let chats = ctx.client.chats().in_space(&ctx.space_id);
-        let chat_name = format!("rest-chat-stream-{}", unique_suffix());
-        let chat = retry_definitive_rate_limit("REST SSE setup chat", || async {
-            chats
-                .create(
-                    &chat_name,
-                    Icon::Emoji {
-                        emoji: "📨".to_string(),
-                    },
-                )
-                .create()
-                .await
-        })
-        .await?;
-        ctx.register_object(&chat.id);
-        let message_id = retry_definitive_rate_limit("REST SSE setup message", || async {
-            chats
-                .add_message(&chat.id, MessageContent::new().text("hello from REST SSE"))
-                .send()
-                .await
-        })
-        .await?;
-
-        let mut events = chats
-            .message_stream(&chat.id)
-            .limit(1)
-            .heartbeat_seconds(1)
-            .open()
-            .await?;
-        let event = timeout(Duration::from_secs(10), events.next())
-            .await
-            .expect("REST chat stream event timed out")
-            .expect("REST chat stream ended")?;
-        assert!(matches!(
-            event,
-            ChatHttpEvent::MessageAdded { message } if message.id == message_id
-        ));
-
-        chats.delete_message(&chat.id, &message_id).await?;
-        Ok(())
-    })
-    .await?;
-    Ok(())
-}
-
-#[tokio::test]
-#[serial_test::serial(chat_stream)]
-async fn chat_stream_reconnects_after_disconnect() -> Result<()> {
-    let (client, handle) = setup_mock_client().await?;
-    let chat_id = "chat-default";
-
-    let backoff = BackoffPolicy {
-        initial: Duration::from_millis(25),
-        max: Duration::from_millis(100),
-        factor: 1.5,
-    };
-
-    let ChatStreamHandle { mut events, .. } = client
-        .chat_stream()
-        .subscribe_chat(chat_id)
-        .backoff(backoff)
-        .build();
-
-    let _ = client
-        .chats()
-        .add_message(chat_id)
-        .content(MessageContent {
-            text: "initial".to_string(),
-            style: MessageTextStyle::Paragraph,
-            marks: Vec::new(),
-        })
-        .send()
-        .await?;
-
-    let _ = timeout(
-        Duration::from_secs(2),
-        wait_for_event(&mut events, |event| {
-            matches!(event, ChatEvent::MessageAdded { .. })
-        }),
-    )
-    .await??;
-    handle.disconnect_streams().await;
-    let _ = timeout(
-        Duration::from_secs(2),
-        wait_for_event(&mut events, |event| {
-            matches!(event, ChatEvent::StreamDisconnected)
-        }),
-    )
-    .await??;
-    let message_id = client
-        .chats()
-        .add_message(chat_id)
-        .content(MessageContent {
-            text: "after disconnect".to_string(),
-            style: MessageTextStyle::Paragraph,
-            marks: Vec::new(),
-        })
-        .send()
-        .await?;
-
-    let _ = timeout(
-        Duration::from_secs(2),
-        wait_for_event(&mut events, |event| {
-            matches!(event, ChatEvent::StreamResubscribed)
-        }),
-    )
-    .await??;
-
-    let event = timeout(
-        Duration::from_secs(2),
-        wait_for_event(&mut events, |event| {
-            matches!(event, ChatEvent::MessageAdded { .. })
-        }),
-    )
-    .await??;
-
-    if let ChatEvent::MessageAdded { message, .. } = event {
-        assert_eq!(message.id, message_id);
-    } else {
-        anyhow::bail!("expected MessageAdded after reconnect");
     }
-
-    handle.shutdown().await;
-    Ok(())
 }
 
-async fn wait_for_event<F>(events: &mut ChatEventStream, predicate: F) -> Result<ChatEvent>
+#[tokio::test]
+#[ignore = "requires configured real server and disposable test admission"]
+#[serial_test::serial(disposable_anytype_api)]
+async fn chat_stream_receives_messages() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "grpc-chat-stream",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let chat_name = format!("chat-stream-{}", unique_suffix());
+                let chat = retry_definitive_rate_limit("chat stream setup chat", || async {
+                    ctx.client
+                        .chats()
+                        .in_space(&ctx.space_id)
+                        .create(
+                            &chat_name,
+                            Icon::Emoji {
+                                emoji: "📡".to_string(),
+                            },
+                        )
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_object(&chat.id);
+
+                let message_id = ctx
+                    .client
+                    .chats()
+                    .send_text(&chat.id, "hello from the real server")
+                    .send()
+                    .await?;
+                ctx.register_chat_message(&chat.id, &message_id)?;
+                // Subscribe after publishing so the real server's initial message
+                // snapshot deterministically verifies the gRPC stream conversion.
+                let ChatStreamHandle {
+                    mut events,
+                    control,
+                } = ctx.client.chat_stream().subscribe_chat(&chat.id).build();
+
+                let operation = async {
+                    let event = timeout(
+                        Duration::from_secs(10),
+                        wait_for_event(&mut events, |event| {
+                            matches!(event, ChatEvent::MessageAdded { .. })
+                        }),
+                    )
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "real gRPC chat stream event exceeded its fixed timeout"
+                            .to_owned(),
+                    })??;
+
+                    match event {
+                        ChatEvent::MessageAdded { chat_id, message }
+                            if chat_id == chat.id && message.id == message_id =>
+                        {
+                            Ok(())
+                        }
+                        _ => Err(TestError::Assertion {
+                            message: "gRPC chat stream returned an unexpected message event"
+                                .to_owned(),
+                        }),
+                    }
+                }
+                .await;
+                let shutdown = timeout(Duration::from_secs(10), control.shutdown())
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "gRPC chat stream shutdown exceeded its fixed timeout".to_owned(),
+                    })
+                    .and_then(|result| result.map_err(TestError::from));
+                match operation {
+                    Err(error) => {
+                        if shutdown.is_err() {
+                            eprintln!("gRPC chat-stream shutdown failed after stream error");
+                        }
+                        Err(error)
+                    }
+                    Ok(()) => shutdown,
+                }
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe gRPC chat-stream live harness");
+    assert_disposable_completed(outcome, &callback_ran, "gRPC chat-stream live suite");
+}
+
+#[tokio::test]
+#[ignore = "requires configured real server and disposable test admission"]
+#[serial_test::serial(disposable_anytype_api)]
+async fn rest_chat_stream_receives_initial_message() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "rest-chat-stream",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let chats = ctx.client.chats().in_space(&ctx.space_id);
+                let chat_name = format!("rest-chat-stream-{}", unique_suffix());
+                let chat = retry_definitive_rate_limit("REST SSE setup chat", || async {
+                    chats
+                        .create(
+                            &chat_name,
+                            Icon::Emoji {
+                                emoji: "📨".to_string(),
+                            },
+                        )
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_object(&chat.id);
+                let message_id = retry_definitive_rate_limit("REST SSE setup message", || async {
+                    chats
+                        .add_message(&chat.id, MessageContent::new().text("hello from REST SSE"))
+                        .send()
+                        .await
+                })
+                .await?;
+                ctx.register_chat_message(&chat.id, &message_id)?;
+
+                let mut events = chats
+                    .message_stream(&chat.id)
+                    .limit(1)
+                    .heartbeat_seconds(1)
+                    .open()
+                    .await?;
+                let event = timeout(Duration::from_secs(10), events.next())
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "REST chat stream event exceeded its fixed timeout".to_owned(),
+                    })?
+                    .ok_or_else(|| TestError::Assertion {
+                        message: "REST chat stream ended before its initial message".to_owned(),
+                    })??;
+                assert!(matches!(
+                    event,
+                    ChatHttpEvent::MessageAdded { message } if message.id == message_id
+                ));
+
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe REST chat-stream live harness");
+    assert_disposable_completed(outcome, &callback_ran, "REST chat-stream live suite");
+}
+
+async fn wait_for_event<F>(events: &mut ChatEventStream, predicate: F) -> TestResult<ChatEvent>
 where
     F: Fn(&ChatEvent) -> bool,
 {
@@ -240,17 +195,9 @@ where
                 return Ok(event);
             }
         } else {
-            anyhow::bail!("event stream ended");
+            return Err(TestError::Assertion {
+                message: "gRPC chat event stream ended".to_owned(),
+            });
         }
     }
-}
-
-async fn wait_for_server(addr: SocketAddr) -> Result<()> {
-    for _ in 0..20 {
-        if TcpStream::connect(addr).await.is_ok() {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-    anyhow::bail!("mock server failed to start on {addr}");
 }

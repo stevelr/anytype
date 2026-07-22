@@ -8,18 +8,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
-- Body reader integration coverage now uses cleanup-owned real-server objects
-  for typed conversion, exact order, close-safe repeat reads, tightened limits,
-  and missing-object failures instead of the custom gRPC mock. The exact
-  accepted-show close policy remains covered by a transport-independent unit
-  test.
+- Body reader integration coverage now uses fresh prefix-authorized disposable
+  spaces and cleanup-owned real-server objects for typed conversion, exact
+  order, close-safe repeat reads, tightened limits, and missing-object failures
+  instead of the custom gRPC mock. The adjacent dataview case shares the
+  ignored disposable tier so an empty ambient inventory remains valid. The
+  exact accepted-show close policy remains covered by a transport-independent
+  unit test.
 - Process watcher import-finish fallback events are now correlated to the
   requested space, including an explicit opt-in for legacy events with an empty
   space ID. Real-server Markdown import coverage replaces the custom gRPC mock;
   the same subscription observes the ordinary import lifecycle and the
   subsequent import-finish fallback before cleanup.
-- Chat resolver integration coverage now uses cleanup-owned real-server chats
-  and messages across HTTP and gRPC instead of the deprecated custom gRPC mock.
+- Chat resolver integration coverage now uses fresh prefix-authorized
+  disposable spaces with cleanup-owned real-server chats and immediately
+  registered messages across HTTP and gRPC instead of the deprecated custom
+  gRPC mock. Supporting REST reads and the REST SSE case share the ignored
+  serial tier; broader pre-existing REST workflows remain explicitly ambient.
+  The gRPC stream worker shuts down before cleanup.
 - file/SQLite keystore modifier parsing now recognizes only `:key=`
   boundaries, preserving Windows drive paths and ordinary colon-bearing path
   values while retaining the established last-wins behavior for duplicate
@@ -76,6 +82,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
 - Set view integration cases that require a preconfigured internal `set_of`
   source are ignored in environments where REST cannot create that fixture
+
+### Removed
+
+- Removed the custom semantic gRPC mock module and executable after moving its
+  ordinary body, chat, resolver, and process-watcher consumers to cleanup-owned
+  real-server coverage. The mock-only chat disconnect test is also removed;
+  replacement transport-fault coverage remains tracked behind the reviewed
+  external fault-injection plan.
 
 ### Added
 
@@ -252,8 +266,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   publishing/full-fidelity reads, and reconnecting multi-chat subscriptions
   continue to use gRPC
 - chat discovery, CRUD, REST overlap, and normal streaming tests now exercise
-  the configured real server; only disconnect/reconnect fault injection retains
-  the mock gRPC server
+  the configured real server; disconnect/reconnect fault coverage was removed
+  with the semantic mock and remains deferred to the reviewed external
+  fault-injection work
 - successful REST mutation endpoints may return an empty body, which is now
   handled as a unit response
 - removed skia as dependency (was used to generate image file for the files example)

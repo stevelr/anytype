@@ -2,9 +2,12 @@ mod common;
 
 use anytype::{
     prelude::*,
-    test_util::{TestResult, unique_suffix, with_test_context},
+    test_util::{TestError, TestResult, unique_suffix, with_test_context},
 };
 use common::retry_definitive_rate_limit;
+use tokio::time::{Duration, Instant, sleep};
+
+const LIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[tokio::test]
 async fn test_chat_message_crud() -> TestResult<()> {
@@ -37,6 +40,7 @@ async fn test_chat_message_crud() -> TestResult<()> {
             })
             .send()
             .await?;
+        ctx.register_chat_message(&chat.id, &message_id)?;
 
         let page = ctx
             .client
@@ -91,6 +95,74 @@ async fn test_chat_message_crud() -> TestResult<()> {
 }
 
 #[tokio::test]
+async fn test_rest_chat_search_reactions_and_reads() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let chats = ctx.client.chats().in_space(&ctx.space_id);
+        let chat_name = format!("rest-chat-search-{}", unique_suffix());
+        let chat = retry_definitive_rate_limit("REST chat search setup chat", || async {
+            chats
+                .create(
+                    &chat_name,
+                    Icon::Emoji {
+                        emoji: "🔍".to_string(),
+                    },
+                )
+                .create()
+                .await
+        })
+        .await?;
+        ctx.register_object(&chat.id);
+
+        let message_id = chats
+            .add_message(
+                &chat.id,
+                MessageContent::new().text("ambient REST search coverage"),
+            )
+            .send()
+            .await?;
+        ctx.register_chat_message(&chat.id, &message_id)?;
+
+        let search_deadline = Instant::now() + LIVE_OPERATION_TIMEOUT;
+        loop {
+            let matches = chats
+                .search_messages(&chat.id, "ambient REST search coverage")
+                .limit(20)
+                .search()
+                .await?;
+            if matches
+                .items
+                .iter()
+                .any(|result| result.message.id == message_id)
+            {
+                break;
+            }
+            if Instant::now() >= search_deadline {
+                return Err(TestError::Assertion {
+                    message: "ambient REST message did not become searchable within the fixed live-test deadline"
+                        .to_owned(),
+                });
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        chats.toggle_reaction(&chat.id, &message_id, "👍").await?;
+        let reacted = chats.get_message(&chat.id, &message_id).get().await?;
+        assert!(
+            reacted
+                .reactions
+                .iter()
+                .any(|reaction| reaction.emoji == "👍")
+        );
+
+        chats.read_messages(&chat.id).mark_read().await?;
+        chats.read_reactions(&chat.id).mark_read().await?;
+        chats.read_all(&chat.id).await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn test_rest_chat_message_crud() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let chats = ctx.client.chats().in_space(&ctx.space_id);
@@ -113,6 +185,7 @@ async fn test_rest_chat_message_crud() -> TestResult<()> {
             .add_message(&chat.id, MessageContent::new().bold("hello over REST"))
             .send()
             .await?;
+        ctx.register_chat_message(&chat.id, &message_id)?;
         let created = chats.get_message(&chat.id, &message_id).get().await?;
         assert_eq!(created.content.text, "hello over REST");
         assert!(matches!(
