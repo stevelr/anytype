@@ -380,6 +380,32 @@ rejection, and catalog, adversarial-input, and maximum-result token snapshots.
 Synthetic transport failures remain deferred to the external P4
 fault-injection work.
 
+The production-unlinked schema-tag slice implements `tag_create` and
+`tag_update` through `anytype-api` only. Both workflows resolve one space and
+1..256-scalar property reference, prove space ownership and `select` or
+`multi_select` format with one cache-independent terminal property page, and
+return the closed `{ "tag": TagSummary }` envelope containing only the tag ID,
+key, name, and color. Create defaults an omitted color to `grey`, supports finite
+process-local idempotency, sends one POST, and verifies the scoped tag.
+Update requires an exact `tag_id` plus at least one non-null name, key, or
+color, preflights that scoped tag, sends one PATCH, and verifies every supplied
+field. Preflight and readback use a terminal property-owned tag page because
+the upstream exact-tag endpoint accepts globally valid cross-property IDs.
+Both mutations disable automatic property-cache refresh and invalidate the
+affected space cache, so a primed cache cannot expand their work.
+
+Direct-router and preview-stdio acceptance uses cleanup-owned select
+properties in disposable real-server spaces. Stable-ID calls prove three
+logical and physical HTTP operations for create and four for update, while
+name and key resolution remains within the reviewed 34/199 and 35/205
+ceilings. The maximum complete `CallToolResult` is 5,320 bytes and 3,381
+`o200k_base` tokens. Wrong-format calls fail before a tag write. The current
+test environment provides only an owner credential, so genuine HTTP 403
+permission coverage remains an external acceptance blocker. Deterministic latency,
+connection-fault, and retry-maximum cases remain deferred to the P4
+fault-injection design. The slice remains absent from production until the
+complete `schema` registry is independently reviewed and linked.
+
 The production-unlinked `views-write` read slice implements
 `collection_member_list` through `anytype-api`'s canonical manual-membership
 page. Its exact input is `space`, `collection_id`, and optional non-null
@@ -862,6 +888,8 @@ runtime and advertises their static capability alongside the tool catalog.
 - `src/discovery.rs` — typed status and schema-discovery contracts and
   transport-neutral handlers.
 - `src/schema.rs` — strict input/output schema generation.
+- `src/schema_tag_toolset.rs` - production-unlinked schema tag contracts,
+  handlers, and real-server acceptance.
 - `src/protocol.rs` — tool contracts and annotation profiles.
 - `src/resources.rs` — exact document template, empty instance listing, and
   bounded resource reads.

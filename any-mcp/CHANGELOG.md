@@ -100,6 +100,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   cancellation cleanup, zero-I/O boundary rejection, and catalog/input/result
   token snapshots replace semantic mocks; transport-fault injection remains
   deferred to the P4 follow-up.
+- Add production-unlinked `tag_create` and `tag_update` schema workflows
+  through `anytype-api` only. The closed contracts resolve one space and
+  1..256-scalar property reference, prove space ownership plus `select` or
+  `multi_select` format with a terminal cache-independent property page,
+  default create color to grey, require an exact scoped update tag, and return
+  only a closed `{ "tag": TagSummary }` envelope. Create uses process-local
+  idempotency, both paths send at most one mutation, and terminal property-owned
+  tag-page reads verify exact ownership and every requested field while
+  `.no_cache_refresh()` prevents a primed property cache from adding hidden
+  tag pagination. Direct-router and
+  preview-stdio acceptance uses cleanup-owned disposable real-server
+  properties, proves exact stable-ID 3/3 create and 4/4 update HTTP work, locks
+  the reviewed 34/199 and 35/205 ceilings plus a 5,320-byte/3,381-token maximum
+  complete `CallToolResult`, and rejects wrong-format calls before a write.
+  Genuine 403 coverage remains externally blocked because the available real
+  server exposes only an owner credential. Latency and transport-fault cases
+  remain deferred to the P4 fault-injection design, and the incomplete
+  `schema` registry stays unavailable.
 - Add the default-off production `files` toolset through `anytype-api` only:
   bounded exact-ID metadata and ranged byte reads, strong-validator and HTTP
   evidence reconciliation, native MCP image/audio/text/blob content selected
