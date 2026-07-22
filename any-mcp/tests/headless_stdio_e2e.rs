@@ -1155,6 +1155,10 @@ spawned_baseline_test!(headless_stdio_standard_discovery, ScenarioId::Discovery)
 spawned_baseline_test!(headless_stdio_standard_documents, ScenarioId::Documents);
 spawned_baseline_test!(headless_stdio_standard_views, ScenarioId::Views);
 spawned_baseline_test!(headless_stdio_standard_mutations, ScenarioId::Mutations);
+spawned_baseline_test!(
+    headless_stdio_standard_markdown_noop,
+    ScenarioId::MarkdownNoop
+);
 spawned_baseline_test!(headless_stdio_standard_archive, ScenarioId::Archive);
 
 #[tokio::test]

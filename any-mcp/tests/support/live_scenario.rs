@@ -8,6 +8,7 @@
 use std::{collections::HashSet, future::Future, pin::Pin, time::Duration};
 
 use anytype::{
+    body::{BlockContent, BodySnapshot, MarkKind},
     prelude::{Color, ObjectLayout, PropertyFormat},
     test_util::{TestContext, unique_suffix},
 };
@@ -53,17 +54,19 @@ pub enum ScenarioId {
     Documents,
     Views,
     Mutations,
+    MarkdownNoop,
     Archive,
     #[cfg(test)]
     SyntheticNonExecutable,
 }
 
 impl ScenarioId {
-    pub const EXECUTABLE: [Self; 5] = [
+    pub const EXECUTABLE: [Self; 6] = [
         Self::Discovery,
         Self::Documents,
         Self::Views,
         Self::Mutations,
+        Self::MarkdownNoop,
         Self::Archive,
     ];
 
@@ -73,6 +76,7 @@ impl ScenarioId {
             Self::Documents => "standard_documents",
             Self::Views => "standard_views",
             Self::Mutations => "standard_mutations",
+            Self::MarkdownNoop => "standard_markdown_noop",
             Self::Archive => "standard_archive",
             #[cfg(test)]
             Self::SyntheticNonExecutable => "synthetic_non_executable",
@@ -81,9 +85,12 @@ impl ScenarioId {
 
     pub const fn is_executable(self) -> bool {
         match self {
-            Self::Discovery | Self::Documents | Self::Views | Self::Mutations | Self::Archive => {
-                true
-            }
+            Self::Discovery
+            | Self::Documents
+            | Self::Views
+            | Self::Mutations
+            | Self::MarkdownNoop
+            | Self::Archive => true,
             #[cfg(test)]
             Self::SyntheticNonExecutable => false,
         }
@@ -141,6 +148,116 @@ pub struct DocumentFixture<'a> {
 pub struct DocumentScenarioEvidence {
     pub expected_body: String,
     pub edited_sha256: String,
+}
+
+/// Transport-neutral inputs for an exact exported-Markdown replacement.
+pub struct MarkdownNoopFixture<'a> {
+    pub space_id: &'a str,
+    pub object_id: &'a str,
+    pub exported_body: &'a str,
+}
+
+/// Content-free protocol evidence for an exact Markdown replacement.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MarkdownNoopProtocolEvidence {
+    pub body_sha256: String,
+    pub before_bytes: usize,
+    pub after_bytes: usize,
+}
+
+/// Runs the MCP-only portion of an exported-Markdown no-op workflow.
+pub async fn run_markdown_noop_protocol(
+    driver: &mut impl McpDriver,
+    fixture: MarkdownNoopFixture<'_>,
+) -> Result<MarkdownNoopProtocolEvidence, String> {
+    let before = driver
+        .call_tool(
+            "object_get",
+            json!({
+                "space": fixture.space_id,
+                "object_id": fixture.object_id,
+                "body": {"max_chars": 100_000}
+            }),
+        )
+        .await?;
+    require(
+        before.pointer("/object/summary/id").and_then(Value::as_str) == Some(fixture.object_id),
+        "Markdown no-op pre-read object identity",
+    )?;
+    require(
+        before
+            .pointer("/object/summary/space_id")
+            .and_then(Value::as_str)
+            == Some(fixture.space_id),
+        "Markdown no-op pre-read space identity",
+    )?;
+    let before_body = required_string(&before, "/body/text")?;
+    require(
+        before_body == fixture.exported_body,
+        "Markdown no-op pre-read complete export",
+    )?;
+    let body_sha256 = required_string(&before, "/body/sha256")?;
+    let independent_hash = Sha256::digest(fixture.exported_body.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    require(
+        body_sha256 == independent_hash,
+        "Markdown no-op pre-read hash",
+    )?;
+
+    let updated = driver
+        .call_tool(
+            "object_update",
+            json!({
+                "space": fixture.space_id,
+                "object_id": fixture.object_id,
+                "body_markdown": fixture.exported_body,
+                "expected_body_sha256": body_sha256
+            }),
+        )
+        .await?;
+    require(
+        updated.pointer("/object/id").and_then(Value::as_str) == Some(fixture.object_id),
+        "Markdown no-op update object identity",
+    )?;
+    require(
+        updated.pointer("/object/space_id").and_then(Value::as_str) == Some(fixture.space_id),
+        "Markdown no-op update space identity",
+    )?;
+    require(
+        updated.get("body_sha256").and_then(Value::as_str) == Some(body_sha256.as_str()),
+        "Markdown no-op update hash",
+    )?;
+
+    let after = driver
+        .call_tool(
+            "object_get",
+            json!({
+                "space": fixture.space_id,
+                "object_id": fixture.object_id,
+                "body": {"max_chars": 100_000}
+            }),
+        )
+        .await?;
+    require(
+        after.pointer("/object/summary/id").and_then(Value::as_str) == Some(fixture.object_id),
+        "Markdown no-op repeated export object identity",
+    )?;
+    let after_body = required_string(&after, "/body/text")?;
+    require(
+        after_body == fixture.exported_body,
+        "Markdown no-op repeated export byte identity",
+    )?;
+    require(
+        after.pointer("/body/sha256").and_then(Value::as_str) == Some(body_sha256.as_str()),
+        "Markdown no-op repeated export hash",
+    )?;
+    Ok(MarkdownNoopProtocolEvidence {
+        body_sha256,
+        before_bytes: before_body.len(),
+        after_bytes: after_body.len(),
+    })
 }
 
 /// Runs the compact document workflow through an arbitrary MCP transport.
@@ -288,6 +405,7 @@ pub fn run_scenario<'a>(
             ScenarioId::Documents => Box::pin(run_documents(driver, ctx, evidence)).await,
             ScenarioId::Views => Box::pin(run_views(driver, ctx, evidence)).await,
             ScenarioId::Mutations => Box::pin(run_mutations(driver, ctx, evidence)).await,
+            ScenarioId::MarkdownNoop => Box::pin(run_markdown_noop(driver, ctx, evidence)).await,
             ScenarioId::Archive => Box::pin(run_archive(driver, ctx, evidence)).await,
             #[cfg(test)]
             ScenarioId::SyntheticNonExecutable => {
@@ -730,6 +848,201 @@ async fn run_mutations(
     )
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MarkdownBlockEvidence {
+    identity: Vec<(String, String, Vec<String>)>,
+    semantics: Vec<(String, usize)>,
+    has_link: bool,
+}
+
+fn markdown_block_kind(content: &BlockContent) -> String {
+    match content {
+        BlockContent::Text(text) => format!("text:{:?}", text.style),
+        BlockContent::Layout(_) => "layout".to_owned(),
+        BlockContent::Divider(_) => "divider".to_owned(),
+        BlockContent::Bookmark(_) => "bookmark".to_owned(),
+        BlockContent::Link(_) => "link".to_owned(),
+        BlockContent::Relation(_) => "relation".to_owned(),
+        BlockContent::FeaturedRelations => "featured_relations".to_owned(),
+        BlockContent::Embed(_) => "embed".to_owned(),
+        BlockContent::TableOfContents => "table_of_contents".to_owned(),
+        BlockContent::Table => "table".to_owned(),
+        BlockContent::TableRow { .. } => "table_row".to_owned(),
+        BlockContent::TableColumn => "table_column".to_owned(),
+        BlockContent::File(_) => "file".to_owned(),
+        BlockContent::Unsupported(_) => "unsupported".to_owned(),
+        _ => "future".to_owned(),
+    }
+}
+
+fn markdown_block_evidence(snapshot: &BodySnapshot) -> Result<MarkdownBlockEvidence, String> {
+    let mut identity = Vec::with_capacity(snapshot.len());
+    let mut semantics = Vec::with_capacity(snapshot.len());
+    let mut has_link = false;
+    for block in snapshot.iter() {
+        let kind = markdown_block_kind(&block.content);
+        if let BlockContent::Text(text) = &block.content {
+            has_link |= text
+                .marks
+                .iter()
+                .any(|mark| matches!(mark.kind, MarkKind::Link { .. }));
+        }
+        let content = serde_json::to_string(&block.content)
+            .map_err(|_| "serialize Markdown block evidence".to_owned())?;
+        identity.push((
+            block.id.as_str().to_owned(),
+            kind,
+            block
+                .children
+                .iter()
+                .map(|child| child.as_str().to_owned())
+                .collect(),
+        ));
+        semantics.push((content, block.children.len()));
+    }
+    Ok(MarkdownBlockEvidence {
+        identity,
+        semantics,
+        has_link,
+    })
+}
+
+async fn stable_markdown_export(ctx: &TestContext, object_id: &str) -> Result<String, String> {
+    let mut previous = None;
+    for _ in 0..12 {
+        let markdown = ctx
+            .client
+            .object(&ctx.space_id, object_id)
+            .get()
+            .await
+            .map_err(|_| "read independent Markdown export".to_owned())?
+            .markdown
+            .ok_or_else(|| "independent readback omitted Markdown".to_owned())?;
+        if previous.as_ref() == Some(&markdown) {
+            return Ok(markdown);
+        }
+        previous = Some(markdown);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("independent Markdown export did not stabilize".to_owned())
+}
+
+async fn stable_markdown_blocks(
+    ctx: &TestContext,
+    object_id: &str,
+) -> Result<MarkdownBlockEvidence, String> {
+    let mut previous = None;
+    for _ in 0..12 {
+        let snapshot = ctx
+            .client
+            .blocks()
+            .body(&ctx.space_id, object_id)
+            .fetch()
+            .await
+            .map_err(|_| "read independent Markdown ObjectShow evidence".to_owned())?;
+        let evidence = markdown_block_evidence(&snapshot)?;
+        if previous.as_ref() == Some(&evidence) {
+            return Ok(evidence);
+        }
+        previous = Some(evidence);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("independent Markdown ObjectShow evidence did not stabilize".to_owned())
+}
+
+async fn run_markdown_noop(
+    driver: &mut impl McpDriver,
+    ctx: &TestContext,
+    evidence: &mut ScenarioEvidence,
+) -> Result<(), String> {
+    let name = format!("MCP Markdown no-op {}", unique_suffix());
+    let requested = concat!(
+        "# Document heading\n\n",
+        "## Stable heading\n\n",
+        "- bullet one\n",
+        "- bullet two\n\n",
+        "1. numbered one\n",
+        "2. numbered two\n\n",
+        "- [ ] unchecked\n",
+        "- [x] checked\n\n",
+        "> one-line quote\n\n",
+        "A [bounded link](https://example.com/path?q=one) with Unicode こんにちは 👋.\n\n",
+        "First paragraph spans\n",
+        "multiple source lines.\n\n",
+        "Final paragraph."
+    );
+    evidence.sensitive(&name);
+    evidence.sensitive(requested);
+    let object = create_object(ctx, &name, requested).await?;
+    evidence.fixture(&object.id);
+
+    let before_export = stable_markdown_export(ctx, &object.id).await?;
+    evidence.sensitive(&before_export);
+    let before_blocks = stable_markdown_blocks(ctx, &object.id).await?;
+    let before_kinds = before_blocks
+        .identity
+        .iter()
+        .map(|(_, kind, _)| kind.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "text:Header2",
+        "text:Bulleted",
+        "text:Numbered",
+        "text:Checkbox",
+        "text:Quote",
+        "text:Paragraph",
+    ] {
+        if !before_kinds.contains(&expected) {
+            return Err(format!(
+                "Markdown no-op fixture expected block kind={expected} observed={before_kinds:?}"
+            ));
+        }
+    }
+    require(before_blocks.has_link, "Markdown no-op fixture link mark")?;
+
+    let protocol = run_markdown_noop_protocol(
+        driver,
+        MarkdownNoopFixture {
+            space_id: &ctx.space_id,
+            object_id: &object.id,
+            exported_body: &before_export,
+        },
+    )
+    .await?;
+    let after_export = stable_markdown_export(ctx, &object.id).await?;
+    let after_blocks = stable_markdown_blocks(ctx, &object.id).await?;
+    require(
+        after_export == before_export,
+        "independent Markdown no-op byte identity",
+    )?;
+    require(
+        Sha256::digest(after_export.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            == protocol.body_sha256,
+        "independent Markdown no-op hash",
+    )?;
+    require(
+        before_blocks.semantics == after_blocks.semantics,
+        "independent Markdown no-op typed semantics and order",
+    )?;
+    require(
+        before_blocks.has_link == after_blocks.has_link,
+        "independent Markdown no-op link semantics",
+    )?;
+    eprintln!(
+        "MCP Markdown no-op evidence: transport_scenario={} bytes_before={} bytes_after={} blocks_before={} blocks_after={} block_identity={}",
+        ScenarioId::MarkdownNoop.as_str(),
+        protocol.before_bytes,
+        protocol.after_bytes,
+        before_blocks.identity.len(),
+        after_blocks.identity.len(),
+        before_blocks.identity == after_blocks.identity,
+    );
+    Ok(())
+}
+
 async fn run_archive(
     driver: &mut impl McpDriver,
     ctx: &TestContext,
@@ -1168,6 +1481,94 @@ fn require(condition: bool, message: &str) -> Result<(), String> {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    struct ScriptedNoopDriver {
+        responses: VecDeque<Value>,
+        calls: Vec<(&'static str, Value)>,
+    }
+
+    impl ScriptedNoopDriver {
+        fn new(exported: &str, repeated: &str) -> Self {
+            let hash = Sha256::digest(exported.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let object_get = |body: &str| {
+                json!({
+                    "object": {"summary": {"id": "object-id", "space_id": "space-id"}},
+                    "body": {"text": body, "sha256": hash}
+                })
+            };
+            Self {
+                responses: VecDeque::from([
+                    object_get(exported),
+                    json!({
+                        "object": {"id": "object-id", "space_id": "space-id"},
+                        "body_sha256": hash
+                    }),
+                    object_get(repeated),
+                ]),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl McpDriver for ScriptedNoopDriver {
+        fn call_tool<'a>(
+            &'a mut self,
+            name: &'static str,
+            arguments: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+            self.calls.push((name, arguments));
+            Box::pin(std::future::ready(self.responses.pop_front().ok_or_else(
+                || "scripted Markdown response exhausted".to_owned(),
+            )))
+        }
+
+        fn call_tool_error<'a>(
+            &'a mut self,
+            _name: &'static str,
+            _arguments: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+            Box::pin(std::future::ready(Err(
+                "unexpected scripted error call".to_owned()
+            )))
+        }
+
+        fn list_tools<'a>(
+            &'a mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>> {
+            Box::pin(std::future::ready(Err(
+                "unexpected scripted list_tools".to_owned()
+            )))
+        }
+
+        fn list_resources<'a>(
+            &'a mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+            Box::pin(std::future::ready(Err(
+                "unexpected scripted list_resources".to_owned(),
+            )))
+        }
+
+        fn list_resource_templates<'a>(
+            &'a mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+            Box::pin(std::future::ready(Err(
+                "unexpected scripted list_resource_templates".to_owned(),
+            )))
+        }
+
+        fn read_resource<'a>(
+            &'a mut self,
+            _uri: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+            Box::pin(std::future::ready(Err(
+                "unexpected scripted read_resource".to_owned()
+            )))
+        }
+    }
 
     // This compile-time assignment ensures callers cannot accidentally regain
     // the large inline dispatcher future that overflowed the live-test worker.
@@ -1201,6 +1602,54 @@ mod ownership_tests {
             std::mem::size_of::<ScenarioFuture<'static>>(),
             2 * std::mem::size_of::<usize>()
         );
+    }
+
+    #[tokio::test]
+    async fn markdown_noop_protocol_forwards_exact_export_hash_and_repeats_read() {
+        let body = "## Stable\n\nUnicode こんにちは and [link](https://example.com).";
+        let mut driver = ScriptedNoopDriver::new(body, body);
+        let result = run_markdown_noop_protocol(
+            &mut driver,
+            MarkdownNoopFixture {
+                space_id: "space-id",
+                object_id: "object-id",
+                exported_body: body,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.before_bytes, body.len());
+        assert_eq!(result.after_bytes, body.len());
+        assert_eq!(driver.calls.len(), 3);
+        assert_eq!(
+            driver
+                .calls
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            ["object_get", "object_update", "object_get"]
+        );
+        assert_eq!(driver.calls[1].1["body_markdown"], body);
+        assert_eq!(
+            driver.calls[1].1["expected_body_sha256"],
+            result.body_sha256
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_noop_protocol_rejects_lossy_repeated_export() {
+        let mut driver = ScriptedNoopDriver::new("before", "after");
+        let error = run_markdown_noop_protocol(
+            &mut driver,
+            MarkdownNoopFixture {
+                space_id: "space-id",
+                object_id: "object-id",
+                exported_body: "before",
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Markdown no-op repeated export byte identity");
     }
 
     #[test]

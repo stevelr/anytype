@@ -2009,6 +2009,10 @@ direct_baseline_test!(headless_direct_standard_discovery, ScenarioId::Discovery)
 direct_baseline_test!(headless_direct_standard_documents, ScenarioId::Documents);
 direct_baseline_test!(headless_direct_standard_views, ScenarioId::Views);
 direct_baseline_test!(headless_direct_standard_mutations, ScenarioId::Mutations);
+direct_baseline_test!(
+    headless_direct_standard_markdown_noop,
+    ScenarioId::MarkdownNoop
+);
 direct_baseline_test!(headless_direct_standard_archive, ScenarioId::Archive);
 
 #[tokio::test]
