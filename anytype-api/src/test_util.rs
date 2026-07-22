@@ -355,6 +355,21 @@ impl TestContext {
     pub fn register_object(&self, obj_id: &str) {
         self.cleanup.add_object(&self.space_id, obj_id);
     }
+    /// Registers a message belonging to a cleanup-owned chat.
+    ///
+    /// The chat must already be registered as an object in this test context.
+    /// Registered messages are deleted and proved absent before their chat is
+    /// archived during teardown.
+    pub fn register_chat_message(&self, chat_id: &str, message_id: &str) -> TestResult<()> {
+        if self
+            .cleanup
+            .add_chat_message(&self.space_id, chat_id, message_id)
+        {
+            Ok(())
+        } else {
+            Err(child_registry_error())
+        }
+    }
     pub fn register_file(&self, file_id: &str) {
         self.cleanup.add_object(&self.space_id, file_id);
     }
@@ -2011,6 +2026,7 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
 #[derive(Default)]
 pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
+    chat_messages: Mutex<BTreeSet<(String, String, String)>>,
     collection_fixtures: Mutex<BTreeSet<(String, String, String)>>,
     space_fixtures: Mutex<BTreeMap<String, String>>,
     template_resources: Mutex<Vec<TemplateFixtureResource>>,
@@ -2125,12 +2141,14 @@ impl TestCleanup {
         // multiple locks always acquire authoritative IDs before their private
         // provenance registry.
         let objects_empty = self.objects.lock().is_empty();
+        let chat_messages_empty = self.chat_messages.lock().is_empty();
         let collections_empty = self.collection_fixtures.lock().is_empty();
         let spaces_empty = self.space_fixtures.lock().is_empty();
         let templates_empty = self.template_resources.lock().is_empty();
         let registered_empty = self.registered_ids.lock().is_empty();
         let paths_empty = self.temp_paths.lock().is_empty();
         objects_empty
+            && chat_messages_empty
             && collections_empty
             && spaces_empty
             && templates_empty
@@ -2141,6 +2159,24 @@ impl TestCleanup {
     /// Remembers this object for deletion after the test
     pub fn add_object(&self, space_id: &str, id: &str) {
         self.add_generic_resource(space_id, id, DataModel::Object);
+    }
+
+    fn add_chat_message(&self, space_id: &str, chat_id: &str, message_id: &str) -> bool {
+        let chat_is_owned =
+            self.objects
+                .lock()
+                .iter()
+                .any(|(registered_space, registered_id, model)| {
+                    registered_space == space_id
+                        && registered_id == chat_id
+                        && *model == DataModel::Object
+                });
+        chat_is_owned
+            && self.chat_messages.lock().insert((
+                space_id.to_owned(),
+                chat_id.to_owned(),
+                message_id.to_owned(),
+            ))
     }
 
     fn has_type(&self, space_id: &str, id: &str) -> bool {
@@ -2301,6 +2337,20 @@ impl TestCleanup {
             }
         }
 
+        let chat_messages = {
+            let mut guard = self.chat_messages.lock();
+            std::mem::take(&mut *guard)
+        };
+        let mut chat_cleanup_failed = false;
+        for (space_id, chat_id, message_id) in chat_messages.into_iter().rev() {
+            if cleanup_chat_message(client, &space_id, &chat_id, &message_id)
+                .await
+                .is_err()
+            {
+                chat_cleanup_failed = true;
+            }
+        }
+
         let mut objects = {
             let mut guard = self.objects.lock();
             std::mem::take(&mut *guard)
@@ -2391,7 +2441,7 @@ impl TestCleanup {
         if template_cleanup_failed {
             return Err(template_cleanup_provenance_error());
         }
-        if ordinary_cleanup_failed {
+        if chat_cleanup_failed || ordinary_cleanup_failed {
             return Err(child_cleanup_error());
         }
         if space_cleanup_failed {
@@ -2399,6 +2449,47 @@ impl TestCleanup {
         }
         Ok(())
     }
+}
+
+async fn cleanup_chat_message(
+    client: &AnytypeClient,
+    space_id: &str,
+    chat_id: &str,
+    message_id: &str,
+) -> TestResult<()> {
+    let chats = client.chats().in_space(space_id);
+    match chats.delete_message(chat_id, message_id).await {
+        Ok(())
+        | Err(AnytypeError::NotFound { .. })
+        | Err(AnytypeError::ApiError { code: 404, .. }) => {}
+        Err(_) => return Err(child_cleanup_error()),
+    }
+
+    let verify = VerifyConfig {
+        timeout: Duration::from_secs(10),
+        initial_delay: Duration::from_millis(50),
+        max_delay: Duration::from_millis(500),
+        max_attempts: 20,
+    };
+    verify_semantic(
+        &verify,
+        "cleanup-owned chat message absence",
+        message_id,
+        || async {
+            match chats.get_message(chat_id, message_id).get().await {
+                Err(AnytypeError::NotFound { .. })
+                | Err(AnytypeError::ApiError { code: 404, .. }) => Ok(()),
+                Ok(_) => Err(AnytypeError::NotFound {
+                    obj_type: "deleted chat message still visible".to_owned(),
+                    key: String::new(),
+                }),
+                Err(error) => Err(error),
+            }
+        },
+        |()| true,
+    )
+    .await
+    .map_err(|_| child_cleanup_error())
 }
 
 fn child_cleanup_error() -> TestError {
@@ -3293,6 +3384,31 @@ mod tests {
     const CREATED_VIEW_ID: &str = "9c4d60de-66bb-41b9-984e-ce750e4301e1";
     const BLOCK_ID: &str = "dataview";
     const ARCHIVED_SOURCE_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+
+    #[test]
+    fn chat_message_cleanup_registration_requires_one_owned_chat() {
+        let cleanup = TestCleanup::default();
+        assert!(!cleanup.add_chat_message(SPACE_ID, COLLECTION_ID, "message-1"));
+        assert!(cleanup.chat_messages.lock().is_empty());
+
+        cleanup.add_object(SPACE_ID, COLLECTION_ID);
+        assert!(cleanup.add_chat_message(SPACE_ID, COLLECTION_ID, "message-1"));
+        assert!(!cleanup.add_chat_message(SPACE_ID, COLLECTION_ID, "message-1"));
+        assert!(!cleanup.add_chat_message(SPACE_ID, "other-chat", "message-2"));
+        assert_eq!(
+            cleanup
+                .chat_messages
+                .lock()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![(
+                SPACE_ID.to_owned(),
+                COLLECTION_ID.to_owned(),
+                "message-1".to_owned()
+            )]
+        );
+    }
 
     async fn template_paged_fixture_server(
         bodies: Vec<String>,

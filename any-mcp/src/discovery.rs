@@ -21,6 +21,7 @@ use rmcp::{
     schemars::{JsonSchema, Schema, SchemaGenerator, json_schema},
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -31,8 +32,10 @@ use crate::{
         BoundedText, DisplayName, DomainValueError, EntityId, ObjectSummary, SpaceId, TypeKey,
     },
     error::ToolError,
+    filters::{McpListFilter, prepare_flat_filters},
     handler_support::{
         HandlerError, PageRequest, UpstreamPagination, begin_page, execute_handler, finish_page,
+        validate_page_binding_size,
     },
     object_output::{ProjectedColor, object_summary},
     pagination::{Page, PageLimit},
@@ -40,7 +43,7 @@ use crate::{
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
     schema::SchemaContractError,
-    validation::{BoundedList, ValidationError},
+    validation::{BoundedList, Omittable, ValidationError, optional_non_null_schema},
 };
 
 const MAX_REFERENCE_CHARS: usize = 512;
@@ -130,6 +133,10 @@ pub struct ServerStatusInput {}
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpaceListInput {
+    /// Optional shared filter; list endpoints accept only one flat `and` group.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_filter_schema")]
+    pub filters: Omittable<McpListFilter>,
     /// Requested item limit, defaulting to 20.
     #[serde(default)]
     pub limit: PageLimit,
@@ -144,6 +151,10 @@ pub struct SpaceListInput {
 pub struct TypeListInput {
     /// Unique space name or identifier.
     pub space: DiscoveryReference,
+    /// Optional shared filter; list endpoints accept only one flat `and` group.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_filter_schema")]
+    pub filters: Omittable<McpListFilter>,
     /// Requested item limit, defaulting to 20.
     #[serde(default)]
     pub limit: PageLimit,
@@ -161,6 +172,10 @@ pub struct PropertyListInput {
     /// Optional type key, name, or identifier used to scope linked properties.
     #[serde(default, rename = "type")]
     pub type_reference: Option<DiscoveryReference>,
+    /// Optional shared filter; list endpoints accept only one flat `and` group.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_filter_schema")]
+    pub filters: Omittable<McpListFilter>,
     /// Requested item limit, defaulting to 20.
     #[serde(default)]
     pub limit: PageLimit,
@@ -177,6 +192,10 @@ pub struct TagListInput {
     pub space: DiscoveryReference,
     /// Select-property key or identifier.
     pub property: DiscoveryReference,
+    /// Optional shared filter; list endpoints accept only one flat `and` group.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_filter_schema")]
+    pub filters: Omittable<McpListFilter>,
     /// Requested item limit, defaulting to 20.
     #[serde(default)]
     pub limit: PageLimit,
@@ -194,12 +213,20 @@ pub struct TemplateListInput {
     /// Type key, name, or identifier whose templates should be listed.
     #[serde(rename = "type")]
     pub type_reference: DiscoveryReference,
+    /// Optional shared filter; list endpoints accept only one flat `and` group.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_filter_schema")]
+    pub filters: Omittable<McpListFilter>,
     /// Requested item limit, defaulting to 20.
     #[serde(default)]
     pub limit: PageLimit,
     /// Opaque continuation cursor, when continuing the same request.
     #[serde(default)]
     pub cursor: Option<CursorToken>,
+}
+
+fn optional_filter_schema(generator: &mut SchemaGenerator) -> Schema {
+    optional_non_null_schema::<McpListFilter>(generator)
 }
 
 /// Redacted startup snapshot returned by `server_status`.
@@ -428,7 +455,7 @@ pub fn server_status_tool() -> Result<WorkflowTool<ServerStatusOutput>, SchemaCo
 pub fn space_list_tool() -> Result<WorkflowTool<Page<SpaceSummary>>, SchemaContractError> {
     workflow_tool::<SpaceListInput, Page<SpaceSummary>>(
         "space_list",
-        "List one bounded page of concise Anytype space summaries.",
+        "List one bounded page of concise Anytype space summaries, optionally using one server-side flat-AND filter.",
         ToolProfile::Read,
     )
 }
@@ -437,7 +464,7 @@ pub fn space_list_tool() -> Result<WorkflowTool<Page<SpaceSummary>>, SchemaContr
 pub fn type_list_tool() -> Result<WorkflowTool<Page<TypeSummary>>, SchemaContractError> {
     workflow_tool::<TypeListInput, Page<TypeSummary>>(
         "type_list",
-        "List one bounded page of active type identifiers, keys, names, and layouts in a resolved space.",
+        "List one bounded page of active types in a resolved space, optionally using one server-side flat-AND filter.",
         ToolProfile::Read,
     )
 }
@@ -446,7 +473,7 @@ pub fn type_list_tool() -> Result<WorkflowTool<Page<TypeSummary>>, SchemaContrac
 pub fn property_list_tool() -> Result<WorkflowTool<Page<PropertySummary>>, SchemaContractError> {
     workflow_tool::<PropertyListInput, Page<PropertySummary>>(
         "property_list",
-        "List one bounded page of property definitions and tag counts. Does not return tag options.",
+        "List one bounded page of property definitions and tag counts, optionally using one server-side flat-AND filter. A filter cannot be combined with type scoping.",
         ToolProfile::Read,
     )
 }
@@ -455,7 +482,7 @@ pub fn property_list_tool() -> Result<WorkflowTool<Page<PropertySummary>>, Schem
 pub fn tag_list_tool() -> Result<WorkflowTool<Page<TagSummary>>, SchemaContractError> {
     workflow_tool::<TagListInput, Page<TagSummary>>(
         "tag_list",
-        "List one bounded page of tag options for one resolved select property.",
+        "List one bounded page of tag options for one resolved select property, optionally using one server-side flat-AND filter.",
         ToolProfile::Read,
     )
 }
@@ -464,7 +491,7 @@ pub fn tag_list_tool() -> Result<WorkflowTool<Page<TagSummary>>, SchemaContractE
 pub fn template_list_tool() -> Result<WorkflowTool<Page<ObjectSummary>>, SchemaContractError> {
     workflow_tool::<TemplateListInput, Page<ObjectSummary>>(
         "template_list",
-        "List one bounded page of template summaries for one resolved type. Returns no template bodies.",
+        "List one bounded page of body-free template summaries for one resolved type, optionally using one server-side flat-AND filter.",
         ToolProfile::Read,
     )
 }
@@ -533,12 +560,25 @@ impl DiscoveryHandlers {
         let Ok(contract) = space_list_tool() else {
             return tool_error(&ToolError::upstream());
         };
+        let prepared = match prepare_flat_filters(&input.filters) {
+            Ok(prepared) => prepared,
+            Err(error) => return tool_error(error.tool_error()),
+        };
+        let raw_params = EmptyPageParams {
+            filters: prepared.raw_binding.as_ref(),
+        };
+        if let Err(error) = validate_page_binding_size("space_list", input.limit, &raw_params) {
+            return tool_error(error.tool_error());
+        }
+        let params = EmptyPageParams {
+            filters: prepared.semantic_binding.as_ref(),
+        };
         let request = match begin_page(
             &self.cursors,
             input.cursor.as_ref(),
             "space_list",
             input.limit,
-            &EmptyPageParams {},
+            &params,
         ) {
             Ok(request) => request,
             Err(error) => return tool_error(error.tool_error()),
@@ -553,6 +593,7 @@ impl DiscoveryHandlers {
             async move {
                 client
                     .spaces()
+                    .filters(prepared.upstream)
                     .limit(u32::from(input.limit.get()))
                     .offset(request.offset().get())
                     .list()
@@ -574,8 +615,20 @@ impl DiscoveryHandlers {
         let Ok(contract) = type_list_tool() else {
             return tool_error(&ToolError::upstream());
         };
+        let prepared = match prepare_flat_filters(&input.filters) {
+            Ok(prepared) => prepared,
+            Err(error) => return tool_error(error.tool_error()),
+        };
+        let raw_params = SpacePageParams {
+            space: input.space.as_str(),
+            filters: prepared.raw_binding.as_ref(),
+        };
+        if let Err(error) = validate_page_binding_size("type_list", input.limit, &raw_params) {
+            return tool_error(error.tool_error());
+        }
         let params = SpacePageParams {
             space: input.space.as_str(),
+            filters: prepared.semantic_binding.as_ref(),
         };
         let request = match begin_page(
             &self.cursors,
@@ -598,6 +651,7 @@ impl DiscoveryHandlers {
                 let space_id = client.resolve_space_id(input.space.as_str()).await?;
                 client
                     .types(space_id)
+                    .filters(prepared.upstream)
                     .limit(u32::from(input.limit.get()))
                     .offset(request.offset().get())
                     .list()
@@ -628,12 +682,33 @@ impl DiscoveryHandlers {
         let Ok(contract) = property_list_tool() else {
             return tool_error(&ToolError::upstream());
         };
+        if !input.filters.is_none() && input.type_reference.is_some() {
+            return tool_error(&ToolError::validation_message(
+                "filters cannot be combined with property_list type scope because the upstream endpoint cannot express both constraints.",
+            ));
+        }
+        let prepared = match prepare_flat_filters(&input.filters) {
+            Ok(prepared) => prepared,
+            Err(error) => return tool_error(error.tool_error()),
+        };
+        let raw_params = PropertyPageParams {
+            space: input.space.as_str(),
+            type_reference: input
+                .type_reference
+                .as_ref()
+                .map(DiscoveryReference::as_str),
+            filters: prepared.raw_binding.as_ref(),
+        };
+        if let Err(error) = validate_page_binding_size("property_list", input.limit, &raw_params) {
+            return tool_error(error.tool_error());
+        }
         let params = PropertyPageParams {
             space: input.space.as_str(),
             type_reference: input
                 .type_reference
                 .as_ref()
                 .map(DiscoveryReference::as_str),
+            filters: prepared.semantic_binding.as_ref(),
         };
         let request = match begin_page(
             &self.cursors,
@@ -669,6 +744,7 @@ impl DiscoveryHandlers {
                 };
                 let response = client
                     .properties(&space_id)
+                    .filters(prepared.upstream)
                     .limit(u32::from(input.limit.get()))
                     .offset(request.offset().get())
                     .list()
@@ -717,9 +793,22 @@ impl DiscoveryHandlers {
         let Ok(contract) = tag_list_tool() else {
             return tool_error(&ToolError::upstream());
         };
+        let prepared = match prepare_flat_filters(&input.filters) {
+            Ok(prepared) => prepared,
+            Err(error) => return tool_error(error.tool_error()),
+        };
+        let raw_params = TagPageParams {
+            space: input.space.as_str(),
+            property: input.property.as_str(),
+            filters: prepared.raw_binding.as_ref(),
+        };
+        if let Err(error) = validate_page_binding_size("tag_list", input.limit, &raw_params) {
+            return tool_error(error.tool_error());
+        }
         let params = TagPageParams {
             space: input.space.as_str(),
             property: input.property.as_str(),
+            filters: prepared.semantic_binding.as_ref(),
         };
         let request = match begin_page(
             &self.cursors,
@@ -755,12 +844,14 @@ impl DiscoveryHandlers {
                         message: "tag_list requires a select or multi-select property".to_owned(),
                     });
                 }
-                client
+                let mut request = client
                     .tags(space_id, property_id)
                     .limit(u32::from(input.limit.get()))
-                    .offset(request.offset().get())
-                    .list()
-                    .await
+                    .offset(request.offset().get());
+                for filter in prepared.upstream {
+                    request = request.filter(filter);
+                }
+                request.list().await
             },
             move |page| async move {
                 finish_api_page(&cursors, request, page, |tag| {
@@ -780,9 +871,22 @@ impl DiscoveryHandlers {
         let Ok(contract) = template_list_tool() else {
             return tool_error(&ToolError::upstream());
         };
+        let prepared = match prepare_flat_filters(&input.filters) {
+            Ok(prepared) => prepared,
+            Err(error) => return tool_error(error.tool_error()),
+        };
+        let raw_params = TemplatePageParams {
+            space: input.space.as_str(),
+            type_reference: input.type_reference.as_str(),
+            filters: prepared.raw_binding.as_ref(),
+        };
+        if let Err(error) = validate_page_binding_size("template_list", input.limit, &raw_params) {
+            return tool_error(error.tool_error());
+        }
         let params = TemplatePageParams {
             space: input.space.as_str(),
             type_reference: input.type_reference.as_str(),
+            filters: prepared.semantic_binding.as_ref(),
         };
         let request = match begin_page(
             &self.cursors,
@@ -806,12 +910,14 @@ impl DiscoveryHandlers {
                 let type_id = client
                     .resolve_type_id(&space_id, input.type_reference.as_str())
                     .await?;
-                client
+                let mut request = client
                     .templates(space_id, type_id)
                     .limit(u32::from(input.limit.get()))
-                    .offset(request.offset().get())
-                    .list()
-                    .await
+                    .offset(request.offset().get());
+                for filter in prepared.upstream {
+                    request = request.filter(filter);
+                }
+                request.list().await
             },
             move |page| async move {
                 finish_api_page(&cursors, request, page, |template| {
@@ -826,11 +932,16 @@ impl DiscoveryHandlers {
 }
 
 #[derive(Serialize)]
-struct EmptyPageParams {}
+struct EmptyPageParams<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<&'a Value>,
+}
 
 #[derive(Serialize)]
 struct SpacePageParams<'a> {
     space: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<&'a Value>,
 }
 
 #[derive(Serialize)]
@@ -838,12 +949,16 @@ struct PropertyPageParams<'a> {
     space: &'a str,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     type_reference: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<&'a Value>,
 }
 
 #[derive(Serialize)]
 struct TagPageParams<'a> {
     space: &'a str,
     property: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<&'a Value>,
 }
 
 #[derive(Serialize)]
@@ -851,6 +966,8 @@ struct TemplatePageParams<'a> {
     space: &'a str,
     #[serde(rename = "type")]
     type_reference: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<&'a Value>,
 }
 
 struct PropertyPageSource {
@@ -1456,6 +1573,21 @@ mod tests {
         assert_eq!(result.structured_content.as_ref().unwrap()["code"], code);
     }
 
+    fn text_filter(value: &str) -> Omittable<McpListFilter> {
+        Omittable::Present(
+            serde_json::from_value(json!({
+                "operator": "and",
+                "conditions": [{
+                    "format": "text",
+                    "property_key": "name",
+                    "condition": "contains",
+                    "value": value
+                }]
+            }))
+            .expect("valid shared text filter"),
+        )
+    }
+
     fn property(value: serde_json::Value) -> Property {
         serde_json::from_value(value).unwrap()
     }
@@ -1540,6 +1672,27 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_value::<SpaceListInput>(json!({"limit":101})).is_err());
+        assert!(serde_json::from_value::<SpaceListInput>(json!({"filters":null})).is_err());
+        assert!(
+            serde_json::from_value::<TypeListInput>(json!({"space":"space-1","filters":null}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PropertyListInput>(json!({"space":"space-1","filters":null}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TagListInput>(
+                json!({"space":"space-1","property":"status","filters":null})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TemplateListInput>(
+                json!({"space":"space-1","type":"page","filters":null})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1640,7 +1793,10 @@ mod tests {
     #[tokio::test]
     async fn handler_rejects_cursor_reuse_with_changed_params_before_upstream() {
         let cursors = Arc::new(CursorStore::new().unwrap());
-        let old_params = SpacePageParams { space: "space-a" };
+        let old_params = SpacePageParams {
+            space: "space-a",
+            filters: None,
+        };
         let request = begin_page(
             &cursors,
             None,
@@ -1661,6 +1817,7 @@ mod tests {
             .type_list(
                 TypeListInput {
                     space: DiscoveryReference::new("space-b").unwrap(),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(20).unwrap(),
                     cursor: page.next_cursor().cloned(),
                 },
@@ -1676,7 +1833,7 @@ mod tests {
         let fixture = HttpFixture::start(vec![
             ExpectedRequest::json(
                 "/v1/spaces",
-                &[("limit", "2")],
+                &[("limit", "2"), ("name[contains]", "Work")],
                 paged(
                     vec![
                         json!({"id":SPACE_ID,"name":"Work","object":"space"}),
@@ -1689,7 +1846,7 @@ mod tests {
             ),
             ExpectedRequest::json(
                 "/v1/spaces",
-                &[("limit", "2"), ("offset", "2")],
+                &[("limit", "2"), ("offset", "2"), ("name[contains]", "Work")],
                 paged(
                     vec![json!({"id":ID_B,"name":"Direct","object":"one_to_one"})],
                     2,
@@ -1705,6 +1862,7 @@ mod tests {
         let first = handlers
             .space_list(
                 SpaceListInput {
+                    filters: text_filter("Work"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -1724,6 +1882,7 @@ mod tests {
         let mismatch = handlers
             .space_list(
                 SpaceListInput {
+                    filters: text_filter("Work"),
                     limit: PageLimit::new(3).unwrap(),
                     cursor: Some(cursor.clone()),
                 },
@@ -1732,9 +1891,29 @@ mod tests {
             .await;
         assert_error(&mismatch, "validation");
 
+        let changed_filter = handlers
+            .space_list(
+                SpaceListInput {
+                    filters: text_filter("Private changed query"),
+                    limit: PageLimit::new(2).unwrap(),
+                    cursor: Some(cursor.clone()),
+                },
+                &cancellation,
+            )
+            .await;
+        assert_error(&changed_filter, "validation");
+        assert!(
+            !changed_filter.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("Private changed query")
+        );
+
         let second = handlers
             .space_list(
                 SpaceListInput {
+                    filters: text_filter("Work"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: Some(cursor),
                 },
@@ -1754,7 +1933,7 @@ mod tests {
         let fixture = HttpFixture::start(vec![
             ExpectedRequest::json(
                 &path,
-                &[("limit", "2")],
+                &[("limit", "2"), ("name[contains]", "Type")],
                 paged(
                     vec![
                         type_value(ID_A, "old", "Archived", true, Vec::new()),
@@ -1767,7 +1946,7 @@ mod tests {
             ),
             ExpectedRequest::json(
                 &path,
-                &[("limit", "2"), ("offset", "2")],
+                &[("limit", "2"), ("offset", "2"), ("name[contains]", "Type")],
                 paged(
                     vec![
                         type_value(ID_C, "task", "Task", false, Vec::new()),
@@ -1787,6 +1966,7 @@ mod tests {
             .type_list(
                 TypeListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                    filters: text_filter("Type"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -1806,6 +1986,7 @@ mod tests {
             .type_list(
                 TypeListInput {
                     space: DiscoveryReference::new(ID_A).unwrap(),
+                    filters: text_filter("Type"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: Some(cursor.clone()),
                 },
@@ -1817,6 +1998,7 @@ mod tests {
             .type_list(
                 TypeListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                    filters: text_filter("Type"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: Some(cursor),
                 },
@@ -1893,6 +2075,7 @@ mod tests {
                 PropertyListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     type_reference: Some(DiscoveryReference::new(ID_A).unwrap()),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -1912,6 +2095,7 @@ mod tests {
                 PropertyListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     type_reference: Some(DiscoveryReference::new(ID_B).unwrap()),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(2).unwrap(),
                     cursor: Some(cursor.clone()),
                 },
@@ -1924,6 +2108,7 @@ mod tests {
                 PropertyListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     type_reference: Some(DiscoveryReference::new(ID_A).unwrap()),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(2).unwrap(),
                     cursor: Some(cursor),
                 },
@@ -1949,6 +2134,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn property_list_forwards_flat_filter_to_one_server_page() {
+        let properties_path = format!("/v1/spaces/{SPACE_ID}/properties");
+        let fixture = HttpFixture::start(vec![ExpectedRequest::json(
+            &properties_path,
+            &[("limit", "2"), ("name[contains]", "Property")],
+            paged(
+                vec![property_value(ID_B, "summary", "Property", "text")],
+                0,
+                2,
+                1,
+            ),
+        )])
+        .await;
+        let handlers =
+            DiscoveryHandlers::with_new_cursor_store(runtime(&fixture.endpoint)).unwrap();
+        let result = handlers
+            .property_list(
+                PropertyListInput {
+                    space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                    type_reference: None,
+                    filters: text_filter("Property"),
+                    limit: PageLimit::new(2).unwrap(),
+                    cursor: None,
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.structured_content.unwrap()["items"][0]["id"], ID_B);
+        fixture.finish().await;
+    }
+
+    #[test]
+    fn every_discovery_list_rejects_or_and_nested_filters_during_decode() {
+        let or_filter = json!({
+            "operator": "or",
+            "conditions": [{"format":"not_empty","property_key":"name"}]
+        });
+        assert!(serde_json::from_value::<SpaceListInput>(json!({"filters":or_filter})).is_err());
+        assert!(
+            serde_json::from_value::<TypeListInput>(json!({"space":SPACE_ID,"filters":or_filter}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PropertyListInput>(
+                json!({"space":SPACE_ID,"filters":or_filter})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TagListInput>(
+                json!({"space":SPACE_ID,"property":ID_B,"filters":or_filter})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TemplateListInput>(
+                json!({"space":SPACE_ID,"type":ID_A,"filters":or_filter})
+            )
+            .is_err()
+        );
+
+        let nested = json!({
+            "operator": "and",
+            "conditions": [{"format":"not_empty","property_key":"name"}],
+            "filters": [{"operator":"and","conditions":[{"format":"not_empty","property_key":"name"}]}]
+        });
+        assert!(serde_json::from_value::<SpaceListInput>(json!({"filters":nested})).is_err());
+    }
+
+    #[tokio::test]
+    async fn property_list_rejects_type_scope_with_filter_before_io() {
+        let handlers =
+            DiscoveryHandlers::with_new_cursor_store(runtime("http://127.0.0.1:1")).unwrap();
+        let unsupported_combination = handlers
+            .property_list(
+                PropertyListInput {
+                    space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                    type_reference: Some(DiscoveryReference::new(ID_A).unwrap()),
+                    filters: text_filter("Property"),
+                    limit: PageLimit::default(),
+                    cursor: None,
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_error(&unsupported_combination, "validation");
+    }
+
+    #[tokio::test]
     async fn tag_list_gets_select_property_and_uses_exact_http_pages() {
         let property_path = format!("/v1/spaces/{SPACE_ID}/properties/{ID_B}");
         let tags_path = format!("/v1/spaces/{SPACE_ID}/properties/{ID_B}/tags");
@@ -1959,7 +2234,7 @@ mod tests {
             ExpectedRequest::json(&property_path, &[], property_response.clone()),
             ExpectedRequest::json(
                 &tags_path,
-                &[("limit", "2")],
+                &[("limit", "2"), ("name[contains]", "Tag")],
                 paged(
                     vec![
                         tag_value(ID_A, "open", "Open"),
@@ -1973,7 +2248,7 @@ mod tests {
             ExpectedRequest::json(&property_path, &[], property_response),
             ExpectedRequest::json(
                 &tags_path,
-                &[("limit", "2"), ("offset", "2")],
+                &[("limit", "2"), ("offset", "2"), ("name[contains]", "Tag")],
                 paged(vec![tag_value(ID_D, "blocked", "Blocked")], 2, 2, 3),
             ),
         ])
@@ -1986,6 +2261,7 @@ mod tests {
                 TagListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     property: DiscoveryReference::new(ID_B).unwrap(),
+                    filters: text_filter("Tag"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -2006,6 +2282,7 @@ mod tests {
                 TagListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     property: DiscoveryReference::new(ID_C).unwrap(),
+                    filters: text_filter("Tag"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: Some(cursor.clone()),
                 },
@@ -2018,6 +2295,7 @@ mod tests {
                 TagListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     property: DiscoveryReference::new(ID_B).unwrap(),
+                    filters: text_filter("Tag"),
                     limit: PageLimit::new(2).unwrap(),
                     cursor: Some(cursor),
                 },
@@ -2054,6 +2332,7 @@ mod tests {
                 TagListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     property: DiscoveryReference::new(ID_B).unwrap(),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -2090,6 +2369,7 @@ mod tests {
                 TagListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     property: DiscoveryReference::new(ID_B).unwrap(),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -2118,7 +2398,7 @@ mod tests {
         let fixture = HttpFixture::start(vec![
             ExpectedRequest::json(
                 &path,
-                &[("limit", "1")],
+                &[("limit", "1"), ("name[contains]", "Template")],
                 paged(
                     vec![template_value(ID_B, "Meeting", "private body one")],
                     0,
@@ -2128,7 +2408,11 @@ mod tests {
             ),
             ExpectedRequest::json(
                 &path,
-                &[("limit", "1"), ("offset", "1")],
+                &[
+                    ("limit", "1"),
+                    ("offset", "1"),
+                    ("name[contains]", "Template"),
+                ],
                 paged(
                     vec![template_value(ID_C, "Review", "private body two")],
                     1,
@@ -2146,6 +2430,7 @@ mod tests {
                 TemplateListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     type_reference: DiscoveryReference::new(ID_A).unwrap(),
+                    filters: text_filter("Template"),
                     limit: PageLimit::new(1).unwrap(),
                     cursor: None,
                 },
@@ -2162,6 +2447,7 @@ mod tests {
                 TemplateListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     type_reference: DiscoveryReference::new(ID_B).unwrap(),
+                    filters: text_filter("Template"),
                     limit: PageLimit::new(1).unwrap(),
                     cursor: Some(cursor.clone()),
                 },
@@ -2174,6 +2460,7 @@ mod tests {
                 TemplateListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     type_reference: DiscoveryReference::new(ID_A).unwrap(),
+                    filters: text_filter("Template"),
                     limit: PageLimit::new(1).unwrap(),
                     cursor: Some(cursor),
                 },
@@ -2217,6 +2504,7 @@ mod tests {
             .type_list(
                 TypeListInput {
                     space: DiscoveryReference::new("Work").unwrap(),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -2244,6 +2532,7 @@ mod tests {
             .type_list(
                 TypeListInput {
                     space: DiscoveryReference::new("Missing").unwrap(),
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(2).unwrap(),
                     cursor: None,
                 },
@@ -2286,6 +2575,7 @@ mod tests {
                 PropertyListInput {
                     space: DiscoveryReference::new(SPACE_ID).unwrap(),
                     type_reference: None,
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(1).unwrap(),
                     cursor: None,
                 },
@@ -2329,6 +2619,7 @@ mod tests {
         let result = handlers
             .space_list(
                 SpaceListInput {
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(1).unwrap(),
                     cursor: None,
                 },
@@ -2356,6 +2647,7 @@ mod tests {
         let result = handlers
             .space_list(
                 SpaceListInput {
+                    filters: Omittable::Missing,
                     limit: PageLimit::new(100).unwrap(),
                     cursor: None,
                 },

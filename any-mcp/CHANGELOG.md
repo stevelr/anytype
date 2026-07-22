@@ -32,6 +32,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Add strict server-side flat-`and` shared filters to `space_list`, `type_list`,
+  `property_list`, `tag_list`, `template_list`, and `view_object_list`. Reject
+  recursive/`or` shapes, `view_list` filters, and the dishonest
+  `property_list` filter-plus-type combination before I/O; bind canonical
+  filter semantics into continuation cursors without rewriting the upstream
+  query. Lock the capability matrix, positive/rejected scripted paths, exact
+  request forwarding, and reviewed standard catalog/token growth. Disposable
+  live execution is tracked by the explicit env-only credential blocker
+  `any-9h0k`.
 - Extract the `object_search` filter grammar into a shared bounded MCP DTO
   matching the supported `anytype-api` formats and conditions one-to-one.
   Preserve aggregate count/value/depth limits, identifier validation,

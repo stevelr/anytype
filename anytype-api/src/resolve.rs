@@ -1498,21 +1498,6 @@ mod tests {
         .to_string()
     }
 
-    fn fixture_client_with_grpc(base_url: String, grpc_endpoint: String) -> AnytypeClient {
-        let mut config = crate::client::ClientConfig::default()
-            .app_name("resolve-grpc-fixture")
-            .grpc_endpoint(grpc_endpoint);
-        config.base_url = Some(base_url);
-        config.keystore = Some("env".to_string());
-        let client = AnytypeClient::with_config(config).expect("gRPC fixture client");
-        client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
-        client
-            .keystore
-            .update_grpc_credentials(&crate::keystore::GrpcCredentials::from_token("token-alice"))
-            .expect("set mock gRPC credentials");
-        client
-    }
-
     // a valid space id (CID.HASH form) that passes looks_like_object_id
     const SPACE_ID: &str =
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
@@ -2171,115 +2156,6 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].lines().next().unwrap().contains("limit=99"));
         assert!(requests[1].lines().next().unwrap().contains("offset=99"));
-    }
-
-    #[tokio::test]
-    async fn public_chat_resolution_composes_bounded_http_and_grpc_discovery() {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gRPC probe");
-        let grpc_address = probe.local_addr().expect("gRPC fixture address");
-        drop(probe);
-        let mock = crate::mock::MockChatServer::start(grpc_address).expect("start chat mock");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let spaces = serde_json::json!({
-            "items": [{
-                "id": "space-default", "name": "Workspace", "object": "space",
-                "description": null, "icon": null, "gateway_url": null, "network_id": null
-            }],
-            "pagination": {"has_more": false, "limit": 99, "offset": 0, "total": 1}
-        })
-        .to_string();
-        let (base_url, requests) = paged_fixture_server(vec![spaces]).await;
-        let client = fixture_client_with_grpc(base_url, format!("http://{grpc_address}"));
-        client
-            .chats()
-            .add_message(OBJECT_ID)
-            .content(crate::chats::MessageContent::new().text("fixture"))
-            .send()
-            .await
-            .expect("create CID-shaped mock chat");
-
-        let target = client
-            .resolve_chat_target(None, OBJECT_ID)
-            .await
-            .expect("bare chat id discovery");
-        assert_eq!(target.chat_id, OBJECT_ID);
-        assert_eq!(target.space_id, None);
-        let named = client
-            .resolve_chat_target(Some("space-default"), "General")
-            .await
-            .expect("space-scoped chat name discovery");
-        assert_eq!(named.chat_id, "chat-default");
-        assert_eq!(named.space_id.as_deref(), Some("space-default"));
-
-        let requests = requests.await.expect("chat HTTP fixture task");
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].lines().next().unwrap().contains("limit=99"));
-        mock.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn resolve_message_id_maps_order_id_and_passes_ids_through() {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gRPC probe");
-        let grpc_address = probe.local_addr().expect("gRPC fixture address");
-        drop(probe);
-        let mock = crate::mock::MockChatServer::start(grpc_address).expect("start chat mock");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let (base_url, requests) = paged_fixture_server(Vec::new()).await;
-        let client = fixture_client_with_grpc(base_url, format!("http://{grpc_address}"));
-
-        let message_id = client
-            .chats()
-            .add_message(OBJECT_ID)
-            .content(crate::chats::MessageContent::new().text("fixture"))
-            .send()
-            .await
-            .expect("create mock chat message");
-
-        let page = client
-            .chats()
-            .list_messages(OBJECT_ID)
-            .limit(10)
-            .list_page()
-            .await
-            .expect("list mock chat messages");
-        let order_id = page
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
-            .map(|message| message.order_id.clone())
-            .expect("stored message present");
-        assert_ne!(order_id, message_id);
-
-        let by_order = client
-            .resolve_message_id(OBJECT_ID, &order_id)
-            .await
-            .expect("resolve by order id");
-        assert_eq!(by_order, message_id);
-
-        // A value that already looks like an object id is returned unchanged
-        // without a lookup.
-        let passthrough = client
-            .resolve_message_id(OBJECT_ID, OBJECT_ID)
-            .await
-            .expect("message id passthrough");
-        assert_eq!(passthrough, OBJECT_ID);
-
-        let batch = client
-            .resolve_message_ids(OBJECT_ID, &[order_id.clone(), OBJECT_ID.to_string()])
-            .await
-            .expect("resolve batch");
-        assert_eq!(batch, vec![message_id, OBJECT_ID.to_string()]);
-
-        let missing = client
-            .resolve_message_id(OBJECT_ID, "9999999999999999")
-            .await
-            .expect_err("unknown order id must not resolve");
-        assert!(matches!(missing, AnytypeError::NotFound { .. }));
-
-        drop(requests);
-        mock.shutdown().await;
     }
 
     #[test]

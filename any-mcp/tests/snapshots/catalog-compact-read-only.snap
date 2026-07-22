@@ -616,7 +616,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search one bounded Anytype page. Returns summaries and only explicitly projected properties, never document bodies. Boolean and numeric filters are passed through unchanged and may fail due to upstream anytype-heart#2879.",
+      "description": "Search one bounded Anytype page. Returns summaries and only explicitly projected properties, never document bodies. Boolean and numeric filters are passed through unchanged and pagination follows the checked upstream page.",
       "inputSchema": {
         "$defs": {
           "AnytypeReference": {
@@ -749,7 +749,7 @@
             ]
           },
           "McpFilter": {
-            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. They are currently affected by\nupstream `anytype-heart#2879`; this server does not rewrite them into a\nquery with different semantics.",
+            "description": "One constrained Anytype property filter shared by MCP workflows.\n\nThe tagged form prevents ambiguous free-form JSON and maps one-to-one to\nthe supported [`anytype::filters::Filter`] variants. Checkbox and numeric\nfilters are forwarded exactly as supplied. Live conformance verifies the\nconfigured backend's behavior; this server never rewrites them or filters\nreturned pages locally.",
             "oneOf": [
               {
                 "additionalProperties": false,

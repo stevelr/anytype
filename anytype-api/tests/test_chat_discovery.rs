@@ -1,11 +1,27 @@
 mod common;
 
+use std::future::Future;
+
 use anytype::{
     prelude::*,
-    test_util::{TestResult, unique_suffix, with_test_context},
+    test_util::{TestError, TestResult, unique_suffix, with_test_context},
 };
 use common::retry_definitive_rate_limit;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
+
+const LIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn bounded_api<T>(
+    operation: &'static str,
+    future: impl Future<Output = Result<T, AnytypeError>>,
+) -> TestResult<T> {
+    timeout(LIVE_OPERATION_TIMEOUT, future)
+        .await
+        .map_err(|_| TestError::Assertion {
+            message: format!("{operation} exceeded its fixed live-test timeout"),
+        })?
+        .map_err(Into::into)
+}
 
 #[tokio::test]
 async fn test_chat_discovery_requests() -> TestResult<()> {
@@ -27,24 +43,25 @@ async fn test_chat_discovery_requests() -> TestResult<()> {
         .await?;
         ctx.register_object(&chat.id);
 
-        let chats = ctx
-            .client
-            .chats()
-            .list_chats_in(&ctx.space_id)
-            .list()
-            .await?;
+        let chats = bounded_api(
+            "REST chat inventory",
+            ctx.client.chats().list_chats_in(&ctx.space_id).list(),
+        )
+        .await?;
         assert!(
             chats.items.iter().any(|item| item.id == chat.id),
             "REST chat listing should include the created chat"
         );
 
-        let search = ctx
-            .client
-            .chats()
-            .search_chats_in(&ctx.space_id)
-            .text(&name)
-            .search()
-            .await?;
+        let search = bounded_api(
+            "gRPC chat search",
+            ctx.client
+                .chats()
+                .search_chats_in(&ctx.space_id)
+                .text(&name)
+                .search(),
+        )
+        .await?;
         assert!(
             search.items.iter().any(|item| item.id == chat.id),
             "gRPC chat-object search should include the created chat"
@@ -57,6 +74,25 @@ async fn test_chat_discovery_requests() -> TestResult<()> {
             .resolve()
             .await?;
         assert_eq!(resolved, chat.id);
+
+        let scoped_target = bounded_api(
+            "space-scoped public chat resolution",
+            ctx.client.resolve_chat_target(Some(&ctx.space_id), &name),
+        )
+        .await?;
+        assert_eq!(scoped_target.chat_id, chat.id);
+        assert_eq!(
+            scoped_target.space_id.as_deref(),
+            Some(ctx.space_id.as_str())
+        );
+
+        let direct_target = bounded_api(
+            "bare public chat-id resolution",
+            ctx.client.resolve_chat_target(None, &chat.id),
+        )
+        .await?;
+        assert_eq!(direct_target.chat_id, chat.id);
+        assert_eq!(direct_target.space_id, None);
 
         let fetched = ctx
             .client
@@ -91,18 +127,21 @@ async fn test_rest_chat_messages_reactions_search_and_reads() -> TestResult<()> 
         ctx.register_object(&chat.id);
 
         // Publishing remains gRPC so structured blocks are not discarded.
-        let message_id = ctx
-            .client
-            .chats()
-            .add_message(&chat.id)
-            .content(MessageContent::new().bold("migration coverage"))
-            .blocks(vec![MessageBlock::Text(MessageBlockText {
-                text: "structured heading".to_string(),
-                style: MessageTextStyle::Header2,
-                ..MessageBlockText::default()
-            })])
-            .send()
-            .await?;
+        let message_id = bounded_api(
+            "gRPC message creation",
+            ctx.client
+                .chats()
+                .add_message(&chat.id)
+                .content(MessageContent::new().bold("migration coverage"))
+                .blocks(vec![MessageBlock::Text(MessageBlockText {
+                    text: "structured heading".to_string(),
+                    style: MessageTextStyle::Header2,
+                    ..MessageBlockText::default()
+                })])
+                .send(),
+        )
+        .await?;
+        ctx.register_chat_message(&chat.id, &message_id)?;
 
         let rich = ctx
             .client
@@ -122,6 +161,57 @@ async fn test_rest_chat_messages_reactions_search_and_reads() -> TestResult<()> 
 
         let listed = chats.list_messages(&chat.id).limit(20).list().await?;
         assert!(listed.iter().any(|message| message.id == message_id));
+
+        let rich_page = bounded_api(
+            "gRPC message order inventory",
+            ctx.client
+                .chats()
+                .list_messages(&chat.id)
+                .limit(20)
+                .list_page(),
+        )
+        .await?;
+        let order_id = rich_page
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .map(|message| message.order_id.clone())
+            .ok_or_else(|| TestError::Assertion {
+                message: "created message was absent from the bounded gRPC page".to_owned(),
+            })?;
+        assert_ne!(order_id, message_id);
+
+        let by_order = bounded_api(
+            "message order-id resolution",
+            ctx.client.resolve_message_id(&chat.id, &order_id),
+        )
+        .await?;
+        assert_eq!(by_order, message_id);
+        let direct = bounded_api(
+            "direct message-id pass-through",
+            ctx.client.resolve_message_id(&chat.id, &message_id),
+        )
+        .await?;
+        assert_eq!(direct, message_id);
+        let batch = bounded_api(
+            "mixed message-id resolution",
+            ctx.client
+                .resolve_message_ids(&chat.id, &[order_id, message_id.clone()]),
+        )
+        .await?;
+        assert_eq!(batch, vec![message_id.clone(), message_id.clone()]);
+
+        let unknown_order_id = format!("unknown-order-{}", unique_suffix());
+        let unknown_result = timeout(
+            LIVE_OPERATION_TIMEOUT,
+            ctx.client.resolve_message_id(&chat.id, &unknown_order_id),
+        )
+        .await
+        .map_err(|_| TestError::Assertion {
+            message: "unknown message order-id resolution exceeded its fixed live-test timeout"
+                .to_owned(),
+        })?;
+        assert!(matches!(unknown_result, Err(AnytypeError::NotFound { .. })));
 
         let mut search_found = false;
         for _ in 0..40 {
@@ -154,7 +244,6 @@ async fn test_rest_chat_messages_reactions_search_and_reads() -> TestResult<()> 
         chats.read_messages(&chat.id).mark_read().await?;
         chats.read_reactions(&chat.id).mark_read().await?;
         chats.read_all(&chat.id).await?;
-        chats.delete_message(&chat.id, &message_id).await?;
         Ok(())
     })
     .await

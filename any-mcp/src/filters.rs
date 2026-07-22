@@ -18,7 +18,7 @@ use crate::{
     domain::{BoundedText, DomainValueError, EntityId, MAX_REFERENCE_CHARS, ObjectId, TypeKey},
     error::ToolError,
     handler_support::HandlerError,
-    validation::{FilterBudget, FilterList, FilterValueList},
+    validation::{FilterBudget, FilterList, FilterValueList, Omittable},
 };
 
 /// Maximum characters accepted in a scalar textual filter value.
@@ -27,11 +27,50 @@ pub const MAX_FILTER_TEXT_CHARS: usize = 4_096;
 pub const MAX_FILTER_DATE_CHARS: usize = 64;
 /// Maximum absolute numeric filter value.
 pub const MAX_FILTER_NUMBER_ABS: f64 = 1_000_000_000_000_000.0;
+/// Maximum direct leaves in a flat list filter after accounting for its root.
+pub const MAX_LIST_FILTER_CONDITIONS: usize = crate::validation::MAX_FILTERS - 1;
 
 /// Bounded scalar text accepted by textual filter formats.
 pub type FilterText = BoundedText<MAX_FILTER_TEXT_CHARS>;
 /// Bounded date text accepted by the Anytype HTTP API.
 pub type FilterDate = BoundedText<MAX_FILTER_DATE_CHARS>;
+
+/// Checked representations of an optional shared filter for flat-AND list
+/// endpoints.
+pub(crate) struct PreparedFlatFilters {
+    /// Exact filter leaves forwarded to the upstream request builder.
+    pub(crate) upstream: Vec<AnytypeFilter>,
+    /// Original decoded shape used to enforce the raw query-size ceiling.
+    pub(crate) raw_binding: Option<Value>,
+    /// Canonical semantic shape used only for cursor identity.
+    pub(crate) semantic_binding: Option<Value>,
+}
+
+/// Validates and prepares an optional filter for an upstream endpoint that
+/// supports one flat conjunction and no nested expression body.
+pub(crate) fn prepare_flat_filters(
+    filters: &Omittable<McpListFilter>,
+) -> Result<PreparedFlatFilters, HandlerError> {
+    let upstream = filters
+        .as_ref()
+        .map(McpListFilter::to_anytype)
+        .transpose()?
+        .unwrap_or_default();
+    let raw_binding = filters
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|_| HandlerError::new(ToolError::upstream()))?;
+    let semantic_binding = filters
+        .as_ref()
+        .map(McpListFilter::cursor_binding_value)
+        .transpose()?;
+    Ok(PreparedFlatFilters {
+        upstream,
+        raw_binding,
+        semantic_binding,
+    })
+}
 
 /// A nonempty select/tag reference that cannot collide under Anytype's
 /// comma-delimited select serialization.
@@ -120,6 +159,12 @@ pub enum FilterOperator {
     And,
     /// Require at least one condition or nested group.
     Or,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ListFilterOperator {
+    And,
 }
 
 /// Operators supported for textual property formats.
@@ -529,6 +574,82 @@ impl McpFilter {
             values.dedup();
         }
         Ok(value)
+    }
+}
+
+/// Shared filter form for list endpoints whose upstream request model accepts
+/// only a flat conjunction.
+///
+/// Every approved [`McpFilter`] leaf remains available. The wire operator must
+/// be `and`, `conditions` must be nonempty, and nested `filters` are rejected
+/// by the closed schema rather than flattened or emulated after pagination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpListFilter {
+    /// Required flat conjunction operator.
+    #[serde(rename = "operator")]
+    _operator: ListFilterOperator,
+    /// Direct shared filter leaves.
+    conditions: FilterList<McpFilter>,
+}
+
+impl JsonSchema for McpListFilter {
+    fn schema_name() -> Cow<'static, str> {
+        "McpListFilter".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "description": "One flat conjunction for an upstream list endpoint. All shared filter leaf formats are available; nested groups and or are unsupported.",
+            "additionalProperties": false,
+            "properties": {
+                "operator": {
+                    "type": "string",
+                    "const": "and",
+                    "description": "List endpoints combine every condition with and.",
+                },
+                "conditions": {
+                    "type": "array",
+                    "description": "Direct shared filter leaves forwarded to the upstream list request.",
+                    "items": generator.subschema_for::<McpFilter>(),
+                    "minItems": 1,
+                    "maxItems": MAX_LIST_FILTER_CONDITIONS,
+                },
+            },
+            "required": ["operator", "conditions"],
+        })
+    }
+}
+
+impl McpListFilter {
+    fn to_anytype(&self) -> Result<Vec<AnytypeFilter>, HandlerError> {
+        let mut budget = FilterBudget::default();
+        budget.record(1, 0)?;
+        if self.conditions.as_slice().is_empty() {
+            return Err(HandlerError::new(ToolError::validation()));
+        }
+        self.conditions
+            .as_slice()
+            .iter()
+            .map(|filter| {
+                budget.record(1, filter.value_count())?;
+                filter.to_anytype()
+            })
+            .collect()
+    }
+
+    fn cursor_binding_value(&self) -> Result<Value, HandlerError> {
+        let conditions = self
+            .conditions
+            .as_slice()
+            .iter()
+            .map(McpFilter::cursor_binding_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({
+            "operator": "and",
+            "conditions": sort_and_deduplicate(conditions)?,
+        }))
     }
 }
 
@@ -998,6 +1119,67 @@ mod tests {
         for case in cases {
             assert_conversion(case.input, case.expected);
         }
+    }
+
+    #[test]
+    fn flat_list_conversion_preserves_leaves_and_rejects_unrepresentable_groups() {
+        let flat = serde_json::from_value::<McpListFilter>(json!({
+            "operator": "and",
+            "conditions": [
+                {"format":"text","property_key":"name","condition":"contains","value":"road"},
+                {"format":"checkbox","property_key":"done","condition":"eq","value":true}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(flat.to_anytype().unwrap()).unwrap(),
+            json!([
+                {"condition":"contains","property_key":"name","text":"road"},
+                {"condition":"eq","property_key":"done","checkbox":true}
+            ])
+        );
+
+        for rejected in [
+            json!({
+                "operator": "or",
+                "conditions": [{"format":"not_empty","property_key":"name"}]
+            }),
+            json!({
+                "operator": "and",
+                "filters": [{
+                    "operator": "and",
+                    "conditions": [{"format":"not_empty","property_key":"name"}]
+                }]
+            }),
+        ] {
+            assert!(serde_json::from_value::<McpListFilter>(rejected).is_err());
+        }
+        assert!(
+            serde_json::from_value::<McpListFilter>(json!({"operator":"and","conditions":[]}))
+                .unwrap()
+                .to_anytype()
+                .is_err()
+        );
+
+        let reordered = serde_json::from_value::<McpListFilter>(json!({
+            "operator": "and",
+            "conditions": [
+                {"format":"checkbox","property_key":"done","condition":"eq","value":true},
+                {"format":"text","property_key":"name","condition":"contains","value":"road"},
+                {"format":"text","property_key":"name","condition":"contains","value":"road"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            flat.cursor_binding_value().unwrap(),
+            reordered.cursor_binding_value().unwrap(),
+            "flat conjunction permutations and duplicates share cursor identity"
+        );
+        assert_eq!(
+            reordered.to_anytype().unwrap().len(),
+            3,
+            "cursor-only canonicalization must not rewrite the upstream request"
+        );
     }
 
     fn canonical_inputs_by_format() -> HashMap<&'static str, Value> {

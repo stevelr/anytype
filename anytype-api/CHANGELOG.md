@@ -8,6 +8,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Process watcher import-finish fallback events are now correlated to the
+  requested space, including an explicit opt-in for legacy events with an empty
+  space ID. Real-server Markdown import coverage replaces the custom gRPC mock;
+  it remains ignored under `any-9h0k` until the server returns newly created
+  spaces in the ownership inventory required for cleanup.
+- Chat resolver integration coverage now uses cleanup-owned real-server chats
+  and messages across HTTP and gRPC instead of the deprecated custom gRPC mock.
 - file/SQLite keystore modifier parsing now recognizes only `:key=`
   boundaries, preserving Windows drive paths and ordinary colon-bearing path
   values while retaining the established last-wins behavior for duplicate
