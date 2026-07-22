@@ -19,6 +19,7 @@ use anytype_rpc::{
         event::message::Value as EventValue,
         rpc::{
             block_dataview::{
+                filter::add as add_dataview_filter,
                 relation::add as add_dataview_relation,
                 view::{create as create_dataview_view, update as update_dataview_view},
             },
@@ -64,6 +65,7 @@ use crate::{
 
 const COLLECTION_DATAVIEW_BLOCK_ID: &str = "dataview";
 const COLLECTION_VIEW_FIXTURE_SCAN_LIMIT: u32 = 1_000;
+const COLLECTION_VIEW_FILTER_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const KANBAN_FIXTURE_PAGE_LIMIT: u32 = 2;
 const KANBAN_FIXTURE_MAX_ITEMS: usize = 32;
 const SPACE_FIXTURE_SCAN_LIMIT: u32 = 1_000;
@@ -697,6 +699,122 @@ impl TestContext {
             id: created_id,
             name,
         })
+    }
+
+    /// Adds one exact-name saved-view filter to an owned collection view.
+    ///
+    /// This test-only helper exists to prove that direct collection membership
+    /// is independent from saved-view presentation. It accepts only a view and
+    /// collection created and cleanup-owned by this context, requires both the
+    /// REST and `ObjectShow` snapshots to be initially unfiltered, dispatches
+    /// one authenticated `BlockDataviewFilterAdd`, and verifies the assigned
+    /// filter identity and complete filter value through both evidence paths.
+    /// Collection teardown owns removal of the saved filter.
+    pub async fn add_collection_name_filter_fixture(
+        &self,
+        collection_id: &str,
+        view_id: &str,
+        exact_name: impl Into<String>,
+    ) -> TestResult<String> {
+        let exact_name = exact_name.into();
+        self.client
+            .config
+            .limits
+            .validate_name(&exact_name, "collection view filter value")?;
+        if !self
+            .cleanup
+            .owns_collection_view_fixture(&self.space_id, collection_id, view_id)
+        {
+            return Err(collection_view_fixture_code_error("filter-ownership"));
+        }
+
+        let before =
+            read_kanban_view_evidence(&self.client, &self.space_id, collection_id, view_id).await?;
+        if !before.rest_filters_empty || !before.view.filters.is_empty() {
+            return Err(collection_view_fixture_code_error("filter-preexisting"));
+        }
+        let requested = anytype_rpc::model::block::content::dataview::Filter {
+            relation_key: "name".to_owned(),
+            condition: anytype_rpc::model::block::content::dataview::filter::Condition::Equal
+                as i32,
+            value: Some(string_value(&exact_name)),
+            format: anytype_rpc::model::RelationFormat::Shorttext as i32,
+            ..Default::default()
+        };
+        let grpc = self
+            .client
+            .grpc_client()
+            .await
+            .map_err(|_| collection_view_fixture_code_error("filter-grpc"))?;
+        let mut commands = grpc.client_commands();
+        let mut request = with_token_request(
+            Request::new(add_dataview_filter::Request {
+                context_id: collection_id.to_owned(),
+                block_id: before.block_id.clone(),
+                view_id: view_id.to_owned(),
+                filter: Some(requested.clone()),
+            }),
+            grpc.token(),
+        )
+        .map_err(|_| collection_view_fixture_code_error("filter-auth"))?;
+        request.set_timeout(COLLECTION_VIEW_FILTER_RPC_TIMEOUT);
+        let response = tokio::time::timeout(
+            COLLECTION_VIEW_FILTER_RPC_TIMEOUT,
+            commands.block_dataview_filter_add(request),
+        )
+        .await
+        .map_err(|_| collection_view_fixture_code_error("filter-deadline"))?
+        .map_err(|_| collection_view_fixture_code_error("filter-transport"))?
+        .into_inner();
+        if response.error.as_ref().map(|error| error.code) != Some(0)
+            || !valid_collection_view_id(&response.filter_id)
+        {
+            return Err(collection_view_fixture_code_error("filter-response"));
+        }
+        let event = response
+            .event
+            .as_ref()
+            .ok_or_else(|| collection_view_fixture_code_error("filter-event"))?;
+        if event.context_id != collection_id
+            || event.messages.is_empty()
+            || event
+                .messages
+                .iter()
+                .any(|message| message.space_id != self.space_id)
+        {
+            return Err(collection_view_fixture_code_error("filter-event-identity"));
+        }
+
+        let filter_id = response.filter_id;
+        let verify_config = self.client.config.verify.clone().unwrap_or_default();
+        verify_semantic(
+            &verify_config,
+            "collection view name filter fixture",
+            collection_id,
+            || async {
+                let proto =
+                    read_kanban_view_evidence(&self.client, &self.space_id, collection_id, view_id)
+                        .await
+                        .map_err(|_| collection_view_fixture_api_error())?;
+                let rest =
+                    complete_collection_view_snapshot(&self.client, &self.space_id, collection_id)
+                        .await?;
+                Ok((proto, rest))
+            },
+            |(proto, rest)| {
+                collection_name_filter_matches(
+                    proto,
+                    rest,
+                    view_id,
+                    &filter_id,
+                    &requested,
+                    &exact_name,
+                )
+            },
+        )
+        .await
+        .map_err(|_| collection_view_fixture_code_error("filter-reread"))?;
+        Ok(filter_id)
     }
 
     /// Creates a representative cleanup-owned Kanban board on a real server.
@@ -1760,6 +1878,42 @@ async fn read_kanban_view_evidence(
         rest_layout: rest_view.layout.clone(),
         rest_filters_empty: rest_view.filters.is_empty(),
     })
+}
+
+fn collection_name_filter_matches(
+    proto: &KanbanViewEvidence,
+    rest: &[RestCollectionView],
+    view_id: &str,
+    filter_id: &str,
+    requested: &anytype_rpc::model::block::content::dataview::Filter,
+    exact_name: &str,
+) -> bool {
+    let [proto_filter] = proto.view.filters.as_slice() else {
+        return false;
+    };
+    if proto_filter.id != filter_id
+        || proto_filter.relation_key != requested.relation_key
+        || proto_filter.condition != requested.condition
+        || proto_filter.value != requested.value
+        || proto_filter.format != requested.format
+    {
+        return false;
+    }
+    let matching_views = rest
+        .iter()
+        .filter(|view| view.id == view_id)
+        .collect::<Vec<_>>();
+    let [rest_view] = matching_views.as_slice() else {
+        return false;
+    };
+    let [rest_filter] = rest_view.filters.as_slice() else {
+        return false;
+    };
+    rest_filter.id == filter_id
+        && rest_filter.property_key == "name"
+        && rest_filter.format == PropertyFormat::Text
+        && rest_filter.condition == crate::filters::Condition::Equal
+        && rest_filter.value == exact_name
 }
 
 fn validate_kanban_view_evidence(

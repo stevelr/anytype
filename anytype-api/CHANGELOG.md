@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a cleanup-owned test helper that attaches one exact-name saved-view
+  filter to a privately proven collection view. It performs one authenticated
+  filter-add RPC and requires the server-assigned filter identity plus exact
+  proto and REST readback before returning, enabling real-server tests to prove
+  that canonical direct membership remains independent of view presentation.
 - Add canonical manual-collection membership pages independent of saved views,
   filters, and Kanban presentation. Exact collection REST identity, preserved
   native collection order with no ineffective `id` sort, 1..61 public pages,

@@ -8,6 +8,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add the production-unlinked `collection_member_list` read slice for the
+  future `views-write` registry. The strict tool resolves one space, binds an
+  opaque cursor to the exact resolved space, collection, limit, registry, and
+  operation, and delegates one page to `anytype-api`'s canonical direct
+  membership primitive. Results expose only ordered `object_id` values, cap
+  both schema and runtime at 61, preserve verified total and overlap-boundary
+  evidence in process-local cursor state, and fail closed on identity,
+  counter, duplicate, shift, or terminal-arithmetic inconsistencies. The
+  locked maximum result is 33,650 bytes and 31,770 `o200k_base` tokens; 62 is
+  rejected. Direct-router and production stdio protocol tests use an
+  authenticated disposable collection whose saved view hides one still-listed
+  member. Deterministic transport-fault cases remain deferred to the P4 fault
+  injector, and the incomplete registry stays unavailable until `any-uda.4`.
 - Amend the approved `views-write` canonical membership-page prerequisite to
   match real Heart offset-window evidence: `total` and exact row arithmetic
   establish terminal versus continued pages, while Heart's relative
