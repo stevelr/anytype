@@ -340,6 +340,9 @@ impl ToolError {
             | AnytypeError::ResponseTooLarge { .. }
             | AnytypeError::FileHeaderEvidenceTooLarge { .. }
             | AnytypeError::ChatSseEventTooLarge { .. } => ToolErrorCode::BoundedResult,
+            AnytypeError::AttachedDiscussion {
+                kind: anytype::attached_discussions::AttachedDiscussionErrorKind::MalformedEvidence,
+            } => ToolErrorCode::BoundedResult,
             AnytypeError::NotFound { .. } => ToolErrorCode::NotFound,
             AnytypeError::ApiError {
                 code: 400 | 422, ..

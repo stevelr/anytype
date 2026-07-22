@@ -19,7 +19,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   malformed-evidence, cleanup, deadline, upstream, and indeterminate outcome
   classes. Public cumulative work counters and one finite absolute operation
   deadline make HTTP, show, close, reconciliation, and write ownership
-  observable. Pure lifecycle/state-machine tests and cleanup-owned disposable
+  observable. Definitive pre-acceptance authentication or permission failures
+  preserve their original classification without dispatching a synthetic
+  close; accepted or indeterminate shows still own bounded cleanup. Pure
+  lifecycle/state-machine tests and cleanup-owned disposable
   real-server coverage replace any semantic mock or fault emulation.
 - Add `collection_member_add`, a singular non-replayed collection mutation
   seam that preserves the exact completed non-success HTTP status instead of

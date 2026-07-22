@@ -626,15 +626,27 @@ async fn show_and_close(
         client.attached_discussion_metrics.as_ref(),
         || async move {
             let mut commands = show_grpc.client_commands();
-            let response = tokio::time::timeout(show_timeout, commands.object_show(show))
-                .await
-                .map_err(|_| attached_error_value(AttachedDiscussionErrorKind::RpcDeadline))?
-                .map_err(attached_grpc_status)?
-                .into_inner();
-            show_response_ok(response.error.as_ref())?;
-            response
-                .object_view
-                .ok_or_else(|| attached_error_value(AttachedDiscussionErrorKind::MalformedEvidence))
+            let response =
+                match tokio::time::timeout(show_timeout, commands.object_show(show)).await {
+                    Err(_) => {
+                        return ShowAttempt::indeterminate(attached_error_value(
+                            AttachedDiscussionErrorKind::RpcDeadline,
+                        ));
+                    }
+                    Ok(Err(status)) if is_definitive_show_rejection(&status) => {
+                        return ShowAttempt::definitive_failure(attached_grpc_status(status));
+                    }
+                    Ok(Err(status)) => {
+                        return ShowAttempt::indeterminate(attached_grpc_status(status));
+                    }
+                    Ok(Ok(response)) => response.into_inner(),
+                };
+            let shown = show_response_ok(response.error.as_ref()).and_then(|()| {
+                response.object_view.ok_or_else(|| {
+                    attached_error_value(AttachedDiscussionErrorKind::MalformedEvidence)
+                })
+            });
+            ShowAttempt::responded(shown)
         },
         || async move {
             let close = object_close::Request {
@@ -659,6 +671,45 @@ async fn show_and_close(
     .await
 }
 
+struct ShowAttempt {
+    shown: Result<model::ObjectView>,
+    close_required: bool,
+    accepted: bool,
+}
+
+impl ShowAttempt {
+    fn responded(shown: Result<model::ObjectView>) -> Self {
+        Self {
+            accepted: shown.is_ok(),
+            shown,
+            close_required: true,
+        }
+    }
+
+    fn indeterminate(error: AnytypeError) -> Self {
+        Self {
+            shown: Err(error),
+            close_required: true,
+            accepted: false,
+        }
+    }
+
+    fn definitive_failure(error: AnytypeError) -> Self {
+        Self {
+            shown: Err(error),
+            close_required: false,
+            accepted: false,
+        }
+    }
+}
+
+fn is_definitive_show_rejection(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        Code::Unauthenticated | Code::PermissionDenied
+    )
+}
+
 async fn show_lifecycle_with<S, SF, C, CF>(
     metrics: &AttachedDiscussionMetrics,
     show: S,
@@ -666,21 +717,24 @@ async fn show_lifecycle_with<S, SF, C, CF>(
 ) -> Result<model::ObjectView>
 where
     S: FnOnce() -> SF,
-    SF: Future<Output = Result<model::ObjectView>>,
+    SF: Future<Output = ShowAttempt>,
     C: FnOnce() -> CF,
     CF: Future<Output = Result<()>>,
 {
     metrics.show_attempts.fetch_add(1, Ordering::Relaxed);
-    let shown = show().await;
-    if shown.is_ok() {
+    let attempt = show().await;
+    if attempt.accepted {
         metrics.accepted_shows.fetch_add(1, Ordering::Relaxed);
+    }
+    if !attempt.close_required {
+        return attempt.shown;
     }
     metrics.close_attempts.fetch_add(1, Ordering::Relaxed);
     let cleanup = close().await;
     if cleanup.is_ok() {
         metrics.close_successes.fetch_add(1, Ordering::Relaxed);
     }
-    finish_show_lifecycle(shown, cleanup)
+    finish_show_lifecycle(attempt.shown, cleanup)
 }
 
 fn finish_show_lifecycle(
@@ -1215,10 +1269,13 @@ mod tests {
     #[tokio::test]
     async fn injected_show_lifecycle_counts_work_and_cleanup_precedes_evidence() {
         let metrics = AttachedDiscussionMetrics::default();
-        let view =
-            show_lifecycle_with(&metrics, || async { Ok(discussion()) }, || async { Ok(()) })
-                .await
-                .expect("successful lifecycle");
+        let view = show_lifecycle_with(
+            &metrics,
+            || async { ShowAttempt::responded(Ok(discussion())) },
+            || async { Ok(()) },
+        )
+        .await
+        .expect("successful lifecycle");
         assert_eq!(view.root_id, DISCUSSION);
         assert_eq!(
             metrics.snapshot(),
@@ -1234,7 +1291,11 @@ mod tests {
         let failed_metrics = AttachedDiscussionMetrics::default();
         let error = show_lifecycle_with(
             &failed_metrics,
-            || async { attached_error(AttachedDiscussionErrorKind::Upstream) },
+            || async {
+                ShowAttempt::indeterminate(attached_error_value(
+                    AttachedDiscussionErrorKind::Upstream,
+                ))
+            },
             || async { attached_error(AttachedDiscussionErrorKind::CleanupFailed) },
         )
         .await
@@ -1245,6 +1306,33 @@ mod tests {
             AttachedDiscussionMetricsSnapshot {
                 show_attempts: 1,
                 close_attempts: 1,
+                ..AttachedDiscussionMetricsSnapshot::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn definitive_forbidden_show_preserves_authentication_without_close() {
+        let metrics = AttachedDiscussionMetrics::default();
+        let close_calls = AtomicUsize::new(0);
+        let status = tonic::Status::permission_denied("unretained upstream payload");
+        assert!(is_definitive_show_rejection(&status));
+        let error = show_lifecycle_with(
+            &metrics,
+            || async { ShowAttempt::definitive_failure(attached_grpc_status(status)) },
+            || async {
+                close_calls.fetch_add(1, AtomicOrdering::SeqCst);
+                attached_error(AttachedDiscussionErrorKind::CleanupFailed)
+            },
+        )
+        .await
+        .expect_err("forbidden show remains an authentication failure");
+        assert!(error.is_authentication());
+        assert_eq!(close_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            metrics.snapshot(),
+            AttachedDiscussionMetricsSnapshot {
+                show_attempts: 1,
                 ..AttachedDiscussionMetricsSnapshot::default()
             }
         );
@@ -1268,7 +1356,7 @@ mod tests {
                         || async move {
                             show_started.notify_one();
                             release_show.notified().await;
-                            Ok(discussion())
+                            ShowAttempt::responded(Ok(discussion()))
                         },
                         || async move {
                             close_finished.notify_one();

@@ -22,8 +22,9 @@
 //!   Phase 1 catalog; read-only standard retains its ten read tools.
 //! - [`OptionalToolsetSelection`] is empty unless `ANY_MCP_TOOLSETS` names a
 //!   complete registry linked into the binary. The default-off `members`,
-//!   `members`, `files`, nine-tool `schema`, three-tool `views-write`, and
-//!   six-tool `chats` registries are linked; Phase 1 remains the default catalog.
+//!   `files`, nine-tool `schema`, three-tool `views-write`, and six-tool
+//!   `chats` registries are linked; acceptance-blocked `discussions` remains
+//!   unavailable and Phase 1 remains the default catalog.
 //! - Resources advertise only the canonical
 //!   `anytype://spaces/{space_id}/objects/{object_id}` template. Instance
 //!   listing is empty and document discovery remains paginated through
@@ -43,8 +44,8 @@
 //! without echoing invalid values. [`RuntimeContext::start`] loads existing Anytype credentials and
 //! performs bounded authenticated health checks. HTTP is always required;
 //! standard read-write also requires gRPC for verified archive readback, while
-//! compact and read-only selections may run HTTP-only unless `schema` is
-//! or `views-write` is selected, because their bounded type classification or
+//! compact and read-only selections may run HTTP-only unless `schema` or
+//! `views-write` is selected, because their bounded type classification or
 //! canonical membership evidence requires gRPC through `anytype-api`.
 //! [`serve_stdio`] reserves
 //! stdout for protocol frames; redacted diagnostics go to stderr.
@@ -67,6 +68,7 @@ pub mod config;
 mod create_idempotency;
 pub mod cursor;
 pub mod discovery;
+pub mod discussion_toolset;
 pub mod domain;
 pub mod error;
 mod file_content;

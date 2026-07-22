@@ -429,7 +429,10 @@ malformed evidence, and an unconfirmed final state are not retried. Once
 dispatch begins, reconciliation continues in an owned task even if the caller
 cancels its future. Each gRPC call has a finite deadline capped at five seconds,
 the whole operation has a caller-adjustable absolute deadline capped at thirty
-seconds, and every show owns a separate bounded close.
+seconds. A show that returned a usable view or has an indeterminate dispatch
+outcome owns a separate bounded close; a definitive pre-acceptance
+authentication or permission rejection returns directly without manufacturing
+a close that could mask the original error.
 The total budget reserves time for each owned close and, once a write is
 admitted, for one fresh reconciliation read.
 

@@ -1015,7 +1015,13 @@ mod tests {
                     ));
                 }
                 let keyword = compositions[0];
-                self.require_allowed_keys(schema, path, &[keyword])?;
+                let typed_object_union = keyword == "oneOf"
+                    && schema.get("type").and_then(Value::as_str) == Some("object");
+                if typed_object_union {
+                    self.require_allowed_keys(schema, path, &["type", keyword])?;
+                } else {
+                    self.require_allowed_keys(schema, path, &[keyword])?;
+                }
                 let branches = schema[keyword]
                     .as_array()
                     .ok_or_else(|| format!("{path}/{keyword}: composition must be an array"))?;

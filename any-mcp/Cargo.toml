@@ -24,6 +24,11 @@ name = "any-mcp-views-write-acceptance"
 path = "src/bin/views_write_acceptance.rs"
 required-features = ["acceptance-harness"]
 
+[[bin]]
+name = "any-mcp-discussions-acceptance"
+path = "src/bin/discussions_acceptance.rs"
+required-features = ["acceptance-harness"]
+
 [features]
 default = []
 # Builds a test-only stdio child with deterministic acceptance seams around the
