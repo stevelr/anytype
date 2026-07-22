@@ -32,8 +32,8 @@ use anytype::{
     prelude::*,
     test_assert,
     test_util::{
-        DisposableRun, TestContext, TestError, TestResult, with_disposable_space_context,
-        with_test_context,
+        DisposableCallbackStage, DisposableRun, TestContext, TestError, TestResult,
+        disposable_callback_error, with_disposable_space_context, with_test_context,
     },
 };
 use serial_test::serial;
@@ -205,6 +205,22 @@ impl NumericCheckboxCase {
             Self::CheckboxEqualFalse => "checkbox eq false",
             Self::CheckboxNotEqualTrue => "checkbox ne true",
             Self::CheckboxNotEqualFalse => "checkbox ne false",
+        }
+    }
+
+    const fn callback_stage(self) -> DisposableCallbackStage {
+        match self {
+            Self::NumberEqualInteger => DisposableCallbackStage::NumberEqualInteger,
+            Self::NumberNotEqual => DisposableCallbackStage::NumberNotEqual,
+            Self::NumberLess => DisposableCallbackStage::NumberLess,
+            Self::NumberLessOrEqual => DisposableCallbackStage::NumberLessOrEqual,
+            Self::NumberGreater => DisposableCallbackStage::NumberGreater,
+            Self::NumberGreaterOrEqual => DisposableCallbackStage::NumberGreaterOrEqual,
+            Self::NumberEqualDecimal => DisposableCallbackStage::NumberEqualDecimal,
+            Self::CheckboxEqualTrue => DisposableCallbackStage::CheckboxEqualTrue,
+            Self::CheckboxEqualFalse => DisposableCallbackStage::CheckboxEqualFalse,
+            Self::CheckboxNotEqualTrue => DisposableCallbackStage::CheckboxNotEqualTrue,
+            Self::CheckboxNotEqualFalse => DisposableCallbackStage::CheckboxNotEqualFalse,
         }
     }
 }
@@ -584,9 +600,13 @@ async fn test_filter_number_checkbox_condition_matrix() {
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
-                let (objects, type_key) = create_test_objects(&ctx).await?;
+                let (objects, type_key) = create_test_objects(&ctx).await.map_err(|error| {
+                    disposable_callback_error(DisposableCallbackStage::Fixture, error)
+                })?;
                 for case in NumericCheckboxCase::ALL {
-                    assert_filter_case(&ctx, &objects, &type_key, case).await?;
+                    assert_filter_case(&ctx, &objects, &type_key, case)
+                        .await
+                        .map_err(|error| disposable_callback_error(case.callback_stage(), error))?;
                 }
                 Ok(())
             })

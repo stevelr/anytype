@@ -44,8 +44,8 @@ use tonic::Request;
 
 mod disposable;
 pub use disposable::{
-    DisposableChildEnvironment, DisposableRun, DisposableSkip, DisposableTestError,
-    with_disposable_space_context,
+    DisposableCallbackStage, DisposableChildEnvironment, DisposableRun, DisposableSkip,
+    DisposableTestError, disposable_callback_error, with_disposable_space_context,
 };
 
 #[allow(unused_imports)]
@@ -171,6 +171,15 @@ pub enum TestError {
     #[snafu(display("Disposable setup failed: stage={stage} category={category}"))]
     DisposableSetup {
         /// Closed setup stage name.
+        stage: &'static str,
+        /// Closed payload-free failure category.
+        category: &'static str,
+    },
+
+    /// A disposable-space callback boundary failed with a closed, secret-safe cause.
+    #[snafu(display("Disposable callback failed: stage={stage} category={category}"))]
+    DisposableCallback {
+        /// Closed callback stage name.
         stage: &'static str,
         /// Closed payload-free failure category.
         category: &'static str,

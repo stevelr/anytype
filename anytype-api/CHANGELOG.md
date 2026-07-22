@@ -115,6 +115,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Pre-readiness create failures now retain an equally closed setup
   stage/category that distinguishes rejected or indeterminate requests and
   invalid ID/model/name/ambient-identity responses without exposing values.
+  Numeric/checkbox callback failures now retain a closed fixture or exact
+  comparison stage and payload-free `TestError`/API diagnostic category, so
+  callback execution is distinguishable from pre-callback convergence without
+  exposing fixture or request values.
 - Replace the stale `anytype-heart#2879` numeric/checkbox limitation with exact
   query-encoding unit regressions and a cleanup-owned real-server matrix over
   object-list and scoped-search endpoints. The matrix covers all six numeric
