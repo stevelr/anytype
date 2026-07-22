@@ -8,6 +8,8 @@
 //! - [`view_add_objects`](AnytypeClient::view_add_objects) - add objects to a collection
 //! - [`observe_collection_membership`](AnytypeClient::observe_collection_membership) - prove exact
 //!   direct collection membership independently of saved view filters
+//! - [`collection_membership_page`](AnytypeClient::collection_membership_page) - enumerate one
+//!   bounded page from the same canonical membership scope
 //!
 //! ## Quick Start
 //!
@@ -49,13 +51,16 @@ use crate::{
     client::AnytypeClient,
     error::AnytypeError,
     filters::{Query, QueryWithFilters},
-    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
+    grpc_util::{ensure_error_ok, with_token_request},
     http_client::{GetPaged, HttpClient},
     prelude::*,
 };
 
 const MAX_VIEW_ID_CHARS: usize = 256;
 const MEMBERSHIP_QUERY_LIMIT: i64 = 2;
+const MAX_MEMBERSHIP_PAGE_LIMIT: u32 = 61;
+const MAX_MEMBERSHIP_PAGE_OFFSET: u64 = 1_000_000_000;
+const MAX_MEMBERSHIP_ENTITY_ID_BYTES: usize = 256;
 const MAX_MEMBERSHIP_SUBSCRIPTION_ID_BYTES: usize = 128;
 const MEMBERSHIP_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MEMBERSHIP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -89,6 +94,37 @@ pub struct CollectionMembershipObservation {
     pub state: CollectionMembershipState,
 }
 
+/// Verified continuation state for a canonical collection-membership page.
+///
+/// Values are identity-bound by callers such as MCP cursors. Passing stale or
+/// altered state fails closed instead of returning a shifted page.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CollectionMembershipContinuation {
+    /// Model-visible offset of the next distinct member.
+    pub next_offset: u64,
+    /// Total reported by the preceding complete page.
+    pub total: u64,
+    /// Final object ID from the preceding complete page.
+    pub final_object_id: String,
+}
+
+/// One complete, canonical page of direct collection member IDs.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CollectionMembershipPage {
+    /// Exact space whose collection index was read.
+    pub space_id: String,
+    /// Exact manual collection whose canonical membership scope was read.
+    pub collection_id: String,
+    /// Model-visible zero-based offset of this page.
+    pub offset: u64,
+    /// Complete total established by this page's counter block and row arithmetic.
+    pub total: u64,
+    /// Direct member IDs in Heart's canonical collection order.
+    pub object_ids: Vec<String>,
+    /// Verified state for the next page, or `None` for a terminal page.
+    pub continuation: Option<CollectionMembershipContinuation>,
+}
+
 /// Closed classification for incomplete collection-membership evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
@@ -107,6 +143,8 @@ pub enum CollectionMembershipEvidenceKind {
     InvalidCounters,
     /// Heart returned malformed, duplicate, or mismatched records.
     InvalidRecords,
+    /// Pagination moved relative to the preceding verified boundary.
+    ConcurrentShift,
     /// The independent unscoped query could not prove the target index row.
     IncompleteControl,
     /// A finite membership RPC deadline expired.
@@ -156,7 +194,9 @@ impl MembershipSubscriptionGuard {
     }
 
     async fn cleanup(&mut self) -> Result<()> {
-        let result = (self.action)().await;
+        let result = (self.action)().await.map_err(|_| {
+            membership_evidence_error(CollectionMembershipEvidenceKind::CleanupFailed)
+        });
         if result.is_ok() {
             self.armed = false;
         }
@@ -496,6 +536,52 @@ impl AnytypeClient {
         })
     }
 
+    /// Reads one canonical page of direct members from an exact collection.
+    ///
+    /// This operation is independent of saved views, view filters, Kanban
+    /// layout, and caller-defined queries. It first binds a manual collection
+    /// with one cache-independent REST read, then uses one finite Heart
+    /// subscription with a client-owned identifier and bounded cleanup. Pages
+    /// contain only validated IDs in Heart's canonical collection order.
+    ///
+    /// `limit` must be in `1..=61`. Pass `None` for the first page. A returned
+    /// continuation may be supplied unchanged for the next page; it causes one
+    /// internal overlap row to prove the boundary and total have not shifted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnytypeError::CollectionMembershipEvidence`] for incomplete,
+    /// malformed, shifted, or identity-mismatched evidence. Set/query objects
+    /// are rejected as [`CollectionMembershipEvidenceKind::NotACollection`].
+    /// Authentication and transport failures retain their normal categories.
+    pub async fn collection_membership_page(
+        &self,
+        space_id: impl Into<String>,
+        collection_id: impl Into<String>,
+        limit: u32,
+        continuation: Option<CollectionMembershipContinuation>,
+    ) -> Result<CollectionMembershipPage> {
+        let space_id = space_id.into();
+        let collection_id = collection_id.into();
+        self.config.limits.validate_id(&space_id, "space_id")?;
+        self.config
+            .limits
+            .validate_id(&collection_id, "collection_id")?;
+        validate_membership_page_input(limit, continuation.as_ref())?;
+
+        let collection = self.object(&space_id, &collection_id).get().await?;
+        validate_collection_identity(&collection, &space_id, &collection_id)?;
+
+        canonical_membership_page_query(
+            self,
+            &space_id,
+            &collection_id,
+            limit,
+            continuation.as_ref(),
+        )
+        .await
+    }
+
     /// Adds objects to a collection.
     pub async fn view_add_objects<S: Into<String>>(
         &self,
@@ -591,6 +677,280 @@ fn complete_membership_state(
     }
 }
 
+fn validate_membership_page_input(
+    limit: u32,
+    continuation: Option<&CollectionMembershipContinuation>,
+) -> Result<()> {
+    if !(1..=MAX_MEMBERSHIP_PAGE_LIMIT).contains(&limit) {
+        return Err(AnytypeError::Validation {
+            message: "collection membership page limit must be between 1 and 61".to_owned(),
+        });
+    }
+    let Some(continuation) = continuation else {
+        return Ok(());
+    };
+    if continuation.next_offset == 0
+        || continuation.next_offset > MAX_MEMBERSHIP_PAGE_OFFSET
+        || continuation.next_offset >= continuation.total
+    {
+        return Err(AnytypeError::Validation {
+            message: "collection membership continuation offset is invalid".to_owned(),
+        });
+    }
+    validate_membership_entity_id(&continuation.final_object_id, "final_object_id")
+}
+
+fn validate_membership_entity_id(value: &str, name: &str) -> Result<()> {
+    let valid = !value.is_empty()
+        && value.len() <= MAX_MEMBERSHIP_ENTITY_ID_BYTES
+        && !matches!(value, "." | "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._~-".contains(&byte));
+    if valid {
+        Ok(())
+    } else {
+        Err(AnytypeError::Validation {
+            message: format!("{name} must be a bounded safe entity identifier"),
+        })
+    }
+}
+
+async fn canonical_membership_page_query(
+    client: &AnytypeClient,
+    space_id: &str,
+    collection_id: &str,
+    limit: u32,
+    continuation: Option<&CollectionMembershipContinuation>,
+) -> Result<CollectionMembershipPage> {
+    let grpc = client.grpc_client().await?;
+    let subscription_id = new_membership_subscription_id()?;
+    let mut commands = grpc.client_commands();
+    let request = membership_page_request(
+        space_id,
+        collection_id,
+        limit,
+        continuation,
+        &subscription_id,
+    );
+    let mut request = with_token_request(Request::new(request), grpc.token())?;
+    request.set_timeout(MEMBERSHIP_RPC_TIMEOUT);
+    let mut cleanup = MembershipSubscriptionGuard::new(grpc, subscription_id.clone());
+    let response = match tokio::time::timeout(
+        MEMBERSHIP_RPC_TIMEOUT,
+        commands.object_search_subscribe(request),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response.into_inner(),
+        Ok(Err(status)) => {
+            let query_error = membership_grpc_status(status);
+            cleanup.cleanup().await?;
+            return Err(query_error);
+        }
+        Err(_) => {
+            cleanup.cleanup().await?;
+            return membership_evidence(CollectionMembershipEvidenceKind::RpcDeadline);
+        }
+    };
+    finish_membership_page_response(
+        &response,
+        &subscription_id,
+        space_id,
+        collection_id,
+        limit,
+        continuation,
+        &mut cleanup,
+    )
+    .await
+}
+
+async fn finish_membership_page_response(
+    response: &search_subscribe::Response,
+    subscription_id: &str,
+    space_id: &str,
+    collection_id: &str,
+    limit: u32,
+    continuation: Option<&CollectionMembershipContinuation>,
+    cleanup: &mut MembershipSubscriptionGuard,
+) -> Result<CollectionMembershipPage> {
+    let response_error = ensure_error_ok(response.error.as_ref(), "collection membership page");
+    let cleanup_result = cleanup.cleanup().await;
+    cleanup_result?;
+    response_error?;
+    validate_echoed_subscription_id(response, subscription_id)?;
+    decode_membership_page(
+        response,
+        subscription_id,
+        space_id,
+        collection_id,
+        limit,
+        continuation,
+    )
+}
+
+fn membership_page_request(
+    space_id: &str,
+    collection_id: &str,
+    limit: u32,
+    continuation: Option<&CollectionMembershipContinuation>,
+    subscription_id: &str,
+) -> search_subscribe::Request {
+    let (offset, internal_limit) = continuation.map_or((0, limit), |continuation| {
+        (
+            continuation.next_offset.saturating_sub(1),
+            limit.saturating_add(1),
+        )
+    });
+    search_subscribe::Request {
+        space_id: space_id.to_owned(),
+        sub_id: subscription_id.to_owned(),
+        filters: vec![
+            default_filter_opt_out(ARCHIVED_KEY),
+            default_filter_opt_out(DELETED_KEY),
+            default_filter_opt_out(RESOLVED_LAYOUT_KEY),
+        ],
+        sorts: Vec::new(),
+        limit: i64::from(internal_limit),
+        offset: i64::try_from(offset).unwrap_or(i64::MAX),
+        keys: vec![ID_KEY.to_owned(), SPACE_ID_KEY.to_owned()],
+        after_id: String::new(),
+        before_id: String::new(),
+        source: Vec::new(),
+        no_dep_subscription: true,
+        collection_id: collection_id.to_owned(),
+    }
+}
+
+fn decode_membership_page(
+    response: &search_subscribe::Response,
+    subscription_id: &str,
+    space_id: &str,
+    collection_id: &str,
+    limit: u32,
+    continuation: Option<&CollectionMembershipContinuation>,
+) -> Result<CollectionMembershipPage> {
+    let counters = response.counters.as_ref().ok_or_else(|| {
+        membership_evidence_error(CollectionMembershipEvidenceKind::InvalidCounters)
+    })?;
+    if response.sub_id != subscription_id || counters.sub_id != subscription_id {
+        return membership_evidence(CollectionMembershipEvidenceKind::InvalidCounters);
+    }
+    if !response.dependencies.is_empty() {
+        return membership_evidence(CollectionMembershipEvidenceKind::InvalidRecords);
+    }
+
+    let total = nonnegative_counter(counters.total)?;
+    let previous = nonnegative_counter(counters.prev_count)?;
+    let next = nonnegative_counter(counters.next_count)?;
+    if continuation.is_some_and(|state| total != state.total) {
+        return membership_evidence(CollectionMembershipEvidenceKind::ConcurrentShift);
+    }
+    let raw_offset = continuation.map_or(0, |state| state.next_offset.saturating_sub(1));
+    let raw_limit = u64::from(if continuation.is_some() {
+        limit.saturating_add(1)
+    } else {
+        limit
+    });
+    let row_count = u64::try_from(response.records.len()).map_err(|_| {
+        membership_evidence_error(CollectionMembershipEvidenceKind::InvalidCounters)
+    })?;
+    let remaining = total.checked_sub(raw_offset).ok_or_else(|| {
+        membership_evidence_error(CollectionMembershipEvidenceKind::InvalidCounters)
+    })?;
+    let expected_rows = raw_limit.min(remaining);
+    let consumed_end = raw_offset.checked_add(row_count).ok_or_else(|| {
+        membership_evidence_error(CollectionMembershipEvidenceKind::InvalidCounters)
+    })?;
+    if previous != 0
+        || next != 0
+        || row_count != expected_rows
+        || consumed_end > total
+        || row_count > raw_limit
+    {
+        return membership_evidence(CollectionMembershipEvidenceKind::InvalidCounters);
+    }
+
+    let mut object_ids = Vec::with_capacity(response.records.len());
+    for record in &response.records {
+        let object_id = struct_string(record, ID_KEY).ok_or_else(|| {
+            membership_evidence_error(CollectionMembershipEvidenceKind::InvalidRecords)
+        })?;
+        let record_space = struct_string(record, SPACE_ID_KEY).ok_or_else(|| {
+            membership_evidence_error(CollectionMembershipEvidenceKind::InvalidRecords)
+        })?;
+        if record_space != space_id
+            || validate_membership_entity_id(object_id, "object_id").is_err()
+        {
+            return membership_evidence(CollectionMembershipEvidenceKind::InvalidRecords);
+        }
+        if object_ids.iter().any(|previous| previous == object_id) {
+            return membership_evidence(CollectionMembershipEvidenceKind::InvalidRecords);
+        }
+        object_ids.push(object_id.to_owned());
+    }
+
+    let visible_offset = continuation.map_or(0, |state| state.next_offset);
+    if let Some(state) = continuation {
+        if object_ids.first() != Some(&state.final_object_id) || object_ids.len() < 2 {
+            return membership_evidence(CollectionMembershipEvidenceKind::ConcurrentShift);
+        }
+        object_ids.remove(0);
+    }
+    if object_ids.len() > usize::try_from(limit).unwrap_or(usize::MAX)
+        || (consumed_end < total && object_ids.is_empty())
+    {
+        return membership_evidence(CollectionMembershipEvidenceKind::InvalidCounters);
+    }
+
+    let continuation = if consumed_end == total {
+        None
+    } else {
+        let next_offset = consumed_end;
+        if next_offset == 0 || next_offset > MAX_MEMBERSHIP_PAGE_OFFSET {
+            return membership_evidence(CollectionMembershipEvidenceKind::InvalidCounters);
+        }
+        let final_object_id = object_ids.last().cloned().ok_or_else(|| {
+            membership_evidence_error(CollectionMembershipEvidenceKind::InvalidRecords)
+        })?;
+        Some(CollectionMembershipContinuation {
+            next_offset,
+            total,
+            final_object_id,
+        })
+    };
+
+    Ok(CollectionMembershipPage {
+        space_id: space_id.to_owned(),
+        collection_id: collection_id.to_owned(),
+        offset: visible_offset,
+        total,
+        object_ids,
+        continuation,
+    })
+}
+
+fn nonnegative_counter(value: i64) -> Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| membership_evidence_error(CollectionMembershipEvidenceKind::InvalidCounters))
+}
+
+fn membership_grpc_status(status: tonic::Status) -> AnytypeError {
+    let code = status.code();
+    if matches!(
+        code,
+        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+    ) {
+        AnytypeError::Auth {
+            message: "membership gRPC authentication failed".to_owned(),
+        }
+    } else {
+        AnytypeError::Other {
+            message: format!("membership gRPC request failed with fixed code {code:?}"),
+        }
+    }
+}
+
 async fn exact_membership_query(
     client: &AnytypeClient,
     space_id: &str,
@@ -612,7 +972,7 @@ async fn exact_membership_query(
     {
         Ok(Ok(response)) => response.into_inner(),
         Ok(Err(status)) => {
-            let query_error = grpc_status(status);
+            let query_error = membership_grpc_status(status);
             cleanup.cleanup().await?;
             return Err(query_error);
         }
@@ -640,8 +1000,8 @@ async fn finish_membership_response(
 ) -> Result<MembershipQueryState> {
     let response_error = ensure_error_ok(response.error.as_ref(), "collection membership query");
     let cleanup_result = cleanup.cleanup().await;
-    response_error?;
     cleanup_result?;
+    response_error?;
     validate_echoed_subscription_id(response, subscription_id)?;
     decode_membership_query(response, subscription_id, space_id, object_id)
 }
@@ -660,24 +1020,28 @@ fn validate_echoed_subscription_id(
 }
 
 async fn unsubscribe_membership(grpc: AnytypeGrpcClient, subscription_id: String) -> Result<()> {
-    let mut commands = grpc.client_commands();
-    let request = search_unsubscribe::Request {
-        sub_ids: vec![subscription_id],
-    };
-    let mut request = with_token_request(Request::new(request), grpc.token())?;
-    request.set_timeout(MEMBERSHIP_CLEANUP_TIMEOUT);
-    let response = tokio::time::timeout(
-        MEMBERSHIP_CLEANUP_TIMEOUT,
-        commands.object_search_unsubscribe(request),
-    )
-    .await
-    .map_err(|_| membership_evidence_error(CollectionMembershipEvidenceKind::CleanupFailed))?
-    .map_err(grpc_status)?
-    .into_inner();
-    ensure_error_ok(
-        response.error.as_ref(),
-        "collection membership query cleanup",
-    )
+    let result = async {
+        let mut commands = grpc.client_commands();
+        let request = search_unsubscribe::Request {
+            sub_ids: vec![subscription_id],
+        };
+        let mut request = with_token_request(Request::new(request), grpc.token())?;
+        request.set_timeout(MEMBERSHIP_CLEANUP_TIMEOUT);
+        let response = tokio::time::timeout(
+            MEMBERSHIP_CLEANUP_TIMEOUT,
+            commands.object_search_unsubscribe(request),
+        )
+        .await
+        .map_err(|_| membership_evidence_error(CollectionMembershipEvidenceKind::CleanupFailed))?
+        .map_err(membership_grpc_status)?
+        .into_inner();
+        ensure_error_ok(
+            response.error.as_ref(),
+            "collection membership query cleanup",
+        )
+    }
+    .await;
+    result.map_err(|_| membership_evidence_error(CollectionMembershipEvidenceKind::CleanupFailed))
 }
 
 fn new_membership_subscription_id() -> Result<String> {
@@ -839,6 +1203,9 @@ mod tests {
     const SPACE_ID: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const LIST_ID: &str = "bafyreicccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const OBJECT_ID: &str = "bafyreiooooooooooooooooooooooooooooooooooooooooooooooooooo";
+    const PAGE_A: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab";
+    const PAGE_B: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac";
+    const PAGE_C: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad";
     const SUBSCRIPTION_ID: &str = "anytype-api-membership-0123456789abcdef0123456789abcdef";
 
     fn fixture_client() -> AnytypeClient {
@@ -937,6 +1304,414 @@ mod tests {
         );
         assert!(!MEMBERSHIP_RPC_TIMEOUT.is_zero());
         assert!(!MEMBERSHIP_CLEANUP_TIMEOUT.is_zero());
+    }
+
+    #[test]
+    fn membership_grpc_status_classification_is_typed_and_payload_safe() {
+        for code in [tonic::Code::Unauthenticated, tonic::Code::PermissionDenied] {
+            let error = membership_grpc_status(tonic::Status::new(code, "secret payload"));
+            assert!(error.is_authentication());
+            assert!(!format!("{error:?}").contains("secret payload"));
+        }
+
+        let unavailable = membership_grpc_status(tonic::Status::new(
+            tonic::Code::Unavailable,
+            "secret payload",
+        ));
+        assert!(!unavailable.is_authentication());
+        assert!(!format!("{unavailable:?}").contains("secret payload"));
+    }
+
+    #[test]
+    fn membership_page_request_is_canonical_bounded_and_filter_free() {
+        let first = membership_page_request(SPACE_ID, LIST_ID, 61, None, SUBSCRIPTION_ID);
+        assert_eq!(first.space_id, SPACE_ID);
+        assert_eq!(first.collection_id, LIST_ID);
+        assert_eq!(first.sub_id, SUBSCRIPTION_ID);
+        assert_eq!((first.limit, first.offset), (61, 0));
+        assert_eq!(first.keys, [ID_KEY, SPACE_ID_KEY]);
+        assert!(first.source.is_empty());
+        assert!(first.after_id.is_empty());
+        assert!(first.before_id.is_empty());
+        assert!(first.no_dep_subscription);
+        assert_eq!(first.filters.len(), 3);
+        for (filter, key) in
+            first
+                .filters
+                .iter()
+                .zip([ARCHIVED_KEY, DELETED_KEY, RESOLVED_LAYOUT_KEY])
+        {
+            assert_eq!(filter, &default_filter_opt_out(key));
+        }
+        assert!(first.sorts.is_empty());
+
+        let continuation = CollectionMembershipContinuation {
+            next_offset: 61,
+            total: 100,
+            final_object_id: PAGE_A.to_owned(),
+        };
+        let continued =
+            membership_page_request(SPACE_ID, LIST_ID, 61, Some(&continuation), SUBSCRIPTION_ID);
+        assert_eq!((continued.limit, continued.offset), (62, 60));
+        assert_eq!(continued.filters, first.filters);
+        assert_eq!(continued.sorts, first.sorts);
+    }
+
+    #[test]
+    fn membership_page_input_bounds_fail_before_io() {
+        for limit in [0, 62, u32::MAX] {
+            assert!(matches!(
+                validate_membership_page_input(limit, None),
+                Err(AnytypeError::Validation { .. })
+            ));
+        }
+        for next_offset in [0, MAX_MEMBERSHIP_PAGE_OFFSET + 1] {
+            let continuation = CollectionMembershipContinuation {
+                next_offset,
+                total: MAX_MEMBERSHIP_PAGE_OFFSET + 1,
+                final_object_id: PAGE_A.to_owned(),
+            };
+            assert!(matches!(
+                validate_membership_page_input(1, Some(&continuation)),
+                Err(AnytypeError::Validation { .. })
+            ));
+        }
+        for continuation in [
+            CollectionMembershipContinuation {
+                next_offset: 2,
+                total: 1,
+                final_object_id: PAGE_A.to_owned(),
+            },
+            CollectionMembershipContinuation {
+                next_offset: 1,
+                total: 1,
+                final_object_id: PAGE_A.to_owned(),
+            },
+            CollectionMembershipContinuation {
+                next_offset: 1,
+                total: 2,
+                final_object_id: "../secret".to_owned(),
+            },
+        ] {
+            assert!(matches!(
+                validate_membership_page_input(1, Some(&continuation)),
+                Err(AnytypeError::Validation { .. })
+            ));
+        }
+        assert!(validate_membership_page_input(1, None).is_ok());
+        assert!(validate_membership_page_input(61, None).is_ok());
+    }
+
+    #[test]
+    fn membership_page_decoder_proves_first_continued_and_empty_pages() {
+        let first = page_response(
+            vec![record(PAGE_A, SPACE_ID), record(PAGE_B, SPACE_ID)],
+            3,
+            0,
+            0,
+        );
+        let first = decode_membership_page(&first, SUBSCRIPTION_ID, SPACE_ID, LIST_ID, 2, None)
+            .expect("complete first page");
+        assert_eq!((first.offset, first.total), (0, 3));
+        assert_eq!(first.object_ids, [PAGE_A, PAGE_B]);
+        let continuation = first.continuation.expect("first page continuation");
+        assert_eq!(continuation.next_offset, 2);
+        assert_eq!(continuation.total, 3);
+        assert_eq!(continuation.final_object_id, PAGE_B);
+
+        let continued = page_response(
+            vec![record(PAGE_B, SPACE_ID), record(PAGE_C, SPACE_ID)],
+            3,
+            0,
+            0,
+        );
+        let continued = decode_membership_page(
+            &continued,
+            SUBSCRIPTION_ID,
+            SPACE_ID,
+            LIST_ID,
+            2,
+            Some(&continuation),
+        )
+        .expect("complete terminal continuation");
+        assert_eq!((continued.offset, continued.total), (2, 3));
+        assert_eq!(continued.object_ids, [PAGE_C]);
+        assert!(continued.continuation.is_none());
+
+        let empty = page_response(Vec::new(), 0, 0, 0);
+        let empty = decode_membership_page(&empty, SUBSCRIPTION_ID, SPACE_ID, LIST_ID, 61, None)
+            .expect("canonical empty first page");
+        assert_eq!(empty.total, 0);
+        assert!(empty.object_ids.is_empty());
+        assert!(empty.continuation.is_none());
+    }
+
+    #[test]
+    fn membership_page_decoder_keeps_public_pages_at_61_with_overlap_62() {
+        let limits = fixture_client().config.limits;
+        let alphabet = b"234567abcdefghijklmnopqrstuvwxyz";
+        let ids = (0..63)
+            .map(|index| {
+                format!(
+                    "bafyrei{}{}{}",
+                    "a".repeat(50),
+                    char::from(alphabet[index / 32]),
+                    char::from(alphabet[index % 32])
+                )
+            })
+            .collect::<Vec<_>>();
+        for id in &ids {
+            limits
+                .validate_id(id, "object_id")
+                .expect("safe fixture ID");
+        }
+
+        let first_response = page_response(
+            ids[..61].iter().map(|id| record(id, SPACE_ID)).collect(),
+            62,
+            0,
+            0,
+        );
+        let first = decode_membership_page(
+            &first_response,
+            SUBSCRIPTION_ID,
+            SPACE_ID,
+            LIST_ID,
+            61,
+            None,
+        )
+        .expect("maximum first page");
+        assert_eq!(first.object_ids.len(), 61);
+        assert_eq!(first.continuation.expect("continuation").next_offset, 61);
+
+        let state = CollectionMembershipContinuation {
+            next_offset: 1,
+            total: 63,
+            final_object_id: ids[0].clone(),
+        };
+        let continued_response = page_response(
+            ids[..62].iter().map(|id| record(id, SPACE_ID)).collect(),
+            63,
+            0,
+            0,
+        );
+        let continued = decode_membership_page(
+            &continued_response,
+            SUBSCRIPTION_ID,
+            SPACE_ID,
+            LIST_ID,
+            61,
+            Some(&state),
+        )
+        .expect("maximum continuation page");
+        assert_eq!(continued.object_ids.len(), 61);
+        assert_eq!(continued.object_ids.first(), Some(&ids[1]));
+        assert_eq!(continued.object_ids.last(), Some(&ids[61]));
+        assert_eq!(
+            continued.continuation.expect("continuation").next_offset,
+            62
+        );
+
+        assert_evidence_kind(
+            decode_membership_page(
+                &page_response(
+                    ids[..62].iter().map(|id| record(id, SPACE_ID)).collect(),
+                    62,
+                    0,
+                    0,
+                ),
+                SUBSCRIPTION_ID,
+                SPACE_ID,
+                LIST_ID,
+                61,
+                None,
+            ),
+            CollectionMembershipEvidenceKind::InvalidCounters,
+        );
+        let overrun_state = CollectionMembershipContinuation {
+            next_offset: 1,
+            total: 63,
+            final_object_id: ids[0].clone(),
+        };
+        assert_evidence_kind(
+            decode_membership_page(
+                &page_response(
+                    ids.iter().map(|id| record(id, SPACE_ID)).collect(),
+                    63,
+                    0,
+                    0,
+                ),
+                SUBSCRIPTION_ID,
+                SPACE_ID,
+                LIST_ID,
+                61,
+                Some(&overrun_state),
+            ),
+            CollectionMembershipEvidenceKind::InvalidCounters,
+        );
+    }
+
+    #[test]
+    fn membership_page_entity_id_boundaries_are_exact() {
+        let maximum = "~z".repeat(MAX_MEMBERSHIP_ENTITY_ID_BYTES / 2);
+        assert_eq!(maximum.len(), MAX_MEMBERSHIP_ENTITY_ID_BYTES);
+        validate_membership_entity_id(&maximum, "object_id").expect("maximum safe entity ID");
+        let page = decode_membership_page(
+            &page_response(vec![record(&maximum, SPACE_ID)], 1, 0, 0),
+            SUBSCRIPTION_ID,
+            SPACE_ID,
+            LIST_ID,
+            1,
+            None,
+        )
+        .expect("maximum safe entity ID row");
+        assert_eq!(page.object_ids, [maximum]);
+
+        for invalid in [
+            "x".repeat(MAX_MEMBERSHIP_ENTITY_ID_BYTES + 1),
+            "../x".to_owned(),
+        ] {
+            assert_evidence_kind(
+                decode_membership_page(
+                    &page_response(vec![record(&invalid, SPACE_ID)], 1, 0, 0),
+                    SUBSCRIPTION_ID,
+                    SPACE_ID,
+                    LIST_ID,
+                    1,
+                    None,
+                ),
+                CollectionMembershipEvidenceKind::InvalidRecords,
+            );
+        }
+    }
+
+    #[test]
+    fn membership_page_decoder_rejects_counters_records_and_shifts() {
+        let valid = page_response(vec![record(PAGE_A, SPACE_ID)], 1, 0, 0);
+        let mut malformed = Vec::new();
+        let mut missing_counters = valid.clone();
+        missing_counters.counters = None;
+        malformed.push((
+            missing_counters,
+            CollectionMembershipEvidenceKind::InvalidCounters,
+        ));
+        let mut wrong_counter_id = valid.clone();
+        wrong_counter_id.counters.as_mut().expect("counters").sub_id = "other".to_owned();
+        malformed.push((
+            wrong_counter_id,
+            CollectionMembershipEvidenceKind::InvalidCounters,
+        ));
+        let mut dependency = valid.clone();
+        dependency.dependencies.push(record(PAGE_B, SPACE_ID));
+        malformed.push((dependency, CollectionMembershipEvidenceKind::InvalidRecords));
+        for (field, value) in [("total", -1), ("prev", 1), ("next", 1)] {
+            let mut response = valid.clone();
+            let counters = response.counters.as_mut().expect("counters");
+            match field {
+                "total" => counters.total = value,
+                "prev" => counters.prev_count = value,
+                _ => counters.next_count = value,
+            }
+            malformed.push((response, CollectionMembershipEvidenceKind::InvalidCounters));
+        }
+        let native_order = page_response(
+            vec![record(PAGE_B, SPACE_ID), record(PAGE_A, SPACE_ID)],
+            2,
+            0,
+            0,
+        );
+        let native_order =
+            decode_membership_page(&native_order, SUBSCRIPTION_ID, SPACE_ID, LIST_ID, 2, None)
+                .expect("Heart collection order is preserved");
+        assert_eq!(native_order.object_ids, [PAGE_B, PAGE_A]);
+        malformed.push((
+            page_response(
+                vec![record(PAGE_A, SPACE_ID), record(PAGE_A, SPACE_ID)],
+                2,
+                0,
+                0,
+            ),
+            CollectionMembershipEvidenceKind::InvalidRecords,
+        ));
+        malformed.push((
+            page_response(vec![record(PAGE_A, LIST_ID)], 1, 0, 0),
+            CollectionMembershipEvidenceKind::InvalidRecords,
+        ));
+        malformed.push((
+            page_response(vec![Struct::default()], 1, 0, 0),
+            CollectionMembershipEvidenceKind::InvalidRecords,
+        ));
+        for (response, expected) in malformed {
+            assert_evidence_kind(
+                decode_membership_page(&response, SUBSCRIPTION_ID, SPACE_ID, LIST_ID, 2, None),
+                expected,
+            );
+        }
+
+        let continuation = CollectionMembershipContinuation {
+            next_offset: 1,
+            total: 3,
+            final_object_id: PAGE_A.to_owned(),
+        };
+        for response in [
+            page_response(
+                vec![record(PAGE_A, SPACE_ID), record(PAGE_B, SPACE_ID)],
+                2,
+                0,
+                0,
+            ),
+            page_response(
+                vec![record(PAGE_B, SPACE_ID), record(PAGE_C, SPACE_ID)],
+                3,
+                0,
+                0,
+            ),
+        ] {
+            assert_evidence_kind(
+                decode_membership_page(
+                    &response,
+                    SUBSCRIPTION_ID,
+                    SPACE_ID,
+                    LIST_ID,
+                    1,
+                    Some(&continuation),
+                ),
+                CollectionMembershipEvidenceKind::ConcurrentShift,
+            );
+        }
+        assert_evidence_kind(
+            decode_membership_page(
+                &page_response(vec![record(PAGE_A, SPACE_ID)], 3, 0, 0),
+                SUBSCRIPTION_ID,
+                SPACE_ID,
+                LIST_ID,
+                1,
+                Some(&continuation),
+            ),
+            CollectionMembershipEvidenceKind::InvalidCounters,
+        );
+
+        let maximum_offset = CollectionMembershipContinuation {
+            next_offset: MAX_MEMBERSHIP_PAGE_OFFSET,
+            total: MAX_MEMBERSHIP_PAGE_OFFSET + 2,
+            final_object_id: PAGE_A.to_owned(),
+        };
+        assert_evidence_kind(
+            decode_membership_page(
+                &page_response(
+                    vec![record(PAGE_A, SPACE_ID), record(PAGE_B, SPACE_ID)],
+                    i64::try_from(MAX_MEMBERSHIP_PAGE_OFFSET + 2).expect("bounded total"),
+                    0,
+                    0,
+                ),
+                SUBSCRIPTION_ID,
+                SPACE_ID,
+                LIST_ID,
+                1,
+                Some(&maximum_offset),
+            ),
+            CollectionMembershipEvidenceKind::InvalidCounters,
+        );
     }
 
     #[test]
@@ -1199,6 +1974,75 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn membership_page_decodes_only_after_confirmed_owned_cleanup() {
+        let cleaned = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let action = successful_cleanup_action(Arc::clone(&calls), Arc::clone(&cleaned));
+        let mut guard = MembershipSubscriptionGuard::from_action(action);
+        let response = page_response(vec![record(PAGE_A, SPACE_ID)], 1, 0, 0);
+        let page = finish_membership_page_response(
+            &response,
+            SUBSCRIPTION_ID,
+            SPACE_ID,
+            LIST_ID,
+            1,
+            None,
+            &mut guard,
+        )
+        .await
+        .expect("complete page after cleanup");
+        cleaned.notified().await;
+        assert_eq!(page.object_ids, [PAGE_A]);
+        drop(guard);
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn membership_page_cleanup_failure_is_typed_and_has_one_fallback() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fallback = Arc::new(Notify::new());
+        let action: MembershipCleanupAction = Arc::new({
+            let calls = Arc::clone(&calls);
+            let fallback = Arc::clone(&fallback);
+            move || {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                let fallback = Arc::clone(&fallback);
+                Box::pin(async move {
+                    if attempt == 1 {
+                        fallback.notify_one();
+                    }
+                    Err(AnytypeError::Other {
+                        message: "untrusted cleanup detail".to_owned(),
+                    })
+                })
+            }
+        });
+        let mut guard = MembershipSubscriptionGuard::from_action(action);
+        let mut response = page_response(vec![record(PAGE_A, SPACE_ID)], 1, 0, 0);
+        response.sub_id = "different-subscription".to_owned();
+        assert_evidence_kind(
+            finish_membership_page_response(
+                &response,
+                SUBSCRIPTION_ID,
+                SPACE_ID,
+                LIST_ID,
+                1,
+                None,
+                &mut guard,
+            )
+            .await,
+            CollectionMembershipEvidenceKind::CleanupFailed,
+        );
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), fallback.notified())
+            .await
+            .expect("one bounded fallback cleanup");
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     fn object_fixture(id: &str, space_id: &str, layout: ObjectLayout) -> Object {
         Object {
             archived: false,
@@ -1248,6 +2092,27 @@ mod tests {
                 total,
                 next_count: 0,
                 prev_count: 0,
+                sub_id,
+            }),
+        }
+    }
+
+    fn page_response(
+        records: Vec<Struct>,
+        total: i64,
+        prev_count: i64,
+        next_count: i64,
+    ) -> search_subscribe::Response {
+        let sub_id = SUBSCRIPTION_ID.to_owned();
+        search_subscribe::Response {
+            error: None,
+            records,
+            dependencies: Vec::new(),
+            sub_id: sub_id.clone(),
+            counters: Some(Counters {
+                total,
+                next_count,
+                prev_count,
                 sub_id,
             }),
         }

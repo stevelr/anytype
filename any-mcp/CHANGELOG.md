@@ -8,6 +8,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Amend the approved `views-write` canonical membership-page prerequisite to
+  match real Heart offset-window evidence: `total` and exact row arithmetic
+  establish terminal versus continued pages, while Heart's relative
+  `prev_count` and `next_count` fields must both remain zero. Continuation still
+  requires exact echoed subscription IDs, a checked offset, total stability,
+  and an ordered overlap boundary; it never treats a zero relative counter as
+  terminal by itself. Real collection scopes also ignore an `id` sort, so the
+  canonical request now sends no sort and preserves Heart's direct collection
+  order without post-sorting; duplicate rows and boundary shifts still fail
+  closed.
 - Amend the approved schema-toolset design after `any-93eo` with one closed
   `type_update.recommended_properties` desired-state field: omission preserves,
   an explicit empty array clears only replaceable recommendations, and 1..20

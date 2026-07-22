@@ -278,8 +278,9 @@ pub mod prelude {
         verify::{MAX_VERIFY_ATTEMPTS, VerifyConfig, verify_semantic},
         // Views (Lists, Collections, Queries)
         views::{
-            CollectionMembershipEvidenceKind, CollectionMembershipObservation,
-            CollectionMembershipState, View, ViewLayout,
+            CollectionMembershipContinuation, CollectionMembershipEvidenceKind,
+            CollectionMembershipObservation, CollectionMembershipPage, CollectionMembershipState,
+            View, ViewLayout,
         },
     };
     pub use crate::{
