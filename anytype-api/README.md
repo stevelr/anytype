@@ -626,8 +626,11 @@ cleanup-owned space created by `with_disposable_space_context`. The watcher
 subscribes and unsubscribes from the configured gRPC server, accepts empty-space
 fallback events only for import requests that explicitly enable the fallback,
 and applies fixed timeouts to every live stage. The test is ignored under
-`any-9h0k` until env-only disposable credentials and a complete space inventory
-are available; run it explicitly after that environment issue is repaired.
+ordinary runs because it requires a configured real server and explicit
+disposable-process admission. The real server may complete the ordinary import
+process before publishing the import-finish event; the test uses the same
+subscription for a second bounded wait and proves that no new process was
+correlated while observing that fallback.
 
 Tests that need a custom collection can use the hidden
 `TestContext::create_collection_type_fixture` helper. Anytype's REST type
