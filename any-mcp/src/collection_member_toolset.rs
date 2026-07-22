@@ -1058,19 +1058,91 @@ mod tests {
         value.as_object().cloned().expect("object arguments")
     }
 
-    fn metric_counts(client: &AnytypeClient) -> (u64, u64) {
-        let metrics = client.http_metrics();
-        (metrics.logical_operations, metrics.physical_attempts)
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct WorkCounts {
+        http_logical: u64,
+        http_physical: u64,
+        membership: anytype::views::CollectionMembershipMetricsSnapshot,
     }
 
-    fn assert_list_work(before: (u64, u64), after: (u64, u64)) {
-        assert!(after.0 > before.0);
+    fn metric_counts(client: &AnytypeClient) -> WorkCounts {
+        let http = client.http_metrics();
+        WorkCounts {
+            http_logical: http.logical_operations,
+            http_physical: http.physical_attempts,
+            membership: client.collection_membership_metrics(),
+        }
+    }
+
+    fn assert_list_work(before: WorkCounts, after: WorkCounts) {
+        assert!(after.http_logical > before.http_logical);
         assert_list_ceiling(before, after);
     }
 
-    fn assert_list_ceiling(before: (u64, u64), after: (u64, u64)) {
-        assert!(after.0 - before.0 <= COLLECTION_MEMBER_LIST_HTTP_LOGICAL_CEILING as u64);
-        assert!(after.1 - before.1 <= COLLECTION_MEMBER_LIST_HTTP_PHYSICAL_CEILING as u64);
+    fn assert_list_ceiling(before: WorkCounts, after: WorkCounts) {
+        assert!(
+            after.http_logical - before.http_logical
+                <= COLLECTION_MEMBER_LIST_HTTP_LOGICAL_CEILING as u64
+        );
+        assert!(
+            after.http_physical - before.http_physical
+                <= COLLECTION_MEMBER_LIST_HTTP_PHYSICAL_CEILING as u64
+        );
+    }
+
+    fn assert_stable_list_work(before: WorkCounts, after: WorkCounts) {
+        assert_eq!(
+            after.http_logical - before.http_logical,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.http_physical - before.http_physical,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.membership.query_rounds - before.membership.query_rounds,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.membership.subscribe_attempts - before.membership.subscribe_attempts,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.membership.foreground_close_attempts
+                - before.membership.foreground_close_attempts,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.membership.foreground_close_successes
+                - before.membership.foreground_close_successes,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.membership.fallback_close_attempts - before.membership.fallback_close_attempts,
+            0,
+            "{before:?} -> {after:?}"
+        );
+    }
+
+    fn assert_zero_membership_io(before: WorkCounts, after: WorkCounts) {
+        assert_eq!(
+            after.http_logical, before.http_logical,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.http_physical, before.http_physical,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.membership, before.membership,
+            "{before:?} -> {after:?}"
+        );
     }
 
     async fn direct_call(server: &AnyMcpServer, value: Value) -> CallToolResult {
@@ -1201,7 +1273,7 @@ mod tests {
             json!({"space":space_id,"collection_id":collection_id,"limit":1}),
         )
         .await;
-        assert_list_work(first_before, metric_counts(metrics_client));
+        assert_stable_list_work(first_before, metric_counts(metrics_client));
         let cursor = first["result"]["structuredContent"]["next_cursor"]
             .as_str()
             .expect("stdio walk continuation")
@@ -1220,7 +1292,7 @@ mod tests {
             }),
         )
         .await;
-        assert_list_ceiling(mismatch_before, metric_counts(metrics_client));
+        assert_zero_membership_io(mismatch_before, metric_counts(metrics_client));
 
         let second_before = metric_counts(metrics_client);
         let second = write_stdio_frame(
@@ -1235,7 +1307,7 @@ mod tests {
             }),
         )
         .await;
-        assert_list_work(second_before, metric_counts(metrics_client));
+        assert_stable_list_work(second_before, metric_counts(metrics_client));
         drop(client_writer);
         drop(client_reader);
         task.await
@@ -1511,7 +1583,7 @@ mod tests {
                             }),
                         )
                         .await;
-                        assert_list_work(kanban_before, metric_counts(&ctx.client));
+                        assert_stable_list_work(kanban_before, metric_counts(&ctx.client));
                         assert_eq!(kanban_direct.is_error, Some(false));
                         let kanban_direct_ids = kanban_direct
                             .structured_content
@@ -1537,7 +1609,7 @@ mod tests {
                         )
                         .await;
                         assert_eq!(first.is_error, Some(false));
-                        assert_list_work(before, metric_counts(&ctx.client));
+                        assert_stable_list_work(before, metric_counts(&ctx.client));
                         let first_value = first
                             .structured_content
                             .as_ref()
@@ -1546,16 +1618,18 @@ mod tests {
                             .as_str()
                             .expect("direct continuation")
                             .to_owned();
+                        let mismatch_before = metric_counts(&ctx.client);
                         let mismatch = direct_call(
                             &direct_server,
                             json!({
                                 "space":ctx.space_id,
-                                "collection_id":collection.id,
-                                "limit":2,
+                                "collection_id":query.id,
+                                "limit":1,
                                 "cursor":cursor
                             }),
                         )
                         .await;
+                        assert_zero_membership_io(mismatch_before, metric_counts(&ctx.client));
                         assert_eq!(mismatch.is_error, Some(true));
                         assert_eq!(
                             mismatch
@@ -1576,7 +1650,7 @@ mod tests {
                         )
                         .await;
                         assert_eq!(second.is_error, Some(false));
-                        assert_list_work(second_before, metric_counts(&ctx.client));
+                        assert_stable_list_work(second_before, metric_counts(&ctx.client));
                         assert!(
                             second
                                 .structured_content
@@ -1618,6 +1692,13 @@ mod tests {
                             stdio_walk[2]["result"]["structuredContent"]["code"],
                             "validation"
                         );
+                        assert_eq!(
+                            &stdio_walk[2]["result"]["structuredContent"],
+                            mismatch
+                                .structured_content
+                                .as_ref()
+                                .expect("direct mismatch structured content")
+                        );
                         assert_eq!(stdio_walk[3]["result"]["isError"], false);
                         assert!(
                             stdio_walk[3]["result"]["structuredContent"]
@@ -1648,7 +1729,7 @@ mod tests {
                             }),
                         )
                         .await;
-                        assert_list_work(stdio_before, metric_counts(&ctx.client));
+                        assert_stable_list_work(stdio_before, metric_counts(&ctx.client));
                         assert_eq!(stdio["result"]["isError"], false, "{stdio}");
                         let stdio_ids = stdio["result"]["structuredContent"]["items"]
                             .as_array()
@@ -1669,7 +1750,7 @@ mod tests {
                             }),
                         )
                         .await;
-                        assert_list_work(kanban_stdio_before, metric_counts(&ctx.client));
+                        assert_stable_list_work(kanban_stdio_before, metric_counts(&ctx.client));
                         assert_eq!(kanban_stdio["result"]["isError"], false);
                         let kanban_stdio_ids = kanban_stdio["result"]["structuredContent"]["items"]
                             .as_array()
@@ -1682,18 +1763,38 @@ mod tests {
                             kanban_reference.object_ids.as_slice()
                         );
 
+                        let read_only_arguments = json!({
+                            "space":ctx.space_id,
+                            "collection_id":collection.id,
+                            "limit":61
+                        });
+                        let read_only_direct_before = metric_counts(&ctx.client);
+                        let read_only_direct = direct_call(
+                            &server_with_runtime(live_runtime(ctx.client.clone(), true)),
+                            read_only_arguments.clone(),
+                        )
+                        .await;
+                        assert_stable_list_work(
+                            read_only_direct_before,
+                            metric_counts(&ctx.client),
+                        );
+                        assert_eq!(read_only_direct.is_error, Some(false));
+
                         let read_only_before = metric_counts(&ctx.client);
                         let read_only = preview_stdio_call(
                             server_with_runtime(live_runtime(ctx.client.clone(), true)),
-                            json!({
-                                "space":ctx.space_id,
-                                "collection_id":collection.id,
-                                "limit":61
-                            }),
+                            read_only_arguments,
                         )
                         .await;
-                        assert_list_work(read_only_before, metric_counts(&ctx.client));
+                        assert_stable_list_work(read_only_before, metric_counts(&ctx.client));
                         assert_eq!(read_only["result"]["isError"], false, "{read_only}");
+                        assert_eq!(
+                            &read_only["result"]["structuredContent"],
+                            read_only_direct
+                                .structured_content
+                                .as_ref()
+                                .expect("read-only direct structured content")
+                        );
                         let read_only_ids = read_only["result"]["structuredContent"]["items"]
                             .as_array()
                             .expect("read-only stdio items")

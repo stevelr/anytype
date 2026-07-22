@@ -393,6 +393,11 @@ independently reviewed `views-write` registry is linked by `any-uda.4`.
 Authenticated disposable acceptance exercises the selected test registry
 through both the direct production router and real stdio protocol frames,
 including `limit=1` continuation and a saved view that hides one member.
+Stable-ID success performs exactly one logical and physical HTTP GET, one
+canonical membership round, one subscribe, and one confirmed foreground close
+with no fallback. Cursor binding is checked before the membership primitive, so
+a mismatched collection or limit performs zero HTTP or membership I/O. Direct
+and stdio scenarios assert the same cursor-mismatch and read-only outcomes.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
 

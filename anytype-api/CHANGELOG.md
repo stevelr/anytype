@@ -25,8 +25,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   The page contract accepts exact 256-byte safe entity-ID boundaries, records
   one logical GET with the shared six-attempt ceiling, uses one non-replayed
   subscribe plus one foreground unsubscribe, permits only one cleanup fallback,
-  and preserves typed secret-safe gRPC authentication failures. Set/query
-  objects fail before subscription.
+  and preserves typed secret-safe gRPC authentication failures. Public,
+  payload-free client metrics now count query rounds, subscribe attempts,
+  confirmed foreground cleanup, and detached cleanup fallbacks independently.
+  Set/query objects fail before subscription.
 - Add evidence-backed REST chat prerequisites for bounded MCP workflows:
   message timestamp conversion is fallible and canonical UTC milliseconds,
   older-history pages preserve server order behind a 256-byte opaque
