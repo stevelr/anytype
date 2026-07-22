@@ -192,6 +192,7 @@ pub mod attached_discussions;
 pub mod auth;
 pub mod body;
 pub mod body_mutation;
+pub mod body_rpc;
 pub mod cache;
 pub mod chat_stream;
 pub mod chats;
@@ -246,6 +247,11 @@ pub mod prelude {
         body_mutation::{
             BlockChange, BlockMutation, BodyBatchOutcome, BodyEditor, BodyOp, FailedBodyOp,
             InsertPosition, NewBlock,
+        },
+        body_rpc::{
+            BodyRpcConfig, BodyRpcLifecycleErrorKind, BodyRpcMetrics, BodyRpcMetricsSnapshot,
+            DEFAULT_BODY_OPERATION_TIMEOUT, MAX_BODY_NON_SHOW_RESPONSE_BYTES, MAX_BODY_RPC_TIMEOUT,
+            MAX_BODY_SHOW_RESPONSE_BYTES,
         },
         // HTTP metrics
         cache::AnytypeCache,

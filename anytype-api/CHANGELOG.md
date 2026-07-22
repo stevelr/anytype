@@ -8,6 +8,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a public protobuf-free finite body RPC seam. `BodyRpcConfig` shares one
+  absolute deadline across gRPC acquisition, `ObjectShow`, bounded foreground
+  and cancellation fallback `ObjectClose`, one-shot writes, and verification.
+  Tonic decoder limits reject Show responses above 4 MiB and every mutation or
+  close response above 64 KiB before body allocation/decode. Closed lifecycle
+  errors, exact payload-free counters, and the pre-poll write counter expose
+  cleanup and dispatch certainty without retaining identifiers or upstream
+  response text. Body reads and writes now enforce 1..64-byte control-free
+  emoji values and both UTF-16 mark endpoints as ordered in-bounds Unicode
+  scalar boundaries.
 - Add typed attached-discussion discovery and idempotent ensure operations for
   Basic and Note parent objects. A required-layout REST wire preflight plus
   bounded, cleanup-owned gRPC reads verify the exact parent relation and the

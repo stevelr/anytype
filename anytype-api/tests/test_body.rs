@@ -116,7 +116,7 @@ async fn test_body_read_preserves_typed_variants_ids_and_order() {
                     .expect("bold mark range maps to byte offsets");
                 assert_eq!(&bold_text[byte_range], "bold");
 
-                // A second show after the first read's best-effort ObjectClose proves
+                // A second show after the first read's confirmed ObjectClose proves
                 // the public lifecycle remains usable and preserves exact identity and
                 // document order.
                 let reopened = ctx
@@ -228,7 +228,16 @@ async fn test_body_read_missing_object_returns_public_failure_without_fixture() 
                     .await
                     .expect_err("a never-created object must fail");
 
-                assert!(matches!(error, AnytypeError::Other { .. }));
+                // Once ObjectShow is polled, R4 requires an unconfirmed matching
+                // ObjectClose to take precedence over the Show application error.
+                // Heart rejects Close for a never-created object, so the public
+                // result is the fixed, payload-free cleanup classification.
+                assert!(matches!(
+                    error,
+                    AnytypeError::BodyRpcLifecycle {
+                        kind: BodyRpcLifecycleErrorKind::CleanupFailed
+                    }
+                ));
                 Ok(())
             })
         },

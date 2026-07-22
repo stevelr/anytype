@@ -37,17 +37,15 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use anytype_rpc::anytype::rpc::object::{close as object_close, show as object_show};
 use anytype_rpc::model;
 use prost::Message as _;
 use serde::{Deserialize, Serialize};
-use tonic::Request;
 
 use crate::{
     Result,
+    body_rpc::{BodyRpcConfig, fetch_object_view},
     client::AnytypeClient,
     error::AnytypeError,
-    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
 };
 
 // ============================================================================
@@ -1101,6 +1099,7 @@ impl<'a> BlocksClient<'a> {
             space_id: space_id.into(),
             object_id: object_id.into(),
             limits: BodyLimits::default(),
+            rpc: None,
         }
     }
 }
@@ -1112,6 +1111,7 @@ pub struct BodyRequest<'a> {
     space_id: String,
     object_id: String,
     limits: BodyLimits,
+    rpc: Option<BodyRpcConfig>,
 }
 
 impl BodyRequest<'_> {
@@ -1123,9 +1123,20 @@ impl BodyRequest<'_> {
         self
     }
 
+    /// Uses one finite gRPC configuration for acquisition, show, and close.
+    ///
+    /// Cloning and reusing the same configuration for a subsequent
+    /// [`BodyEditor`](crate::body_mutation::BodyEditor) shares its absolute
+    /// deadline and payload-free counters across the complete operation.
+    #[must_use]
+    pub fn rpc_config(mut self, config: BodyRpcConfig) -> Self {
+        self.rpc = Some(config);
+        self
+    }
+
     /// Executes `ObjectShow`, validates the returned graph, and returns the
-    /// snapshot. The shown view is released with a best-effort `ObjectClose`
-    /// before validation.
+    /// snapshot. Every possibly accepted show owns a bounded close; a cleanup
+    /// failure takes precedence over the show or application response.
     ///
     /// # Errors
     ///
@@ -1134,61 +1145,9 @@ impl BodyRequest<'_> {
     /// transport/authentication errors otherwise.
     pub async fn fetch(self) -> Result<BodySnapshot> {
         let limits = self.limits.clamped();
-        let grpc = self.client.grpc_client().await?;
-        let mut commands = grpc.client_commands();
-        let mut close_guard = ObjectCloseGuard::default();
-
-        let request = object_show::Request {
-            context_id: self.object_id.clone(),
-            object_id: self.object_id.clone(),
-            space_id: self.space_id.clone(),
-            ..Default::default()
-        };
-        let request = with_token_request(Request::new(request), grpc.token())?;
-        let response = commands
-            .object_show(request)
-            .await
-            .map_err(grpc_status)?
-            .into_inner();
-        ensure_error_ok(response.error.as_ref(), "object show")?;
-        close_guard.mark_shown();
-
-        // Release the shown view. Best-effort: a close failure must not turn
-        // a successfully read body into an error.
-        if let Some(close) = close_guard.request(&self.space_id, &self.object_id)
-            && let Ok(close) = with_token_request(Request::new(close), grpc.token())
-        {
-            let _ = commands.object_close(close).await;
-        }
-
-        let view = response.object_view.ok_or_else(|| AnytypeError::Other {
-            message: "object show returned no object view".to_owned(),
-        })?;
+        let rpc = self.rpc.unwrap_or_default();
+        let view = fetch_object_view(self.client, &self.space_id, &self.object_id, &rpc).await?;
         snapshot_from_view(&self.space_id, &self.object_id, &view, &limits)
-    }
-}
-
-/// Tracks whether `ObjectShow` established a view that may be closed.
-///
-/// This is deliberately a state policy rather than an async drop guard: the
-/// close remains best-effort, but an authentication, transport, or response
-/// error before an accepted show can never manufacture an `ObjectClose`.
-#[derive(Debug, Default)]
-struct ObjectCloseGuard {
-    shown: bool,
-}
-
-impl ObjectCloseGuard {
-    fn mark_shown(&mut self) {
-        self.shown = true;
-    }
-
-    fn request(&self, space_id: &str, object_id: &str) -> Option<object_close::Request> {
-        self.shown.then(|| object_close::Request {
-            context_id: object_id.to_owned(),
-            object_id: object_id.to_owned(),
-            space_id: space_id.to_owned(),
-        })
     }
 }
 
@@ -1732,7 +1691,8 @@ fn convert_text(
     let text_utf16_len = utf16_len(&text.text);
     let mut marks = Vec::with_capacity(raw_marks.len());
     for (mark, kind) in raw_marks.iter().zip(kinds) {
-        let range = validate_mark_range(mark.range.as_ref(), text_utf16_len, &block.id)?;
+        let range =
+            validate_mark_range(mark.range.as_ref(), &text.text, text_utf16_len, &block.id)?;
         marks.push(TextMark { range, kind });
     }
 
@@ -1740,6 +1700,12 @@ fn convert_text(
     let icon = if !text.icon_image.is_empty() {
         Some(CalloutIcon::Image(text.icon_image.clone()))
     } else if !text.icon_emoji.is_empty() {
+        validate_emoji_value(&text.icon_emoji).map_err(|()| {
+            Violation::new(
+                BodyGraphErrorKind::MalformedBlock,
+                format!("block {} has a malformed callout emoji", block.id),
+            )
+        })?;
         Some(CalloutIcon::Emoji(text.icon_emoji.clone()))
     } else {
         None
@@ -1797,9 +1763,12 @@ fn convert_mark_kind(
         Type::Mention => MarkKind::Mention {
             object_id: nonempty_param()?,
         },
-        Type::Emoji => MarkKind::Emoji {
-            emoji: nonempty_param()?,
-        },
+        Type::Emoji => {
+            validate_emoji_value(&mark.param).map_err(|()| malformed_param())?;
+            MarkKind::Emoji {
+                emoji: mark.param.clone(),
+            }
+        }
         Type::Object => MarkKind::Object {
             object_id: nonempty_param()?,
         },
@@ -1809,6 +1778,7 @@ fn convert_mark_kind(
 
 fn validate_mark_range(
     range: Option<&model::Range>,
+    text: &str,
     text_utf16_len: u32,
     block_id: &str,
 ) -> std::result::Result<TextRange, Violation> {
@@ -1824,10 +1794,21 @@ fn validate_mark_range(
     if start > end {
         return Err(invalid("an inverted range"));
     }
-    if end > text_utf16_len {
+    if start > text_utf16_len || end > text_utf16_len {
         return Err(invalid("a range past the end of the text"));
     }
-    Ok(TextRange { start, end })
+    let range = TextRange { start, end };
+    if range.to_byte_range(text).is_none() {
+        return Err(invalid("an endpoint that splits a Unicode scalar"));
+    }
+    Ok(range)
+}
+
+fn validate_emoji_value(value: &str) -> std::result::Result<(), ()> {
+    if value.is_empty() || value.len() > 64 || value.chars().any(char::is_control) {
+        return Err(());
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -2196,6 +2177,8 @@ mod tests {
             mark(3, 1, Type::Bold as i32, ""),
             // Negative start.
             mark(-1, 1, Type::Bold as i32, ""),
+            // Negative end.
+            mark(0, -1, Type::Bold as i32, ""),
             // Past the end of the text (utf16 len of "text" is 4).
             mark(0, 5, Type::Bold as i32, ""),
             // Empty link URL.
@@ -2253,6 +2236,87 @@ mod tests {
             ],
         );
         assert_eq!(graph_kind(snap(&bad)), BodyGraphErrorKind::MalformedBlock);
+
+        for (start, end) in [(2, 3), (1, 2)] {
+            let split = view(
+                "root",
+                vec![
+                    smart_block("root", &["a"]),
+                    text_block_with_marks("a", text, vec![mark(start, end, Type::Bold as i32, "")]),
+                ],
+            );
+            assert_eq!(graph_kind(snap(&split)), BodyGraphErrorKind::MalformedBlock);
+        }
+
+        for (start, end) in [(0, 0), (4, 4), (1, 3)] {
+            let boundary = view(
+                "root",
+                vec![
+                    smart_block("root", &["a"]),
+                    text_block_with_marks("a", text, vec![mark(start, end, Type::Bold as i32, "")]),
+                ],
+            );
+            assert!(snap(&boundary).is_ok());
+        }
+    }
+
+    #[test]
+    fn read_emoji_values_enforce_exact_utf8_byte_bounds() {
+        use content::text::mark::Type;
+        let accepted = ["x".to_owned(), "🙂".repeat(16)];
+        for emoji in accepted {
+            let marked = view(
+                "root",
+                vec![
+                    smart_block("root", &["a"]),
+                    text_block_with_marks("a", "x", vec![mark(0, 1, Type::Emoji as i32, &emoji)]),
+                ],
+            );
+            assert!(snap(&marked).is_ok());
+
+            let mut callout = text_block("a", &[], "x", content::text::Style::Callout as i32);
+            if let Some(ContentValue::Text(text)) = &mut callout.content_value {
+                text.icon_emoji = emoji;
+            }
+            assert!(snap(&view("root", vec![smart_block("root", &["a"]), callout])).is_ok());
+        }
+
+        for emoji in [String::new(), "\n".to_owned(), "a".repeat(65)] {
+            let marked = view(
+                "root",
+                vec![
+                    smart_block("root", &["a"]),
+                    text_block_with_marks("a", "x", vec![mark(0, 1, Type::Emoji as i32, &emoji)]),
+                ],
+            );
+            assert_eq!(
+                graph_kind(snap(&marked)),
+                BodyGraphErrorKind::MalformedBlock
+            );
+        }
+
+        for emoji in ["\n".to_owned(), "a".repeat(65)] {
+            let mut callout = text_block("a", &[], "x", content::text::Style::Callout as i32);
+            if let Some(ContentValue::Text(text)) = &mut callout.content_value {
+                text.icon_emoji = emoji;
+            }
+            assert_eq!(
+                graph_kind(snap(&view(
+                    "root",
+                    vec![smart_block("root", &["a"]), callout]
+                ))),
+                BodyGraphErrorKind::MalformedBlock
+            );
+        }
+    }
+
+    #[test]
+    fn text_range_json_rejects_negative_and_u32_overflow() {
+        assert!(serde_json::from_str::<TextRange>(r#"{"start":-1,"end":0}"#).is_err());
+        assert!(
+            serde_json::from_str::<TextRange>(r#"{"start":4294967296,"end":4294967296}"#).is_err()
+        );
+        assert!(serde_json::from_str::<TextRange>(r#"{"start":0,"end":4294967296}"#).is_err());
     }
 
     #[test]
@@ -3204,23 +3268,5 @@ mod tests {
             BodyGraphErrorKind::MalformedBlock.to_string(),
             "malformed_block"
         );
-    }
-
-    // ------------------------------------------------------------------
-    // Close lifecycle policy
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn object_close_guard_requires_an_accepted_show_and_preserves_identity() {
-        let mut guard = ObjectCloseGuard::default();
-        assert!(guard.request(SPACE, OBJECT).is_none());
-
-        guard.mark_shown();
-        let request = guard
-            .request(SPACE, OBJECT)
-            .expect("accepted show creates a close request");
-        assert_eq!(request.context_id, OBJECT);
-        assert_eq!(request.object_id, OBJECT);
-        assert_eq!(request.space_id, SPACE);
     }
 }
