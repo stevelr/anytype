@@ -72,7 +72,7 @@ fn require_strict_root(schema: Arc<JsonObject>) -> Result<Arc<JsonObject>, Schem
 const MAX_SCHEMA_STRING_CHARS: u64 = 100_000;
 const MAX_SCHEMA_ARRAY_ITEMS: u64 = 10_000;
 const MAX_SCHEMA_ENUM_VALUES: usize = 128;
-const MAX_SCHEMA_NUMBER_ABS: f64 = 1_000_000_000_000_000.0;
+const MAX_SCHEMA_NUMBER_ABS: f64 = 9_007_199_254_740_991.0;
 const MAX_SCHEMA_ANNOTATION_CHARS: usize = 4_096;
 
 const COMMON_SCHEMA_KEYWORDS: &[&str] = &[

@@ -336,6 +336,27 @@ Only `compact` and `standard` application profiles exist. The optional
 selectable in this release. Their names become valid selectors only when a
 complete independently reviewed production registry is linked.
 
+The production-unlinked `files` read slice now provides the reusable internal
+contracts and handlers for that eventual registry. `file_metadata` performs an
+exact object-identity preflight and bounded `HEAD`; `file_read` returns at most
+65,536 bytes with reconciled range, size, MIME, strong ETag, and modification
+date evidence. Successful reads contain compact structured metadata once plus
+exactly one native MCP payload: image, revision-supported audio, bounded UTF-8
+text resource, or base64 blob resource. Every read also identifies a canonical
+hash-bound
+`anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}` URI;
+the matching internal resource reader re-fetches the exact range and rejects
+identity, length, representation, or digest drift as not found. Text frames are
+capped at 70,000 encoded bytes and all file results at 96 KiB. This slice uses
+`anytype-api` only and is covered through scripted HTTP and preview stdio
+dispatch, but it is intentionally absent from production discovery until the
+remaining files workflows and real-headless acceptance are complete. The
+entire module is compiled only for tests, and the internal handlers currently
+reject non-ID space references before I/O. They must not be production-linked
+until `anytype-api` exposes the approved 1-MiB/page resolver plus caller-scoped
+cumulative retry and error-evidence controls; the generic
+`resolve_space_id` path is intentionally not used by this slice.
+
 The server also advertises static resource and tool capabilities without
 `listChanged` or resource subscriptions. `resources/templates/list` exposes
 the canonical `anytype://spaces/{space_id}/objects/{object_id}` document

@@ -59,6 +59,8 @@ pub mod cursor;
 pub mod discovery;
 pub mod domain;
 pub mod error;
+#[cfg(test)]
+mod file_content;
 pub mod filters;
 pub mod handler_support;
 pub mod logging;

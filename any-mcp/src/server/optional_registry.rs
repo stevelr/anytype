@@ -117,6 +117,7 @@ impl OptionalToolsetRegistry for AlphaRegistry {
         request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
         _cursors: &'a crate::cursor::CursorStore,
+        _protocol_version: &'a rmcp::model::ProtocolVersion,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async move {
@@ -200,6 +201,7 @@ impl OptionalToolsetRegistry for BetaRegistry {
         request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
         _cursors: &'a crate::cursor::CursorStore,
+        _protocol_version: &'a rmcp::model::ProtocolVersion,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async move {
@@ -252,6 +254,7 @@ impl OptionalToolsetRegistry for GammaRegistry {
         request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
         _cursors: &'a crate::cursor::CursorStore,
+        _protocol_version: &'a rmcp::model::ProtocolVersion,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async move {
@@ -940,6 +943,7 @@ impl OptionalToolsetRegistry for CollisionRegistry {
         _request: CallToolRequestParams,
         _runtime: &'a RuntimeContext,
         _cursors: &'a crate::cursor::CursorStore,
+        _protocol_version: &'a rmcp::model::ProtocolVersion,
         _cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async { Err(ErrorData::method_not_found::<CallToolRequestMethod>()) })

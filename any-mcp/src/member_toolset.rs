@@ -194,6 +194,7 @@ impl OptionalToolsetRegistry for MembersRegistry {
         request: CallToolRequestParams,
         runtime: &'a RuntimeContext,
         cursors: &'a CursorStore,
+        _protocol_version: &'a rmcp::model::ProtocolVersion,
         cancellation: &'a CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         Box::pin(async move {
@@ -1102,23 +1103,26 @@ mod tests {
             .expect("selected members fixture server")
     }
 
-    async fn dispatch(
-        server: &AnyMcpServer,
+    fn dispatch<'a>(
+        server: &'a AnyMcpServer,
         name: &'static str,
         arguments: serde_json::Value,
-        cancellation: &CancellationToken,
-    ) -> Result<CallToolResult, ErrorData> {
-        server
-            .dispatch_tool(
-                CallToolRequestParams::new(name).with_arguments(
-                    arguments
-                        .as_object()
-                        .cloned()
-                        .expect("fixture arguments object"),
-                ),
-                cancellation,
-            )
-            .await
+        cancellation: &'a CancellationToken,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<CallToolResult, ErrorData>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            server
+                .dispatch_tool(
+                    CallToolRequestParams::new(name).with_arguments(
+                        arguments
+                            .as_object()
+                            .cloned()
+                            .expect("fixture arguments object"),
+                    ),
+                    cancellation,
+                )
+                .await
+        })
     }
 
     fn assert_tool_error(result: &CallToolResult, expected_code: &str) {

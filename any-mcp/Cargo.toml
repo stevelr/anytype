@@ -21,8 +21,11 @@ name = "any-mcp"
 
 [dependencies]
 anytype.workspace = true
+base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
+httpdate.workspace = true
+mime.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
