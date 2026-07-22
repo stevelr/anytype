@@ -21,6 +21,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   deadline make HTTP, show, close, reconciliation, and write ownership
   observable. Pure lifecycle/state-machine tests and cleanup-owned disposable
   real-server coverage replace any semantic mock or fault emulation.
+- Add `collection_member_add`, a singular non-replayed collection mutation
+  seam that preserves the exact completed non-success HTTP status instead of
+  collapsing 401, 403, 404, or 410 into broad error variants. Redirects remain
+  disabled; transport, response-read, and malformed-success failures remain
+  indeterminate errors. The existing multi-object view helper is unchanged.
+- Extend payload-free collection-membership metrics with exact observer-query,
+  collection-add, and collection-remove dispatch counters. The observer count
+  starts only after exact REST collection/object identity validation, so
+  Set/query rejection remains distinguishable from a canonical membership
+  query. These shared-clone counters let bounded desired-state workflows prove
+  no-op zero writes and one logical write without retaining identifiers.
 - Add a cleanup-owned test helper that attaches one exact-name saved-view
   filter to a privately proven collection view. It performs one authenticated
   filter-add RPC and requires the server-assigned filter identity plus exact

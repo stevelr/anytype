@@ -6,6 +6,8 @@
 //! - [`view_list_objects`](AnytypeClient::view_list_objects) - list objects in a collection or query
 //! - [`view_remove_object`](AnytypeClient::view_remove_object) - remove an object from a view (collection)
 //! - [`view_add_objects`](AnytypeClient::view_add_objects) - add objects to a collection
+//! - [`collection_member_add`](AnytypeClient::collection_member_add) - add exactly one object while
+//!   preserving the server's exact completed rejection status
 //! - [`observe_collection_membership`](AnytypeClient::observe_collection_membership) - prove exact
 //!   direct collection membership independently of saved view filters
 //! - [`collection_membership_page`](AnytypeClient::collection_membership_page) - enumerate one
@@ -61,7 +63,7 @@ use crate::{
     error::AnytypeError,
     filters::{Query, QueryWithFilters},
     grpc_util::{ensure_error_ok, with_token_request},
-    http_client::{GetPaged, HttpClient},
+    http_client::{GetPaged, HttpClient, PreservedStatusResponse},
     prelude::*,
 };
 
@@ -80,13 +82,15 @@ const ARCHIVED_KEY: &str = "isArchived";
 const DELETED_KEY: &str = "isDeleted";
 const RESOLVED_LAYOUT_KEY: &str = "resolvedLayout";
 
-/// Cumulative work counters for canonical collection-membership reads.
+/// Cumulative work counters for canonical collection-membership workflows.
 ///
 /// The counters are owned by [`AnytypeClient`] and shared by its clones. They
 /// expose transport work without retaining subscription IDs, object IDs, or
 /// upstream payloads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CollectionMembershipMetricsSnapshot {
+    /// Exact direct-membership query phases entered after REST identity validation.
+    pub observer_attempts: u64,
     /// Complete canonical membership query rounds entered.
     pub query_rounds: u64,
     /// `ObjectSearchSubscribe` RPCs polled by those rounds.
@@ -97,25 +101,35 @@ pub struct CollectionMembershipMetricsSnapshot {
     pub foreground_close_successes: u64,
     /// Detached close fallbacks polled after cancellation or failed cleanup.
     pub fallback_close_attempts: u64,
+    /// Single-object collection-add operations dispatched to the HTTP client.
+    pub add_dispatches: u64,
+    /// Single-object collection-remove operations dispatched to the HTTP client.
+    pub remove_dispatches: u64,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct CollectionMembershipMetrics {
+    observer_attempts: AtomicU64,
     query_rounds: AtomicU64,
     subscribe_attempts: AtomicU64,
     foreground_close_attempts: AtomicU64,
     foreground_close_successes: AtomicU64,
     fallback_close_attempts: AtomicU64,
+    add_dispatches: AtomicU64,
+    remove_dispatches: AtomicU64,
 }
 
 impl CollectionMembershipMetrics {
     pub(crate) fn snapshot(&self) -> CollectionMembershipMetricsSnapshot {
         CollectionMembershipMetricsSnapshot {
+            observer_attempts: self.observer_attempts.load(Ordering::Relaxed),
             query_rounds: self.query_rounds.load(Ordering::Relaxed),
             subscribe_attempts: self.subscribe_attempts.load(Ordering::Relaxed),
             foreground_close_attempts: self.foreground_close_attempts.load(Ordering::Relaxed),
             foreground_close_successes: self.foreground_close_successes.load(Ordering::Relaxed),
             fallback_close_attempts: self.fallback_close_attempts.load(Ordering::Relaxed),
+            add_dispatches: self.add_dispatches.load(Ordering::Relaxed),
+            remove_dispatches: self.remove_dispatches.load(Ordering::Relaxed),
         }
     }
 }
@@ -128,6 +142,19 @@ pub enum CollectionMembershipState {
     Present,
     /// The exact object is not stored in the collection.
     Absent,
+}
+
+/// Completed HTTP outcome from dispatching one collection-member addition.
+///
+/// Transport, response-read, and response-decoding failures are returned as
+/// errors instead because they cannot prove whether the server applied the
+/// mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionMemberAddOutcome {
+    /// The server completed the mutation with a successful HTTP status.
+    Acknowledged,
+    /// The server completed the request with this exact non-success status.
+    Rejected { status: u16 },
 }
 
 /// Identity-bound result of a direct collection-membership observation.
@@ -601,6 +628,10 @@ impl AnytypeClient {
         let object = self.object(&space_id, &object_id).get().await?;
         validate_object_identity(&object, &space_id, &object_id)?;
 
+        self.collection_membership_metrics
+            .observer_attempts
+            .fetch_add(1, Ordering::Relaxed);
+
         let control = exact_membership_query(self, &space_id, None, &object_id).await?;
         require_complete_control(control)?;
         let scoped =
@@ -694,6 +725,49 @@ impl AnytypeClient {
             .await
     }
 
+    /// Adds exactly one object to a collection in one non-replayed POST.
+    ///
+    /// Completed non-success responses retain their exact HTTP status in
+    /// [`CollectionMemberAddOutcome::Rejected`]. The request is never retried
+    /// or redirected, so callers can distinguish definitive application-level
+    /// rejections from outcomes that still require state verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors before dispatch. Missing credentials,
+    /// transport failures, incomplete response bodies, and malformed success
+    /// responses retain their normal [`AnytypeError`] categories.
+    pub async fn collection_member_add(
+        &self,
+        space_id: impl Into<String>,
+        collection_id: impl Into<String>,
+        object_id: impl Into<String>,
+    ) -> Result<CollectionMemberAddOutcome> {
+        let space_id = space_id.into();
+        let collection_id = collection_id.into();
+        let object_id = object_id.into();
+        self.config.limits.validate_id(&space_id, "space_id")?;
+        self.config
+            .limits
+            .validate_id(&collection_id, "collection_id")?;
+        self.config.limits.validate_id(&object_id, "object_id")?;
+        let request = ViewAddObjectsRequest {
+            objects: vec![object_id],
+        };
+        self.collection_membership_metrics
+            .add_dispatches
+            .fetch_add(1, Ordering::Relaxed);
+        let response = self
+            .client
+            .post_request_preserve_status::<String, _>(
+                &format!("/v1/spaces/{space_id}/lists/{collection_id}/objects"),
+                &request,
+                QueryWithFilters::default(),
+            )
+            .await?;
+        Ok(collection_member_add_outcome(response))
+    }
+
     /// Removes an object from a collection.
     pub async fn view_remove_object(
         &self,
@@ -708,11 +782,25 @@ impl AnytypeClient {
         self.config.limits.validate_id(&space_id, "space_id")?;
         self.config.limits.validate_id(&list_id, "list_id")?;
         self.config.limits.validate_id(&object_id, "object_id")?;
+        self.collection_membership_metrics
+            .remove_dispatches
+            .fetch_add(1, Ordering::Relaxed);
         self.client
             .delete_request(&format!(
                 "/v1/spaces/{space_id}/lists/{list_id}/objects/{object_id}",
             ))
             .await
+    }
+}
+
+fn collection_member_add_outcome(
+    response: PreservedStatusResponse<String>,
+) -> CollectionMemberAddOutcome {
+    match response {
+        PreservedStatusResponse::Success(_) => CollectionMemberAddOutcome::Acknowledged,
+        PreservedStatusResponse::Rejected { status } => {
+            CollectionMemberAddOutcome::Rejected { status }
+        }
     }
 }
 
@@ -1313,6 +1401,20 @@ mod tests {
         let client = AnytypeClient::with_config(config).expect("fixture client");
         client.set_api_key(crate::keystore::HttpCredentials::new("fixture-token"));
         client
+    }
+
+    #[test]
+    fn collection_member_add_outcome_preserves_actual_status_variants() {
+        assert_eq!(
+            collection_member_add_outcome(PreservedStatusResponse::Success("ok".to_owned())),
+            CollectionMemberAddOutcome::Acknowledged
+        );
+        for status in [300, 400, 401, 403, 404, 408, 409, 410, 422, 425, 429, 500] {
+            assert_eq!(
+                collection_member_add_outcome(PreservedStatusResponse::Rejected { status }),
+                CollectionMemberAddOutcome::Rejected { status }
+            );
+        }
     }
 
     #[test]

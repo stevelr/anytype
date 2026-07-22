@@ -694,6 +694,31 @@ evidence return an error rather than `Absent`. After a mutation has been
 dispatched, callers must treat every such error as an indeterminate mutation
 outcome and perform a fresh read before deciding whether retry is safe.
 
+Use `collection_member_add` when a workflow must add exactly one member and
+classify a completed HTTP rejection conservatively:
+
+```rust,no_run
+use anytype::prelude::*;
+
+# async fn example(client: &AnytypeClient) -> anytype::Result<()> {
+match client
+    .collection_member_add("space-id", "collection-id", "object-id")
+    .await?
+{
+    CollectionMemberAddOutcome::Acknowledged => {}
+    CollectionMemberAddOutcome::Rejected { status } => eprintln!("HTTP {status}"),
+}
+# Ok(())
+# }
+```
+
+The method sends one POST attempt, never follows a redirect, and returns the
+exact completed non-success status without reading or exposing its response
+body. A transport failure, incomplete or oversized success response, or
+malformed success body remains an error because it cannot prove whether the
+server applied the mutation. `view_add_objects` remains the general
+multi-object API and does not provide this status-preserving contract.
+
 Use `collection_membership_page` to enumerate the same canonical direct
 membership scope without consulting a selected or saved view:
 
@@ -732,9 +757,13 @@ snapshot-isolated; restart from the first page after concurrent membership
 changes.
 
 `client.collection_membership_metrics()` returns cumulative, payload-free
-counters for query rounds, subscribe attempts, foreground close attempts and
-successes, and fallback close attempts. Cloned clients share the same counters;
-the snapshot never retains collection, object, or subscription identifiers.
+counters for validated direct-observer query phases, membership query rounds,
+subscribe attempts, foreground close attempts and successes, fallback close
+attempts, and collection add/remove dispatches. The observer count starts only
+after the exact REST collection and object identities pass validation, so a
+Set/query rejection can be distinguished from a canonical membership query.
+Cloned clients share the same counters; the snapshot never retains collection,
+object, or subscription identifiers.
 
 ## Status and Compatibility
 

@@ -407,9 +407,10 @@ permission coverage remains an external acceptance blocker. Deterministic latenc
 connection-fault, and retry-maximum cases remain deferred to the P4
 fault-injection design.
 
-The production-unlinked `views-write` read slice implements
-`collection_member_list` through `anytype-api`'s canonical manual-membership
-page. Its exact input is `space`, `collection_id`, and optional non-null
+The production-unlinked `views-write` slice implements
+`collection_member_list`, `collection_member_add`, and
+`collection_member_remove` through `anytype-api`'s canonical direct-membership
+operations. The list input is exactly `space`, `collection_id`, and optional non-null
 `limit`/`cursor`; it deliberately accepts no view, filter, sort, layout, query,
 or Kanban field. The default limit is 20 and the reviewed maximum is 61.
 Results contain only canonical-order `{ "object_id": ... }` summaries, while
@@ -417,16 +418,66 @@ opaque process-local cursors bind the resolved space ID, exact collection,
 limit, operation, registry, preceding total, next offset, and overlap boundary.
 Saved-view presentation therefore cannot hide a direct member from this tool.
 
+Both mutations accept exactly `space`, `collection_id`, and `object_id`.
+Collection and object values are stable IDs, never names, queries, views, or
+filters. Add returns a fixed `membership: "present"` result; remove returns
+`membership: "absent"`. A complete independent preflight observation returns
+success with zero writes when that state already holds. Otherwise add sends
+one non-replayed, non-redirected POST and remove sends one logical replay-safe DELETE, then a
+ten-attempt, three-second independent observer must prove the desired state.
+No response message is treated as state evidence. Cancellation or any other
+uncertainty after dispatch returns fixed conflict guidance to reread before
+retrying, and the handler never redispatches.
+
+For add, a completed POST preserves its exact status through `anytype-api`.
+Only 400, 401, 403, 404, 409, and 422 are definitive rejections. Redirects,
+408, 410, 425, 429, every other 4xx, every 5xx, transport failures, and
+malformed or incomplete success responses remain indeterminate.
+
 The slice remains absent from production discovery until the complete
 independently reviewed `views-write` registry is linked by `any-uda.4`.
-Authenticated disposable acceptance exercises the selected test registry
-through both the direct production router and real stdio protocol frames,
-including `limit=1` continuation and a saved view that hides one member.
+Authenticated disposable acceptance exercises one shared scenario through the
+direct production router and separately spawned stable and preview stdio
+children. The feature-gated child uses the real stdio server and bounded
+portable shutdown driver but hardwires only the reviewed, production-unlinked
+test registry; it is not built by default. Its test-only modes reproduce both
+sides of each dispatch-marker cancellation boundary and append payload-free
+counter snapshots to a private metrics file. The shipped `any-mcp` binary still
+rejects `views-write` before protocol decode or credential I/O. The shared
+scenario covers strict Set/query rejection, `limit=1` continuation,
+add/no-op/remove/no-op cycles, cancellation on both sides of both dispatch
+markers, read-only zero-I/O rejection, exact result identity, object survival,
+and a saved view that hides one canonical member.
 Stable-ID success performs exactly one logical and physical HTTP GET, one
 canonical membership round, one subscribe, and one confirmed foreground close
 with no fallback. Cursor binding is checked before the membership primitive, so
-a mismatched collection or limit performs zero HTTP or membership I/O. Direct
-and stdio scenarios assert the same cursor-mismatch and read-only outcomes.
+a mismatched collection or limit performs zero HTTP or membership I/O. Direct,
+stable-stdio, and preview-stdio scenarios assert cursor mismatch, strict query
+rejection, read-only behavior, identical results, and exact logical/physical
+HTTP, observer, query, subscribe, foreground-close, fallback, and write deltas.
+Canonical pagination must contain the member after the repeated add no-op and
+before the actual remove; after removal it must be absent while the object
+survives. Stable and preview protocol envelopes are both included in every
+profile/access token snapshot. A separate offline direct/stable/preview process
+test feeds HTTP 403 into the production rejection classifier twice and proves
+authentication mapping, transport parity, no redispatch, and zero HTTP or
+mutation work. This pure classifier seam is not a substitute for a genuine
+permission-denied handler run. Live collection POST 403 evidence remains unsafe
+until a disposable non-owner collection and owner cleanup are available; no
+read-only fixture is mutated and invalid credentials are not used as a
+permission substitute.
+An earlier live mutation run was blocked before the scenario callback when
+disposable-space creation applied but its response did not complete; both
+ledger-named spaces were removed and absence proved. A later run entered the
+shared scenario and exposed debug-build worker stack overflows in the add and
+list handlers; both operation/executor boundaries are now boxed. The next run
+progressed through the normal stable add calls, then the stable
+`CancelAddBeforeMark` child timed out waiting for its add response with empty
+stderr. Cleanup acknowledged deletion and independently proved absence, and
+both transports remained healthy. The harness now gives injected cancellation
+a handler-local token so it cannot cancel rmcp's response channel. That final
+correction has offline coverage but still awaits an authorized live rerun and
+independent review.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
 

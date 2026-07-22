@@ -330,7 +330,7 @@ impl AnyMcpServer {
     }
 
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "acceptance-harness")),
         expect(dead_code, reason = "stable-version dispatch seam is used by tests")
     )]
     pub(crate) fn dispatch_tool<'a>(

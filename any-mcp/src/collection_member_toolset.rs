@@ -5,15 +5,22 @@
 
 //! Canonical, presentation-independent collection membership workflows.
 //!
-//! This module provides the production-unlinked read slice for the eventual
-//! `views-write` optional registry. It enumerates direct manual-collection
-//! membership through `anytype-api`; it never reads a saved view, filter,
-//! layout, sort, or Kanban column.
+//! This module provides the production-unlinked collection membership slice
+//! for the eventual `views-write` optional registry. It enumerates and changes
+//! direct manual-collection membership through `anytype-api`; it never reads
+//! or mutates a saved view, filter, layout, sort, or Kanban column.
 
 use std::borrow::Cow;
 
-use anytype::views::{
-    CollectionMembershipContinuation, CollectionMembershipPage as ApiCollectionMembershipPage,
+#[cfg(test)]
+use anytype::error::AnytypeError;
+use anytype::{
+    prelude::{AnytypeClient, CollectionMemberAddOutcome, VerifyConfig, verify_semantic},
+    views::{
+        CollectionMembershipContinuation,
+        CollectionMembershipObservation as ApiCollectionMembershipObservation,
+        CollectionMembershipPage as ApiCollectionMembershipPage, CollectionMembershipState,
+    },
 };
 use rmcp::{
     model::{CallToolRequestMethod, CallToolRequestParams, CallToolResult, ErrorData},
@@ -28,8 +35,9 @@ use crate::{
     domain::{DomainValueError, EntityId},
     error::ToolError,
     handler_support::{
-        HandlerError, HandlerOperationError, execute_prepared_handler, page_query_fingerprint,
-        validate_page_binding_size,
+        HandlerError, HandlerOperationError, MutationAccess, MutationProgress,
+        execute_mutation_handler, execute_prepared_handler, page_query_fingerprint,
+        require_mutation_access, validate_page_binding_size,
     },
     optional_toolsets::OptionalRegistryTool,
     pagination::{DEFAULT_PAGE_LIMIT, PageLimit, PageOffset},
@@ -43,6 +51,10 @@ use crate::{
 
 /// Exact tool name for canonical collection membership enumeration.
 pub const COLLECTION_MEMBER_LIST: &str = "collection_member_list";
+/// Exact tool name for ensuring that one object is a direct collection member.
+pub const COLLECTION_MEMBER_ADD: &str = "collection_member_add";
+/// Exact tool name for ensuring that one object is not a direct collection member.
+pub const COLLECTION_MEMBER_REMOVE: &str = "collection_member_remove";
 /// Reviewed maximum number of collection members returned by one call.
 pub const MAX_COLLECTION_MEMBER_PAGE_LIMIT: u16 = 61;
 /// Reviewed maximum logical HTTP operations for one list page.
@@ -51,10 +63,457 @@ pub const COLLECTION_MEMBER_LIST_HTTP_LOGICAL_CEILING: usize = 12;
 pub const COLLECTION_MEMBER_LIST_HTTP_PHYSICAL_CEILING: usize = 72;
 /// Reviewed maximum gRPC calls including cleanup fallback for one list page.
 pub const COLLECTION_MEMBER_LIST_GRPC_CEILING: usize = 3;
+/// Reviewed maximum logical HTTP operations for one collection-member add.
+pub const COLLECTION_MEMBER_ADD_HTTP_LOGICAL_CEILING: usize = 34;
+/// Reviewed maximum physical HTTP attempts for one collection-member add.
+pub const COLLECTION_MEMBER_ADD_HTTP_PHYSICAL_CEILING: usize = 199;
+/// Reviewed maximum gRPC calls for one collection-member add.
+pub const COLLECTION_MEMBER_ADD_GRPC_CEILING: usize = 99;
+/// Reviewed maximum logical HTTP operations for one collection-member removal.
+pub const COLLECTION_MEMBER_REMOVE_HTTP_LOGICAL_CEILING: usize = 34;
+/// Reviewed maximum physical HTTP attempts for one collection-member removal.
+pub const COLLECTION_MEMBER_REMOVE_HTTP_PHYSICAL_CEILING: usize = 204;
+/// Reviewed maximum gRPC calls for one collection-member removal.
+pub const COLLECTION_MEMBER_REMOVE_GRPC_CEILING: usize = 96;
 /// Reviewed incremental catalog ceiling for the complete future registry.
 pub const VIEWS_WRITE_CATALOG_TOKEN_CEILING: usize = 3_000;
 
 const VIEWS_WRITE_REGISTRY: &str = "views-write";
+
+#[cfg(feature = "acceptance-harness")]
+struct ViewsWriteAcceptanceRegistry {
+    handlers: CollectionMemberHandlers,
+    recorder: Option<std::sync::Arc<AcceptanceMetricsRecorder>>,
+    forced_add_rejection: Option<u16>,
+    isolate_cancellation: bool,
+}
+
+/// Test-only mutation mode shared by direct and spawned acceptance drivers.
+#[cfg(feature = "acceptance-harness")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcceptanceMutationMode {
+    /// Run the production handler without an acceptance seam.
+    #[default]
+    Normal,
+    /// Cancel after add preflight but before the dispatch marker.
+    CancelAddBeforeMark,
+    /// Cancel immediately after the add dispatch marker.
+    CancelAddAfterMark,
+    /// Cancel after remove preflight but before the dispatch marker.
+    CancelRemoveBeforeMark,
+    /// Cancel immediately after the remove dispatch marker.
+    CancelRemoveAfterMark,
+    /// Exercise only the production 403 classifier without upstream I/O.
+    ClassifyAdd403,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl AcceptanceMutationMode {
+    const fn isolates_injected_cancellation(self) -> bool {
+        matches!(
+            self,
+            Self::CancelAddBeforeMark
+                | Self::CancelAddAfterMark
+                | Self::CancelRemoveBeforeMark
+                | Self::CancelRemoveAfterMark
+        )
+    }
+}
+
+/// Payload-free counter snapshot emitted by acceptance drivers.
+#[cfg(feature = "acceptance-harness")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AcceptanceMetricsSnapshot {
+    pub http_logical: u64,
+    pub http_physical: u64,
+    pub observer_attempts: u64,
+    pub query_rounds: u64,
+    pub subscribe_attempts: u64,
+    pub foreground_close_attempts: u64,
+    pub foreground_close_successes: u64,
+    pub fallback_close_attempts: u64,
+    pub add_dispatches: u64,
+    pub remove_dispatches: u64,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl AcceptanceMetricsSnapshot {
+    fn capture(client: &AnytypeClient) -> Self {
+        let http = client.http_metrics();
+        let membership = client.collection_membership_metrics();
+        Self {
+            http_logical: http.logical_operations,
+            http_physical: http.physical_attempts,
+            observer_attempts: membership.observer_attempts,
+            query_rounds: membership.query_rounds,
+            subscribe_attempts: membership.subscribe_attempts,
+            foreground_close_attempts: membership.foreground_close_attempts,
+            foreground_close_successes: membership.foreground_close_successes,
+            fallback_close_attempts: membership.fallback_close_attempts,
+            add_dispatches: membership.add_dispatches,
+            remove_dispatches: membership.remove_dispatches,
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+struct AcceptanceMetricsRecorder {
+    output: std::sync::Mutex<std::fs::File>,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl AcceptanceMetricsRecorder {
+    fn create(path: &std::path::Path) -> std::io::Result<Self> {
+        use std::fs::OpenOptions;
+
+        let output = OpenOptions::new().create_new(true).write(true).open(path)?;
+        Ok(Self {
+            output: std::sync::Mutex::new(output),
+        })
+    }
+
+    fn record(&self, client: &AnytypeClient) {
+        use std::io::Write as _;
+
+        let Ok(encoded) = serde_json::to_vec(&AcceptanceMetricsSnapshot::capture(client)) else {
+            tracing::error!("acceptance metrics encoding failed");
+            return;
+        };
+        let Ok(mut output) = self.output.lock() else {
+            tracing::error!("acceptance metrics lock failed");
+            return;
+        };
+        if output
+            .write_all(&encoded)
+            .and_then(|()| output.write_all(b"\n"))
+            .and_then(|()| output.flush())
+            .is_err()
+        {
+            tracing::error!("acceptance metrics write failed");
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl std::fmt::Debug for ViewsWriteAcceptanceRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ViewsWriteAcceptanceRegistry")
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl crate::optional_toolsets::OptionalToolsetRegistry for ViewsWriteAcceptanceRegistry {
+    fn metadata(&self) -> crate::optional_toolsets::OptionalToolsetMetadata {
+        crate::optional_toolsets::OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)
+    }
+
+    fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
+        collection_member_tools()
+    }
+
+    fn scripted_scenario_ids(&self) -> &'static [&'static str] {
+        &["collection_member_acceptance_stdio"]
+    }
+
+    fn headless_scenario_ids(&self) -> &'static [&'static str] {
+        &["collection_member_acceptance_headless"]
+    }
+
+    fn catalog_token_ceiling(&self) -> usize {
+        VIEWS_WRITE_CATALOG_TOKEN_CEILING
+    }
+
+    fn call_tool<'a>(
+        &'a self,
+        request: CallToolRequestParams,
+        runtime: &'a RuntimeContext,
+        cursors: &'a CursorStore,
+        _protocol_version: &'a rmcp::model::ProtocolVersion,
+        cancellation: &'a CancellationToken,
+    ) -> crate::optional_toolsets::OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>>
+    {
+        Box::pin(async move {
+            let result = if request.name.as_ref() == COLLECTION_MEMBER_ADD
+                && let Some(status) = self.forced_add_rejection
+            {
+                let error = definitive_add_rejection_tool(status)
+                    .unwrap_or_else(ToolError::mutation_indeterminate);
+                Ok(tool_error(&error))
+            } else {
+                let isolated_cancellation = CancellationToken::new();
+                let handler_cancellation = if self.isolate_cancellation {
+                    &isolated_cancellation
+                } else {
+                    cancellation
+                };
+                self.handlers
+                    .call_tool(request, runtime, cursors, handler_cancellation)
+                    .await
+            };
+            if let Some(recorder) = self.recorder.as_ref() {
+                recorder.record(runtime.client());
+            }
+            result
+        })
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn acceptance_handlers(
+    mode: AcceptanceMutationMode,
+) -> Result<CollectionMemberHandlers, SchemaContractError> {
+    let cancel: MutationDispatchHook = std::sync::Arc::new(CancellationToken::cancel);
+    let hooks = match mode {
+        AcceptanceMutationMode::CancelAddBeforeMark => CollectionMutationHooks {
+            before_add: Some(cancel),
+            ..CollectionMutationHooks::default()
+        },
+        AcceptanceMutationMode::CancelAddAfterMark => CollectionMutationHooks {
+            after_add_mark: Some(cancel),
+            ..CollectionMutationHooks::default()
+        },
+        AcceptanceMutationMode::CancelRemoveBeforeMark => CollectionMutationHooks {
+            before_remove: Some(cancel),
+            ..CollectionMutationHooks::default()
+        },
+        AcceptanceMutationMode::CancelRemoveAfterMark => CollectionMutationHooks {
+            after_remove_mark: Some(cancel),
+            ..CollectionMutationHooks::default()
+        },
+        AcceptanceMutationMode::Normal | AcceptanceMutationMode::ClassifyAdd403 => {
+            CollectionMutationHooks::default()
+        }
+    };
+    Ok(CollectionMemberHandlers {
+        list: CollectionMemberListHandlers::new()?,
+        mutations: CollectionMemberMutationHandlers::new()?.with_hooks(hooks),
+    })
+}
+
+/// Direct reviewed-registry driver used by the shared acceptance scenario.
+#[cfg(feature = "acceptance-harness")]
+#[doc(hidden)]
+pub struct ViewsWriteAcceptanceDirect {
+    server: crate::server::AnyMcpServer,
+    client: AnytypeClient,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl ViewsWriteAcceptanceDirect {
+    pub fn new(
+        client: AnytypeClient,
+        read_only: bool,
+        mode: AcceptanceMutationMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        use std::time::Duration;
+
+        use crate::{
+            config::ApplicationProfile,
+            optional_toolsets::{
+                OptionalToolsetMetadata, OptionalToolsetRegistry, OptionalToolsetSelection,
+            },
+            runtime::StartupStatus,
+        };
+
+        let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)];
+        let selection =
+            OptionalToolsetSelection::parse(Some(VIEWS_WRITE_REGISTRY.to_owned()), &metadata)?;
+        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            client.clone(),
+            2,
+            Duration::from_secs(30),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            ApplicationProfile::Compact,
+            read_only,
+            selection,
+        );
+        let registry: &'static ViewsWriteAcceptanceRegistry =
+            Box::leak(Box::new(ViewsWriteAcceptanceRegistry {
+                handlers: acceptance_handlers(mode)?,
+                recorder: None,
+                forced_add_rejection: (mode == AcceptanceMutationMode::ClassifyAdd403)
+                    .then_some(403),
+                isolate_cancellation: mode.isolates_injected_cancellation(),
+            }));
+        let registries: &'static [&'static dyn OptionalToolsetRegistry] =
+            Box::leak(vec![registry as &dyn OptionalToolsetRegistry].into_boxed_slice());
+        let server =
+            crate::server::AnyMcpServer::new_with_optional_registries(runtime, registries)?;
+        Ok(Self { server, client })
+    }
+
+    pub async fn call(&self, name: &'static str, arguments: serde_json::Value) -> CallToolResult {
+        let arguments = arguments.as_object().cloned().unwrap_or_default();
+        self.server
+            .dispatch_tool(
+                CallToolRequestParams::new(name).with_arguments(arguments),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|_| tool_error(&ToolError::upstream()))
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> AcceptanceMetricsSnapshot {
+        AcceptanceMetricsSnapshot::capture(&self.client)
+    }
+}
+
+/// Runs the reviewed collection-membership slice in a test-only stdio child.
+///
+/// This entrypoint exists only behind the non-default `acceptance-harness`
+/// feature. It does not add `views-write` to the production registry inventory.
+#[cfg(feature = "acceptance-harness")]
+pub async fn serve_acceptance_stdio_from_env() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        config::{ProtocolMode, RuntimeConfig},
+        optional_toolsets::OptionalToolsetMetadata,
+        server::AnyMcpServer,
+    };
+
+    let mut arguments = std::env::args_os().skip(1);
+    let metrics_path = arguments
+        .next()
+        .map(std::path::PathBuf::from)
+        .ok_or("acceptance harness requires a metrics path")?;
+    let mode = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or("acceptance harness requires one exact mode")?;
+    if arguments.next().is_some() {
+        return Err("acceptance harness rejects extra arguments".into());
+    }
+    let (protocol, read_only, mutation_mode) = match mode.as_str() {
+        "stable-normal" => (ProtocolMode::Stable, false, AcceptanceMutationMode::Normal),
+        "preview-normal" => (
+            ProtocolMode::Experimental20260728,
+            false,
+            AcceptanceMutationMode::Normal,
+        ),
+        "stable-read-only" => (ProtocolMode::Stable, true, AcceptanceMutationMode::Normal),
+        "preview-read-only" => (
+            ProtocolMode::Experimental20260728,
+            true,
+            AcceptanceMutationMode::Normal,
+        ),
+        "stable-add-before" => (
+            ProtocolMode::Stable,
+            false,
+            AcceptanceMutationMode::CancelAddBeforeMark,
+        ),
+        "preview-add-before" => (
+            ProtocolMode::Experimental20260728,
+            false,
+            AcceptanceMutationMode::CancelAddBeforeMark,
+        ),
+        "stable-add-after" => (
+            ProtocolMode::Stable,
+            false,
+            AcceptanceMutationMode::CancelAddAfterMark,
+        ),
+        "preview-add-after" => (
+            ProtocolMode::Experimental20260728,
+            false,
+            AcceptanceMutationMode::CancelAddAfterMark,
+        ),
+        "stable-remove-before" => (
+            ProtocolMode::Stable,
+            false,
+            AcceptanceMutationMode::CancelRemoveBeforeMark,
+        ),
+        "preview-remove-before" => (
+            ProtocolMode::Experimental20260728,
+            false,
+            AcceptanceMutationMode::CancelRemoveBeforeMark,
+        ),
+        "stable-remove-after" => (
+            ProtocolMode::Stable,
+            false,
+            AcceptanceMutationMode::CancelRemoveAfterMark,
+        ),
+        "preview-remove-after" => (
+            ProtocolMode::Experimental20260728,
+            false,
+            AcceptanceMutationMode::CancelRemoveAfterMark,
+        ),
+        "stable-classify-403" => (
+            ProtocolMode::Stable,
+            false,
+            AcceptanceMutationMode::ClassifyAdd403,
+        ),
+        "preview-classify-403" => (
+            ProtocolMode::Experimental20260728,
+            false,
+            AcceptanceMutationMode::ClassifyAdd403,
+        ),
+        _ => return Err("acceptance harness mode is invalid".into()),
+    };
+    let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_REGISTRY, true)];
+    let mut config = RuntimeConfig::from_env_with_optional_metadata(&metadata)?;
+    if !config.optional_toolsets.is_empty() {
+        return Err("acceptance harness does not accept a registry selector".into());
+    }
+    config.optional_toolsets = crate::optional_toolsets::OptionalToolsetSelection::parse(
+        Some(VIEWS_WRITE_REGISTRY.to_owned()),
+        &metadata,
+    )?;
+    config.protocol_mode = protocol;
+    config.read_only = read_only;
+    let runtime = if mutation_mode == AcceptanceMutationMode::ClassifyAdd403 {
+        use std::time::Duration;
+
+        use anytype::prelude::{ClientConfig, HttpCredentials};
+
+        use crate::{config::ApplicationProfile, runtime::StartupStatus};
+
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("views-write-offline-classifier".to_owned()),
+            app_name: "views-write-offline-classifier".to_owned(),
+            disable_cache: true,
+            ..ClientConfig::default()
+        })?;
+        client.set_api_key(HttpCredentials::new("offline-classifier-token"));
+        RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            client,
+            1,
+            Duration::from_secs(2),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            ApplicationProfile::Compact,
+            false,
+            config.optional_toolsets.clone(),
+        )
+    } else {
+        RuntimeContext::start(&config).await?
+    };
+    let recorder = std::sync::Arc::new(AcceptanceMetricsRecorder::create(&metrics_path)?);
+    recorder.record(runtime.client());
+    let registry: &'static ViewsWriteAcceptanceRegistry =
+        Box::leak(Box::new(ViewsWriteAcceptanceRegistry {
+            handlers: acceptance_handlers(mutation_mode)?,
+            recorder: Some(recorder),
+            forced_add_rejection: (mutation_mode == AcceptanceMutationMode::ClassifyAdd403)
+                .then_some(403),
+            isolate_cancellation: mutation_mode.isolates_injected_cancellation(),
+        }));
+    let registries: &'static [&'static dyn crate::optional_toolsets::OptionalToolsetRegistry] =
+        Box::leak(
+            vec![registry as &dyn crate::optional_toolsets::OptionalToolsetRegistry]
+                .into_boxed_slice(),
+        );
+    let server = AnyMcpServer::new_with_optional_registries(runtime, registries)?;
+    crate::stdio::serve_stdio(server, protocol).await?;
+    Ok(())
+}
 
 /// Domain-bounded page limit between one and 61, defaulting to 20.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -223,6 +682,108 @@ impl CollectionMemberListPage {
     }
 }
 
+/// Strict identity-only input shared by collection membership mutations.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionMemberMutationInput {
+    /// Unique space name or stable identifier.
+    space: CollectionSpaceRef,
+    /// Exact manual collection identifier.
+    collection_id: EntityId,
+    /// Exact object identifier; names and queries are not accepted.
+    object_id: EntityId,
+}
+
+/// Fixed wire value proving that direct membership is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipPresent;
+
+impl Serialize for MembershipPresent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str("present")
+    }
+}
+
+impl JsonSchema for MembershipPresent {
+    fn schema_name() -> Cow<'static, str> {
+        "MembershipPresent".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"string","const":"present"})
+    }
+}
+
+/// Fixed wire value proving that direct membership is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipAbsent;
+
+impl Serialize for MembershipAbsent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str("absent")
+    }
+}
+
+impl JsonSchema for MembershipAbsent {
+    fn schema_name() -> Cow<'static, str> {
+        "MembershipAbsent".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type":"string","const":"absent"})
+    }
+}
+
+/// Exact verified result of `collection_member_add`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionMembershipPresent {
+    /// Exact manual collection whose membership was observed.
+    collection_id: EntityId,
+    /// Exact object observed in the collection.
+    object_id: EntityId,
+    /// Verified desired state, always `present`.
+    membership: MembershipPresent,
+}
+
+/// Exact verified result of `collection_member_remove`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionMembershipAbsent {
+    /// Exact manual collection whose membership was observed.
+    collection_id: EntityId,
+    /// Exact object observed outside the collection.
+    object_id: EntityId,
+    /// Verified desired state, always `absent`.
+    membership: MembershipAbsent,
+}
+
+/// Constructs the approved `collection_member_add` contract.
+pub fn collection_member_add_tool()
+-> Result<WorkflowTool<CollectionMembershipPresent>, SchemaContractError> {
+    workflow_tool::<CollectionMemberMutationInput, CollectionMembershipPresent>(
+        COLLECTION_MEMBER_ADD,
+        "Ensure that one exact object is a direct member of one exact manual collection, with independent bounded verification and no saved-view behavior.",
+        ToolProfile::Update,
+    )
+}
+
+/// Constructs the approved `collection_member_remove` contract.
+pub fn collection_member_remove_tool()
+-> Result<WorkflowTool<CollectionMembershipAbsent>, SchemaContractError> {
+    workflow_tool::<CollectionMemberMutationInput, CollectionMembershipAbsent>(
+        COLLECTION_MEMBER_REMOVE,
+        "Ensure that one exact object is not a direct member of one exact manual collection, without deleting the object or changing saved views.",
+        ToolProfile::Update,
+    )
+}
+
 /// Constructs the approved `collection_member_list` contract.
 pub fn collection_member_list_tool()
 -> Result<WorkflowTool<CollectionMemberListPage>, SchemaContractError> {
@@ -238,6 +799,15 @@ pub fn collection_member_list_tools() -> Result<Vec<OptionalRegistryTool>, Schem
     Ok(vec![OptionalRegistryTool::read(
         collection_member_list_tool()?,
     )])
+}
+
+/// Returns all three collection-membership tools for terminal registry composition.
+pub fn collection_member_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
+    Ok(vec![
+        OptionalRegistryTool::read(collection_member_list_tool()?),
+        OptionalRegistryTool::mutation(collection_member_add_tool()?),
+        OptionalRegistryTool::mutation(collection_member_remove_tool()?),
+    ])
 }
 
 /// Transport-neutral handler for the production-unlinked membership list slice.
@@ -298,43 +868,44 @@ impl CollectionMemberListHandlers {
         let collection_id = input.collection_id.as_str().to_owned();
         let cursor = input.cursor.as_ref().cloned();
         let limit = input.limit;
-        execute_prepared_handler(
+        let operation = Box::pin(async move {
+            let space_id = client.resolve_space_id(input.space.as_str()).await?;
+            let binding = page_query_fingerprint(
+                COLLECTION_MEMBER_LIST,
+                common_limit,
+                &ResolvedPageParams {
+                    registry: VIEWS_WRITE_REGISTRY,
+                    space_id: &space_id,
+                    collection_id: &collection_id,
+                },
+            )?;
+            let continuation = cursor
+                .as_ref()
+                .map(|cursor| resolve_continuation(cursors, cursor, binding))
+                .transpose()?;
+            let expected_offset = continuation.as_ref().map_or(0, |state| state.next_offset);
+            let page = client
+                .collection_membership_page(
+                    &space_id,
+                    &collection_id,
+                    u32::from(limit.get()),
+                    continuation,
+                )
+                .await?;
+            Ok::<_, HandlerOperationError>((
+                page,
+                binding,
+                space_id,
+                collection_id,
+                expected_offset,
+            ))
+        });
+        Box::pin(execute_prepared_handler(
             runtime,
             &self.contract,
             OperationContext::new(COLLECTION_MEMBER_LIST),
             cancellation,
-            async move {
-                let space_id = client.resolve_space_id(input.space.as_str()).await?;
-                let binding = page_query_fingerprint(
-                    COLLECTION_MEMBER_LIST,
-                    common_limit,
-                    &ResolvedPageParams {
-                        registry: VIEWS_WRITE_REGISTRY,
-                        space_id: &space_id,
-                        collection_id: &collection_id,
-                    },
-                )?;
-                let continuation = cursor
-                    .as_ref()
-                    .map(|cursor| resolve_continuation(cursors, cursor, binding))
-                    .transpose()?;
-                let expected_offset = continuation.as_ref().map_or(0, |state| state.next_offset);
-                let page = client
-                    .collection_membership_page(
-                        &space_id,
-                        &collection_id,
-                        u32::from(limit.get()),
-                        continuation,
-                    )
-                    .await?;
-                Ok::<_, HandlerOperationError>((
-                    page,
-                    binding,
-                    space_id,
-                    collection_id,
-                    expected_offset,
-                ))
-            },
+            operation,
             |(page, binding, space_id, collection_id, expected_offset)| async move {
                 convert_page(
                     cursors,
@@ -346,9 +917,430 @@ impl CollectionMemberListHandlers {
                     binding,
                 )
             },
-        )
+        ))
         .await
     }
+}
+
+#[cfg(any(test, feature = "acceptance-harness"))]
+type MutationDispatchHook = std::sync::Arc<dyn Fn(&CancellationToken) + Send + Sync>;
+
+#[derive(Clone, Default)]
+struct CollectionMutationHooks {
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    before_add: Option<MutationDispatchHook>,
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    after_add_mark: Option<MutationDispatchHook>,
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    before_remove: Option<MutationDispatchHook>,
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    after_remove_mark: Option<MutationDispatchHook>,
+}
+
+/// Transport-neutral desired-state handlers for collection membership writes.
+#[derive(Clone)]
+pub struct CollectionMemberMutationHandlers {
+    verify_config: VerifyConfig,
+    add_contract: WorkflowTool<CollectionMembershipPresent>,
+    remove_contract: WorkflowTool<CollectionMembershipAbsent>,
+    hooks: CollectionMutationHooks,
+}
+
+impl std::fmt::Debug for CollectionMemberMutationHandlers {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CollectionMemberMutationHandlers")
+            .field("verify_config", &self.verify_config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CollectionMemberMutationHandlers {
+    /// Creates mutation handlers with the reviewed ten-attempt, three-second verifier.
+    pub fn new() -> Result<Self, SchemaContractError> {
+        Self::build(VerifyConfig::default())
+    }
+
+    fn build(verify_config: VerifyConfig) -> Result<Self, SchemaContractError> {
+        Ok(Self {
+            verify_config,
+            add_contract: collection_member_add_tool()?,
+            remove_contract: collection_member_remove_tool()?,
+            hooks: CollectionMutationHooks::default(),
+        })
+    }
+
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    fn with_hooks(mut self, hooks: CollectionMutationHooks) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// Dispatches one collection membership mutation after the catalog gate.
+    pub async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        runtime: &RuntimeContext,
+        cancellation: &CancellationToken,
+    ) -> Result<CallToolResult, ErrorData> {
+        if runtime.is_read_only()
+            && matches!(
+                request.name.as_ref(),
+                COLLECTION_MEMBER_ADD | COLLECTION_MEMBER_REMOVE
+            )
+        {
+            return Ok(tool_error(&ToolError::validation()));
+        }
+        match request.name.as_ref() {
+            COLLECTION_MEMBER_ADD => {
+                let input = decode_arguments::<CollectionMemberMutationInput>(request.arguments)?;
+                Ok(self
+                    .collection_member_add(runtime, MutationAccess::Allowed, input, cancellation)
+                    .await)
+            }
+            COLLECTION_MEMBER_REMOVE => {
+                let input = decode_arguments::<CollectionMemberMutationInput>(request.arguments)?;
+                Ok(self
+                    .collection_member_remove(runtime, MutationAccess::Allowed, input, cancellation)
+                    .await)
+            }
+            _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
+        }
+    }
+
+    async fn collection_member_add(
+        &self,
+        runtime: &RuntimeContext,
+        access: MutationAccess,
+        input: CollectionMemberMutationInput,
+        cancellation: &CancellationToken,
+    ) -> CallToolResult {
+        if let Err(error) = require_mutation_access(access) {
+            return tool_error(error.tool_error());
+        }
+        let client = runtime.client().clone();
+        let verify_config = self.verify_config.clone();
+        let progress = MutationProgress::new();
+        let operation_progress = progress.clone();
+        let operation_cancellation = cancellation.clone();
+        let hooks = self.hooks.clone();
+        let operation = Box::pin(async move {
+            let identity = resolve_membership_identity(&client, input).await?;
+            let observed = client
+                .observe_collection_membership(
+                    identity.space_id.as_str(),
+                    identity.collection_id.as_str(),
+                    identity.object_id.as_str(),
+                )
+                .await?;
+            let state = checked_membership_state(&observed, &identity)?;
+            if state == CollectionMembershipState::Present {
+                return Ok(present_output(&identity));
+            }
+
+            run_add_before_hook(&hooks, &operation_cancellation).await;
+            if operation_cancellation.is_cancelled() {
+                return Err(HandlerError::new(ToolError::upstream()).into());
+            }
+            operation_progress.mark_dispatched();
+            run_add_after_mark_hook(&hooks, &operation_cancellation).await;
+            match client
+                .collection_member_add(
+                    identity.space_id.as_str(),
+                    identity.collection_id.as_str(),
+                    identity.object_id.as_str(),
+                )
+                .await
+            {
+                Ok(CollectionMemberAddOutcome::Acknowledged) => {}
+                Ok(CollectionMemberAddOutcome::Rejected { status }) => {
+                    if let Some(error) = definitive_add_rejection(status) {
+                        return Err(error);
+                    }
+                    return Err(indeterminate_membership_operation());
+                }
+                Err(_) => return Err(indeterminate_membership_operation()),
+            }
+
+            let verified = verify_membership(
+                &client,
+                &verify_config,
+                &identity,
+                CollectionMembershipState::Present,
+            )
+            .await?;
+            checked_membership_state(&verified, &identity)
+                .map(|_| present_output(&identity))
+                .map_err(|_| indeterminate_membership_operation())
+        });
+        Box::pin(execute_mutation_handler(
+            runtime,
+            &self.add_contract,
+            OperationContext::new(COLLECTION_MEMBER_ADD),
+            cancellation,
+            &progress,
+            operation,
+            |output| async move { Ok(output) },
+        ))
+        .await
+    }
+
+    async fn collection_member_remove(
+        &self,
+        runtime: &RuntimeContext,
+        access: MutationAccess,
+        input: CollectionMemberMutationInput,
+        cancellation: &CancellationToken,
+    ) -> CallToolResult {
+        if let Err(error) = require_mutation_access(access) {
+            return tool_error(error.tool_error());
+        }
+        let client = runtime.client().clone();
+        let verify_config = self.verify_config.clone();
+        let progress = MutationProgress::new();
+        let operation_progress = progress.clone();
+        let operation_cancellation = cancellation.clone();
+        let hooks = self.hooks.clone();
+        let operation = Box::pin(async move {
+            let identity = resolve_membership_identity(&client, input).await?;
+            let observed = client
+                .observe_collection_membership(
+                    identity.space_id.as_str(),
+                    identity.collection_id.as_str(),
+                    identity.object_id.as_str(),
+                )
+                .await?;
+            let state = checked_membership_state(&observed, &identity)?;
+            if state == CollectionMembershipState::Absent {
+                return Ok(absent_output(&identity));
+            }
+
+            run_remove_before_hook(&hooks, &operation_cancellation).await;
+            if operation_cancellation.is_cancelled() {
+                return Err(HandlerError::new(ToolError::upstream()).into());
+            }
+            operation_progress.mark_dispatched();
+            run_remove_after_mark_hook(&hooks, &operation_cancellation).await;
+            if client
+                .view_remove_object(
+                    identity.space_id.as_str(),
+                    identity.collection_id.as_str(),
+                    identity.object_id.as_str(),
+                )
+                .await
+                .is_err()
+            {
+                return Err(indeterminate_membership_operation());
+            }
+
+            let verified = verify_membership(
+                &client,
+                &verify_config,
+                &identity,
+                CollectionMembershipState::Absent,
+            )
+            .await?;
+            checked_membership_state(&verified, &identity)
+                .map(|_| absent_output(&identity))
+                .map_err(|_| indeterminate_membership_operation())
+        });
+        Box::pin(execute_mutation_handler(
+            runtime,
+            &self.remove_contract,
+            OperationContext::new(COLLECTION_MEMBER_REMOVE),
+            cancellation,
+            &progress,
+            operation,
+            |output| async move { Ok(output) },
+        ))
+        .await
+    }
+}
+
+/// Combined list and mutation dispatcher for the complete future registry.
+#[derive(Clone, Debug)]
+pub struct CollectionMemberHandlers {
+    list: CollectionMemberListHandlers,
+    mutations: CollectionMemberMutationHandlers,
+}
+
+impl CollectionMemberHandlers {
+    /// Creates the complete production-unlinked collection-membership dispatcher.
+    pub fn new() -> Result<Self, SchemaContractError> {
+        Ok(Self {
+            list: CollectionMemberListHandlers::new()?,
+            mutations: CollectionMemberMutationHandlers::new()?,
+        })
+    }
+
+    /// Dispatches one exact collection membership tool after catalog selection.
+    pub async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        runtime: &RuntimeContext,
+        cursors: &CursorStore,
+        cancellation: &CancellationToken,
+    ) -> Result<CallToolResult, ErrorData> {
+        match request.name.as_ref() {
+            COLLECTION_MEMBER_LIST => {
+                self.list
+                    .call_tool(request, runtime, cursors, cancellation)
+                    .await
+            }
+            COLLECTION_MEMBER_ADD | COLLECTION_MEMBER_REMOVE => {
+                self.mutations
+                    .call_tool(request, runtime, cancellation)
+                    .await
+            }
+            _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MembershipIdentity {
+    space_id: EntityId,
+    collection_id: EntityId,
+    object_id: EntityId,
+}
+
+async fn resolve_membership_identity(
+    client: &AnytypeClient,
+    input: CollectionMemberMutationInput,
+) -> Result<MembershipIdentity, HandlerOperationError> {
+    let resolved_space = client.resolve_space_id(input.space.as_str()).await?;
+    let space_id = EntityId::new(resolved_space).map_err(unsafe_membership_identity)?;
+    Ok(MembershipIdentity {
+        space_id,
+        collection_id: input.collection_id,
+        object_id: input.object_id,
+    })
+}
+
+fn checked_membership_state(
+    observation: &ApiCollectionMembershipObservation,
+    identity: &MembershipIdentity,
+) -> Result<CollectionMembershipState, HandlerOperationError> {
+    if observation.space_id != identity.space_id.as_str()
+        || observation.collection_id != identity.collection_id.as_str()
+        || observation.object_id != identity.object_id.as_str()
+    {
+        return Err(HandlerError::new(ToolError::upstream()).into());
+    }
+    Ok(observation.state)
+}
+
+async fn verify_membership(
+    client: &AnytypeClient,
+    verify_config: &VerifyConfig,
+    identity: &MembershipIdentity,
+    desired: CollectionMembershipState,
+) -> Result<ApiCollectionMembershipObservation, HandlerOperationError> {
+    verify_semantic(
+        verify_config,
+        "collection membership",
+        "identity-redacted",
+        || {
+            client.observe_collection_membership(
+                identity.space_id.as_str(),
+                identity.collection_id.as_str(),
+                identity.object_id.as_str(),
+            )
+        },
+        |observation| {
+            observation.space_id == identity.space_id.as_str()
+                && observation.collection_id == identity.collection_id.as_str()
+                && observation.object_id == identity.object_id.as_str()
+                && observation.state == desired
+        },
+    )
+    .await
+    .map_err(|_| indeterminate_membership_operation())
+}
+
+fn definitive_add_rejection(status: u16) -> Option<HandlerOperationError> {
+    definitive_add_rejection_tool(status).map(|error| HandlerError::new(error).into())
+}
+
+fn definitive_add_rejection_tool(status: u16) -> Option<ToolError> {
+    let error = match status {
+        400 | 422 => ToolError::validation(),
+        401 | 403 => ToolError::authentication(),
+        404 => ToolError::not_found(),
+        409 => ToolError::conflict(),
+        _ => return None,
+    };
+    Some(error)
+}
+
+fn present_output(identity: &MembershipIdentity) -> CollectionMembershipPresent {
+    CollectionMembershipPresent {
+        collection_id: identity.collection_id.clone(),
+        object_id: identity.object_id.clone(),
+        membership: MembershipPresent,
+    }
+}
+
+fn absent_output(identity: &MembershipIdentity) -> CollectionMembershipAbsent {
+    CollectionMembershipAbsent {
+        collection_id: identity.collection_id.clone(),
+        object_id: identity.object_id.clone(),
+        membership: MembershipAbsent,
+    }
+}
+
+fn indeterminate_membership_operation() -> HandlerOperationError {
+    HandlerError::new(ToolError::mutation_indeterminate()).into()
+}
+
+fn unsafe_membership_identity(_: DomainValueError) -> HandlerOperationError {
+    HandlerError::new(ToolError::upstream()).into()
+}
+
+async fn run_add_before_hook(hooks: &CollectionMutationHooks, cancellation: &CancellationToken) {
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if let Some(hook) = hooks.before_add.as_ref() {
+        hook(cancellation);
+        tokio::task::yield_now().await;
+    }
+    #[cfg(not(any(test, feature = "acceptance-harness")))]
+    let _ = (hooks, cancellation);
+}
+
+async fn run_add_after_mark_hook(
+    hooks: &CollectionMutationHooks,
+    cancellation: &CancellationToken,
+) {
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if let Some(hook) = hooks.after_add_mark.as_ref() {
+        hook(cancellation);
+        tokio::task::yield_now().await;
+    }
+    #[cfg(not(any(test, feature = "acceptance-harness")))]
+    let _ = (hooks, cancellation);
+}
+
+async fn run_remove_before_hook(hooks: &CollectionMutationHooks, cancellation: &CancellationToken) {
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if let Some(hook) = hooks.before_remove.as_ref() {
+        hook(cancellation);
+        tokio::task::yield_now().await;
+    }
+    #[cfg(not(any(test, feature = "acceptance-harness")))]
+    let _ = (hooks, cancellation);
+}
+
+async fn run_remove_after_mark_hook(
+    hooks: &CollectionMutationHooks,
+    cancellation: &CancellationToken,
+) {
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if let Some(hook) = hooks.after_remove_mark.as_ref() {
+        hook(cancellation);
+        tokio::task::yield_now().await;
+    }
+    #[cfg(not(any(test, feature = "acceptance-harness")))]
+    let _ = (hooks, cancellation);
 }
 
 #[derive(Serialize)]
@@ -476,19 +1468,17 @@ fn domain_error(_: DomainValueError) -> HandlerError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fmt, future::Future, time::Duration};
+    use std::{collections::BTreeMap, fmt, future::Future, sync::Arc, time::Duration};
 
     use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
     use anytype::test_util::{
         DisposableRun, retry_definitive_rate_limit, unique_suffix, with_disposable_space_context,
     };
-    use rmcp::model::ToolAnnotations;
+    use rmcp::model::{ListToolsResult, ToolAnnotations};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
-    use tiktoken_rs::o200k_base;
-    use tokio::io::{
-        AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, duplex, split,
-    };
+    use tiktoken_rs::{CoreBPE, o200k_base};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
 
     use super::*;
     use crate::{
@@ -506,6 +1496,8 @@ mod tests {
     const SPACE_ID: &str = "bafyreic-space";
     const COLLECTION_ID: &str = "bafyreic-collection";
     const OTHER_COLLECTION_ID: &str = "bafyreic-other";
+    const TOKEN_BUDGET_SNAPSHOT: &str =
+        include_str!("../tests/snapshots/collection-membership-token-budget.json");
     const SUFFIX_ALPHABET: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-";
 
@@ -593,7 +1585,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["object_id"]
         );
-        assert_eq!(collection_member_list_tools().expect("tool slice").len(), 1);
+        let add = collection_member_add_tool().expect("add contract");
+        let remove = collection_member_remove_tool().expect("remove contract");
+        for tool in [add.as_tool(), remove.as_tool()] {
+            assert_eq!(
+                tool.annotations,
+                Some(
+                    ToolAnnotations::new()
+                        .read_only(false)
+                        .destructive(true)
+                        .idempotent(false)
+                        .open_world(false)
+                )
+            );
+            let input = serde_json::to_value(tool.input_schema.as_ref()).expect("mutation input");
+            assert_eq!(input["additionalProperties"], false);
+            assert_eq!(
+                input["required"],
+                json!(["space", "collection_id", "object_id"])
+            );
+            assert_eq!(
+                input["properties"]
+                    .as_object()
+                    .expect("mutation properties")
+                    .keys()
+                    .collect::<Vec<_>>(),
+                ["collection_id", "object_id", "space"]
+            );
+        }
+        let add_output =
+            serde_json::to_value(add.as_tool().output_schema.as_ref()).expect("add output schema");
+        let remove_output = serde_json::to_value(remove.as_tool().output_schema.as_ref())
+            .expect("remove output schema");
+        assert_eq!(add_output["$defs"]["MembershipPresent"]["const"], "present");
+        assert_eq!(
+            remove_output["$defs"]["MembershipAbsent"]["const"],
+            "absent"
+        );
+        assert_eq!(collection_member_list_tools().expect("list slice").len(), 1);
+        assert_eq!(collection_member_tools().expect("complete slice").len(), 3);
     }
 
     #[test]
@@ -639,6 +1669,21 @@ mod tests {
             assert!(
                 serde_json::from_value::<CollectionMemberListInput>(value).is_err(),
                 "unexpectedly accepted strict input"
+            );
+        }
+
+        for value in [
+            json!({"space":SPACE_ID,"collection_id":COLLECTION_ID}),
+            json!({"space":SPACE_ID,"collection_id":COLLECTION_ID,"object_id":"object","view_id":"view"}),
+            json!({"space":SPACE_ID,"collection_id":COLLECTION_ID,"object_id":"object","filter":{}}),
+            json!({"space":SPACE_ID,"collection_id":COLLECTION_ID,"object_id":"object","query":"x"}),
+            json!({"space":SPACE_ID,"collection_id":COLLECTION_ID,"object_id":"object","layout":"kanban"}),
+            json!({"space":SPACE_ID,"collection_id":null,"object_id":"object"}),
+            json!({"space":SPACE_ID,"collection_id":COLLECTION_ID,"object_id":"bad/id"}),
+        ] {
+            assert!(
+                serde_json::from_value::<CollectionMemberMutationInput>(value).is_err(),
+                "unexpectedly accepted strict mutation input"
             );
         }
     }
@@ -823,6 +1868,110 @@ mod tests {
         );
     }
 
+    fn membership_identity() -> MembershipIdentity {
+        MembershipIdentity {
+            space_id: EntityId::new(SPACE_ID).expect("space ID"),
+            collection_id: EntityId::new(COLLECTION_ID).expect("collection ID"),
+            object_id: EntityId::new("object-a").expect("object ID"),
+        }
+    }
+
+    fn membership_observation(
+        state: CollectionMembershipState,
+    ) -> ApiCollectionMembershipObservation {
+        ApiCollectionMembershipObservation {
+            space_id: SPACE_ID.to_owned(),
+            collection_id: COLLECTION_ID.to_owned(),
+            object_id: "object-a".to_owned(),
+            state,
+        }
+    }
+
+    #[test]
+    fn mutation_outputs_and_observer_identity_are_exact() {
+        let identity = membership_identity();
+        assert_eq!(
+            serde_json::to_value(present_output(&identity)).expect("present output"),
+            json!({
+                "collection_id":COLLECTION_ID,
+                "object_id":"object-a",
+                "membership":"present"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(absent_output(&identity)).expect("absent output"),
+            json!({
+                "collection_id":COLLECTION_ID,
+                "object_id":"object-a",
+                "membership":"absent"
+            })
+        );
+        for state in [
+            CollectionMembershipState::Present,
+            CollectionMembershipState::Absent,
+        ] {
+            assert_eq!(
+                checked_membership_state(&membership_observation(state), &identity)
+                    .expect("exact observation"),
+                state
+            );
+        }
+        for field in ["space", "collection", "object"] {
+            let mut observation = membership_observation(CollectionMembershipState::Present);
+            match field {
+                "space" => observation.space_id = "other-space".to_owned(),
+                "collection" => observation.collection_id = "other-collection".to_owned(),
+                "object" => observation.object_id = "other-object".to_owned(),
+                _ => unreachable!("fixed test field"),
+            }
+            assert!(checked_membership_state(&observation, &identity).is_err());
+        }
+    }
+
+    #[test]
+    fn post_definitive_rejection_allowlist_is_exact() {
+        for code in 300..=599 {
+            let actual = CollectionMemberAddOutcome::Rejected { status: code };
+            let CollectionMemberAddOutcome::Rejected { status } = actual else {
+                unreachable!("fixed rejection variant");
+            };
+            assert_eq!(
+                definitive_add_rejection(status).is_some(),
+                matches!(code, 400 | 401 | 403 | 404 | 409 | 422),
+                "{code}"
+            );
+        }
+        assert!(matches!(
+            CollectionMemberAddOutcome::Acknowledged,
+            CollectionMemberAddOutcome::Acknowledged
+        ));
+    }
+
+    #[test]
+    fn mutation_error_mapping_never_exposes_identity_or_response_text() {
+        for code in [400, 401, 403, 404, 409, 422] {
+            let source = AnytypeError::ApiError {
+                code,
+                method: "post".to_owned(),
+                url: "/SECRET_SPACE/SECRET_COLLECTION/SECRET_OBJECT".to_owned(),
+                message: "SECRET_UPSTREAM_BODY".to_owned(),
+            };
+            let crate::error::AnytypeErrorMapping::Ready(mapped) = ToolError::from_anytype(&source)
+            else {
+                panic!("fixed status must map directly");
+            };
+            let encoded = serde_json::to_string(&mapped).expect("fixed mapped error");
+            assert!(!encoded.contains("SECRET"));
+        }
+        let indeterminate = serde_json::to_string(&ToolError::mutation_indeterminate())
+            .expect("indeterminate error");
+        assert!(!indeterminate.contains("SECRET"));
+        assert_eq!(
+            ToolError::mutation_indeterminate().message(),
+            "The mutation may have applied. Reread the object before retrying to avoid applying it twice."
+        );
+    }
+
     fn maximum_id(index: usize) -> String {
         let left = SUFFIX_ALPHABET[index / SUFFIX_ALPHABET.len()];
         let right = SUFFIX_ALPHABET[index % SUFFIX_ALPHABET.len()];
@@ -860,6 +2009,159 @@ mod tests {
             Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
             scalar => scalar,
         }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn maximum_mutation_input() -> Value {
+        let space = [
+            "界", "🚀", "𐍈", "\0", "\u{001f}", "\"", "\\", "\n", "\r", "\t",
+        ]
+        .into_iter()
+        .cycle()
+        .take(512)
+        .collect::<String>();
+        json!({
+            "space":space,
+            "collection_id":maximum_id(0),
+            "object_id":maximum_id(1)
+        })
+    }
+
+    fn collection_membership_token_budget() -> Value {
+        let tokenizer = o200k_base().expect("o200k tokenizer");
+        let base = snapshot_server(ApplicationProfile::Compact, false, None);
+        let compact = snapshot_server(
+            ApplicationProfile::Compact,
+            false,
+            Some(VIEWS_WRITE_REGISTRY),
+        );
+        let compact_read_only = snapshot_server(
+            ApplicationProfile::Compact,
+            true,
+            Some(VIEWS_WRITE_REGISTRY),
+        );
+        let standard = snapshot_server(
+            ApplicationProfile::Standard,
+            false,
+            Some(VIEWS_WRITE_REGISTRY),
+        );
+        let standard_read_only = snapshot_server(
+            ApplicationProfile::Standard,
+            true,
+            Some(VIEWS_WRITE_REGISTRY),
+        );
+        let with_members = snapshot_server(
+            ApplicationProfile::Compact,
+            false,
+            Some("members,views-write"),
+        );
+        let per_tool = compact
+            .tools()
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool.name.as_ref(),
+                    COLLECTION_MEMBER_LIST | COLLECTION_MEMBER_ADD | COLLECTION_MEMBER_REMOVE
+                )
+            })
+            .map(|tool| {
+                (
+                    tool.name.to_string(),
+                    token_count(&tokenizer, serde_json::to_value(tool).expect("tool value")),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let maximum_result = collection_member_list_tool()
+            .expect("list contract")
+            .success(&maximum_page(61))
+            .expect("maximum result");
+        let maximum_result_value =
+            serde_json::to_value(maximum_result).expect("maximum result value");
+        let maximum_result_json = canonical_compact(maximum_result_value.clone());
+        let protocol_composition = |render: fn(&AnyMcpServer) -> Value| {
+            let base_value = render(&base);
+            let base_json = canonical_compact(base_value.clone());
+            json!({
+                "base_catalog_sha256":sha256_hex(base_json.as_bytes()),
+                "base_catalog_tokens":token_count(&tokenizer, base_value),
+                "compact_composed_total_tokens":token_count(&tokenizer, render(&compact)),
+                "compact_read_only_total_tokens":token_count(&tokenizer, render(&compact_read_only)),
+                "standard_composed_total_tokens":token_count(&tokenizer, render(&standard)),
+                "standard_read_only_total_tokens":token_count(&tokenizer, render(&standard_read_only)),
+                "members_views_write_compact_total_tokens":token_count(&tokenizer, render(&with_members))
+            })
+        };
+        json!({
+            "tokenizer":"tiktoken o200k_base (tiktoken-rs 0.12.0)",
+            "selected":[VIEWS_WRITE_REGISTRY],
+            "views_write_domain_ceiling_tokens":VIEWS_WRITE_CATALOG_TOKEN_CEILING,
+            "views_write_selected_ceiling_tokens":3500,
+            "per_tool_tokens":per_tool,
+            "protocol_compositions":{
+                "stable_2025_11_25":protocol_composition(tools_list_value),
+                "preview_2026_07_28":protocol_composition(preview_tools_list_value)
+            },
+            "adversarial_maximum_mutation_input_tokens":token_count(
+                &tokenizer,
+                maximum_mutation_input()
+            ),
+            "representative_max_result_items":61,
+            "representative_max_result_bytes":maximum_result_json.len(),
+            "representative_max_result_tokens":token_count(&tokenizer, maximum_result_value),
+            "representative_max_result_sha256":sha256_hex(maximum_result_json.as_bytes())
+        })
+    }
+
+    #[test]
+    fn collection_membership_catalog_and_results_match_reviewed_token_snapshot() {
+        let actual = canonical_json(collection_membership_token_budget());
+        let reviewed = canonical_json(
+            serde_json::from_str(TOKEN_BUDGET_SNAPSHOT)
+                .expect("collection-membership token snapshot"),
+        );
+        assert_eq!(
+            actual, reviewed,
+            "collection-membership token budget drifted"
+        );
+        assert_eq!(actual["selected"], json!([VIEWS_WRITE_REGISTRY]));
+        let domain_tokens = actual["per_tool_tokens"]
+            .as_object()
+            .expect("per-tool tokens")
+            .values()
+            .map(|value| value.as_u64().expect("token count") as usize)
+            .sum::<usize>();
+        assert!(domain_tokens <= VIEWS_WRITE_CATALOG_TOKEN_CEILING);
+        for protocol in ["stable_2025_11_25", "preview_2026_07_28"] {
+            let composition = &actual["protocol_compositions"][protocol];
+            let selected_added = composition["compact_composed_total_tokens"]
+                .as_u64()
+                .expect("composed tokens")
+                .saturating_sub(
+                    composition["base_catalog_tokens"]
+                        .as_u64()
+                        .expect("base tokens"),
+                );
+            assert!(selected_added <= 3_500, "{protocol}");
+        }
+        assert_eq!(actual["representative_max_result_items"], 61);
+        assert!(
+            actual["representative_max_result_bytes"]
+                .as_u64()
+                .expect("bytes")
+                <= 65_536
+        );
+        assert!(
+            actual["representative_max_result_tokens"]
+                .as_u64()
+                .expect("tokens")
+                <= 32_000
+        );
     }
 
     #[test]
@@ -932,6 +2234,12 @@ mod tests {
         assert_eq!(COLLECTION_MEMBER_LIST_HTTP_LOGICAL_CEILING, 12);
         assert_eq!(COLLECTION_MEMBER_LIST_HTTP_PHYSICAL_CEILING, 72);
         assert_eq!(COLLECTION_MEMBER_LIST_GRPC_CEILING, 3);
+        assert_eq!(COLLECTION_MEMBER_ADD_HTTP_LOGICAL_CEILING, 34);
+        assert_eq!(COLLECTION_MEMBER_ADD_HTTP_PHYSICAL_CEILING, 199);
+        assert_eq!(COLLECTION_MEMBER_ADD_GRPC_CEILING, 99);
+        assert_eq!(COLLECTION_MEMBER_REMOVE_HTTP_LOGICAL_CEILING, 34);
+        assert_eq!(COLLECTION_MEMBER_REMOVE_HTTP_PHYSICAL_CEILING, 204);
+        assert_eq!(COLLECTION_MEMBER_REMOVE_GRPC_CEILING, 96);
         assert_eq!(VIEWS_WRITE_CATALOG_TOKEN_CEILING, 3_000);
         assert_eq!(
             Sha256::digest(SUFFIX_ALPHABET)
@@ -943,7 +2251,7 @@ mod tests {
     }
 
     struct TestRegistry {
-        handlers: CollectionMemberListHandlers,
+        handlers: CollectionMemberHandlers,
     }
 
     impl fmt::Debug for TestRegistry {
@@ -958,18 +2266,23 @@ mod tests {
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
-            collection_member_list_tools()
+            collection_member_tools()
         }
 
         fn scripted_scenario_ids(&self) -> &'static [&'static str] {
             &[
                 "collection_member_list_direct",
                 "collection_member_list_stdio",
+                "collection_member_mutation_direct",
+                "collection_member_mutation_stdio",
             ]
         }
 
         fn headless_scenario_ids(&self) -> &'static [&'static str] {
-            &["collection_member_list_headless"]
+            &[
+                "collection_member_list_headless",
+                "collection_member_mutation_headless",
+            ]
         }
 
         fn catalog_token_ceiling(&self) -> usize {
@@ -1026,12 +2339,90 @@ mod tests {
     }
 
     fn server_with_runtime(runtime: RuntimeContext) -> AnyMcpServer {
-        let registry: &'static TestRegistry = Box::leak(Box::new(TestRegistry {
-            handlers: CollectionMemberListHandlers::new().expect("handlers"),
-        }));
+        server_with_handlers(runtime, CollectionMemberHandlers::new().expect("handlers"))
+    }
+
+    fn server_with_handlers(
+        runtime: RuntimeContext,
+        handlers: CollectionMemberHandlers,
+    ) -> AnyMcpServer {
+        let registry: &'static TestRegistry = Box::leak(Box::new(TestRegistry { handlers }));
         let registries: &'static [&'static dyn OptionalToolsetRegistry] =
             Box::leak(vec![registry as &dyn OptionalToolsetRegistry].into_boxed_slice());
         AnyMcpServer::new_with_optional_registries(runtime, registries).expect("test server")
+    }
+
+    fn snapshot_client() -> AnytypeClient {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("collection-membership-snapshot".to_owned()),
+            app_name: "collection-membership-snapshot".to_owned(),
+            disable_cache: true,
+            ..ClientConfig::default()
+        })
+        .expect("snapshot client");
+        client.set_api_key(HttpCredentials::new("snapshot-token"));
+        client
+    }
+
+    fn snapshot_server(
+        profile: ApplicationProfile,
+        read_only: bool,
+        selected: Option<&str>,
+    ) -> AnyMcpServer {
+        let registry: &'static TestRegistry = Box::leak(Box::new(TestRegistry {
+            handlers: CollectionMemberHandlers::new().expect("snapshot handlers"),
+        }));
+        let registries: &'static [&'static dyn OptionalToolsetRegistry] = Box::leak(
+            vec![
+                crate::member_toolset::MEMBERS_REGISTRY,
+                registry as &dyn OptionalToolsetRegistry,
+            ]
+            .into_boxed_slice(),
+        );
+        let metadata = registries
+            .iter()
+            .map(|candidate| candidate.metadata())
+            .collect::<Vec<_>>();
+        let selection = OptionalToolsetSelection::parse(selected.map(str::to_owned), &metadata)
+            .expect("snapshot selection");
+        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            snapshot_client(),
+            4,
+            Duration::from_secs(30),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            profile,
+            read_only,
+            selection,
+        );
+        AnyMcpServer::new_with_optional_registries(runtime, registries).expect("snapshot server")
+    }
+
+    fn tools_list_value(server: &AnyMcpServer) -> Value {
+        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
+            .expect("tools list value")
+    }
+
+    fn preview_tools_list_value(server: &AnyMcpServer) -> Value {
+        let mut value = tools_list_value(server);
+        let object = value.as_object_mut().expect("tools list object");
+        object.insert("resultType".to_owned(), json!("complete"));
+        object.insert("cacheScope".to_owned(), json!("public"));
+        value
+    }
+
+    fn canonical_compact(value: Value) -> String {
+        serde_json::to_string(&canonical_json(value)).expect("canonical compact JSON")
+    }
+
+    fn token_count(tokenizer: &CoreBPE, value: Value) -> usize {
+        tokenizer
+            .encode_with_special_tokens(&canonical_compact(value))
+            .len()
     }
 
     fn live_runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
@@ -1092,6 +2483,464 @@ mod tests {
             after.http_physical - before.http_physical
                 <= COLLECTION_MEMBER_LIST_HTTP_PHYSICAL_CEILING as u64
         );
+    }
+
+    fn metric_delta(after: u64, before: u64) -> u64 {
+        after.checked_sub(before).expect("metrics are monotonic")
+    }
+
+    struct ExpectedMutationWork {
+        http_logical: u64,
+        http_physical: u64,
+        observer_attempts: u64,
+        query_rounds: u64,
+        add_dispatches: u64,
+        remove_dispatches: u64,
+        logical_ceiling: usize,
+        physical_ceiling: usize,
+        grpc_ceiling: usize,
+    }
+
+    fn assert_mutation_work(before: WorkCounts, after: WorkCounts, expected: ExpectedMutationWork) {
+        let logical = metric_delta(after.http_logical, before.http_logical);
+        let physical = metric_delta(after.http_physical, before.http_physical);
+        let observed = metric_delta(
+            after.membership.observer_attempts,
+            before.membership.observer_attempts,
+        );
+        let queries = metric_delta(
+            after.membership.query_rounds,
+            before.membership.query_rounds,
+        );
+        assert_eq!(logical, expected.http_logical, "{before:?} -> {after:?}");
+        assert_eq!(physical, expected.http_physical, "{before:?} -> {after:?}");
+        assert!(
+            logical <= expected.logical_ceiling as u64,
+            "{before:?} -> {after:?}"
+        );
+        assert!(
+            physical <= expected.physical_ceiling as u64,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            observed, expected.observer_attempts,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(queries, expected.query_rounds, "{before:?} -> {after:?}");
+        assert_eq!(
+            metric_delta(
+                after.membership.subscribe_attempts,
+                before.membership.subscribe_attempts
+            ),
+            queries,
+            "{before:?} -> {after:?}"
+        );
+        let grpc_calls = metric_delta(
+            after.membership.subscribe_attempts,
+            before.membership.subscribe_attempts,
+        )
+        .saturating_add(metric_delta(
+            after.membership.foreground_close_attempts,
+            before.membership.foreground_close_attempts,
+        ))
+        .saturating_add(metric_delta(
+            after.membership.fallback_close_attempts,
+            before.membership.fallback_close_attempts,
+        ));
+        assert!(
+            grpc_calls <= expected.grpc_ceiling as u64,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            metric_delta(
+                after.membership.foreground_close_attempts,
+                before.membership.foreground_close_attempts
+            ),
+            queries,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            metric_delta(
+                after.membership.foreground_close_successes,
+                before.membership.foreground_close_successes
+            ),
+            queries,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            metric_delta(
+                after.membership.fallback_close_attempts,
+                before.membership.fallback_close_attempts
+            ),
+            0,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            metric_delta(
+                after.membership.add_dispatches,
+                before.membership.add_dispatches
+            ),
+            expected.add_dispatches,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            metric_delta(
+                after.membership.remove_dispatches,
+                before.membership.remove_dispatches
+            ),
+            expected.remove_dispatches,
+            "{before:?} -> {after:?}"
+        );
+    }
+
+    fn assert_membership_result(
+        result: &CallToolResult,
+        collection_id: &str,
+        object_id: &str,
+        membership: &str,
+    ) {
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        assert_eq!(
+            result.structured_content.as_ref(),
+            Some(&json!({
+                "collection_id":collection_id,
+                "object_id":object_id,
+                "membership":membership
+            }))
+        );
+        let expected_text = serde_json::to_string(
+            result
+                .structured_content
+                .as_ref()
+                .expect("membership result"),
+        )
+        .expect("membership text");
+        assert_eq!(
+            result
+                .content
+                .first()
+                .and_then(|content| content.as_text())
+                .map(|text| text.text.as_str()),
+            Some(expected_text.as_str())
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MutationTransport {
+        Direct,
+    }
+
+    async fn call_membership_mutation(
+        direct_server: &AnyMcpServer,
+        transport: MutationTransport,
+        name: &'static str,
+        args: Value,
+    ) -> CallToolResult {
+        match transport {
+            MutationTransport::Direct => direct_named_call(direct_server, name, args).await,
+        }
+    }
+
+    async fn exercise_membership_mutation_cycle(
+        direct_server: &AnyMcpServer,
+        client: &AnytypeClient,
+        transport: MutationTransport,
+        space_id: &str,
+        collection_id: &str,
+        object_id: &str,
+        saved_view_id: &str,
+    ) {
+        let args = json!({
+            "space":space_id,
+            "collection_id":collection_id,
+            "object_id":object_id
+        });
+
+        let before = metric_counts(client);
+        let added = call_membership_mutation(
+            direct_server,
+            transport,
+            COLLECTION_MEMBER_ADD,
+            args.clone(),
+        )
+        .await;
+        assert_membership_result(&added, collection_id, object_id, "present");
+        assert_mutation_work(
+            before,
+            metric_counts(client),
+            ExpectedMutationWork {
+                http_logical: 5,
+                http_physical: 5,
+                observer_attempts: 2,
+                query_rounds: 5,
+                add_dispatches: 1,
+                remove_dispatches: 0,
+                logical_ceiling: COLLECTION_MEMBER_ADD_HTTP_LOGICAL_CEILING,
+                physical_ceiling: COLLECTION_MEMBER_ADD_HTTP_PHYSICAL_CEILING,
+                grpc_ceiling: COLLECTION_MEMBER_ADD_GRPC_CEILING,
+            },
+        );
+        let canonical_after_add = client
+            .collection_membership_page(space_id, collection_id, 61, None)
+            .await
+            .expect("canonical membership immediately after add");
+        assert!(
+            canonical_after_add
+                .object_ids
+                .contains(&object_id.to_owned())
+        );
+        let filtered_after_add = client
+            .view_list_objects(space_id, collection_id)
+            .view(saved_view_id)
+            .limit(61)
+            .list()
+            .await
+            .expect("saved-view presentation immediately after add");
+        assert!(
+            !filtered_after_add
+                .items
+                .iter()
+                .any(|item| item.id == object_id)
+        );
+
+        for after_mark in [false, true] {
+            exercise_remove_cancellation_boundary(
+                client,
+                transport,
+                space_id,
+                collection_id,
+                object_id,
+                after_mark,
+            )
+            .await;
+        }
+
+        let before = metric_counts(client);
+        let add_noop = call_membership_mutation(
+            direct_server,
+            transport,
+            COLLECTION_MEMBER_ADD,
+            args.clone(),
+        )
+        .await;
+        assert_membership_result(&add_noop, collection_id, object_id, "present");
+        assert_mutation_work(
+            before,
+            metric_counts(client),
+            ExpectedMutationWork {
+                http_logical: 2,
+                http_physical: 2,
+                observer_attempts: 1,
+                query_rounds: 2,
+                add_dispatches: 0,
+                remove_dispatches: 0,
+                logical_ceiling: COLLECTION_MEMBER_ADD_HTTP_LOGICAL_CEILING,
+                physical_ceiling: COLLECTION_MEMBER_ADD_HTTP_PHYSICAL_CEILING,
+                grpc_ceiling: COLLECTION_MEMBER_ADD_GRPC_CEILING,
+            },
+        );
+        let canonical_before_remove = client
+            .collection_membership_page(space_id, collection_id, 61, None)
+            .await
+            .expect("canonical membership immediately before remove");
+        assert!(
+            canonical_before_remove
+                .object_ids
+                .contains(&object_id.to_owned())
+        );
+
+        let before = metric_counts(client);
+        let removed = call_membership_mutation(
+            direct_server,
+            transport,
+            COLLECTION_MEMBER_REMOVE,
+            args.clone(),
+        )
+        .await;
+        assert_membership_result(&removed, collection_id, object_id, "absent");
+        assert_mutation_work(
+            before,
+            metric_counts(client),
+            ExpectedMutationWork {
+                http_logical: 5,
+                http_physical: 5,
+                observer_attempts: 2,
+                query_rounds: 5,
+                add_dispatches: 0,
+                remove_dispatches: 1,
+                logical_ceiling: COLLECTION_MEMBER_REMOVE_HTTP_LOGICAL_CEILING,
+                physical_ceiling: COLLECTION_MEMBER_REMOVE_HTTP_PHYSICAL_CEILING,
+                grpc_ceiling: COLLECTION_MEMBER_REMOVE_GRPC_CEILING,
+            },
+        );
+        let canonical_after_remove = client
+            .collection_membership_page(space_id, collection_id, 61, None)
+            .await
+            .expect("canonical membership immediately after remove");
+        assert!(
+            !canonical_after_remove
+                .object_ids
+                .contains(&object_id.to_owned())
+        );
+
+        let before = metric_counts(client);
+        let remove_noop =
+            call_membership_mutation(direct_server, transport, COLLECTION_MEMBER_REMOVE, args)
+                .await;
+        assert_membership_result(&remove_noop, collection_id, object_id, "absent");
+        assert_mutation_work(
+            before,
+            metric_counts(client),
+            ExpectedMutationWork {
+                http_logical: 2,
+                http_physical: 2,
+                observer_attempts: 1,
+                query_rounds: 3,
+                add_dispatches: 0,
+                remove_dispatches: 0,
+                logical_ceiling: COLLECTION_MEMBER_REMOVE_HTTP_LOGICAL_CEILING,
+                physical_ceiling: COLLECTION_MEMBER_REMOVE_HTTP_PHYSICAL_CEILING,
+                grpc_ceiling: COLLECTION_MEMBER_REMOVE_GRPC_CEILING,
+            },
+        );
+    }
+
+    async fn exercise_add_cancellation_boundary(
+        client: &AnytypeClient,
+        transport: MutationTransport,
+        space_id: &str,
+        collection_id: &str,
+        object_id: &str,
+        after_mark: bool,
+    ) {
+        let cancel: MutationDispatchHook = Arc::new(CancellationToken::cancel);
+        let hooks = if after_mark {
+            CollectionMutationHooks {
+                after_add_mark: Some(cancel),
+                ..CollectionMutationHooks::default()
+            }
+        } else {
+            CollectionMutationHooks {
+                before_add: Some(cancel),
+                ..CollectionMutationHooks::default()
+            }
+        };
+        let handlers = CollectionMemberHandlers {
+            list: CollectionMemberListHandlers::new().expect("list handlers"),
+            mutations: CollectionMemberMutationHandlers::new()
+                .expect("mutation handlers")
+                .with_hooks(hooks),
+        };
+        let server = server_with_handlers(live_runtime(client.clone(), false), handlers);
+        let args = json!({
+            "space":space_id,
+            "collection_id":collection_id,
+            "object_id":object_id
+        });
+        let before = metric_counts(client);
+        let result = match transport {
+            MutationTransport::Direct => {
+                direct_named_call(&server, COLLECTION_MEMBER_ADD, args).await
+            }
+        };
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_str),
+            Some(if after_mark { "conflict" } else { "upstream" })
+        );
+        assert_mutation_work(
+            before,
+            metric_counts(client),
+            ExpectedMutationWork {
+                http_logical: 2,
+                http_physical: 2,
+                observer_attempts: 1,
+                query_rounds: 3,
+                add_dispatches: 0,
+                remove_dispatches: 0,
+                logical_ceiling: COLLECTION_MEMBER_ADD_HTTP_LOGICAL_CEILING,
+                physical_ceiling: COLLECTION_MEMBER_ADD_HTTP_PHYSICAL_CEILING,
+                grpc_ceiling: COLLECTION_MEMBER_ADD_GRPC_CEILING,
+            },
+        );
+        let observed = client
+            .observe_collection_membership(space_id, collection_id, object_id)
+            .await
+            .expect("observe cancellation state");
+        assert_eq!(observed.state, CollectionMembershipState::Absent);
+    }
+
+    async fn exercise_remove_cancellation_boundary(
+        client: &AnytypeClient,
+        transport: MutationTransport,
+        space_id: &str,
+        collection_id: &str,
+        object_id: &str,
+        after_mark: bool,
+    ) {
+        let cancel: MutationDispatchHook = Arc::new(CancellationToken::cancel);
+        let hooks = if after_mark {
+            CollectionMutationHooks {
+                after_remove_mark: Some(cancel),
+                ..CollectionMutationHooks::default()
+            }
+        } else {
+            CollectionMutationHooks {
+                before_remove: Some(cancel),
+                ..CollectionMutationHooks::default()
+            }
+        };
+        let handlers = CollectionMemberHandlers {
+            list: CollectionMemberListHandlers::new().expect("list handlers"),
+            mutations: CollectionMemberMutationHandlers::new()
+                .expect("mutation handlers")
+                .with_hooks(hooks),
+        };
+        let server = server_with_handlers(live_runtime(client.clone(), false), handlers);
+        let args = json!({
+            "space":space_id,
+            "collection_id":collection_id,
+            "object_id":object_id
+        });
+        let before = metric_counts(client);
+        let result = match transport {
+            MutationTransport::Direct => {
+                direct_named_call(&server, COLLECTION_MEMBER_REMOVE, args).await
+            }
+        };
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_str),
+            Some(if after_mark { "conflict" } else { "upstream" })
+        );
+        assert_mutation_work(
+            before,
+            metric_counts(client),
+            ExpectedMutationWork {
+                http_logical: 2,
+                http_physical: 2,
+                observer_attempts: 1,
+                query_rounds: 2,
+                add_dispatches: 0,
+                remove_dispatches: 0,
+                logical_ceiling: COLLECTION_MEMBER_REMOVE_HTTP_LOGICAL_CEILING,
+                physical_ceiling: COLLECTION_MEMBER_REMOVE_HTTP_PHYSICAL_CEILING,
+                grpc_ceiling: COLLECTION_MEMBER_REMOVE_GRPC_CEILING,
+            },
+        );
+        let observed = client
+            .observe_collection_membership(space_id, collection_id, object_id)
+            .await
+            .expect("observe cancellation state");
+        assert_eq!(observed.state, CollectionMembershipState::Present);
     }
 
     fn assert_stable_list_work(before: WorkCounts, after: WorkCounts) {
@@ -1167,16 +3016,24 @@ mod tests {
     }
 
     async fn direct_call(server: &AnyMcpServer, value: Value) -> CallToolResult {
+        direct_named_call(server, COLLECTION_MEMBER_LIST, value).await
+    }
+
+    async fn direct_named_call(
+        server: &AnyMcpServer,
+        name: &'static str,
+        value: Value,
+    ) -> CallToolResult {
         server
             .dispatch_tool(
-                CallToolRequestParams::new(COLLECTION_MEMBER_LIST).with_arguments(arguments(value)),
+                CallToolRequestParams::new(name).with_arguments(arguments(value)),
                 &CancellationToken::new(),
             )
             .await
             .expect("direct router dispatch")
     }
 
-    async fn preview_stdio_call(server: AnyMcpServer, value: Value) -> Value {
+    async fn preview_stdio_tools(server: AnyMcpServer) -> Value {
         let (client_io, server_io) = duplex(64 * 1024);
         let (server_reader, server_writer) = split(server_io);
         let task = tokio::spawn(crate::stdio::serve_preview(
@@ -1187,15 +3044,13 @@ mod tests {
         let (client_reader, mut client_writer) = split(client_io);
         let frame = json!({
             "jsonrpc":"2.0",
-            "id":9,
-            "method":"tools/call",
+            "id":10,
+            "method":"tools/list",
             "params":{
-                "name":COLLECTION_MEMBER_LIST,
-                "arguments":value,
                 "_meta":{
                     "io.modelcontextprotocol/protocolVersion":"2026-07-28",
                     "io.modelcontextprotocol/clientInfo":{
-                        "name":"collection-list-test",
+                        "name":"collection-membership-schema-test",
                         "version":"1"
                     },
                     "io.modelcontextprotocol/clientCapabilities":{}
@@ -1205,136 +3060,19 @@ mod tests {
         client_writer
             .write_all(format!("{frame}\n").as_bytes())
             .await
-            .expect("write stdio request");
+            .expect("write stdio tools request");
         let mut client_reader = BufReader::new(client_reader);
         let mut line = String::new();
         client_reader
             .read_line(&mut line)
             .await
-            .expect("read stdio response");
+            .expect("read stdio tools response");
         drop(client_writer);
         drop(client_reader);
         task.await
-            .expect("spawned stdio task")
-            .expect("stdio transport");
-        serde_json::from_str(&line).expect("decode stdio response")
-    }
-
-    async fn write_stdio_frame<W, R>(
-        writer: &mut W,
-        reader: &mut BufReader<R>,
-        id: u64,
-        arguments: Value,
-    ) -> Value
-    where
-        W: AsyncWrite + Unpin,
-        R: AsyncRead + Unpin,
-    {
-        let frame = json!({
-            "jsonrpc":"2.0",
-            "id":id,
-            "method":"tools/call",
-            "params":{
-                "name":COLLECTION_MEMBER_LIST,
-                "arguments":arguments,
-                "_meta":{
-                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-                    "io.modelcontextprotocol/clientInfo":{
-                        "name":"collection-list-walk-test",
-                        "version":"1"
-                    },
-                    "io.modelcontextprotocol/clientCapabilities":{}
-                }
-            }
-        });
-        writer
-            .write_all(format!("{frame}\n").as_bytes())
-            .await
-            .expect("write stdio walk request");
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .expect("read stdio walk response");
-        serde_json::from_str(&line).expect("decode stdio walk response")
-    }
-
-    async fn preview_stdio_walk(
-        server: AnyMcpServer,
-        metrics_client: &AnytypeClient,
-        space_id: &str,
-        collection_id: &str,
-        other_collection_id: &str,
-    ) -> Vec<Value> {
-        let (client_io, server_io) = duplex(64 * 1024);
-        let (server_reader, server_writer) = split(server_io);
-        let task = tokio::spawn(crate::stdio::serve_preview(
-            server,
-            BufReader::new(server_reader),
-            server_writer,
-        ));
-        let (client_reader, mut client_writer) = split(client_io);
-        let mut client_reader = BufReader::new(client_reader);
-
-        let rejected_before = metric_counts(metrics_client);
-        let rejected = write_stdio_frame(
-            &mut client_writer,
-            &mut client_reader,
-            21,
-            json!({"space":space_id,"collection_id":other_collection_id,"limit":1}),
-        )
-        .await;
-        assert_stable_preflight_rejection(rejected_before, metric_counts(metrics_client));
-
-        let first_before = metric_counts(metrics_client);
-        let first = write_stdio_frame(
-            &mut client_writer,
-            &mut client_reader,
-            22,
-            json!({"space":space_id,"collection_id":collection_id,"limit":1}),
-        )
-        .await;
-        assert_stable_list_work(first_before, metric_counts(metrics_client));
-        let cursor = first["result"]["structuredContent"]["next_cursor"]
-            .as_str()
-            .expect("stdio walk continuation")
-            .to_owned();
-
-        let mismatch_before = metric_counts(metrics_client);
-        let mismatch = write_stdio_frame(
-            &mut client_writer,
-            &mut client_reader,
-            23,
-            json!({
-                "space":space_id,
-                "collection_id":other_collection_id,
-                "limit":1,
-                "cursor":cursor
-            }),
-        )
-        .await;
-        assert_zero_membership_io(mismatch_before, metric_counts(metrics_client));
-
-        let second_before = metric_counts(metrics_client);
-        let second = write_stdio_frame(
-            &mut client_writer,
-            &mut client_reader,
-            24,
-            json!({
-                "space":space_id,
-                "collection_id":collection_id,
-                "limit":1,
-                "cursor":cursor
-            }),
-        )
-        .await;
-        assert_stable_list_work(second_before, metric_counts(metrics_client));
-        drop(client_writer);
-        drop(client_reader);
-        task.await
-            .expect("spawned stdio walk task")
-            .expect("stdio walk transport");
-        vec![rejected, first, mismatch, second]
+            .expect("spawned stdio tools task")
+            .expect("stdio tools transport");
+        serde_json::from_str(&line).expect("decode stdio tools response")
     }
 
     fn run_large_future<F, Fut>(test: F)
@@ -1360,7 +3098,7 @@ mod tests {
     #[test]
     fn registry_is_grpc_gated_read_only_and_production_unlinked() {
         let metadata = TestRegistry {
-            handlers: CollectionMemberListHandlers::new().expect("handlers"),
+            handlers: CollectionMemberHandlers::new().expect("handlers"),
         }
         .metadata();
         assert_eq!(metadata.name, VIEWS_WRITE_REGISTRY);
@@ -1396,7 +3134,11 @@ mod tests {
                 .iter()
                 .any(|name| name == COLLECTION_MEMBER_LIST)
         );
-        assert_eq!(selected.tools().len(), read_only.tools().len() + 1);
+        assert_eq!(selected.tools().len(), read_only.tools().len() + 3);
+        for mutation in [COLLECTION_MEMBER_ADD, COLLECTION_MEMBER_REMOVE] {
+            assert!(names(&selected).iter().any(|name| name == mutation));
+            assert!(!names(&read_only).iter().any(|name| name == mutation));
+        }
 
         let tokenizer = o200k_base().expect("pinned o200k_base");
         let tool = selected
@@ -1416,9 +3158,62 @@ mod tests {
         assert!(catalog_contribution <= VIEWS_WRITE_CATALOG_TOKEN_CEILING);
     }
 
+    #[tokio::test]
+    async fn read_only_mutations_reject_before_decode_and_io() {
+        let runtime = no_io_runtime(true, true);
+        let client = runtime.client().clone();
+        let before = metric_counts(&client);
+        let server = server_with_runtime(runtime);
+        for name in [COLLECTION_MEMBER_ADD, COLLECTION_MEMBER_REMOVE] {
+            let result = server
+                .dispatch_tool(CallToolRequestParams::new(name), &CancellationToken::new())
+                .await
+                .expect("read-only direct dispatch");
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(
+                result
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("code"))
+                    .and_then(Value::as_str),
+                Some("validation")
+            );
+        }
+        assert_zero_membership_io(before, metric_counts(&client));
+
+        let runtime = no_io_runtime(true, true);
+        let client = runtime.client().clone();
+        let before = metric_counts(&client);
+        let handlers = CollectionMemberMutationHandlers::new().expect("mutation handlers");
+        for name in [COLLECTION_MEMBER_ADD, COLLECTION_MEMBER_REMOVE] {
+            let result = handlers
+                .call_tool(
+                    CallToolRequestParams::new(name),
+                    &runtime,
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect("defense-in-depth dispatch");
+            assert_eq!(result.is_error, Some(true));
+        }
+        assert_zero_membership_io(before, metric_counts(&client));
+    }
+
+    #[tokio::test]
+    async fn direct_and_preview_stdio_catalog_schemas_are_identical() {
+        for read_only in [false, true] {
+            let direct = test_server(true, read_only);
+            let expected = tools_list_value(&direct);
+            let stdio = preview_stdio_tools(test_server(true, read_only)).await;
+            assert_eq!(stdio["result"]["tools"], expected["tools"]);
+            assert_eq!(stdio["result"]["resultType"], "complete");
+            assert_eq!(stdio["result"]["cacheScope"], "public");
+        }
+    }
+
     #[test]
     #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-    fn live_direct_and_production_stdio_ignore_saved_view_presentation() {
+    fn live_direct_membership_ignores_saved_view_presentation() {
         run_large_future(|| async {
             let outcome = Box::pin(with_disposable_space_context(
                 "any-mcp-collection-list",
@@ -1594,6 +3389,27 @@ mod tests {
                         );
                         assert_stable_preflight_rejection(query_before, metric_counts(&ctx.client));
 
+                        for name in [COLLECTION_MEMBER_ADD, COLLECTION_MEMBER_REMOVE] {
+                            let args = json!({
+                                "space":ctx.space_id,
+                                "collection_id":query.id,
+                                "object_id":object_c.id
+                            });
+                            let before = metric_counts(&ctx.client);
+                            let rejected =
+                                direct_named_call(&direct_server, name, args.clone()).await;
+                            assert_stable_preflight_rejection(before, metric_counts(&ctx.client));
+                            assert_eq!(rejected.is_error, Some(true));
+                            assert_eq!(
+                                rejected
+                                    .structured_content
+                                    .as_ref()
+                                    .and_then(|value| value.get("code"))
+                                    .and_then(Value::as_str),
+                                Some("upstream")
+                            );
+                        }
+
                         let kanban_before = metric_counts(&ctx.client);
                         let kanban_direct = direct_call(
                             &direct_server,
@@ -1696,93 +3512,66 @@ mod tests {
                         assert_eq!(walked, reference.object_ids);
                         assert!(walked.contains(&object_b.id));
 
-                        let stdio_walk = preview_stdio_walk(
-                            server_with_runtime(live_runtime(ctx.client.clone(), false)),
-                            &ctx.client,
-                            &ctx.space_id,
-                            &collection.id,
-                            &query.id,
-                        )
-                        .await;
-                        assert_eq!(
-                            stdio_walk[0]["result"]["structuredContent"]["code"],
-                            "upstream"
-                        );
-                        assert_eq!(stdio_walk[1]["result"]["isError"], false);
-                        assert_eq!(
-                            stdio_walk[2]["result"]["structuredContent"]["code"],
-                            "validation"
-                        );
-                        assert_eq!(
-                            &stdio_walk[2]["result"]["structuredContent"],
-                            mismatch
-                                .structured_content
-                                .as_ref()
-                                .expect("direct mismatch structured content")
-                        );
-                        assert_eq!(stdio_walk[3]["result"]["isError"], false);
-                        assert!(
-                            stdio_walk[3]["result"]["structuredContent"]
-                                .get("next_cursor")
-                                .is_none()
-                        );
-                        let restarted = [&stdio_walk[1], &stdio_walk[3]]
-                            .into_iter()
-                            .flat_map(|response| {
-                                response["result"]["structuredContent"]["items"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(|item| {
-                                        item["object_id"].as_str().map(str::to_owned)
-                                    })
-                            })
-                            .collect::<Vec<_>>();
-                        assert_eq!(restarted.as_slice(), reference.object_ids.as_slice());
-
-                        let stdio_before = metric_counts(&ctx.client);
-                        let stdio = preview_stdio_call(
-                            server_with_runtime(live_runtime(ctx.client.clone(), false)),
-                            json!({
-                                "space":ctx.space_id,
-                                "collection_id":collection.id,
-                                "limit":61
-                            }),
-                        )
-                        .await;
-                        assert_stable_list_work(stdio_before, metric_counts(&ctx.client));
-                        assert_eq!(stdio["result"]["isError"], false, "{stdio}");
-                        let stdio_ids = stdio["result"]["structuredContent"]["items"]
-                            .as_array()
-                            .expect("stdio items")
-                            .iter()
-                            .filter_map(|item| item["object_id"].as_str().map(str::to_owned))
-                            .collect::<Vec<_>>();
-                        assert_eq!(stdio_ids.as_slice(), reference.object_ids.as_slice());
-                        assert!(stdio_ids.contains(&object_b.id));
-
-                        let kanban_stdio_before = metric_counts(&ctx.client);
-                        let kanban_stdio = preview_stdio_call(
-                            server_with_runtime(live_runtime(ctx.client.clone(), false)),
-                            json!({
-                                "space":ctx.space_id,
-                                "collection_id":kanban.collection.id,
-                                "limit":61
-                            }),
-                        )
-                        .await;
-                        assert_stable_list_work(kanban_stdio_before, metric_counts(&ctx.client));
-                        assert_eq!(kanban_stdio["result"]["isError"], false);
-                        let kanban_stdio_ids = kanban_stdio["result"]["structuredContent"]["items"]
-                            .as_array()
-                            .expect("Kanban stdio items")
-                            .iter()
-                            .filter_map(|item| item["object_id"].as_str().map(str::to_owned))
-                            .collect::<Vec<_>>();
-                        assert_eq!(
-                            kanban_stdio_ids.as_slice(),
-                            kanban_reference.object_ids.as_slice()
-                        );
+                        for transport in [MutationTransport::Direct] {
+                            exercise_add_cancellation_boundary(
+                                &ctx.client,
+                                transport,
+                                &ctx.space_id,
+                                &collection.id,
+                                &object_c.id,
+                                false,
+                            )
+                            .await;
+                            exercise_add_cancellation_boundary(
+                                &ctx.client,
+                                transport,
+                                &ctx.space_id,
+                                &collection.id,
+                                &object_c.id,
+                                true,
+                            )
+                            .await;
+                            exercise_membership_mutation_cycle(
+                                &direct_server,
+                                &ctx.client,
+                                transport,
+                                &ctx.space_id,
+                                &collection.id,
+                                &object_c.id,
+                                &saved_view.id,
+                            )
+                            .await;
+                            let observed = ctx
+                                .client
+                                .observe_collection_membership(
+                                    &ctx.space_id,
+                                    &collection.id,
+                                    &object_c.id,
+                                )
+                                .await?;
+                            assert_eq!(
+                                observed.state,
+                                anytype::views::CollectionMembershipState::Absent
+                            );
+                            let survived =
+                                ctx.client.object(&ctx.space_id, &object_c.id).get().await?;
+                            assert_eq!(survived.id, object_c.id);
+                            assert_eq!(survived.space_id, ctx.space_id);
+                            let canonical = ctx
+                                .client
+                                .collection_membership_page(&ctx.space_id, &collection.id, 61, None)
+                                .await?;
+                            assert!(!canonical.object_ids.contains(&object_c.id));
+                            let presentation = ctx
+                                .client
+                                .view_list_objects(&ctx.space_id, &collection.id)
+                                .view(&saved_view.id)
+                                .limit(61)
+                                .list()
+                                .await?;
+                            assert!(presentation.items.iter().any(|item| item.id == object_a.id));
+                            assert!(!presentation.items.iter().any(|item| item.id == object_c.id));
+                        }
 
                         let read_only_arguments = json!({
                             "space":ctx.space_id,
@@ -1800,29 +3589,6 @@ mod tests {
                             metric_counts(&ctx.client),
                         );
                         assert_eq!(read_only_direct.is_error, Some(false));
-
-                        let read_only_before = metric_counts(&ctx.client);
-                        let read_only = preview_stdio_call(
-                            server_with_runtime(live_runtime(ctx.client.clone(), true)),
-                            read_only_arguments,
-                        )
-                        .await;
-                        assert_stable_list_work(read_only_before, metric_counts(&ctx.client));
-                        assert_eq!(read_only["result"]["isError"], false, "{read_only}");
-                        assert_eq!(
-                            &read_only["result"]["structuredContent"],
-                            read_only_direct
-                                .structured_content
-                                .as_ref()
-                                .expect("read-only direct structured content")
-                        );
-                        let read_only_ids = read_only["result"]["structuredContent"]["items"]
-                            .as_array()
-                            .expect("read-only stdio items")
-                            .iter()
-                            .filter_map(|item| item["object_id"].as_str().map(str::to_owned))
-                            .collect::<Vec<_>>();
-                        assert_eq!(read_only_ids.as_slice(), reference.object_ids.as_slice());
 
                         let prefix = std::env::var("ANYTYPE_TEST_SPACE_PREFIX")
                             .expect("disposable prefix admitted before callback");
@@ -1850,26 +3616,6 @@ mod tests {
                                 .and_then(Value::as_str),
                             Some("ambiguous")
                         );
-                        ctx.client.cache().clear_spaces();
-                        let ambiguity_stdio_before = metric_counts(&ctx.client);
-                        let ambiguity_stdio = preview_stdio_call(
-                            server_with_runtime(live_runtime(ctx.client.clone(), false)),
-                            json!({
-                                "space":ambiguous_name,
-                                "collection_id":collection.id,
-                                "limit":1
-                            }),
-                        )
-                        .await;
-                        assert_resolver_rejection(
-                            ambiguity_stdio_before,
-                            metric_counts(&ctx.client),
-                        );
-                        assert_eq!(
-                            ambiguity_stdio["result"]["structuredContent"]["code"],
-                            "ambiguous"
-                        );
-
                         let mut rejected_config = ctx.client.get_config().clone();
                         rejected_config.app_name = "collection-list-auth-rejection".to_owned();
                         let rejected_client = AnytypeClient::with_config(rejected_config)?;
@@ -1898,24 +3644,32 @@ mod tests {
                                 .and_then(Value::as_str),
                             Some("authentication")
                         );
-                        let auth_stdio_before = metric_counts(&rejected_client);
-                        let authentication_stdio = preview_stdio_call(
-                            server_with_runtime(live_runtime(rejected_client.clone(), false)),
-                            json!({
+                        for name in [COLLECTION_MEMBER_ADD, COLLECTION_MEMBER_REMOVE] {
+                            let args = json!({
                                 "space":ctx.space_id,
                                 "collection_id":collection.id,
-                                "limit":1
-                            }),
-                        )
-                        .await;
-                        assert_stable_preflight_rejection(
-                            auth_stdio_before,
-                            metric_counts(&rejected_client),
-                        );
-                        assert_eq!(
-                            authentication_stdio["result"]["structuredContent"]["code"],
-                            "authentication"
-                        );
+                                "object_id":object_c.id
+                            });
+                            let before = metric_counts(&rejected_client);
+                            let rejected = direct_named_call(
+                                &server_with_runtime(live_runtime(rejected_client.clone(), false)),
+                                name,
+                                args.clone(),
+                            )
+                            .await;
+                            assert_stable_preflight_rejection(
+                                before,
+                                metric_counts(&rejected_client),
+                            );
+                            assert_eq!(
+                                rejected
+                                    .structured_content
+                                    .as_ref()
+                                    .and_then(|value| value.get("code"))
+                                    .and_then(Value::as_str),
+                                Some("authentication")
+                            );
+                        }
                         Ok(())
                     })
                 },
