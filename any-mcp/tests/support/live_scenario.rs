@@ -414,6 +414,14 @@ async fn run_discovery(
         1_000,
     )
     .await?;
+    assert_filtered_cursor_contract(
+        driver,
+        "type_list",
+        json!({"space": ctx.space_id}),
+        &duplicate_name,
+        &[first_type.id.clone(), second_type.id.clone()],
+    )
+    .await?;
     walk_pages(
         driver,
         "property_list",
@@ -904,6 +912,100 @@ async fn walk_pages(
         cursor = Some(next.to_owned());
     }
     Err(format!("{tool} did not terminate within {max_pages} pages"))
+}
+
+async fn assert_filtered_cursor_contract(
+    driver: &mut impl McpDriver,
+    tool: &'static str,
+    base: Value,
+    filter_value: &str,
+    expected_ids: &[String],
+) -> Result<(), String> {
+    const MAX_PAGES: usize = 8;
+
+    let filter = |value: &str| {
+        json!({
+            "operator": "and",
+            "conditions": [{
+                "format": "text",
+                "property_key": "name",
+                "condition": "contains",
+                "value": value
+            }]
+        })
+    };
+    let mut request = base
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "filtered page input must be an object".to_owned())?;
+    request.insert("filters".to_owned(), filter(filter_value));
+    request.insert("limit".to_owned(), json!(1));
+
+    let first = driver
+        .call_tool(tool, Value::Object(request.clone()))
+        .await?;
+    let first_items = first["items"]
+        .as_array()
+        .ok_or_else(|| format!("{tool} filtered items array"))?;
+    require(
+        first_items.len() == 1,
+        &format!("{tool} filtered first page"),
+    )?;
+    let first_id =
+        item_id(&first_items[0]).ok_or_else(|| format!("{tool} filtered item identity"))?;
+    let mut seen_ids = HashSet::from([first_id.to_owned()]);
+    let first_cursor = first
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{tool} filtered continuation"))?
+        .to_owned();
+
+    let mut mismatch = request.clone();
+    mismatch.insert(
+        "filters".to_owned(),
+        filter(&format!("{filter_value}-mismatch")),
+    );
+    mismatch.insert("cursor".to_owned(), json!(first_cursor));
+    let code = driver
+        .call_tool_error(tool, Value::Object(mismatch))
+        .await?;
+    require(
+        code == "validation",
+        &format!("{tool} filter cursor binding"),
+    )?;
+
+    let mut cursor = Some(first_cursor);
+    for _ in 1..MAX_PAGES {
+        let Some(next) = cursor.take() else {
+            break;
+        };
+        let mut continuation = request.clone();
+        continuation.insert("cursor".to_owned(), json!(next));
+        let page = driver.call_tool(tool, Value::Object(continuation)).await?;
+        for item in page["items"]
+            .as_array()
+            .ok_or_else(|| format!("{tool} filtered continuation items"))?
+        {
+            let id =
+                item_id(item).ok_or_else(|| format!("{tool} filtered continuation identity"))?;
+            require(
+                seen_ids.insert(id.to_owned()),
+                &format!("{tool} filtered identity progress"),
+            )?;
+        }
+        cursor = page
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+    }
+    require(
+        cursor.is_none(),
+        &format!("{tool} filtered pagination terminates"),
+    )?;
+    require(
+        seen_ids == expected_ids.iter().cloned().collect(),
+        &format!("{tool} filtered exact identities"),
+    )
 }
 
 fn item_id(item: &Value) -> Option<&str> {

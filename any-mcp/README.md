@@ -30,68 +30,6 @@ Use any-mcp (this) for:
 
 ## Quick start
 
-Install by downloading the `any-mcp` release from the github releases page.
-
-Confirm that the existing `anyr` credentials can reach Anytype:
-
-```sh
-anyr auth status --pretty
-```
-
-An MCP host starts that binary and communicates with it over stdio.
-The server does not perform login or print credentials. It reuses the endpoint
-and keystore selected by `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
-`ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE` (default `anyr`). The default
-startup is the stable `2025-11-25` protocol, the four-tool compact profile, and
-read-write access. For a safer first registration, select compact read-only
-explicitly:
-
-```json
-{
-  "mcpServers": {
-    "anytype": {
-      "command": "/absolute/path/to/any-mcp",
-      "env": {
-        "ANY_MCP_PROTOCOL": "stable",
-        "ANY_MCP_PROFILE": "compact",
-        "ANY_MCP_READ_ONLY": "1",
-        "ANYTYPE_URL": "http://127.0.0.1:31009",
-        "ANYTYPE_KEYSTORE": "file:path=/replace/with/your/anytype-keys.db",
-        "ANYTYPE_KEYSTORE_SERVICE": "anyr"
-      }
-    }
-  }
-}
-```
-
-Use a platform-appropriate keystore path or keep the host's existing Anytype
-environment instead of copying credentials into configuration. When
-`ANYTYPE_KEYSTORE=env`, supply `ANYTYPE_KEY_HTTP_TOKEN` only through the host
-environment or another secret facility; never put its value in prompts, tool
-arguments, or logs.
-
-Codex uses the same settings in `config.toml` and can forward the operator's
-existing non-secret selectors:
-
-```toml
-[mcp_servers.anytype]
-command = "/absolute/path/to/any-mcp"
-env = { ANY_MCP_PROTOCOL = "stable", ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
-env_vars = [
-  "ANYTYPE_URL",
-  "ANYTYPE_GRPC_ENDPOINT",
-  "ANYTYPE_KEYSTORE",
-  "ANYTYPE_KEYSTORE_SERVICE",
-]
-```
-
-See [stdio protocol verification](STDIO_CONFORMANCE.md) for the tested Codex,
-Claude Code, and MCP Inspector registration commands and their exact pinned
-protocol revisions. Client registration is separate from Anytype login: create
-and store credentials with `anyr` or Anytype before starting the MCP host.
-
-## Quick start
-
 Build the current workspace prerelease and confirm that the existing `anyr`
 credentials can reach Anytype:
 
@@ -827,16 +765,20 @@ release is published by this documentation change.
 
 ## Headless integration tests
 
-The ignored live suite uses `with_test_context`, checks authenticated HTTP and
-gRPC before work, and runs serially so mutation verification does not compete
-with itself for the server's rate limit. Every created object, type, and
-property is registered immediately for cleanup. It requires a running headless
-server, a test space selected by `.test-env`, and `anyr auth status` reporting
-both HTTP and gRPC pings as OK. Run the direct-router and spawned-stdio targets
-explicitly from the repository root:
+The ignored live suite checks authenticated HTTP and gRPC before work and runs
+serially so mutation verification does not compete with itself for the
+server's rate limit. Every standard direct-router and spawned-stdio scenario
+uses a prefix-authorized disposable space; the spawned production child is
+registered for stop-and-wait cleanup before protocol initialization. Every
+created object, type, and property is registered immediately for cleanup. The
+suite requires a running headless server, env-only disposable credentials
+from `.test-env`, and `anyr auth status` reporting both HTTP and gRPC pings as
+OK. Run the direct-router and spawned-stdio targets explicitly from the
+repository root:
 
 ```sh
 source .test-env
+export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
 cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
 cargo test -p any-mcp --test headless_stdio_e2e -- --ignored --test-threads=1
 ```
@@ -848,8 +790,10 @@ standard tools and `resources/list`, `resources/templates/list`, and
 `resources/read`, including bounded cursor terminality and binding,
 ambiguity, explicit view selection, idempotent create, independent
 read-after-write visibility, stale/count edit conflicts, and active/archive
-evidence. Existing focused live regressions remain alongside this acceptance
-baseline. The direct command selects exactly 13 intended `headless_` cases;
+evidence. Discovery additionally proves exact identities for a forwarded flat
+list filter and rejects a continuation cursor whose filter binding changes
+through both entry paths. Existing focused live regressions remain alongside
+this acceptance baseline. The direct command selects exactly 13 intended `headless_` cases;
 the spawned target contains exactly 8 ignored live cases.
 
 The compact and read-only cases prove representative real reads and catalog

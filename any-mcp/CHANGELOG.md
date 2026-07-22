@@ -42,9 +42,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `property_list` filter-plus-type combination before I/O; bind canonical
   filter semantics into continuation cursors without rewriting the upstream
   query. Lock the capability matrix, positive/rejected scripted paths, exact
-  request forwarding, and reviewed standard catalog/token growth. Disposable
-  live execution is tracked by the explicit env-only credential blocker
-  `any-9h0k`.
+  request forwarding, and reviewed standard catalog/token growth. The shared
+  standard direct-router and spawned-stdio discovery scenarios now prove exact
+  filtered identities plus filter-bound cursor rejection in prefix-authorized
+  disposable spaces. Spawned children are registered for stop-and-wait cleanup
+  before protocol initialization, and direct-router dispatches run as separate
+  Tokio tasks so the full filter matrix passes on Rust's default test-thread
+  stack.
 - Extract the `object_search` filter grammar into a shared bounded MCP DTO
   matching the supported `anytype-api` formats and conditions one-to-one.
   Preserve aggregate count/value/depth limits, identifier validation,
