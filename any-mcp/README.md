@@ -912,6 +912,9 @@ Phase 1 read path.
   conformance proves the configured backend returns the exact numeric and
   checkbox matches while continuation follows the checked upstream page;
   `any-mcp` never rewrites the filters or scans extra pages locally.
+  The workspace [filter-status matrix](../FILTER_STATUS.md) distinguishes
+  this verified production path from unsupported condition/value combinations
+  and tracks closure of the historical upstream parsing report.
   File and object filter operands are validated as safe bounded identifiers
   before any upstream request. Cursor identity sorts and deduplicates
   commutative condition groups, nested groups, and set-valued operands while

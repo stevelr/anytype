@@ -349,6 +349,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Reconcile numeric and checkbox filter documentation with current live
+  acceptance and the workspace-wide direct-client matrix. The production MCP
+  contract remains unchanged: typed filter values pass through once, checked
+  server pagination remains authoritative, and no result-page emulation is
+  introduced.
 - Add strict server-side flat-`and` shared filters to `space_list`, `type_list`,
   `property_list`, `tag_list`, `template_list`, and `view_object_list`. Reject
   recursive/`or` shapes, `view_list` filters, and the dishonest

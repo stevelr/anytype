@@ -124,6 +124,10 @@
 //!   available for advanced use cases.
 //! - Filters default to AND semantics: `.filter()` chains into AND, and `Vec<Filter>.into()`
 //!   yields an AND `FilterExpression`.
+//! - Numeric filters support `eq`, `ne`, `lt`, `lte`, `gt`, and `gte`; checkbox
+//!   filters support `eq` and `ne`. Search bodies retain typed JSON values, while
+//!   list-query builders emit canonical number text and lowercase boolean text
+//!   without changing conditions or filtering returned pages locally.
 //! - Enums represent token types like Color and Layout.
 //! - A single HTTP pipeline handles validation, logging, serialization, retries, and rate limits.
 //! - Pagination uses `PaginatedResponse<T>` and `PagedResult<T>` with `into_stream()` and

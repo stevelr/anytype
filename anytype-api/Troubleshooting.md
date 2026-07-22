@@ -14,9 +14,15 @@ The following issues were found during testing `anytype` and are filed in the `a
 
 **Issues**
 
-- [2879](https://github.com/anyproto/anytype-heart/issues/2879) bool and number filters in list queries.
 - [2887](https://github.com/anyproto/anytype-heart/issues/2887) sorting search results by `due_date`
 - [2883](https://github.com/anyproto/anytype-heart/issues/2883) Crash: nil account-key from DeriveKeysFromMasterNode
+
+**Resolved or awaiting upstream closure**
+
+- [2879](https://github.com/anyproto/anytype-heart/issues/2879) scalar bool and
+  number filter parsing works on the current server for the live cases already
+  accepted. The complete direct condition matrix and the remaining environment
+  gate are tracked in [the filter status](../FILTER_STATUS.md).
 
 **PRs**
 

@@ -56,6 +56,15 @@ and callers do not need a direct `anytype-rpc` dependency.
   - [anyr](https://github.com/stevelr/anytype/tree/main/anyr) - list, search, and manipulate anytype objects
   - [any-edit](https://github.com/stevelr/anytype/tree/main/any-edit) - edit anytype docs in markdown in external editor
 
+Numeric filters support `eq`, `ne`, `lt`, `lte`, `gt`, and `gte`; checkbox
+filters support `eq` and `ne`. Typed values pass through unchanged in search
+expressions and become canonical number text or lowercase boolean text only
+where a list endpoint requires URL query values. The client does not coerce
+strings to numbers or booleans, accept checkbox `1`/`0` aliases, or emulate
+server filtering after pagination. See the workspace
+[filter status](../FILTER_STATUS.md) for the live compatibility matrix and
+the disposition of the historical upstream limitation.
+
 ### Bounded HTTP responses
 
 Buffered REST responses have finite byte ceilings. Ordinary JSON defaults to

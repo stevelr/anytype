@@ -94,6 +94,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Replace the stale `anytype-heart#2879` numeric/checkbox limitation with exact
+  query-encoding unit regressions and a cleanup-owned real-server matrix over
+  object-list and scoped-search endpoints. The matrix covers all six numeric
+  comparisons, both checkbox comparisons, integer and negative-decimal values,
+  and missing-property semantics without coercion or client-side filtering.
+  Document the remaining new-space readiness gate and upstream issue closure
+  recommendation in `FILTER_STATUS.md`.
 - Property and tag create/update builders now offer a cache-independent
   `no_cache_refresh()` path. It invalidates a primed space-property cache after
   the write instead of silently collecting every tag page, so mutation request
@@ -192,8 +199,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   a separate default test database without the configured HTTP credentials
 - chat event streams continue polling when callers keep the event stream but
   drop the optional control handle, avoiding reconnect spins and missed events
-- integration tests accept the current missing-token authentication error, and
-  known-broken boolean/numeric filter cases reference
+- integration tests accept the current missing-token authentication error; at
+  that release, boolean/numeric filter cases were temporarily ignored against
+  the then-current server and tracked by
   [anytype-heart#2879](https://github.com/anyproto/anytype-heart/issues/2879)
 - Set view integration cases that require a preconfigured internal `set_of`
   source are ignored in environments where REST cannot create that fixture
