@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Body reader integration coverage now uses cleanup-owned real-server objects
+  for typed conversion, exact order, close-safe repeat reads, tightened limits,
+  and missing-object failures instead of the custom gRPC mock. The exact
+  accepted-show close policy remains covered by a transport-independent unit
+  test.
 - Process watcher import-finish fallback events are now correlated to the
   requested space, including an explicit opt-in for legacy events with an empty
   space ID. Real-server Markdown import coverage replaces the custom gRPC mock;

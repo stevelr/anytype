@@ -416,6 +416,9 @@ depth, fanout, text size, and mark count. Content the typed layer does not
 model (dataviews, widgets, unknown styles or marks from newer servers) reads
 as an explicit `Unsupported` marker carrying only a content-free structural
 summary, so trees from newer hearts stay complete, ordered, and honest.
+Every accepted `ObjectShow` is followed by a best-effort `ObjectClose`, even
+when graph validation rejects the returned view; failed shows do not issue a
+close request.
 
 Mutations start from a snapshot and accept only typed constructors and targets
 that belong to that snapshot. Every write is sent once, then a bounded fresh
@@ -612,6 +615,11 @@ Integration tests require a running Anytype server and environment variables. Se
 Chat resolver integration tests create cleanup-owned chats and messages on the
 configured real HTTP and gRPC endpoints; they do not use the deprecated custom
 gRPC mock.
+
+Body reader integration tests create cleanup-owned objects on the configured
+real HTTP endpoint, then verify typed reads, ordering, close-safe repeat reads,
+tightened limits, and missing-object failures through the configured gRPC
+endpoint; they do not use the custom gRPC mock.
 
 Process watcher import-finish coverage uses a real Markdown import in the fresh
 cleanup-owned space created by `with_disposable_space_context`. The watcher
