@@ -515,6 +515,39 @@ exact source list; `featured` contains only definitions visible on the REST
 type. Hidden and file recommendation lists are separate Heart concepts and are
 not part of this replaceable-property model.
 
+## Direct Collection Membership
+
+Saved collection views can hide members through filters and pagination. Use
+`observe_collection_membership` when a workflow needs bounded evidence about
+one exact object in one exact manual collection:
+
+```rust,no_run
+use anytype::prelude::*;
+
+# async fn example(client: &AnytypeClient) -> anytype::Result<()> {
+let observation = client
+    .observe_collection_membership("space-id", "collection-id", "object-id")
+    .await?;
+match observation.state {
+    CollectionMembershipState::Present => println!("direct member"),
+    CollectionMembershipState::Absent => println!("not a direct member"),
+}
+# Ok(())
+# }
+```
+
+The read exact-checks the REST collection and object identities and rejects
+Set/query lists. It runs an independent unscoped exact-object query before the
+collection-scoped query; an absent result also requires the same unscoped proof
+afterward. This control/scoped/control sequence prevents a transient missing
+index row from being misreported as absence. Saved view filters and sorts are
+never consulted. Each app-global Heart subscription has a unique client-owned
+ID, a finite deadline, and cancellation-resilient bounded cleanup. Missing
+counters, malformed identities, cleanup failures, or incomplete control
+evidence return an error rather than `Absent`. After a mutation has been
+dispatched, callers must treat every such error as an indeterminate mutation
+outcome and perform a fresh read before deciding whether retry is safe.
+
 ## Status and Compatibility
 
 The crate has 100% coverage of the Anytype REST api 2025-11-08.
