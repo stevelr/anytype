@@ -1074,9 +1074,13 @@ mod tests {
         }
     }
 
-    fn assert_list_work(before: WorkCounts, after: WorkCounts) {
+    fn assert_resolver_rejection(before: WorkCounts, after: WorkCounts) {
         assert!(after.http_logical > before.http_logical);
         assert_list_ceiling(before, after);
+        assert_eq!(
+            after.membership, before.membership,
+            "{before:?} -> {after:?}"
+        );
     }
 
     fn assert_list_ceiling(before: WorkCounts, after: WorkCounts) {
@@ -1126,6 +1130,23 @@ mod tests {
         assert_eq!(
             after.membership.fallback_close_attempts - before.membership.fallback_close_attempts,
             0,
+            "{before:?} -> {after:?}"
+        );
+    }
+
+    fn assert_stable_preflight_rejection(before: WorkCounts, after: WorkCounts) {
+        assert_eq!(
+            after.http_logical - before.http_logical,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.http_physical - before.http_physical,
+            1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.membership, before.membership,
             "{before:?} -> {after:?}"
         );
     }
@@ -1263,7 +1284,7 @@ mod tests {
             json!({"space":space_id,"collection_id":other_collection_id,"limit":1}),
         )
         .await;
-        assert_list_work(rejected_before, metric_counts(metrics_client));
+        assert_stable_preflight_rejection(rejected_before, metric_counts(metrics_client));
 
         let first_before = metric_counts(metrics_client);
         let first = write_stdio_frame(
@@ -1571,7 +1592,7 @@ mod tests {
                                 .and_then(Value::as_str),
                             Some("upstream")
                         );
-                        assert_list_work(query_before, metric_counts(&ctx.client));
+                        assert_stable_preflight_rejection(query_before, metric_counts(&ctx.client));
 
                         let kanban_before = metric_counts(&ctx.client);
                         let kanban_direct = direct_call(
@@ -1820,7 +1841,7 @@ mod tests {
                             }),
                         )
                         .await;
-                        assert_list_work(ambiguity_before, metric_counts(&ctx.client));
+                        assert_resolver_rejection(ambiguity_before, metric_counts(&ctx.client));
                         assert_eq!(
                             ambiguity
                                 .structured_content
@@ -1840,7 +1861,10 @@ mod tests {
                             }),
                         )
                         .await;
-                        assert_list_work(ambiguity_stdio_before, metric_counts(&ctx.client));
+                        assert_resolver_rejection(
+                            ambiguity_stdio_before,
+                            metric_counts(&ctx.client),
+                        );
                         assert_eq!(
                             ambiguity_stdio["result"]["structuredContent"]["code"],
                             "ambiguous"
@@ -1862,7 +1886,10 @@ mod tests {
                             }),
                         )
                         .await;
-                        assert_list_work(auth_before, metric_counts(&rejected_client));
+                        assert_stable_preflight_rejection(
+                            auth_before,
+                            metric_counts(&rejected_client),
+                        );
                         assert_eq!(
                             authentication
                                 .structured_content
@@ -1881,7 +1908,10 @@ mod tests {
                             }),
                         )
                         .await;
-                        assert_list_work(auth_stdio_before, metric_counts(&rejected_client));
+                        assert_stable_preflight_rejection(
+                            auth_stdio_before,
+                            metric_counts(&rejected_client),
+                        );
                         assert_eq!(
                             authentication_stdio["result"]["structuredContent"]["code"],
                             "authentication"
