@@ -347,6 +347,23 @@ cleanup. This design requires both HTTP and gRPC when the future complete
 `schema` registry is selected; it does not make the incomplete selector
 available in this release.
 
+The production-unlinked schema-space slice implements `space_create` and
+`space_update` for later composition into that complete `schema` registry.
+Both workflows use `anytype-api` only and return just a validated space ID,
+name, and optional description. Create supports a bounded process-local
+`idempotency_key`; update resolves one exact space, requires at least one
+nonempty replacement field, preserves omissions, sends one PATCH, and does not
+support description clearing. Post-dispatch timeout, cancellation, transport,
+5xx, malformed response, or failed semantic readback is reported as an
+indeterminate conflict. The slice remains absent from production discovery
+until all independently reviewed schema workflows and their shared registry
+land together.
+
+Direct-router and spawned preview-stdio happy paths are exercised against
+cleanup-registered disposable spaces on an authenticated real server. Tests
+that must induce latency, connection faults, malformed responses, or exact
+worst-case retries remain deferred to the external P4 fault-injection design.
+
 The production-unlinked `files` read slice now provides the reusable internal
 contracts and handlers for that eventual registry. `file_metadata` performs an
 exact object-identity preflight and bounded `HEAD`; `file_read` returns at most

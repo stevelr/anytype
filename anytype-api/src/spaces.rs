@@ -249,6 +249,38 @@ impl SpaceRequest {
             .await?;
         Ok(response.space)
     }
+
+    /// Retrieves the exact space without consulting or populating the cache.
+    ///
+    /// This is intended for bounded preflight and read-after-write workflows
+    /// that must observe current server state even when the client's ordinary
+    /// space cache has already been populated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnytypeError::NotFound`] when the server reports no such
+    /// space, or [`AnytypeError::Other`] when a malformed response identifies
+    /// a different space than the one requested.
+    pub async fn get_direct(self) -> Result<Space> {
+        let response: SpaceResponse = self
+            .client
+            .get_request(
+                &format!("/v1/spaces/{}", self.space_id),
+                QueryWithFilters::default(),
+            )
+            .await?;
+        exact_space_response(response, &self.space_id)
+    }
+}
+
+fn exact_space_response(response: SpaceResponse, expected_id: &str) -> Result<Space> {
+    ensure!(
+        response.space.id == expected_id,
+        OtherSnafu {
+            message: "REST space response id did not match the requested id".to_owned(),
+        }
+    );
+    Ok(response.space)
 }
 
 /// Request builder for creating a new space.
@@ -1546,6 +1578,27 @@ mod tests {
     }
 
     #[test]
+    fn test_update_space_request_body_preserves_omissions() {
+        let name_only = UpdateSpaceRequestBody {
+            name: Some("Renamed".to_owned()),
+            description: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&name_only).unwrap(),
+            r#"{"name":"Renamed"}"#
+        );
+
+        let description_only = UpdateSpaceRequestBody {
+            name: None,
+            description: Some("Updated".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_string(&description_only).unwrap(),
+            r#"{"description":"Updated"}"#
+        );
+    }
+
+    #[test]
     fn test_space_is_chat() {
         let space = Space {
             id: "test".to_string(),
@@ -1575,5 +1628,42 @@ mod tests {
 
         assert!(space.is_space());
         assert!(!space.is_chat());
+    }
+
+    #[test]
+    fn direct_space_response_requires_exact_identity() {
+        let matching = SpaceResponse {
+            space: Space {
+                id: "space-direct-id".to_owned(),
+                name: "Fresh".to_owned(),
+                object: SpaceModel::Space,
+                description: None,
+                icon: None,
+                gateway_url: None,
+                network_id: None,
+            },
+        };
+        assert_eq!(
+            exact_space_response(matching, "space-direct-id")
+                .expect("matching direct-space response")
+                .name,
+            "Fresh"
+        );
+
+        let mismatched = SpaceResponse {
+            space: Space {
+                id: "different-space-id".to_owned(),
+                name: "Wrong".to_owned(),
+                object: SpaceModel::Space,
+                description: None,
+                icon: None,
+                gateway_url: None,
+                network_id: None,
+            },
+        };
+        let error = exact_space_response(mismatched, "space-direct-id")
+            .expect_err("mismatched space identity");
+        assert!(matches!(error, AnytypeError::Other { .. }));
+        assert!(!error.to_string().contains("different-space-id"));
     }
 }

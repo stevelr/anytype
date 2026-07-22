@@ -27,6 +27,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   non-replayed update, bounded HTTP/gRPC classification and verification,
   conservative post-dispatch uncertainty, unchanged result/token ceilings,
   and direct, stdio, and disposable-real-server acceptance without a mock.
+- Add production-unlinked `space_create` and `space_update` schema-toolset
+  workflows through `anytype-api` only. They enforce strict bounded inputs,
+  read-only removal, finite process-local create idempotency, exact preflight
+  and semantic readback, one-write mutation discipline, redacted indeterminate
+  outcomes, and minimized space metadata. Direct and spawned preview-stdio
+  acceptance uses cleanup-registered disposable spaces on an authenticated
+  real server. Pure tests lock the reviewed 61/133 ceilings; inducing exact
+  retry maxima and transport faults remains deferred to the P4 fault injector.
 - Add the production-unlinked `files` read slice through `anytype-api` only:
   bounded exact-ID metadata and ranged byte reads, strong-validator and HTTP
   evidence reconciliation, native MCP image/audio/text/blob content selected

@@ -7,8 +7,6 @@
 
 use std::{
     borrow::Cow,
-    collections::HashMap,
-    fmt,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -25,10 +23,13 @@ use rmcp::{
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    create_idempotency::{
+        Attempt, BeginAttempt, CreateDisposition, CreateExecution, DEFAULT_IDEMPOTENCY_CAPACITY,
+        IdempotencyStore, finish_supervised_execution, wait_for_attempt,
+    },
     domain::{
         BoundedText, DomainValueError, EntityId, MAX_DISPLAY_NAME_CHARS, ObjectId, ObjectSummary,
         SpaceId, TypeKey,
@@ -50,15 +51,12 @@ use crate::{
     validation::{Omittable, optional_non_null_schema},
 };
 
+pub use crate::create_idempotency::{CreateInputError, IdempotencyKey, MAX_IDEMPOTENCY_KEY_CHARS};
+
 /// Maximum Unicode scalar values accepted in a resolvable reference.
 pub const MAX_CREATE_REFERENCE_CHARS: usize = 512;
 /// Maximum Unicode scalar values accepted in one document body.
 pub const MAX_CREATE_BODY_CHARS: usize = 100_000;
-/// Maximum Unicode scalar values accepted in an idempotency key.
-pub const MAX_IDEMPOTENCY_KEY_CHARS: usize = 256;
-/// Maximum retained idempotency entries in one handler instance.
-pub const DEFAULT_IDEMPOTENCY_CAPACITY: usize = 1_024;
-
 type CreateBody = BoundedText<MAX_CREATE_BODY_CHARS>;
 
 /// A nonempty bounded space, type, or template reference.
@@ -105,48 +103,6 @@ impl JsonSchema for CreateReference {
             "type": "string",
             "minLength": 1,
             "maxLength": MAX_CREATE_REFERENCE_CHARS,
-        })
-    }
-}
-
-/// A bounded, nonempty caller-generated idempotency key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct IdempotencyKey(String);
-
-impl IdempotencyKey {
-    /// Validates a process-local idempotency key.
-    pub fn new(value: impl Into<String>) -> Result<Self, CreateInputError> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(CreateInputError::Empty);
-        }
-        if value.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS {
-            return Err(CreateInputError::TooLong);
-        }
-        Ok(Self(value))
-    }
-}
-
-impl<'de> Deserialize<'de> for IdempotencyKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
-    }
-}
-
-impl JsonSchema for IdempotencyKey {
-    fn schema_name() -> Cow<'static, str> {
-        "IdempotencyKey".into()
-    }
-
-    fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({
-            "type": "string",
-            "minLength": 1,
-            "maxLength": MAX_IDEMPOTENCY_KEY_CHARS,
         })
     }
 }
@@ -267,24 +223,6 @@ pub struct ObjectCreateOutput {
     /// Verified metadata and canonical body resource link.
     object: ObjectSummary,
 }
-
-/// Failure to construct one strict create input component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CreateInputError {
-    Empty,
-    TooLong,
-}
-
-impl fmt::Display for CreateInputError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Empty => "value must not be empty",
-            Self::TooLong => "value exceeds its maximum length",
-        })
-    }
-}
-
-impl std::error::Error for CreateInputError {}
 
 /// Builds the strict create contract consumed by the static catalog.
 pub fn object_create_tool() -> Result<WorkflowTool<ObjectCreateOutput>, SchemaContractError> {
@@ -411,7 +349,7 @@ async fn supervise_create(
     input: NormalizedCreate,
     verify_config: VerifyConfig,
 ) {
-    let progress = attempt.progress.clone();
+    let progress = attempt.progress();
     let supervisor_cancellation = CancellationToken::new();
     let execution_progress = progress.clone();
     let execution_task = tokio::spawn(async move {
@@ -427,15 +365,6 @@ async fn supervise_create(
     });
     let execution = finish_supervised_execution(execution_task, &progress).await;
     store.finish(&key, &attempt, execution).await;
-}
-
-async fn finish_supervised_execution(
-    execution: tokio::task::JoinHandle<CreateExecution>,
-    progress: &MutationProgress,
-) -> CreateExecution {
-    execution
-        .await
-        .unwrap_or_else(|_| CreateExecution::supervisor_failed(progress.stage()))
 }
 
 #[derive(Clone, Serialize)]
@@ -537,142 +466,6 @@ enum FingerprintField<'a, T> {
 impl<'a, T> FingerprintField<'a, T> {
     fn from_option(value: Option<&'a T>) -> Self {
         value.map_or(Self::Absent, Self::Present)
-    }
-}
-
-struct IdempotencyStore {
-    entries: Mutex<HashMap<IdempotencyKey, StoredAttempt>>,
-    capacity: usize,
-}
-
-enum StoredAttempt {
-    Running {
-        fingerprint: [u8; 32],
-        attempt: Arc<Attempt>,
-    },
-    Complete {
-        fingerprint: [u8; 32],
-        result: CallToolResult,
-    },
-    Indeterminate {
-        fingerprint: [u8; 32],
-    },
-}
-
-struct Attempt {
-    result: Mutex<Option<CallToolResult>>,
-    notify: Notify,
-    progress: MutationProgress,
-}
-
-enum BeginAttempt {
-    Lead(Arc<Attempt>),
-    Wait(Arc<Attempt>),
-    Cached(CallToolResult),
-    Indeterminate,
-    Conflict,
-    Full,
-}
-
-impl IdempotencyStore {
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-            capacity,
-        }
-    }
-
-    async fn begin(&self, key: IdempotencyKey, fingerprint: [u8; 32]) -> BeginAttempt {
-        let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.get(&key) {
-            return match entry {
-                StoredAttempt::Running {
-                    fingerprint: saved,
-                    attempt,
-                } if saved == &fingerprint => BeginAttempt::Wait(attempt.clone()),
-                StoredAttempt::Complete {
-                    fingerprint: saved,
-                    result,
-                } if saved == &fingerprint => BeginAttempt::Cached(result.clone()),
-                StoredAttempt::Indeterminate { fingerprint: saved } if saved == &fingerprint => {
-                    BeginAttempt::Indeterminate
-                }
-                _ => BeginAttempt::Conflict,
-            };
-        }
-        if self.capacity == 0 || entries.len() >= self.capacity {
-            return BeginAttempt::Full;
-        }
-        let attempt = Arc::new(Attempt {
-            result: Mutex::new(None),
-            notify: Notify::new(),
-            progress: MutationProgress::new(),
-        });
-        entries.insert(
-            key,
-            StoredAttempt::Running {
-                fingerprint,
-                attempt: attempt.clone(),
-            },
-        );
-        BeginAttempt::Lead(attempt)
-    }
-
-    async fn finish(&self, key: &IdempotencyKey, attempt: &Arc<Attempt>, result: CreateExecution) {
-        let mut entries = self.entries.lock().await;
-        if let Some(StoredAttempt::Running {
-            fingerprint,
-            attempt: stored,
-        }) = entries.get(key)
-            && Arc::ptr_eq(stored, attempt)
-        {
-            let fingerprint = *fingerprint;
-            match result.disposition {
-                CreateDisposition::Verified => {
-                    entries.insert(
-                        key.clone(),
-                        StoredAttempt::Complete {
-                            fingerprint,
-                            result: result.result.clone(),
-                        },
-                    );
-                }
-                CreateDisposition::Indeterminate => {
-                    entries.insert(key.clone(), StoredAttempt::Indeterminate { fingerprint });
-                }
-                CreateDisposition::PreDispatchFailure => {
-                    entries.remove(key);
-                }
-            }
-        }
-        drop(entries);
-        *attempt.result.lock().await = Some(result.result);
-        attempt.notify.notify_waiters();
-    }
-}
-
-async fn wait_for_attempt(
-    attempt: Arc<Attempt>,
-    cancellation: &CancellationToken,
-) -> CallToolResult {
-    loop {
-        let notified = attempt.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if let Some(result) = attempt.result.lock().await.clone() {
-            return result;
-        }
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                let error = match attempt.progress.stage() {
-                    MutationStage::PreDispatch => ToolError::upstream(),
-                    MutationStage::Dispatched => ToolError::mutation_indeterminate(),
-                };
-                return tool_error(&error);
-            },
-            () = &mut notified => {}
-        }
     }
 }
 
@@ -795,36 +588,6 @@ async fn execute_create(
         result,
         disposition,
     }
-}
-
-struct CreateExecution {
-    result: CallToolResult,
-    disposition: CreateDisposition,
-}
-
-impl CreateExecution {
-    fn supervisor_failed(stage: MutationStage) -> Self {
-        let (error, disposition) = match stage {
-            MutationStage::PreDispatch => {
-                (ToolError::upstream(), CreateDisposition::PreDispatchFailure)
-            }
-            MutationStage::Dispatched => (
-                ToolError::mutation_indeterminate(),
-                CreateDisposition::Indeterminate,
-            ),
-        };
-        Self {
-            result: tool_error(&error),
-            disposition,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CreateDisposition {
-    Verified,
-    Indeterminate,
-    PreDispatchFailure,
 }
 
 fn validate_properties(
@@ -2402,10 +2165,10 @@ mod tests {
         let waiter = tokio::spawn(async move {
             wait_for_attempt(waiter_attempt, &CancellationToken::new()).await
         });
-        attempt.progress.mark_dispatched();
+        attempt.progress().mark_dispatched();
         let panic_task: tokio::task::JoinHandle<CreateExecution> =
             tokio::spawn(async { panic!("injected create panic") });
-        let execution = finish_supervised_execution(panic_task, &attempt.progress).await;
+        let execution = finish_supervised_execution(panic_task, &attempt.progress()).await;
         store.finish(&key, &attempt, execution).await;
         assert_eq!(result_code(&waiter.await.unwrap()), "conflict");
         assert!(matches!(
@@ -2424,7 +2187,7 @@ mod tests {
         let abort_task: tokio::task::JoinHandle<CreateExecution> =
             tokio::spawn(std::future::pending());
         abort_task.abort();
-        let execution = finish_supervised_execution(abort_task, &attempt.progress).await;
+        let execution = finish_supervised_execution(abort_task, &attempt.progress()).await;
         store.finish(&key, &attempt, execution).await;
         assert_eq!(result_code(&waiter.await.unwrap()), "upstream");
         assert!(matches!(
