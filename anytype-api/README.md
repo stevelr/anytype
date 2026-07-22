@@ -554,14 +554,56 @@ view; there is no general view-create production API.
 
 Tests that need disposable spaces should use
 `TestContext::create_space_fixture`. It creates through the authenticated REST
-API after taking a complete bounded snapshot of existing IDs. A returned ID is
-registered exactly once only when it is valid, is not the context space, and
-was absent from that snapshot; untrusted duplicate responses are allowed to
-leak rather than authorize deletion of pre-existing state. Registration occurs
-before follow-up verification. Teardown removes only those privately owned IDs
-through Anytype's irreversible `SpaceDelete` RPC, then requires complete
-bounded REST evidence that each is gone. There is intentionally no general test
-registration or production space-delete API.
+API after taking a complete bounded inventory whose pagination, IDs, names, and
+uniqueness are validated. A response is registered exactly once only when its
+valid ID was absent from that inventory, its name exactly matches the request,
+and it is a regular space distinct from the context space. The private registry
+retains that exact ID/name provenance. Untrusted or ambiguous responses are
+allowed to leak rather than authorize deletion of ambient state. Registration
+occurs before follow-up verification. Teardown revalidates exact ID/name/model
+provenance through the same strict inventory before Anytype's irreversible
+`SpaceDelete` RPC, then requires complete bounded REST evidence that the ID is
+gone even when the delete response is uncertain. There is intentionally no
+general test registration or production space-delete API.
+
+Whole live suites should prefer `with_disposable_space_context`. It creates a
+fresh cleanup-owned space under the mandatory `ANYTYPE_TEST_SPACE_PREFIX`.
+That ASCII prefix is an explicit authorization to delete **every** space whose
+current name starts with it, case-insensitively; reserve it exclusively for
+tests. Missing or invalid configuration returns a typed `DisposableRun::Skipped`
+before credential access or filesystem I/O. One same-host backend-wide file
+lease serializes participating runs. An owner-private durable ledger and
+disk-backed enumerate-before-delete offset-pagination plans recover interrupted
+matching runs without a count ceiling or an in-memory inventory. Each fixed
+pagination window shares one deadline; a changing total discards the plan and
+restarts at offset zero. New names use 128 bits of operating-system randomness.
+Readiness, the two immediate
+pre-delete checks, and final absence proof all use cache-disabled direct exact-ID
+reads. The helper cleans registered children first and retains callback,
+cleanup, deletion, absence, ledger, and panic outcomes; an unproven absence is
+always dominant. Remote backends require an equivalent scheduler lease and are
+otherwise rejected. Operators must not create, rename, or delete spaces through
+another client while the helper holds its lease.
+Disposable runs require `ANYTYPE_KEYSTORE=env`, an explicit
+`ANYTYPE_KEYSTORE_SERVICE`, a nonempty `ANYTYPE_KEY_HTTP_TOKEN`, and at least
+one nonempty gRPC session token or account key. They must run in a dedicated
+single-threaded integration-test process admitted with
+`ANYTYPE_DISPOSABLE_TEST_PROCESS=1`; the process must not mutate its environment.
+File, keyring, implicit, unknown, malformed, and over-budget credential forms
+skip before authentication, private state, or mutation. The helper creates no
+credential file. For a spawned production child, call
+`ctx.disposable_child_environment().unwrap().configure(&mut command)` before
+spawn, then register an idempotent stop-and-wait handle with
+`ctx.spawn_owned_child(...)`. Configuration uses `env_clear`, reconstructs only
+the approved endpoints, finite limits, MCP settings, and exact accepted
+credential names, and rechecks the whole environment/argument block budget.
+The helper records child-running state before invoking the spawn closure and
+stops all registered children before resource cleanup and space deletion.
+Destructive execution is enabled only where owner and owner-only permissions
+can be proved for the runtime directory and every recovery target. Unix opens
+and removes exact components relative to verified directory handles with
+no-follow semantics. Windows fails closed before authentication until native
+DACL, ownership, and reparse-point verification is implemented.
 
 Tests that need templates can use the hidden
 `TestContext::create_template_fixtures` helper with one to sixteen source

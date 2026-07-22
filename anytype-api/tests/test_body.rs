@@ -65,7 +65,7 @@ async fn test_body_read_preserves_typed_variants_ids_and_order() -> TestResult<(
             })
             .collect();
         for expected in [
-            TextStyle::Header1,
+            TextStyle::Title,
             TextStyle::Paragraph,
             TextStyle::Bulleted,
             TextStyle::Numbered,
@@ -74,7 +74,7 @@ async fn test_body_read_preserves_typed_variants_ids_and_order() -> TestResult<(
         ] {
             assert!(
                 text_styles.contains(&expected),
-                "expected a {expected:?} text block in the read body"
+                "expected a {expected:?} text block in the read body; got {text_styles:?}"
             );
         }
 
