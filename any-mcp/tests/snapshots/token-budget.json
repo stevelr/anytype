@@ -1,12 +1,12 @@
 {
-	"tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)",
-	"smallest_supported_context_tokens": 200000,
-	"catalog_context_limit_percent": 5,
-	"material_growth_review_percent": 2,
-	"compact_catalog_tokens": 9669,
-	"compact_read_only_catalog_tokens": 8380,
-	"standard_catalog_tokens": 22909,
-	"standard_read_only_catalog_tokens": 15654,
-	"object_search_result_tokens": 421,
-	"object_get_result_tokens": 316
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)",
+  "smallest_supported_context_tokens": 200000,
+  "catalog_context_limit_percent": 5,
+  "material_growth_review_percent": 2,
+  "compact_catalog_tokens": 9669,
+  "compact_read_only_catalog_tokens": 8380,
+  "standard_catalog_tokens": 22909,
+  "standard_read_only_catalog_tokens": 15654,
+  "object_search_result_tokens": 421,
+  "object_get_result_tokens": 316
 }
