@@ -336,6 +336,15 @@ Only `compact` and `standard` application profiles exist. The optional
 selectable in this release. Their names become valid selectors only when a
 complete independently reviewed production registry is linked.
 
+The approved `schema` design now includes bounded complete replacement or
+clearing of non-featured type recommendations after the API gained a
+cache-independent featured/recommended classification. Omission preserves the
+current set, an explicit empty list clears it, and at most 20 unique-key
+property specifications replace it while exact featured evidence remains
+unchanged. This design requires both HTTP and gRPC when the future complete
+`schema` registry is selected; it does not make the incomplete selector
+available in this release.
+
 The production-unlinked `files` read slice now provides the reusable internal
 contracts and handlers for that eventual registry. `file_metadata` performs an
 exact object-identity preflight and bounded `HEAD`; `file_read` returns at most
