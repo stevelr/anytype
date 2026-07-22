@@ -4,7 +4,6 @@
 //! Individually selectable production-stdio-to-headless acceptance cases.
 
 use std::{
-    collections::HashSet,
     ffi::OsString,
     future::Future,
     panic::AssertUnwindSafe,
@@ -19,6 +18,7 @@ use std::{
 };
 
 use anytype::{
+    error::AnytypeError,
     prelude::{AnytypeClient, ClientConfig},
     test_util::{
         DisposableRun, TestContext, TestError, TestResult, unique_suffix,
@@ -886,71 +886,37 @@ fn fresh_no_cache_client() -> Result<AnytypeClient, String> {
     .map_err(|_| "construct fresh no-cache sentinel client".to_owned())
 }
 
-async fn complete_space_ids(client: &AnytypeClient) -> Result<HashSet<String>, String> {
-    const PAGE_LIMIT: u32 = 100;
-    const INVENTORY_TIMEOUT: Duration = Duration::from_secs(30);
-
-    tokio::time::timeout(INVENTORY_TIMEOUT, async {
-        let mut offset = 0_u32;
-        let mut stable_total = None;
-        let mut ids = HashSet::new();
-        loop {
-            let page = client
-                .spaces()
-                .limit(PAGE_LIMIT)
-                .offset(offset)
-                .list()
-                .await
-                .map_err(|_| "read fresh sentinel space inventory".to_owned())?
-                .into_response();
-            if stable_total.is_some_and(|total| total != page.pagination.total) {
-                return Err("fresh sentinel space inventory total changed".to_owned());
-            }
-            stable_total.get_or_insert(page.pagination.total);
-            let offset_usize = usize::try_from(offset)
-                .map_err(|_| "fresh sentinel inventory offset overflow".to_owned())?;
-            let expected_len = page
-                .pagination
-                .total
-                .checked_sub(offset_usize)
-                .map(|remaining| remaining.min(PAGE_LIMIT as usize))
-                .ok_or_else(|| "fresh sentinel inventory offset exceeds total".to_owned())?;
-            let expected_more = offset_usize
-                .checked_add(PAGE_LIMIT as usize)
-                .is_some_and(|next| next < page.pagination.total);
-            if page.pagination.offset != offset
-                || page.pagination.limit != PAGE_LIMIT
-                || page.items.len() != expected_len
-                || page.pagination.has_more != expected_more
-            {
-                return Err("fresh sentinel space inventory pagination mismatch".to_owned());
-            }
-            for space in page.items {
-                if !ids.insert(space.id) {
-                    return Err("fresh sentinel space inventory repeated an id".to_owned());
-                }
-            }
-            if !expected_more {
-                return Ok(ids);
-            }
-            offset = offset
-                .checked_add(PAGE_LIMIT)
-                .ok_or_else(|| "fresh sentinel inventory offset overflow".to_owned())?;
-        }
-    })
-    .await
-    .map_err(|_| "fresh sentinel space inventory timed out".to_owned())?
-}
-
 async fn assert_fresh_space_absence(space_id: &str) {
     let client = fresh_no_cache_client().expect("fresh no-cache sentinel client");
-    let ids = complete_space_ids(&client)
-        .await
-        .expect("complete fresh sentinel space inventory");
-    assert!(
-        !ids.contains(space_id),
-        "cleaned disposable sentinel space remains in fresh inventory"
-    );
+    client
+        .get_config()
+        .limits
+        .validate_id(space_id, "sentinel exact space id")
+        .expect("valid sentinel exact space id");
+    match tokio::time::timeout(Duration::from_secs(30), client.space(space_id).get()).await {
+        Ok(Err(AnytypeError::NotFound { .. } | AnytypeError::ApiError { code: 404, .. })) => {}
+        Ok(Ok(space)) => {
+            client
+                .get_config()
+                .limits
+                .validate_id(&space.id, "sentinel returned space id")
+                .expect("valid returned sentinel space id");
+            client
+                .get_config()
+                .limits
+                .validate_name(&space.name, "sentinel returned space name")
+                .expect("valid returned sentinel space name");
+            assert_eq!(space.id, space_id, "exact sentinel response identity");
+            assert_eq!(space.object, anytype::spaces::SpaceModel::Space);
+            assert!(
+                !space.name.chars().any(char::is_control),
+                "sentinel space name has no controls"
+            );
+            panic!("cleaned disposable sentinel space remains present");
+        }
+        Ok(Err(_)) => panic!("fresh exact sentinel absence request failed"),
+        Err(_) => panic!("fresh exact sentinel absence request timed out"),
+    }
 }
 
 async fn run_disposable_stdio_lifecycle_sentinel(mode: DisposableSentinelMode) {
@@ -1104,7 +1070,7 @@ async fn run_disposable_stdio_lifecycle_sentinel(mode: DisposableSentinelMode) {
     };
     assert_fresh_space_absence(&space_id).await;
     eprintln!(
-        "disposable stdio sentinel cleanup verified: mode={mode:?} space_id={space_id} object_id={object_id} child=stopped absence=verified"
+        "disposable stdio sentinel cleanup verified: mode={mode:?} space_id={space_id} object_id={object_id} child=stopped exact_absence=verified"
     );
 }
 

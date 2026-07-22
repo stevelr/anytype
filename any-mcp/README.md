@@ -801,8 +801,8 @@ Two spawned-stdio disposable lifecycle sentinels create and read an object by
 its exact object and space IDs through the production MCP process. The normal
 case and a deliberate callback-panic case both require the registered child
 stop-and-wait record before independently constructing a fresh cache-disabled
-client, enumerating the complete stable space inventory, and proving the exact
-disposable space ID is absent. The panic sentinel catches the resumed panic
+client and proving absence through a direct request for the exact disposable
+space ID. The panic sentinel catches the resumed panic
 only outside `with_disposable_space_context`, after child and fixture cleanup
 have completed.
 
