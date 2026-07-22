@@ -1136,6 +1136,7 @@ impl BodyRequest<'_> {
         let limits = self.limits.clamped();
         let grpc = self.client.grpc_client().await?;
         let mut commands = grpc.client_commands();
+        let mut close_guard = ObjectCloseGuard::default();
 
         let request = object_show::Request {
             context_id: self.object_id.clone(),
@@ -1150,15 +1151,13 @@ impl BodyRequest<'_> {
             .map_err(grpc_status)?
             .into_inner();
         ensure_error_ok(response.error.as_ref(), "object show")?;
+        close_guard.mark_shown();
 
         // Release the shown view. Best-effort: a close failure must not turn
         // a successfully read body into an error.
-        let close = object_close::Request {
-            context_id: self.object_id.clone(),
-            object_id: self.object_id.clone(),
-            space_id: self.space_id.clone(),
-        };
-        if let Ok(close) = with_token_request(Request::new(close), grpc.token()) {
+        if let Some(close) = close_guard.request(&self.space_id, &self.object_id)
+            && let Ok(close) = with_token_request(Request::new(close), grpc.token())
+        {
             let _ = commands.object_close(close).await;
         }
 
@@ -1166,6 +1165,30 @@ impl BodyRequest<'_> {
             message: "object show returned no object view".to_owned(),
         })?;
         snapshot_from_view(&self.space_id, &self.object_id, &view, &limits)
+    }
+}
+
+/// Tracks whether `ObjectShow` established a view that may be closed.
+///
+/// This is deliberately a state policy rather than an async drop guard: the
+/// close remains best-effort, but an authentication, transport, or response
+/// error before an accepted show can never manufacture an `ObjectClose`.
+#[derive(Debug, Default)]
+struct ObjectCloseGuard {
+    shown: bool,
+}
+
+impl ObjectCloseGuard {
+    fn mark_shown(&mut self) {
+        self.shown = true;
+    }
+
+    fn request(&self, space_id: &str, object_id: &str) -> Option<object_close::Request> {
+        self.shown.then(|| object_close::Request {
+            context_id: object_id.to_owned(),
+            object_id: object_id.to_owned(),
+            space_id: space_id.to_owned(),
+        })
     }
 }
 
@@ -3184,110 +3207,20 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Mock-server round trips
+    // Close lifecycle policy
     // ------------------------------------------------------------------
 
-    fn grpc_fixture_client(grpc_endpoint: String) -> AnytypeClient {
-        let mut config = crate::client::ClientConfig::default()
-            .app_name("body-grpc-fixture")
-            .grpc_endpoint(grpc_endpoint);
-        // No HTTP request is issued by a body read; the base URL only has to
-        // parse.
-        config.base_url = Some("http://127.0.0.1:9".to_string());
-        config.keystore = Some("env".to_string());
-        let client = AnytypeClient::with_config(config).expect("gRPC fixture client");
-        client
-            .keystore
-            .update_grpc_credentials(&crate::keystore::GrpcCredentials::from_token("token-alice"))
-            .expect("set mock gRPC credentials");
-        client
-    }
+    #[test]
+    fn object_close_guard_requires_an_accepted_show_and_preserves_identity() {
+        let mut guard = ObjectCloseGuard::default();
+        assert!(guard.request(SPACE, OBJECT).is_none());
 
-    async fn start_mock() -> crate::mock::MockChatServerHandle {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gRPC probe");
-        let address = probe.local_addr().expect("gRPC fixture address");
-        drop(probe);
-        let mock = crate::mock::MockChatServer::start(address).expect("start mock server");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        mock
-    }
-
-    #[tokio::test]
-    async fn body_fetch_round_trips_over_grpc_and_closes_the_view() {
-        let mock = start_mock().await;
-        let fixture = view(
-            "root",
-            vec![
-                smart_block("root", &["h", "p"]),
-                text_block("h", &[], "Heading", content::text::Style::Header1 as i32),
-                text_block("p", &[], "Body", 0),
-            ],
-        );
-        mock.set_object_view(SPACE, OBJECT, fixture).await;
-
-        let client = grpc_fixture_client(format!("http://{}", mock.addr()));
-        let snapshot = client
-            .blocks()
-            .body(SPACE, OBJECT)
-            .fetch()
-            .await
-            .expect("fetch body over mock gRPC");
-
-        assert_eq!(snapshot.len(), 3);
-        assert_eq!(snapshot.root_id, id("root"));
-        let order: Vec<&str> = snapshot.iter().map(|block| block.id.as_str()).collect();
-        assert_eq!(order, vec!["root", "h", "p"]);
-        let BlockContent::Text(heading) = &snapshot.get(&id("h")).unwrap().content else {
-            panic!("expected text content");
-        };
-        assert_eq!(heading.style, TextStyle::Header1);
-        assert_eq!(heading.text, "Heading");
-        // The reader released the shown view.
-        assert_eq!(mock.object_close_count().await, 1);
-        mock.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn body_fetch_applies_tightened_limits_over_grpc() {
-        let mock = start_mock().await;
-        let fixture = view(
-            "root",
-            vec![smart_block("root", &["a"]), text_block("a", &[], "x", 0)],
-        );
-        mock.set_object_view(SPACE, OBJECT, fixture).await;
-
-        let client = grpc_fixture_client(format!("http://{}", mock.addr()));
-        let error = client
-            .blocks()
-            .body(SPACE, OBJECT)
-            .limits(BodyLimits {
-                max_blocks: 1,
-                ..BodyLimits::default()
-            })
-            .fetch()
-            .await
-            .expect_err("oversized read must fail");
-        match error {
-            AnytypeError::BodyGraph { kind, .. } => {
-                assert_eq!(kind, BodyGraphErrorKind::Oversized);
-            }
-            other => panic!("expected BodyGraph error, got {other:?}"),
-        }
-        mock.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn body_fetch_for_unknown_object_fails_without_closing() {
-        let mock = start_mock().await;
-        let client = grpc_fixture_client(format!("http://{}", mock.addr()));
-        let error = client
-            .blocks()
-            .body(SPACE, "missing-object")
-            .fetch()
-            .await
-            .expect_err("unknown object must fail");
-        assert!(matches!(error, AnytypeError::Other { .. }));
-        assert_eq!(mock.object_close_count().await, 0);
-        mock.shutdown().await;
+        guard.mark_shown();
+        let request = guard
+            .request(SPACE, OBJECT)
+            .expect("accepted show creates a close request");
+        assert_eq!(request.context_id, OBJECT);
+        assert_eq!(request.object_id, OBJECT);
+        assert_eq!(request.space_id, SPACE);
     }
 }

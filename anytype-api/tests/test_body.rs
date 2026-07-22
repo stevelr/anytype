@@ -93,7 +93,45 @@ async fn test_body_read_preserves_typed_variants_ids_and_order() -> TestResult<(
             .expect("bold mark range maps to byte offsets");
         assert_eq!(&bold_text[byte_range], "bold");
 
-        // Tightened limits fail closed instead of truncating.
+        // A second show after the first read's best-effort ObjectClose proves
+        // the public lifecycle remains usable and preserves exact identity and
+        // document order.
+        let reopened = ctx
+            .client
+            .blocks()
+            .body(&ctx.space_id, &object.id)
+            .fetch()
+            .await?;
+        assert_eq!(reopened.root_id, snapshot.root_id);
+        assert_eq!(
+            reopened.iter().map(|block| &block.id).collect::<Vec<_>>(),
+            snapshot.iter().map(|block| &block.id).collect::<Vec<_>>()
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn test_body_read_tightened_limits_reject_real_multi_block_object() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let object = ctx
+            .client
+            .new_object(&ctx.space_id, "page")
+            .name(format!("body-limit-{}", unique_suffix()))
+            .body("# Heading\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.")
+            .create()
+            .await?;
+        ctx.register_object(&object.id);
+
+        let baseline = ctx
+            .client
+            .blocks()
+            .body(&ctx.space_id, &object.id)
+            .fetch()
+            .await?;
+        assert!(baseline.len() > 1, "fixture must contain multiple blocks");
+
         let error = ctx
             .client
             .blocks()
@@ -112,6 +150,38 @@ async fn test_body_read_preserves_typed_variants_ids_and_order() -> TestResult<(
                 ..
             }
         ));
+
+        // Validation happens after the shown view is released; a subsequent
+        // unbounded read remains usable after the rejected snapshot.
+        let reopened = ctx
+            .client
+            .blocks()
+            .body(&ctx.space_id, &object.id)
+            .fetch()
+            .await?;
+        assert_eq!(reopened.root_id, baseline.root_id);
+        assert_eq!(
+            reopened.iter().map(|block| &block.id).collect::<Vec<_>>(),
+            baseline.iter().map(|block| &block.id).collect::<Vec<_>>()
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn test_body_read_missing_object_returns_public_failure_without_fixture() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let missing_id = format!("missing-body-{}", unique_suffix());
+        let error = ctx
+            .client
+            .blocks()
+            .body(&ctx.space_id, &missing_id)
+            .fetch()
+            .await
+            .expect_err("a never-created object must fail");
+
+        assert!(matches!(error, AnytypeError::Other { .. }));
         Ok(())
     })
     .await
