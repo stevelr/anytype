@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Amend the approved schema-toolset design after `any-93eo` with one closed
+  `type_update.recommended_properties` desired-state field: omission preserves,
+  an explicit empty array clears only replaceable recommendations, and 1..20
+  unique-key specifications replace the complete ordered set. The delta locks
+  cache-independent featured-property protection, zero-write semantic no-ops,
+  one non-replayed update, bounded HTTP/gRPC classification and verification,
+  conservative post-dispatch uncertainty, unchanged result/token ceilings,
+  and direct, stdio, and disposable-real-server acceptance without a mock.
 - Add the production-unlinked `files` read slice through `anytype-api` only:
   bounded exact-ID metadata and ranged byte reads, strong-validator and HTTP
   evidence reconciliation, native MCP image/audio/text/blob content selected
