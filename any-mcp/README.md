@@ -436,18 +436,18 @@ malformed or incomplete success responses remain indeterminate.
 
 The slice remains absent from production discovery until the complete
 independently reviewed `views-write` registry is linked by `any-uda.4`.
-Authenticated disposable acceptance exercises one shared scenario through the
-direct production router and separately spawned stable and preview stdio
-children. The feature-gated child uses the real stdio server and bounded
-portable shutdown driver but hardwires only the reviewed, production-unlinked
-test registry; it is not built by default. Its test-only modes reproduce both
-sides of each dispatch-marker cancellation boundary and append payload-free
-counter snapshots to a private metrics file. The shipped `any-mcp` binary still
-rejects `views-write` before protocol decode or credential I/O. The shared
-scenario covers strict Set/query rejection, `limit=1` continuation,
-add/no-op/remove/no-op cycles, cancellation on both sides of both dispatch
-markers, read-only zero-I/O rejection, exact result identity, object survival,
-and a saved view that hides one canonical member.
+Authenticated disposable acceptance defines one shared scenario for the actual
+`AnyMcpServer` router and separately spawned stable and preview stdio children.
+All three drivers install the reviewed production-unlinked handlers through a
+feature-gated test registry; the spawned acceptance binary is not the shipped
+`any-mcp` binary and is not built by default. The shipped binary still rejects
+`views-write` before protocol decode or credential I/O. The child appends
+payload-free counter snapshots to a private metrics file. The scenario seeds
+only A, leaves B absent as the mutation target, and keeps C absent as a control.
+It applies list, add, and remove to a Set/query object, rejects limit and
+collection cursor rebinding, covers add/no-op/remove/no-op cycles, both sides of
+both dispatch-marker cancellation boundaries, both read-only mutation gates,
+exact result identity, object survival, and a saved view that hides B.
 Stable-ID success performs exactly one logical and physical HTTP GET, one
 canonical membership round, one subscribe, and one confirmed foreground close
 with no fallback. Cursor binding is checked before the membership primitive, so
@@ -455,17 +455,20 @@ a mismatched collection or limit performs zero HTTP or membership I/O. Direct,
 stable-stdio, and preview-stdio scenarios assert cursor mismatch, strict query
 rejection, read-only behavior, identical results, and exact logical/physical
 HTTP, observer, query, subscribe, foreground-close, fallback, and write deltas.
-Canonical pagination must contain the member after the repeated add no-op and
-before the actual remove; after removal it must be absent while the object
-survives. Stable and preview protocol envelopes are both included in every
-profile/access token snapshot. A separate offline direct/stable/preview process
-test feeds HTTP 403 into the production rejection classifier twice and proves
-authentication mapping, transport parity, no redispatch, and zero HTTP or
-mutation work. This pure classifier seam is not a substitute for a genuine
-permission-denied handler run. Live collection POST 403 evidence remains unsafe
-until a disposable non-owner collection and owner cleanup are available; no
-read-only fixture is mutated and invalid credentials are not used as a
-permission substitute.
+Canonical pagination must contain A and B exactly once before remove, then only
+A afterward; independent observers continuously keep C absent. A barrier at
+the actual handler's post-preflight boundary sends two concurrent B additions
+through each router, proves bounded aggregate work and a safe verified outcome,
+and checks that neither A nor C changes. This is a concurrency seam, not a
+latency or network-fault server. Stable and preview protocol envelopes are both
+included in every profile/access token snapshot. A separate offline
+direct/stable/preview process test feeds HTTP 403 into the production rejection
+classifier twice and proves authentication mapping, transport parity, no
+redispatch, and zero HTTP or mutation work. This pure classifier test is not
+permission acceptance. Genuine direct-router and spawned-stdio HTTP 403
+coverage remains blocked until a disposable non-owner collection with owner
+cleanup is available; the persistent read-only fixture is never mutated and
+invalid credentials are not used as a permission substitute.
 An earlier live mutation run was blocked before the scenario callback when
 disposable-space creation applied but its response did not complete; both
 ledger-named spaces were removed and absence proved. A later run entered the
@@ -475,9 +478,13 @@ progressed through the normal stable add calls, then the stable
 `CancelAddBeforeMark` child timed out waiting for its add response with empty
 stderr. Cleanup acknowledged deletion and independently proved absence, and
 both transports remained healthy. The harness now gives injected cancellation
-a handler-local token so it cannot cancel rmcp's response channel. That final
-correction has offline coverage but still awaits an authorized live rerun and
-independent review.
+a handler-local token so it cannot cancel rmcp's response channel. The
+preview dispatcher and optional-registry aggregate also box the reviewed tool
+future, keeping debug-build workers within their default stack. The final
+authorized direct/stable/preview run completed every A/B/C, cancellation,
+concurrency, pagination, and cleanup assertion; HTTP and gRPC remained healthy,
+the disposable prefix was empty afterward, and no child, metrics file, or
+current run ledger remained.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
 

@@ -761,7 +761,7 @@ impl EmbedContent {
     ///
     /// # Errors
     ///
-    /// Returns [`AnytypeError::Validation`](crate::error::AnytypeError::Validation)
+    /// Returns [`AnytypeError::Validation`]
     /// when `text` exceeds [`BodyLimits::max_embed_text_bytes`]. Processor-
     /// specific mutation policy is checked by the body editor.
     pub fn new(processor: EmbedProcessor, text: impl Into<String>) -> crate::Result<Self> {

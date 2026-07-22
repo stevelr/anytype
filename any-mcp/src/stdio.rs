@@ -627,18 +627,17 @@ pub(crate) async fn dispatch_modern(
             }),
         "tools/call" => match decode::<ToolCallParams>(params) {
             Ok(params) if params.request_state.is_none() && params.input_responses.is_none() => {
-                server
-                    .dispatch_tool_for_protocol(
-                        params.into_rmcp(),
-                        &rmcp::model::ProtocolVersion::V_2026_07_28,
-                        cancellation,
-                    )
-                    .await
-                    .and_then(encode_result)
-                    .map(|mut result| {
-                        add_complete(&mut result);
-                        result
-                    })
+                Box::pin(server.dispatch_tool_for_protocol(
+                    params.into_rmcp(),
+                    &rmcp::model::ProtocolVersion::V_2026_07_28,
+                    cancellation,
+                ))
+                .await
+                .and_then(encode_result)
+                .map(|mut result| {
+                    add_complete(&mut result);
+                    result
+                })
             }
             Ok(_) | Err(_) => Err(validation_error()),
         },

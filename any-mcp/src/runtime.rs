@@ -655,6 +655,7 @@ impl UpstreamDiagnostic {
             AnytypeError::TypePropertyClassification { .. } => {
                 Self::new("type_property_classification")
             }
+            AnytypeError::AttachedDiscussion { .. } => Self::new("attached_discussion"),
             AnytypeError::BodyMutationIndeterminate { .. } => {
                 Self::new("body_mutation_indeterminate")
             }
@@ -1572,8 +1573,15 @@ mod tests {
                 observed: None,
             });
         assert_eq!(body_mutation.category, "body_mutation_indeterminate");
+        let attached_discussion =
+            UpstreamDiagnostic::from_error(&AnytypeError::AttachedDiscussion {
+                kind: anytype::attached_discussions::AttachedDiscussionErrorKind::MalformedEvidence,
+            });
+        assert_eq!(attached_discussion.category, "attached_discussion");
         assert!(
-            !format!("{api:?}{auth:?}{grpc:?}{file_headers:?}{malformed_file:?}{body_mutation:?}")
+            !format!(
+                "{api:?}{auth:?}{grpc:?}{file_headers:?}{malformed_file:?}{body_mutation:?}{attached_discussion:?}"
+            )
                 .contains(secret)
         );
     }
