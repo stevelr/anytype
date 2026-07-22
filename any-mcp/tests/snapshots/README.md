@@ -101,6 +101,15 @@ maximum result uses 100 distinct valid 256-character IDs and deterministic
 token-dense 512-scalar Unicode local names, avoiding an unrealistically
 compressible repeated-character corpus.
 
+`schema-token-budget.json` locks the complete linked production `schema`
+descriptor against the same compact base hash. It records the canonical
+selection, every one of the nine standalone tool contributions, complete
+compact/standard and read-write/read-only totals, the all-linked mixed total,
+and compact key-sorted maximum representative result frames for every tool.
+The nine tools contribute 7,856 tokens under the 9,500 domain ceiling; common
+status brings the selected contribution to 8,112 tokens under its 10,000
+ceiling.
+
 `files-token-budget.json` locks the files registry's complete standard
 read-write/read-only compositions, common status contribution, per-tool and
 maximum result costs, and exact multipart body evidence. Its maximum upload

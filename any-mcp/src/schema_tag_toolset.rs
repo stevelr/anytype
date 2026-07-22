@@ -5,9 +5,8 @@
 
 //! Optional schema-toolset workflows for bounded tag creation and updates.
 //!
-//! This module exports the complete tag slice without linking the incomplete
-//! `schema` registry into production. The terminal schema integration task
-//! composes it with the independently reviewed space, type, and property slices.
+//! The production `schema` descriptor composes this reviewed slice with the
+//! space, type, and property slices.
 
 use std::{
     borrow::Cow,
@@ -47,7 +46,7 @@ use crate::{
         execute_mutation_handler, require_mutation_access,
     },
     object_output::ProjectedColor,
-    optional_toolsets::OptionalRegistryTool,
+    optional_toolsets::{OptionalRegistryFuture, OptionalRegistryTool},
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
@@ -290,7 +289,7 @@ pub fn tag_update_tool() -> Result<WorkflowTool<TagOutput>, SchemaContractError>
     )
 }
 
-/// Returns the complete schema-tag slice for later registry composition.
+/// Returns the complete schema-tag slice for registry composition.
 pub fn schema_tag_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
         OptionalRegistryTool::mutation(tag_create_tool()?),
@@ -348,78 +347,82 @@ impl SchemaTagHandlers {
     }
 
     /// Dispatches one schema-tag tool after the caller's catalog gate.
-    pub async fn call_tool(
-        &self,
+    pub fn call_tool<'a>(
+        &'a self,
         request: CallToolRequestParams,
-        runtime: &RuntimeContext,
-        cancellation: &CancellationToken,
-    ) -> Result<CallToolResult, ErrorData> {
-        if runtime.is_read_only() && matches!(request.name.as_ref(), TAG_CREATE | TAG_UPDATE) {
-            return Ok(tool_error(&ToolError::validation()));
-        }
-        let access = MutationAccess::Allowed;
-        match request.name.as_ref() {
-            TAG_CREATE => {
-                let input = decode_arguments::<TagCreateInput>(request.arguments)?;
-                Ok(self.tag_create(runtime, access, input, cancellation).await)
+        runtime: &'a RuntimeContext,
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        Box::pin(async move {
+            if runtime.is_read_only() && matches!(request.name.as_ref(), TAG_CREATE | TAG_UPDATE) {
+                return Ok(tool_error(&ToolError::validation()));
             }
-            TAG_UPDATE => {
-                let input = decode_arguments::<TagUpdateInput>(request.arguments)?;
-                Ok(self.tag_update(runtime, access, input, cancellation).await)
+            let access = MutationAccess::Allowed;
+            match request.name.as_ref() {
+                TAG_CREATE => {
+                    let input = decode_arguments::<TagCreateInput>(request.arguments)?;
+                    Ok(Box::pin(self.tag_create(runtime, access, input, cancellation)).await)
+                }
+                TAG_UPDATE => {
+                    let input = decode_arguments::<TagUpdateInput>(request.arguments)?;
+                    Ok(Box::pin(self.tag_update(runtime, access, input, cancellation)).await)
+                }
+                _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
             }
-            _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
-        }
+        })
     }
 
-    async fn tag_create(
-        &self,
-        runtime: &RuntimeContext,
+    fn tag_create<'a>(
+        &'a self,
+        runtime: &'a RuntimeContext,
         access: MutationAccess,
         input: TagCreateInput,
-        cancellation: &CancellationToken,
-    ) -> CallToolResult {
-        if let Err(error) = require_mutation_access(access) {
-            return tool_error(error.tool_error());
-        }
-        let normalized = NormalizedTagCreate::from(input);
-        let Some(key) = normalized.idempotency_key.clone() else {
-            let progress = MutationProgress::new();
-            return execute_tag_create(
-                runtime,
-                &self.create_contract,
-                normalized,
-                cancellation,
-                &progress,
-                &self.verify_config,
-                &self.dispatch_hooks,
-            )
-            .await
-            .result;
-        };
-
-        let fingerprint = normalized.fingerprint();
-        match self.idempotency.begin(key.clone(), fingerprint).await {
-            BeginAttempt::Cached(result) => result,
-            BeginAttempt::Indeterminate => tool_error(&ToolError::mutation_indeterminate()),
-            BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
-            BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
-            BeginAttempt::Expired => tool_error(&ToolError::upstream()),
-            BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
-            BeginAttempt::Lead(attempt) => {
-                let supervision = TagCreateSupervision {
-                    runtime: runtime.clone(),
-                    contract: self.create_contract.clone(),
-                    store: self.idempotency.clone(),
-                    key,
-                    attempt: attempt.clone(),
-                    normalized,
-                    verify_config: self.verify_config.clone(),
-                    dispatch_hooks: self.dispatch_hooks.clone(),
-                };
-                tokio::spawn(supervise_tag_create(supervision));
-                wait_for_attempt(attempt, cancellation).await
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, CallToolResult> {
+        Box::pin(async move {
+            if let Err(error) = require_mutation_access(access) {
+                return tool_error(error.tool_error());
             }
-        }
+            let normalized = NormalizedTagCreate::from(input);
+            let Some(key) = normalized.idempotency_key.clone() else {
+                let progress = MutationProgress::new();
+                return Box::pin(execute_tag_create(
+                    runtime,
+                    &self.create_contract,
+                    normalized,
+                    cancellation,
+                    &progress,
+                    &self.verify_config,
+                    &self.dispatch_hooks,
+                ))
+                .await
+                .result;
+            };
+
+            let fingerprint = normalized.fingerprint();
+            match self.idempotency.begin(key.clone(), fingerprint).await {
+                BeginAttempt::Cached(result) => result,
+                BeginAttempt::Indeterminate => tool_error(&ToolError::mutation_indeterminate()),
+                BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
+                BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
+                BeginAttempt::Expired => tool_error(&ToolError::upstream()),
+                BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
+                BeginAttempt::Lead(attempt) => {
+                    let supervision = TagCreateSupervision {
+                        runtime: runtime.clone(),
+                        contract: self.create_contract.clone(),
+                        store: self.idempotency.clone(),
+                        key,
+                        attempt: attempt.clone(),
+                        normalized,
+                        verify_config: self.verify_config.clone(),
+                        dispatch_hooks: self.dispatch_hooks.clone(),
+                    };
+                    tokio::spawn(supervise_tag_create(supervision));
+                    wait_for_attempt(attempt, cancellation).await
+                }
+            }
+        })
     }
 
     async fn tag_update(
@@ -446,7 +449,7 @@ impl SchemaTagHandlers {
             OperationContext::new(TAG_UPDATE),
             cancellation,
             &progress,
-            async move {
+            Box::pin(async move {
                 let scope = resolve_property_scope(&client, &input.space, &input.property).await?;
                 ensure_select_property(&scope.property)?;
                 let current = scoped_tag_preflight(&client, &scope, &input.tag_id).await?;
@@ -503,8 +506,8 @@ impl SchemaTagHandlers {
                 checked_tag_summary(&verified, Some(&input.tag_id))
                     .map(TagOutput::from)
                     .map_err(|_| indeterminate_operation())
-            },
-            |output| async move { Ok(output) },
+            }),
+            |output| Box::pin(async move { Ok(output) }),
         )
         .await
     }
@@ -621,7 +624,7 @@ async fn execute_tag_create(
         OperationContext::new(TAG_CREATE),
         cancellation,
         progress,
-        async move {
+        Box::pin(async move {
             let scope = resolve_property_scope(&client, &input.space, &input.property).await?;
             ensure_select_property(&scope.property)?;
             let mut request = client
@@ -672,8 +675,8 @@ async fn execute_tag_create(
             checked_tag_summary(&verified, Some(&id))
                 .map(TagOutput::from)
                 .map_err(|_| indeterminate_operation())
-        },
-        |output| async move { Ok(output) },
+        }),
+        |output| Box::pin(async move { Ok(output) }),
     )
     .await;
     let disposition = if result.is_error == Some(false) {

@@ -1,0 +1,73 @@
+{
+  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
+  "base_catalog_tokens": 9658,
+  "compact_composed_total_tokens": 17770,
+  "compact_read_only_total_tokens": 9215,
+  "files_members_schema_compact_total_tokens": 21862,
+  "per_tool_tokens": {
+    "property_create": 1478,
+    "property_update": 671,
+    "space_create": 477,
+    "space_update": 474,
+    "tag_create": 929,
+    "tag_update": 933,
+    "type_create": 1166,
+    "type_get": 590,
+    "type_update": 1138
+  },
+  "representative_max_results": {
+    "property_create": {
+      "bytes": 117906,
+      "sha256": "87766efc502717c5c74b6f49ee26c103e614dd80ca7557d33d9a9b4972a5c7c3",
+      "tokens": 56777
+    },
+    "property_update": {
+      "bytes": 5721,
+      "sha256": "8714ab26fd34e7402e8e82e5ad09f97e66132d196156b82d3580e1ad5c0480e9",
+      "tokens": 2718
+    },
+    "space_create": {
+      "bytes": 30649,
+      "sha256": "5f6301a8af900e1cdb692b44b89bc6c365567c9997a064d90315f6df267277cd",
+      "tokens": 15732
+    },
+    "space_update": {
+      "bytes": 30649,
+      "sha256": "5f6301a8af900e1cdb692b44b89bc6c365567c9997a064d90315f6df267277cd",
+      "tokens": 15732
+    },
+    "tag_create": {
+      "bytes": 5320,
+      "sha256": "ce80dbc0eaaebeeba6e2871b1f6c2873930e8936e530e19828de7fe80c8fe222",
+      "tokens": 3317
+    },
+    "tag_update": {
+      "bytes": 5320,
+      "sha256": "ce80dbc0eaaebeeba6e2871b1f6c2873930e8936e530e19828de7fe80c8fe222",
+      "tokens": 3317
+    },
+    "type_create": {
+      "bytes": 7452,
+      "sha256": "598ee92a7887a313991d65aada6de57d6148a2065d5dd9830704b1ffdbddcabe",
+      "tokens": 2247
+    },
+    "type_get": {
+      "bytes": 7452,
+      "sha256": "598ee92a7887a313991d65aada6de57d6148a2065d5dd9830704b1ffdbddcabe",
+      "tokens": 2247
+    },
+    "type_update": {
+      "bytes": 7452,
+      "sha256": "598ee92a7887a313991d65aada6de57d6148a2065d5dd9830704b1ffdbddcabe",
+      "tokens": 2247
+    }
+  },
+  "schema_domain_ceiling_tokens": 9500,
+  "schema_domain_tokens": 7856,
+  "schema_selected_ceiling_tokens": 10000,
+  "schema_selected_contribution_tokens": 8112,
+  "selected": ["schema"],
+  "standard_composed_total_tokens": 44247,
+  "standard_read_only_total_tokens": 29726,
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
+}

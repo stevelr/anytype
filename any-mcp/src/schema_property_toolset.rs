@@ -5,8 +5,8 @@
 
 //! Optional schema-toolset workflows for bounded property mutations.
 //!
-//! This slice stays production-unlinked until the complete `schema` registry
-//! is assembled and independently reviewed.
+//! The production `schema` descriptor composes this reviewed slice with the
+//! space, type, and tag slices.
 
 use std::{
     borrow::Cow,
@@ -43,7 +43,7 @@ use crate::{
         HandlerError, HandlerOperationError, MutationAccess, MutationProgress, MutationStage,
         execute_mutation_handler, require_mutation_access,
     },
-    optional_toolsets::OptionalRegistryTool,
+    optional_toolsets::{OptionalRegistryFuture, OptionalRegistryTool},
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
@@ -447,32 +447,42 @@ impl SchemaPropertyHandlers {
     }
 
     /// Dispatches one schema-property tool after the caller's catalog gate.
-    pub async fn call_tool(
-        &self,
+    pub fn call_tool<'a>(
+        &'a self,
         request: CallToolRequestParams,
-        runtime: &RuntimeContext,
-        cancellation: &CancellationToken,
-    ) -> Result<CallToolResult, ErrorData> {
-        if runtime.is_read_only()
-            && matches!(request.name.as_ref(), PROPERTY_CREATE | PROPERTY_UPDATE)
-        {
-            return Ok(tool_error(&ToolError::validation()));
-        }
-        match request.name.as_ref() {
-            PROPERTY_CREATE => {
-                let input = decode_arguments::<PropertyCreateInput>(request.arguments)?;
-                Ok(self
-                    .property_create(runtime, MutationAccess::Allowed, input, cancellation)
-                    .await)
+        runtime: &'a RuntimeContext,
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        Box::pin(async move {
+            if runtime.is_read_only()
+                && matches!(request.name.as_ref(), PROPERTY_CREATE | PROPERTY_UPDATE)
+            {
+                return Ok(tool_error(&ToolError::validation()));
             }
-            PROPERTY_UPDATE => {
-                let input = decode_arguments::<PropertyUpdateInput>(request.arguments)?;
-                Ok(self
-                    .property_update(runtime, MutationAccess::Allowed, input, cancellation)
+            match request.name.as_ref() {
+                PROPERTY_CREATE => {
+                    let input = decode_arguments::<PropertyCreateInput>(request.arguments)?;
+                    Ok(Box::pin(self.property_create(
+                        runtime,
+                        MutationAccess::Allowed,
+                        input,
+                        cancellation,
+                    ))
                     .await)
+                }
+                PROPERTY_UPDATE => {
+                    let input = decode_arguments::<PropertyUpdateInput>(request.arguments)?;
+                    Ok(Box::pin(self.property_update(
+                        runtime,
+                        MutationAccess::Allowed,
+                        input,
+                        cancellation,
+                    ))
+                    .await)
+                }
+                _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
             }
-            _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
-        }
+        })
     }
 
     async fn property_create(
@@ -569,7 +579,7 @@ impl SchemaPropertyHandlers {
             OperationContext::new(PROPERTY_UPDATE),
             cancellation,
             &progress,
-            async move {
+            Box::pin(async move {
                 let (space_id, property_id) =
                     resolve_property(&client, &input.space, &input.property).await?;
                 let current = client
@@ -629,8 +639,8 @@ impl SchemaPropertyHandlers {
                 checked_property_summary(&verified, Some(&property_id))
                     .map(|property| PropertyUpdateOutput { property })
                     .map_err(|_| indeterminate_operation())
-            },
-            |output| async move { Ok(output) },
+            }),
+            |output| Box::pin(async move { Ok(output) }),
         )
         .await
     }
@@ -745,7 +755,7 @@ async fn execute_property_create(
         OperationContext::new(PROPERTY_CREATE),
         cancellation,
         progress,
-        async move {
+        Box::pin(async move {
             let resolved = client.resolve_space_id(input.space.as_str()).await?;
             let space_id = EntityId::new(resolved).map_err(unsafe_upstream)?;
             let mut request = client
@@ -807,8 +817,8 @@ async fn execute_property_create(
                 .map_err(|_| indeterminate_operation())?;
             let tags = checked_tag_page(&page, &input.tags)?;
             Ok(PropertyCreateOutput { property, tags })
-        },
-        |output| async move { Ok(output) },
+        }),
+        |output| Box::pin(async move { Ok(output) }),
     )
     .await;
     let disposition = if result.is_error == Some(false) {
@@ -1741,7 +1751,13 @@ mod tests {
             .iter()
             .map(|registry| registry.metadata().name.to_owned())
             .collect::<Vec<_>>();
-        assert!(!production_names.iter().any(|name| name == "schema"));
+        assert_eq!(
+            production_names
+                .iter()
+                .filter(|name| name.as_str() == "schema")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

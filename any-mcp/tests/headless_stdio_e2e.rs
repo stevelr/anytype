@@ -4,25 +4,22 @@
 //! Individually selectable production-stdio-to-headless acceptance cases.
 
 use std::{
-    collections::BTreeMap,
     ffi::OsString,
     future::Future,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     pin::Pin,
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime},
 };
 
 use anytype::{
     error::AnytypeError,
-    prelude::{AnytypeClient, ClientConfig},
+    prelude::{AnytypeClient, ClientConfig, Color, Tag},
     test_util::{
         DisposableRun, TestContext, TestError, TestResult, unique_suffix,
         with_disposable_space_context, with_test_context,
@@ -224,231 +221,6 @@ fn valid_modifier_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-enum MemberFixtureReply {
-    Json {
-        status: &'static str,
-        headers: &'static str,
-        body: Value,
-    },
-    Raw(String),
-    Hang(Duration),
-}
-
-struct MemberFixtureRequest {
-    path: String,
-    query: BTreeMap<String, String>,
-    reply: MemberFixtureReply,
-}
-
-impl MemberFixtureRequest {
-    fn json(path: impl Into<String>, query: &[(&str, &str)], body: Value) -> Self {
-        Self {
-            path: path.into(),
-            query: query
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect(),
-            reply: MemberFixtureReply::Json {
-                status: "200 OK",
-                headers: "",
-                body,
-            },
-        }
-    }
-
-    fn status(
-        path: impl Into<String>,
-        query: &[(&str, &str)],
-        status: &'static str,
-        headers: &'static str,
-        body: Value,
-    ) -> Self {
-        let mut request = Self::json(path, query, body);
-        request.reply = MemberFixtureReply::Json {
-            status,
-            headers,
-            body: match request.reply {
-                MemberFixtureReply::Json { body, .. } => body,
-                _ => unreachable!("JSON member fixture request"),
-            },
-        };
-        request
-    }
-
-    fn raw(path: impl Into<String>, query: &[(&str, &str)], body: impl Into<String>) -> Self {
-        let mut request = Self::json(path, query, Value::Null);
-        request.reply = MemberFixtureReply::Raw(body.into());
-        request
-    }
-
-    fn hang(path: impl Into<String>, query: &[(&str, &str)], duration: Duration) -> Self {
-        let mut request = Self::json(path, query, Value::Null);
-        request.reply = MemberFixtureReply::Hang(duration);
-        request
-    }
-}
-
-struct SpawnedMemberFixture {
-    endpoint: String,
-    task: Option<std::thread::JoinHandle<usize>>,
-    accepted: Arc<AtomicUsize>,
-}
-
-impl SpawnedMemberFixture {
-    fn start(requests: Vec<MemberFixtureRequest>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind spawned members fixture");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking spawned members fixture");
-        let endpoint = format!(
-            "http://{}",
-            listener
-                .local_addr()
-                .expect("spawned members fixture address")
-        );
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let accepted_count = Arc::clone(&accepted);
-        let task = std::thread::Builder::new()
-            .name("spawned-members-http-fixture".to_owned())
-            .spawn(move || {
-                let mut accepted = 0_usize;
-                for expected in requests {
-                    let mut socket = accept_member_fixture(&listener, Duration::from_secs(30));
-                    accepted += 1;
-                    accepted_count.store(accepted, Ordering::SeqCst);
-                    let target = read_member_fixture_target(&mut socket);
-                    let (path, raw_query) = target
-                        .split_once('?')
-                        .map_or((target.as_str(), ""), |(path, query)| (path, query));
-                    assert_eq!(path, expected.path);
-                    let query = url::form_urlencoded::parse(raw_query.as_bytes())
-                        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-                        .collect::<BTreeMap<_, _>>();
-                    assert_eq!(query, expected.query, "spawned query for {path}");
-                    match expected.reply {
-                        MemberFixtureReply::Json {
-                            status,
-                            headers,
-                            body,
-                        } => write_member_fixture_response(
-                            &mut socket,
-                            status,
-                            headers,
-                            &body.to_string(),
-                        ),
-                        MemberFixtureReply::Raw(body) => {
-                            write_member_fixture_response(&mut socket, "200 OK", "", &body)
-                        }
-                        MemberFixtureReply::Hang(duration) => std::thread::sleep(duration),
-                    }
-                }
-                let deadline = std::time::Instant::now() + Duration::from_millis(500);
-                loop {
-                    match listener.accept() {
-                        Ok(_) => panic!("spawned members fixture received an extra request"),
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if std::time::Instant::now() >= deadline {
-                                break;
-                            }
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) => panic!("accept extra spawned member request: {error}"),
-                    }
-                }
-                accepted
-            })
-            .expect("spawn spawned-members fixture");
-        Self {
-            endpoint,
-            task: Some(task),
-            accepted,
-        }
-    }
-
-    fn wait_until_accepted(&self, minimum: usize) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while self.accepted.load(Ordering::SeqCst) < minimum {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "spawned members fixture did not accept request {minimum}"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn finish(mut self, expected_requests: usize) {
-        let accepted = self
-            .task
-            .take()
-            .expect("spawned members fixture task")
-            .join()
-            .expect("spawned members fixture thread");
-        assert_eq!(accepted, expected_requests);
-    }
-}
-
-impl Drop for SpawnedMemberFixture {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            let _ = task.join();
-        }
-    }
-}
-
-fn accept_member_fixture(listener: &TcpListener, timeout: Duration) -> TcpStream {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match listener.accept() {
-            Ok((socket, _)) => return socket,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "spawned members fixture accept timeout"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("accept spawned member request: {error}"),
-        }
-    }
-}
-
-fn read_member_fixture_target(socket: &mut TcpStream) -> String {
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("spawned members fixture read timeout");
-    let mut request = Vec::new();
-    loop {
-        let mut chunk = [0_u8; 1024];
-        let read = socket
-            .read(&mut chunk)
-            .expect("read spawned member request");
-        assert!(read > 0, "spawned member request ended before headers");
-        request.extend_from_slice(&chunk[..read]);
-        assert!(request.len() <= 64 * 1024, "spawned request too large");
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-    let request = std::str::from_utf8(&request).expect("ASCII spawned member request");
-    request
-        .lines()
-        .next()
-        .and_then(|line| line.split_ascii_whitespace().nth(1))
-        .expect("spawned member request target")
-        .to_owned()
-}
-
-fn write_member_fixture_response(socket: &mut TcpStream, status: &str, headers: &str, body: &str) {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    socket
-        .write_all(response.as_bytes())
-        .expect("write spawned member response");
-    socket.flush().expect("flush spawned member response");
-}
-
 impl TemporaryKeystore {
     fn isolate_environment() -> Result<(Option<Self>, Option<String>), String> {
         let Some(specification) = std::env::var("ANYTYPE_KEYSTORE").ok() else {
@@ -568,33 +340,6 @@ impl StdioDriver {
             command.env("ANYTYPE_KEYSTORE", specification);
         }
         let mut driver = Self::spawn(command, options, keystore);
-        driver.initialize();
-        driver
-    }
-
-    fn start_members_fixture(endpoint: &str, request_timeout_secs: u64) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
-        command
-            .env("ANY_MCP_PROFILE", "compact")
-            .env("ANY_MCP_READ_ONLY", "0")
-            .env("ANY_MCP_TOOLSETS", "members")
-            .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "10")
-            .env(
-                "ANY_MCP_REQUEST_TIMEOUT_SECS",
-                request_timeout_secs.to_string(),
-            )
-            .env("ANYTYPE_URL", endpoint)
-            .env("ANYTYPE_KEYSTORE", "env")
-            .env("ANYTYPE_KEYSTORE_SERVICE", "spawned-members-fixture")
-            .env("ANYTYPE_KEY_HTTP_TOKEN", "spawned-fixture-http-token")
-            .env("ANYTYPE_RATE_LIMIT_MAX_RETRIES", "5")
-            .env("RUST_LOG", "any_mcp=info")
-            .env_remove("ANY_MCP_PROTOCOL")
-            .env_remove("ANYTYPE_GRPC_ENDPOINT")
-            .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
-            .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
-            .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
-        let mut driver = Self::spawn(command, DriverOptions::COMPACT, None);
         driver.initialize();
         driver
     }
@@ -855,6 +600,47 @@ fn response_summary(operation: &str, response: &Value) -> String {
     format!("{operation} failed (jsonrpc_category={jsonrpc:?}, tool_category={tool:?})")
 }
 
+struct PropertyScopedTagReadback {
+    space_id: String,
+    property_id: String,
+    tag: Tag,
+}
+
+async fn property_scoped_tag_readback(
+    client: &AnytypeClient,
+    space_id: &str,
+    property_id: &str,
+    tag_id: &str,
+) -> TestResult<PropertyScopedTagReadback> {
+    let page = client
+        .tags(space_id, property_id)
+        .limit(1_000)
+        .offset(0)
+        .list()
+        .await?;
+    if page.pagination.total != page.items.len() || page.items.len() > 1_000 {
+        return Err(TestError::Assertion {
+            message: "property-scoped tag readback was incomplete".to_owned(),
+        });
+    }
+    let mut matches = page.items.iter().filter(|tag| tag.id == tag_id);
+    let Some(tag) = matches.next().cloned() else {
+        return Err(TestError::Assertion {
+            message: "property-scoped tag readback omitted the exact tag".to_owned(),
+        });
+    };
+    if matches.next().is_some() {
+        return Err(TestError::Assertion {
+            message: "property-scoped tag readback duplicated the exact tag".to_owned(),
+        });
+    }
+    Ok(PropertyScopedTagReadback {
+        space_id: space_id.to_owned(),
+        property_id: property_id.to_owned(),
+        tag,
+    })
+}
+
 #[derive(Default)]
 struct CaseRecord {
     error: Option<String>,
@@ -876,6 +662,9 @@ struct StderrMetrics {
     runtime_ready: usize,
     operation_success: usize,
     operation_non_success: usize,
+    stack_overflow: usize,
+    panic: usize,
+    fatal: usize,
     other: usize,
     invalid_utf8: bool,
 }
@@ -883,12 +672,15 @@ struct StderrMetrics {
 impl StderrMetrics {
     fn summary(&self) -> String {
         format!(
-            "bytes={} lines={} runtime_ready={} operation_success={} operation_non_success={} other={} invalid_utf8={}",
+            "bytes={} lines={} runtime_ready={} operation_success={} operation_non_success={} stack_overflow={} panic={} fatal={} other={} invalid_utf8={}",
             self.bytes,
             self.lines,
             self.runtime_ready,
             self.operation_success,
             self.operation_non_success,
+            self.stack_overflow,
+            self.panic,
+            self.fatal,
             self.other,
             self.invalid_utf8
         )
@@ -906,7 +698,13 @@ fn stderr_metrics(stderr: &[u8]) -> StderrMetrics {
         .filter(|line| !line.is_empty())
     {
         metrics.lines += 1;
-        if contains_bytes(line, b"authenticated Anytype runtime ready") {
+        if contains_bytes(line, b"stack overflow") {
+            metrics.stack_overflow += 1;
+        } else if contains_bytes(line, b"panicked at") {
+            metrics.panic += 1;
+        } else if contains_bytes(line, b"fatal runtime error") {
+            metrics.fatal += 1;
+        } else if contains_bytes(line, b"authenticated Anytype runtime ready") {
             metrics.runtime_ready += 1;
         } else if contains_bytes(line, b"Anytype operation completed") {
             if contains_bytes(line, b"outcome=\"success\"") {
@@ -1425,412 +1223,6 @@ spawned_baseline_test!(
 );
 spawned_baseline_test!(headless_stdio_standard_archive, ScenarioId::Archive);
 
-const SPAWNED_MEMBER_SPACE_ID: &str =
-    "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
-const SPAWNED_MEMBER_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4a";
-const SPAWNED_OTHER_MEMBER_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4b";
-
-fn member_http_page(items: Vec<Value>, offset: usize, limit: usize, total: usize) -> Value {
-    json!({
-        "data": items,
-        "pagination": {
-            "offset": offset,
-            "limit": limit,
-            "total": total,
-            "has_more": offset + limit < total
-        }
-    })
-}
-
-fn spawned_member_value(id: &str, role: &str, status: &str) -> Value {
-    json!({
-        "id": id,
-        "name": "Local member",
-        "global_name": "SPAWNED-GLOBAL-NAME-SECRET",
-        "identity": "SPAWNED-NETWORK-IDENTITY-SECRET",
-        "icon": {"url": "SPAWNED-ICON-SECRET"},
-        "role": role,
-        "status": status
-    })
-}
-
-fn startup_space_page() -> Value {
-    member_http_page(Vec::new(), 0, 1, 0)
-}
-
-fn tool_result_code(response: &Value) -> Option<&str> {
-    response
-        .pointer("/result/structuredContent/code")
-        .and_then(Value::as_str)
-}
-
-fn push_spawned_six_attempt_success(
-    requests: &mut Vec<MemberFixtureRequest>,
-    path: impl Into<String>,
-    query: &[(&str, &str)],
-    success: Value,
-) {
-    let path = path.into();
-    for attempt in 0..5 {
-        requests.push(if attempt == 1 {
-            MemberFixtureRequest::status(
-                &path,
-                query,
-                "504 Gateway Timeout",
-                "",
-                json!({"class": "retryable-status"}),
-            )
-        } else {
-            MemberFixtureRequest::status(
-                &path,
-                query,
-                "429 Too Many Requests",
-                "RateLimit-Reset: 0\r\n",
-                json!({"class": "rate-limit"}),
-            )
-        });
-    }
-    requests.push(MemberFixtureRequest::json(path, query, success));
-}
-
-#[test]
-#[serial_test::serial]
-fn headless_stdio_members_scripted_failure_matrix() {
-    let member_path = format!("/v1/spaces/{SPAWNED_MEMBER_SPACE_ID}/members");
-    let exact_path = format!("{member_path}/{SPAWNED_MEMBER_ID}");
-    let secret = "SPAWNED-UPSTREAM-BODY-SECRET";
-    let fixture = SpawnedMemberFixture::start(vec![
-        MemberFixtureRequest::json("/v1/spaces", &[("limit", "1")], startup_space_page()),
-        MemberFixtureRequest::json(
-            &member_path,
-            &[("limit", "1")],
-            member_http_page(
-                vec![spawned_member_value(SPAWNED_MEMBER_ID, "owner", "active")],
-                0,
-                1,
-                2,
-            ),
-        ),
-        MemberFixtureRequest::json(
-            "/v1/spaces",
-            &[("limit", "99")],
-            member_http_page(
-                vec![
-                    json!({"id": "space-alpha", "name": "Shared", "object": "space"}),
-                    json!({"id": "space-beta", "name": "shared", "object": "space"}),
-                ],
-                0,
-                99,
-                2,
-            ),
-        ),
-        MemberFixtureRequest::status(
-            &member_path,
-            &[("limit", "20")],
-            "401 Unauthorized",
-            "",
-            json!({"secret": secret}),
-        ),
-        MemberFixtureRequest::status(
-            &member_path,
-            &[("limit", "20")],
-            "403 Forbidden",
-            "",
-            json!({"secret": secret}),
-        ),
-        MemberFixtureRequest::json(
-            &exact_path,
-            &[],
-            json!({"member": spawned_member_value(SPAWNED_OTHER_MEMBER_ID, "owner", "active")}),
-        ),
-        MemberFixtureRequest::raw(&exact_path, &[], "{malformed-json"),
-        MemberFixtureRequest::json(
-            &exact_path,
-            &[],
-            json!({"member": spawned_member_value(SPAWNED_MEMBER_ID, "superuser", "active")}),
-        ),
-        MemberFixtureRequest::json(
-            &exact_path,
-            &[],
-            json!({"member": spawned_member_value(SPAWNED_MEMBER_ID, "owner", "unknown")}),
-        ),
-        MemberFixtureRequest::status(
-            &member_path,
-            &[("limit", "20")],
-            "503 Service Unavailable",
-            "",
-            json!({"secret": secret}),
-        ),
-        MemberFixtureRequest::hang(&member_path, &[("limit", "20")], Duration::from_secs(2)),
-        MemberFixtureRequest::hang(&member_path, &[("limit", "20")], Duration::from_secs(2)),
-    ]);
-    let mut driver = StdioDriver::start_members_fixture(&fixture.endpoint, 1);
-
-    let catalog = driver.request("tools/list", json!({}));
-    let tools = catalog["result"]["tools"]
-        .as_array()
-        .expect("spawned members catalog");
-    for expected in [
-        any_mcp::member_toolset::member_get_tool()
-            .expect("member_get contract")
-            .into_tool(),
-        any_mcp::member_toolset::member_list_tool()
-            .expect("member_list contract")
-            .into_tool(),
-    ] {
-        let actual = tools
-            .iter()
-            .find(|tool| tool["name"] == expected.name.as_ref())
-            .expect("spawned members tool metadata");
-        assert_eq!(
-            *actual,
-            serde_json::to_value(expected).expect("expected member contract")
-        );
-    }
-
-    for arguments in [
-        json!({"space": SPAWNED_MEMBER_SPACE_ID, "cursor": null}),
-        json!({"space": SPAWNED_MEMBER_SPACE_ID, "limit": 101}),
-        json!({"space": SPAWNED_MEMBER_SPACE_ID, "filter": "forbidden"}),
-    ] {
-        let response = driver.request(
-            "tools/call",
-            json!({"name": "member_list", "arguments": arguments}),
-        );
-        assert_eq!(
-            response.pointer("/error/code").and_then(Value::as_i64),
-            Some(-32602)
-        );
-    }
-
-    let first = driver
-        .call_tool_sync(
-            "member_list",
-            json!({"space": SPAWNED_MEMBER_SPACE_ID, "limit": 1}),
-        )
-        .expect("spawned first member page");
-    let cursor = first["next_cursor"]
-        .as_str()
-        .expect("spawned member continuation")
-        .to_owned();
-    for arguments in [
-        json!({"space": SPAWNED_MEMBER_SPACE_ID, "limit": 2, "cursor": cursor.clone()}),
-        json!({
-            "space": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4z.2tq5w93cr6oe7",
-            "limit": 1,
-            "cursor": cursor
-        }),
-    ] {
-        assert_eq!(
-            driver
-                .call_tool_error_sync("member_list", arguments)
-                .expect("spawned cursor rejection"),
-            "validation"
-        );
-    }
-
-    let ambiguity = driver.request(
-        "tools/call",
-        json!({"name": "member_list", "arguments": {"space": "Shared"}}),
-    );
-    assert_eq!(tool_result_code(&ambiguity), Some("ambiguous"));
-    assert_eq!(
-        ambiguity.pointer("/result/structuredContent/candidates"),
-        Some(&json!([
-            {"id": "space-alpha", "name": "Shared"},
-            {"id": "space-beta", "name": "shared"}
-        ]))
-    );
-    for expected in ["authentication", "authentication"] {
-        assert_eq!(
-            driver
-                .call_tool_error_sync("member_list", json!({"space": SPAWNED_MEMBER_SPACE_ID}),)
-                .expect("spawned authorization failure"),
-            expected
-        );
-    }
-    for _case in 0..4 {
-        assert_eq!(
-            driver
-                .call_tool_error_sync(
-                    "member_get",
-                    json!({"space": SPAWNED_MEMBER_SPACE_ID, "member_id": SPAWNED_MEMBER_ID}),
-                )
-                .expect("spawned malformed member failure"),
-            "upstream"
-        );
-    }
-    assert_eq!(
-        driver
-            .call_tool_error_sync("member_list", json!({"space": SPAWNED_MEMBER_SPACE_ID}),)
-            .expect("spawned 5xx failure"),
-        "upstream"
-    );
-
-    let cancellation_id = driver.next_id;
-    driver.next_id += 1;
-    driver.process.send(json!({
-        "jsonrpc": "2.0",
-        "id": cancellation_id,
-        "method": "tools/call",
-        "params": {
-            "name": "member_list",
-            "arguments": {"space": SPAWNED_MEMBER_SPACE_ID}
-        }
-    }));
-    fixture.wait_until_accepted(11);
-    driver.process.notification(
-        "notifications/cancelled",
-        json!({"requestId": cancellation_id, "reason": "fixture cancellation"}),
-    );
-
-    assert_eq!(
-        driver
-            .call_tool_error_sync("member_list", json!({"space": SPAWNED_MEMBER_SPACE_ID}),)
-            .expect("spawned timeout failure"),
-        "upstream"
-    );
-    let (transcript, output) = driver.finish();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("cancelled"),
-        "fixed cancellation diagnostic"
-    );
-    for sensitive in [
-        secret,
-        "spawned-fixture-http-token",
-        "SPAWNED-GLOBAL-NAME-SECRET",
-        "SPAWNED-NETWORK-IDENTITY-SECRET",
-        "SPAWNED-ICON-SECRET",
-        fixture.endpoint.as_str(),
-    ] {
-        assert!(!transcript.contains(sensitive));
-        assert!(!stdout.contains(sensitive));
-        assert!(!stderr.contains(sensitive));
-    }
-    fixture.finish(12);
-}
-
-#[test]
-#[serial_test::serial]
-fn headless_stdio_members_asserts_logical_and_physical_work_ceilings() {
-    for exact_get in [false, true] {
-        let mut requests = vec![MemberFixtureRequest::json(
-            "/v1/spaces",
-            &[("limit", "1")],
-            startup_space_page(),
-        )];
-        for page_index in 0..11_usize {
-            let offset = page_index * 99;
-            let count = if page_index == 10 { 10 } else { 99 };
-            let mut spaces = (0..count)
-                .map(|row| {
-                    let ordinal = offset + row;
-                    json!({
-                        "id": format!("space-{ordinal:04}"),
-                        "name": format!("Other {ordinal:04}"),
-                        "object": "space"
-                    })
-                })
-                .collect::<Vec<_>>();
-            if page_index == 10 {
-                *spaces.last_mut().expect("spawned terminal resolver row") =
-                    json!({"id": SPAWNED_MEMBER_SPACE_ID, "name": "Target", "object": "space"});
-            }
-            let offset_string = offset.to_string();
-            let mut query = vec![("limit", "99")];
-            if page_index != 0 {
-                query.push(("offset", offset_string.as_str()));
-            }
-            push_spawned_six_attempt_success(
-                &mut requests,
-                "/v1/spaces",
-                &query,
-                member_http_page(spaces, offset, 99, 1000),
-            );
-        }
-
-        let (tool, arguments, final_path, final_query, final_success) = if exact_get {
-            (
-                "member_get",
-                json!({"space": "Target", "member_id": SPAWNED_MEMBER_ID}),
-                format!("/v1/spaces/{SPAWNED_MEMBER_SPACE_ID}/members/{SPAWNED_MEMBER_ID}"),
-                Vec::new(),
-                json!({
-                    "member": spawned_member_value(SPAWNED_MEMBER_ID, "viewer", "active")
-                }),
-            )
-        } else {
-            (
-                "member_list",
-                json!({"space": "Target"}),
-                format!("/v1/spaces/{SPAWNED_MEMBER_SPACE_ID}/members"),
-                vec![("limit", "20")],
-                member_http_page(Vec::new(), 0, 20, 0),
-            )
-        };
-        push_spawned_six_attempt_success(&mut requests, final_path, &final_query, final_success);
-        assert_eq!(requests.len(), 73, "startup plus 72 physical attempts");
-
-        let fixture = SpawnedMemberFixture::start(requests);
-        let mut driver = StdioDriver::start_members_fixture(&fixture.endpoint, 120);
-        let result = driver
-            .call_tool_sync(tool, arguments)
-            .expect("spawned full physical-budget member result");
-        if exact_get {
-            assert_eq!(result["member"]["id"], SPAWNED_MEMBER_ID);
-        } else {
-            assert_eq!(result, json!({"items": []}));
-        }
-        let _ = driver.finish();
-        fixture.finish(73);
-    }
-}
-
-#[test]
-#[serial_test::serial]
-fn headless_stdio_members_mixed_retries_never_send_a_seventh_attempt() {
-    let path = format!("/v1/spaces/{SPAWNED_MEMBER_SPACE_ID}/members");
-    let mut requests = vec![MemberFixtureRequest::json(
-        "/v1/spaces",
-        &[("limit", "1")],
-        startup_space_page(),
-    )];
-    for physical_attempt in 0..6 {
-        requests.push(if physical_attempt % 2 == 0 {
-            MemberFixtureRequest::status(
-                &path,
-                &[("limit", "20")],
-                "429 Too Many Requests",
-                "RateLimit-Reset: 0\r\n",
-                json!({"secret": "SPAWNED-RETRY-SECRET"}),
-            )
-        } else {
-            MemberFixtureRequest::status(
-                &path,
-                &[("limit", "20")],
-                "504 Gateway Timeout",
-                "",
-                json!({"secret": "SPAWNED-RETRY-SECRET"}),
-            )
-        });
-    }
-    assert_eq!(requests.len(), 7, "one startup plus six physical attempts");
-    let fixture = SpawnedMemberFixture::start(requests);
-    let mut driver = StdioDriver::start_members_fixture(&fixture.endpoint, 20);
-    assert_eq!(
-        driver
-            .call_tool_error_sync("member_list", json!({"space": SPAWNED_MEMBER_SPACE_ID}),)
-            .expect("spawned mixed retry ceiling"),
-        "upstream"
-    );
-    let (_, output) = driver.finish();
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("SPAWNED-RETRY-SECRET"));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("SPAWNED-RETRY-SECRET"));
-    fixture.finish(7);
-}
-
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
@@ -1893,6 +1285,299 @@ async fn headless_stdio_members_minimizes_personal_data() {
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned members suite skipped before callback: {reason:?}");
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_schema_registry_runs_all_nine_workflows() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-stdio-schema",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let mut driver =
+                    StdioDriver::start_with_toolsets(DriverOptions::STANDARD, Some("schema"));
+                let tools = driver.list_tools_sync().expect("schema tools/list");
+                let schema_names = [
+                    "property_create",
+                    "property_update",
+                    "space_create",
+                    "space_update",
+                    "tag_create",
+                    "tag_update",
+                    "type_create",
+                    "type_get",
+                    "type_update",
+                ];
+                for name in schema_names {
+                    assert!(
+                        tools.iter().any(|candidate| candidate == name),
+                        "missing {name}"
+                    );
+                }
+                assert_eq!(
+                    tools
+                        .iter()
+                        .filter(|name| name.as_str() == "optional_toolset_status")
+                        .count(),
+                    1
+                );
+                let status = driver
+                    .call_tool_sync("optional_toolset_status", json!({}))
+                    .expect("schema status");
+                assert_eq!(status["configured_toolsets"], json!(["schema"]));
+                assert_eq!(status["active_toolsets"], json!(["schema"]));
+
+                let created_space_name = format!("MCP schema registry space {}", unique_suffix());
+                let created_space_claim =
+                    Arc::new(ctx.prepare_space_fixture_claim(&created_space_name).await?);
+                let created_space = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    driver.call_tool_sync(
+                        "space_create",
+                        json!({
+                            "name":created_space_name,
+                            "description":"schema registry create",
+                            "idempotency_key":format!("space-{}", unique_suffix())
+                        }),
+                    )
+                })) {
+                    Ok(result) => result.expect("spawned space_create"),
+                    Err(_) => {
+                        let (_, output, process_category) = driver.finish_after_panic();
+                        let stderr = stderr_metrics(&output.stderr);
+                        panic!(
+                            "spawned schema call failed: process={process_category} status={} stderr={}",
+                            output.exit_category,
+                            stderr.summary()
+                        );
+                    }
+                };
+                let created_space_id = created_space
+                    .pointer("/space/id")
+                    .and_then(Value::as_str)
+                    .expect("created space id")
+                    .to_owned();
+                let created_space_readback =
+                    ctx.client.space(&created_space_id).get_direct().await?;
+                ctx.claim_prepared_space_fixture(
+                    created_space_claim.as_ref(),
+                    &created_space_readback,
+                )?;
+                let updated_space = driver
+                    .call_tool_sync(
+                        "space_update",
+                        json!({
+                            "space":created_space_id,
+                            "description":"schema registry updated"
+                        }),
+                    )
+                    .expect("spawned space_update");
+                assert_eq!(
+                    updated_space
+                        .pointer("/space/description")
+                        .and_then(Value::as_str),
+                    Some("schema registry updated")
+                );
+                assert_eq!(
+                    ctx.client
+                        .space(&created_space_id)
+                        .get_direct()
+                        .await?
+                        .description
+                        .as_deref(),
+                    Some("schema registry updated")
+                );
+
+                let type_name = format!("MCP schema type {}", unique_suffix());
+                let created_type = driver
+                    .call_tool_sync(
+                        "type_create",
+                        json!({
+                            "space":ctx.space_id,
+                            "name":type_name,
+                            "layout":"basic",
+                            "idempotency_key":format!("type-{}", unique_suffix())
+                        }),
+                    )
+                    .expect("spawned type_create");
+                let type_id = created_type
+                    .pointer("/type/id")
+                    .and_then(Value::as_str)
+                    .expect("created type id")
+                    .to_owned();
+                ctx.register_type(&type_id);
+                let fetched_type = driver
+                    .call_tool_sync("type_get", json!({"space":ctx.space_id,"type":type_id}))
+                    .expect("spawned type_get");
+                assert_eq!(
+                    fetched_type.pointer("/type/id").and_then(Value::as_str),
+                    Some(type_id.as_str())
+                );
+                let updated_type_name = format!("MCP schema updated type {}", unique_suffix());
+                let updated_type = driver
+                    .call_tool_sync(
+                        "type_update",
+                        json!({
+                            "space":ctx.space_id,
+                            "type":type_id,
+                            "name":updated_type_name
+                        }),
+                    )
+                    .expect("spawned type_update");
+                assert_eq!(
+                    updated_type.pointer("/type/name").and_then(Value::as_str),
+                    Some(updated_type_name.as_str())
+                );
+                assert_eq!(
+                    ctx.client
+                        .get_type(&ctx.space_id, &type_id)
+                        .get_direct()
+                        .await?
+                        .name
+                        .as_deref(),
+                    Some(updated_type_name.as_str())
+                );
+
+                let property_name = format!("MCP schema property {}", unique_suffix());
+                let created_property = driver
+                    .call_tool_sync(
+                        "property_create",
+                        json!({
+                            "space":ctx.space_id,
+                            "name":property_name,
+                            "format":"select",
+                            "idempotency_key":format!("property-{}", unique_suffix())
+                        }),
+                    )
+                    .expect("spawned property_create");
+                let property_id = created_property
+                    .pointer("/property/id")
+                    .and_then(Value::as_str)
+                    .expect("created property id")
+                    .to_owned();
+                ctx.register_property(&property_id);
+                assert_eq!(created_property["tags"], json!([]));
+                let updated_property_name =
+                    format!("MCP schema updated property {}", unique_suffix());
+                let updated_property = driver
+                    .call_tool_sync(
+                        "property_update",
+                        json!({
+                            "space":ctx.space_id,
+                            "property":property_id,
+                            "name":updated_property_name
+                        }),
+                    )
+                    .expect("spawned property_update");
+                assert_eq!(
+                    updated_property
+                        .pointer("/property/name")
+                        .and_then(Value::as_str),
+                    Some(updated_property_name.as_str())
+                );
+                assert_eq!(
+                    ctx.client
+                        .property(&ctx.space_id, &property_id)
+                        .get_direct()
+                        .await?
+                        .name,
+                    updated_property_name
+                );
+
+                let tag_name = format!("MCP schema tag {}", unique_suffix());
+                let created_tag = driver
+                    .call_tool_sync(
+                        "tag_create",
+                        json!({
+                            "space":ctx.space_id,
+                            "property":property_id,
+                            "name":tag_name,
+                            "color":"grey",
+                            "idempotency_key":format!("tag-{}", unique_suffix())
+                        }),
+                    )
+                    .expect("spawned tag_create");
+                let tag_id = created_tag
+                    .pointer("/tag/id")
+                    .and_then(Value::as_str)
+                    .expect("created tag id")
+                    .to_owned();
+                let created_tag_readback = property_scoped_tag_readback(
+                    &ctx.client,
+                    &ctx.space_id,
+                    &property_id,
+                    &tag_id,
+                )
+                .await?;
+                assert_eq!(created_tag_readback.space_id, ctx.space_id);
+                assert_eq!(created_tag_readback.property_id, property_id);
+                assert_eq!(created_tag_readback.tag.id, tag_id);
+                assert_eq!(created_tag_readback.tag.name, tag_name);
+                assert_eq!(created_tag_readback.tag.color, Color::Grey);
+                let updated_tag_name = format!("MCP schema updated tag {}", unique_suffix());
+                let updated_tag = driver
+                    .call_tool_sync(
+                        "tag_update",
+                        json!({
+                            "space":ctx.space_id,
+                            "property":property_id,
+                            "tag_id":tag_id,
+                            "name":updated_tag_name,
+                            "color":"teal"
+                        }),
+                    )
+                    .expect("spawned tag_update");
+                assert_eq!(
+                    updated_tag.pointer("/tag/name").and_then(Value::as_str),
+                    Some(updated_tag_name.as_str())
+                );
+                assert_eq!(
+                    updated_tag.pointer("/tag/color").and_then(Value::as_str),
+                    Some("teal")
+                );
+                let updated_tag_readback = property_scoped_tag_readback(
+                    &ctx.client,
+                    &ctx.space_id,
+                    &property_id,
+                    &tag_id,
+                )
+                .await?;
+                assert_eq!(updated_tag_readback.space_id, ctx.space_id);
+                assert_eq!(updated_tag_readback.property_id, property_id);
+                assert_eq!(updated_tag_readback.tag.id, tag_id);
+                assert_eq!(updated_tag_readback.tag.name, updated_tag_name);
+                assert_eq!(updated_tag_readback.tag.color, Color::Teal);
+
+                let (transcript, output) = driver.finish();
+                assert!(!transcript.contains(&created_space_name));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                for sensitive in [
+                    created_space_name.as_str(),
+                    type_name.as_str(),
+                    updated_type_name.as_str(),
+                    property_name.as_str(),
+                    updated_property_name.as_str(),
+                    tag_name.as_str(),
+                    updated_tag_name.as_str(),
+                ] {
+                    assert!(!stderr.contains(sensitive));
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned schema registry suite");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("spawned schema registry suite skipped before callback: {reason:?}");
         }
     }
 }
@@ -2189,8 +1874,9 @@ mod keystore_tests {
         let cleanup_finalizer_ran = AtomicBool::new(false);
         cleanup_finalizer_ran.store(true, Ordering::SeqCst);
         let report = format!(
-            "scenario=standard_discovery process_category={} cleanup={} stderr_metrics={}",
+            "scenario=standard_discovery process_category={} status={} cleanup={} stderr_metrics={}",
             failure.category,
+            failure.output.exit_category,
             if cleanup_finalizer_ran.load(Ordering::SeqCst) {
                 "success"
             } else {
@@ -2199,6 +1885,7 @@ mod keystore_tests {
             metrics.summary()
         );
         assert!(report.contains("process_category=child_eof"));
+        assert!(report.contains("status=exit_code"));
         assert!(report.contains("cleanup=success"));
         assert!(report.contains("other="));
         for secret in [HTTP_TOKEN, CIPHER, BODY] {

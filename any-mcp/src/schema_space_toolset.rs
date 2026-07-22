@@ -5,10 +5,8 @@
 
 //! Optional schema-toolset workflows for bounded space creation and updates.
 //!
-//! This module deliberately exports a complete handler/contract slice without
-//! linking the incomplete `schema` descriptor into the production registry.
-//! The terminal schema integration task composes this slice with the remaining
-//! reviewed type, property, and tag slices before the selector becomes valid.
+//! The production `schema` descriptor composes this reviewed slice with the
+//! type, property, and tag slices.
 
 use std::{
     borrow::Cow,
@@ -43,7 +41,7 @@ use crate::{
         HandlerError, HandlerOperationError, MutationAccess, MutationProgress, MutationStage,
         execute_mutation_handler, require_mutation_access,
     },
-    optional_toolsets::OptionalRegistryTool,
+    optional_toolsets::{OptionalRegistryFuture, OptionalRegistryTool},
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
@@ -310,7 +308,7 @@ pub fn space_update_tool() -> Result<WorkflowTool<SpaceOutput>, SchemaContractEr
     )
 }
 
-/// Returns the complete schema-space slice for later registry composition.
+/// Returns the complete schema-space slice for registry composition.
 pub fn schema_space_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
         OptionalRegistryTool::mutation(space_create_tool()?),
@@ -359,160 +357,168 @@ impl SchemaSpaceHandlers {
     }
 
     /// Dispatches one schema-space tool after the caller's catalog gate.
-    pub async fn call_tool(
-        &self,
+    pub fn call_tool<'a>(
+        &'a self,
         request: CallToolRequestParams,
-        runtime: &RuntimeContext,
-        cancellation: &CancellationToken,
-    ) -> Result<CallToolResult, ErrorData> {
-        if runtime.is_read_only() && matches!(request.name.as_ref(), SPACE_CREATE | SPACE_UPDATE) {
-            return Ok(tool_error(&ToolError::validation()));
-        }
-        let access = MutationAccess::Allowed;
-        match request.name.as_ref() {
-            SPACE_CREATE => {
-                let input = decode_arguments::<SpaceCreateInput>(request.arguments)?;
-                Ok(self
-                    .space_create(runtime, access, input, cancellation)
-                    .await)
+        runtime: &'a RuntimeContext,
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        Box::pin(async move {
+            if runtime.is_read_only()
+                && matches!(request.name.as_ref(), SPACE_CREATE | SPACE_UPDATE)
+            {
+                return Ok(tool_error(&ToolError::validation()));
             }
-            SPACE_UPDATE => {
-                let input = decode_arguments::<SpaceUpdateInput>(request.arguments)?;
-                Ok(self
-                    .space_update(runtime, access, input, cancellation)
-                    .await)
+            let access = MutationAccess::Allowed;
+            match request.name.as_ref() {
+                SPACE_CREATE => {
+                    let input = decode_arguments::<SpaceCreateInput>(request.arguments)?;
+                    Ok(self
+                        .space_create(runtime, access, input, cancellation)
+                        .await)
+                }
+                SPACE_UPDATE => {
+                    let input = decode_arguments::<SpaceUpdateInput>(request.arguments)?;
+                    Ok(self
+                        .space_update(runtime, access, input, cancellation)
+                        .await)
+                }
+                _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
             }
-            _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
-        }
+        })
     }
 
-    async fn space_create(
-        &self,
-        runtime: &RuntimeContext,
+    fn space_create<'a>(
+        &'a self,
+        runtime: &'a RuntimeContext,
         access: MutationAccess,
         input: SpaceCreateInput,
-        cancellation: &CancellationToken,
-    ) -> CallToolResult {
-        if let Err(error) = require_mutation_access(access) {
-            return tool_error(error.tool_error());
-        }
-        let normalized = NormalizedSpaceCreate::from(input);
-        let Some(key) = normalized.idempotency_key.clone() else {
-            let progress = MutationProgress::new();
-            return execute_space_create(
-                runtime,
-                &self.create_contract,
-                normalized,
-                cancellation,
-                &progress,
-                &self.verify_config,
-                self.create_observer.clone(),
-            )
-            .await
-            .result;
-        };
-
-        let fingerprint = normalized.fingerprint();
-        match self.idempotency.begin(key.clone(), fingerprint).await {
-            BeginAttempt::Cached(result) => result,
-            BeginAttempt::Indeterminate => tool_error(&ToolError::mutation_indeterminate()),
-            BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
-            BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
-            BeginAttempt::Expired => tool_error(&ToolError::upstream()),
-            BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
-            BeginAttempt::Lead(attempt) => {
-                let runtime = runtime.clone();
-                let contract = self.create_contract.clone();
-                let store = self.idempotency.clone();
-                let task_attempt = attempt.clone();
-                let verify_config = self.verify_config.clone();
-                let observer = self.create_observer.clone();
-                tokio::spawn(async move {
-                    supervise_space_create(SpaceCreateSupervision {
-                        runtime,
-                        contract,
-                        store,
-                        key,
-                        attempt: task_attempt,
-                        normalized,
-                        verify_config,
-                        observer,
-                    })
-                    .await;
-                });
-                wait_for_attempt(attempt, cancellation).await
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, CallToolResult> {
+        Box::pin(async move {
+            if let Err(error) = require_mutation_access(access) {
+                return tool_error(error.tool_error());
             }
-        }
+            let normalized = NormalizedSpaceCreate::from(input);
+            let Some(key) = normalized.idempotency_key.clone() else {
+                let progress = MutationProgress::new();
+                return Box::pin(execute_space_create(
+                    runtime,
+                    &self.create_contract,
+                    normalized,
+                    cancellation,
+                    &progress,
+                    &self.verify_config,
+                    self.create_observer.clone(),
+                ))
+                .await
+                .result;
+            };
+
+            let fingerprint = normalized.fingerprint();
+            match self.idempotency.begin(key.clone(), fingerprint).await {
+                BeginAttempt::Cached(result) => result,
+                BeginAttempt::Indeterminate => tool_error(&ToolError::mutation_indeterminate()),
+                BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
+                BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
+                BeginAttempt::Expired => tool_error(&ToolError::upstream()),
+                BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
+                BeginAttempt::Lead(attempt) => {
+                    let runtime = runtime.clone();
+                    let contract = self.create_contract.clone();
+                    let store = self.idempotency.clone();
+                    let task_attempt = attempt.clone();
+                    let verify_config = self.verify_config.clone();
+                    let observer = self.create_observer.clone();
+                    tokio::spawn(async move {
+                        supervise_space_create(SpaceCreateSupervision {
+                            runtime,
+                            contract,
+                            store,
+                            key,
+                            attempt: task_attempt,
+                            normalized,
+                            verify_config,
+                            observer,
+                        })
+                        .await;
+                    });
+                    wait_for_attempt(attempt, cancellation).await
+                }
+            }
+        })
     }
 
-    async fn space_update(
-        &self,
-        runtime: &RuntimeContext,
+    fn space_update<'a>(
+        &'a self,
+        runtime: &'a RuntimeContext,
         access: MutationAccess,
         input: SpaceUpdateInput,
-        cancellation: &CancellationToken,
-    ) -> CallToolResult {
-        if let Err(error) = require_mutation_access(access) {
-            return tool_error(error.tool_error());
-        }
-        if !input.has_mutation() {
-            return tool_error(&ToolError::validation());
-        }
-        let client = runtime.client().clone();
-        let verify_config = self.verify_config.clone();
-        let progress = MutationProgress::new();
-        let operation_progress = progress.clone();
-        execute_mutation_handler(
-            runtime,
-            &self.update_contract,
-            OperationContext::new(SPACE_UPDATE),
-            cancellation,
-            &progress,
-            async move {
-                let resolved = client.resolve_space_id(input.space.as_str()).await?;
-                let space_id = EntityId::new(resolved).map_err(unsafe_upstream)?;
-                let current = client.space(space_id.as_str()).get_direct().await?;
-                checked_space_summary(&current, Some(&space_id))
-                    .map_err(HandlerOperationError::from)?;
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, CallToolResult> {
+        Box::pin(async move {
+            if let Err(error) = require_mutation_access(access) {
+                return tool_error(error.tool_error());
+            }
+            if !input.has_mutation() {
+                return tool_error(&ToolError::validation());
+            }
+            let client = runtime.client().clone();
+            let verify_config = self.verify_config.clone();
+            let progress = MutationProgress::new();
+            let operation_progress = progress.clone();
+            execute_mutation_handler(
+                runtime,
+                &self.update_contract,
+                OperationContext::new(SPACE_UPDATE),
+                cancellation,
+                &progress,
+                Box::pin(async move {
+                    let resolved = client.resolve_space_id(input.space.as_str()).await?;
+                    let space_id = EntityId::new(resolved).map_err(unsafe_upstream)?;
+                    let current = client.space(space_id.as_str()).get_direct().await?;
+                    checked_space_summary(&current, Some(&space_id))
+                        .map_err(HandlerOperationError::from)?;
 
-                let mut request = client.update_space(space_id.as_str()).no_verify();
-                if let Some(name) = input.name.as_ref() {
-                    request = request.name(name.as_str());
-                }
-                if let Some(description) = input.description.as_ref() {
-                    request = request.description(description.as_str());
-                }
-
-                operation_progress.mark_dispatched();
-                let response_anomaly = match request.update().await {
-                    Ok(returned) => {
-                        !space_matches_update(&returned, &space_id, &input).unwrap_or(false)
+                    let mut request = client.update_space(space_id.as_str()).no_verify();
+                    if let Some(name) = input.name.as_ref() {
+                        request = request.name(name.as_str());
                     }
-                    Err(error) if mutation_rejection_is_definitive(&error) => {
-                        return Err(error.into());
+                    if let Some(description) = input.description.as_ref() {
+                        request = request.description(description.as_str());
                     }
-                    Err(_) => true,
-                };
 
-                let verified = verify_semantic(
-                    &verify_config,
-                    "space",
-                    space_id.as_str(),
-                    || client.space(space_id.as_str()).get_direct(),
-                    |space| space_matches_update(space, &space_id, &input).unwrap_or(false),
-                )
-                .await
-                .map_err(|_| indeterminate_operation())?;
-                if response_anomaly {
-                    return Err(indeterminate_operation());
-                }
-                checked_space_summary(&verified, Some(&space_id))
-                    .map(SpaceOutput::from)
-                    .map_err(|_| indeterminate_operation())
-            },
-            |output| async move { Ok(output) },
-        )
-        .await
+                    operation_progress.mark_dispatched();
+                    let response_anomaly = match request.update().await {
+                        Ok(returned) => {
+                            !space_matches_update(&returned, &space_id, &input).unwrap_or(false)
+                        }
+                        Err(error) if mutation_rejection_is_definitive(&error) => {
+                            return Err(error.into());
+                        }
+                        Err(_) => true,
+                    };
+
+                    let verified = verify_semantic(
+                        &verify_config,
+                        "space",
+                        space_id.as_str(),
+                        || client.space(space_id.as_str()).get_direct(),
+                        |space| space_matches_update(space, &space_id, &input).unwrap_or(false),
+                    )
+                    .await
+                    .map_err(|_| indeterminate_operation())?;
+                    if response_anomaly {
+                        return Err(indeterminate_operation());
+                    }
+                    checked_space_summary(&verified, Some(&space_id))
+                        .map(SpaceOutput::from)
+                        .map_err(|_| indeterminate_operation())
+                }),
+                |output| Box::pin(async move { Ok(output) }),
+            )
+            .await
+        })
     }
 }
 
@@ -579,7 +585,7 @@ async fn supervise_space_create(supervision: SpaceCreateSupervision) {
     let progress = attempt.progress();
     let task_progress = progress.clone();
     let task = tokio::spawn(async move {
-        execute_space_create(
+        Box::pin(execute_space_create(
             &runtime,
             &contract,
             normalized,
@@ -587,7 +593,7 @@ async fn supervise_space_create(supervision: SpaceCreateSupervision) {
             &task_progress,
             &verify_config,
             observer,
-        )
+        ))
         .await
     });
     let execution = finish_supervised_execution(task, &progress).await;
@@ -614,7 +620,7 @@ async fn execute_space_create(
         OperationContext::new(SPACE_CREATE),
         cancellation,
         progress,
-        async move {
+        Box::pin(async move {
             let mut request = client.new_space(input.name.as_str()).no_verify();
             if let Some(description) = input.description.as_ref() {
                 request = request.description(description.as_str());
@@ -651,8 +657,8 @@ async fn execute_space_create(
             checked_space_summary(&verified, Some(&id))
                 .map(SpaceOutput::from)
                 .map_err(|_| indeterminate_operation())
-        },
-        |output| async move { Ok(output) },
+        }),
+        |output| Box::pin(async move { Ok(output) }),
     )
     .await;
     let disposition = if result.is_error == Some(false) {

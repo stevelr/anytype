@@ -146,8 +146,8 @@ stated maximum.
 - `ANY_MCP_TOOLSETS` is absent by default. A present selector is an exact,
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
-  fail closed without being echoed. The linked production names are `members`
-  and `files`; incomplete registries such as `chats` remain rejected;
+  fail closed without being echoed. The linked production names are `members`,
+  `files`, and `schema`; incomplete registries such as `chats` remain rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
@@ -330,25 +330,20 @@ and resource names return method-not-found before argument decoding or I/O.
 Stable and experimental protocol modes use the same composed catalog.
 
 Only `compact` and `standard` application profiles exist. The optional
-`members` and `files` registries are linked and can be selected explicitly with
-`ANY_MCP_TOOLSETS=members`, `ANY_MCP_TOOLSETS=files`, or a comma-separated
-selection; they are absent by default. Proposed `schema`, `views-write`,
-`chats`, and `admin` toolsets are not selectable in this release. Some have
-production-unlinked implementation slices, but their names become valid
-selectors only when a complete independently reviewed production registry is
-linked.
+`members`, `files`, and `schema` registries are linked and can be selected
+explicitly or combined in one comma-separated `ANY_MCP_TOOLSETS` value; they
+are absent by default. Proposed `views-write`, `chats`, and `admin` toolsets are
+not selectable in this release. Their names become valid selectors only when a
+complete independently reviewed production registry is linked.
 
-The production-unlinked schema-space slice implements `space_create` and
-`space_update` for later composition into that complete `schema` registry.
+The production `schema` registry includes `space_create` and `space_update`.
 Both workflows use `anytype-api` only and return just a validated space ID,
 name, and optional description. Create supports a bounded process-local
 `idempotency_key`; update resolves one exact space, requires at least one
 nonempty replacement field, preserves omissions, sends one PATCH, and does not
 support description clearing. Post-dispatch timeout, cancellation, transport,
 5xx, malformed response, or failed semantic readback is reported as an
-indeterminate conflict. The slice remains absent from production discovery
-until all independently reviewed schema workflows and their shared registry
-land together.
+indeterminate conflict.
 
 Direct-router and spawned preview-stdio happy paths are exercised against
 cleanup-registered disposable spaces on an authenticated real server. Tests
@@ -361,13 +356,20 @@ featured/recommended classification. Omission preserves the current set, an
 explicit empty list clears it, and at most 20 unique-key property
 specifications replace it while exact featured evidence remains unchanged. The
 API classification operation now has finite per-RPC deadlines and
-cancellation-resilient owned `ObjectClose` cleanup. The production-unlinked
-schema-type slice implements cache-independent `type_get`, verified and
+cancellation-resilient owned `ObjectClose` cleanup. The production `schema`
+registry includes cache-independent `type_get`, verified and
 idempotent `type_create`, and one-write `type_update` with semantic no-ops,
 complete ordered preserve/replace/clear behavior, exact featured-vector
-protection, and conservative post-dispatch uncertainty. This slice requires
-both HTTP and gRPC in its test registry but does not make the incomplete
-`schema` selector available in this release.
+protection, and conservative post-dispatch uncertainty. Selecting `schema`
+requires both authenticated HTTP and gRPC through the shared `anytype-api`
+client.
+
+The complete production registry keeps aggregate dispatch and every schema
+mutation success path behind heap-owned future boundaries so standard worker
+stacks remain bounded. Its spawned stable-stdio acceptance runs all nine tools
+in one cleanup-owned workflow and independently re-reads created and updated
+tags through the exact property-scoped `anytype-api` path, including tag ID,
+name, color, space, and property ownership.
 
 Direct-router and preview-stdio parity runs those type workflows only against
 cleanup-registered disposable real-server types using the production
@@ -380,8 +382,8 @@ rejection, and catalog, adversarial-input, and maximum-result token snapshots.
 Synthetic transport failures remain deferred to the external P4
 fault-injection work.
 
-The production-unlinked schema-tag slice implements `tag_create` and
-`tag_update` through `anytype-api` only. Both workflows resolve one space and
+The production `schema` registry includes `tag_create` and `tag_update`
+through `anytype-api` only. Both workflows resolve one space and
 1..256-scalar property reference, prove space ownership and `select` or
 `multi_select` format with one cache-independent terminal property page, and
 return the closed `{ "tag": TagSummary }` envelope containing only the tag ID,
@@ -403,8 +405,7 @@ ceilings. The maximum complete `CallToolResult` is 5,320 bytes and 3,381
 test environment provides only an owner credential, so genuine HTTP 403
 permission coverage remains an external acceptance blocker. Deterministic latency,
 connection-fault, and retry-maximum cases remain deferred to the P4
-fault-injection design. The slice remains absent from production until the
-complete `schema` registry is independently reviewed and linked.
+fault-injection design.
 
 The production-unlinked `views-write` read slice implements
 `collection_member_list` through `anytype-api`'s canonical manual-membership
@@ -429,11 +430,10 @@ and stdio scenarios assert the same cursor-mismatch and read-only outcomes.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
 
-The production-unlinked `chats` slices implement `chat_list`,
-`chat_message_list`, `chat_message_get`, `chat_message_search`, and
-`chat_message_add` for later composition with the separately tracked delete
-workflow. They use REST through `anytype-api` only. Chat lists default to 10
-and cap at 20; message
+The production-unlinked `chats` read slice implements `chat_list`,
+`chat_message_list`, `chat_message_get`, and `chat_message_search` for later
+composition with the separately tracked add/delete workflows. It uses REST
+through `anytype-api` only. Chat lists default to 10 and cap at 20; message
 lists and searches default to 8 and cap at 12. Older-history cursors keep one
 validated opaque server anchor and a one-based page number only in the bounded
 process-local cursor registry, never in MCP output or diagnostics, and stop at
@@ -486,20 +486,19 @@ returned, the process retains that candidate before verification. Initial
 verification may therefore return an ordinary not-found,
 authentication/permission, bounded-result, or upstream GET error; every later
 identical retry performs only a fresh exact GET for the retained ID and never
-another POST. Reply preflight validates exact scoped
-identity and timestamps but does not apply the returned-detail text ceiling to
-the unreturned target. Resolution, admission, detached leader work, and
-verification share one absolute invocation deadline; a waiter observes the
-earlier of its own and the leader's deadline. The fixed catalog/result
-snapshot keeps the actual tool at or below its reviewed 2,000-token ceiling.
-Deterministic process tests drive real stdio frames through a test-owned child
-composing this exact reviewed registry and separately prove that the shipped
-production composition continues to reject the unlinked tool.
-The slice exposes no edit, attachment, rich
-block, reaction, read-state, pin-state, streaming, or gRPC capability.
+another POST. Reply preflight validates exact scoped identity and timestamps
+but does not apply the returned-detail text ceiling to the unreturned target.
+Resolution, admission, detached leader work, and verification share one
+absolute invocation deadline; a waiter observes the earlier of its own and the
+leader's deadline. The fixed catalog/result snapshot keeps the actual tool at
+or below its reviewed 2,000-token ceiling. Deterministic process tests drive
+real stdio frames through a test-owned child composing this exact reviewed
+registry and separately prove that the shipped production composition
+continues to reject the unlinked tool. The slice exposes no edit, attachment,
+rich block, reaction, read-state, pin-state, streaming, or gRPC capability.
 
-The production-unlinked schema-property slice implements `property_create`
-and `property_update` through `anytype-api` only. Create accepts every closed
+The production `schema` registry includes `property_create` and
+`property_update` through `anytype-api` only. Create accepts every closed
 property format, restricts an optional 1..20 tag batch to select formats,
 deduplicates retries with an optional process-local key, disables hidden cache
 refresh work, verifies property metadata through direct reads, and consumes
@@ -511,8 +510,16 @@ Direct-router and preview-stdio acceptance covers primed and unprimed caches,
 exact logical/physical counters, the 20/21 boundary, cancellation, auth,
 idempotency, and cleanup-owned disposable real-server properties. Latency,
 malformed-success, 5xx, and connection-fault injection remain deferred to the
-external P4 design. The slice stays absent from production discovery until the
-complete independently reviewed `schema` registry lands.
+external P4 design.
+
+The complete registry exposes exactly nine domain tools in read-write mode and
+only `type_get` in read-only mode; common `optional_toolset_status` is added
+once. Its compact recursively key-sorted `o200k_base` snapshot records 7,856
+domain tokens and an 8,112-token selected contribution, below the reviewed
+9,500/10,000 ceilings. The same snapshot locks compact, standard, read-only,
+mixed-registry, per-tool, and maximum representative-result measurements. A
+spawned production-stdio disposable workflow exercises all nine tools and
+independent API readback before exact cleanup.
 
 The default-off `files` registry provides `file_metadata`, `file_read`, and
 `file_upload` in read-write mode; read-only mode removes only `file_upload`.
@@ -859,13 +866,14 @@ member tool calls fail before argument decoding or upstream access.
 
 Both tools apply the common request cancellation, timeout, retry, and redacted
 diagnostic controls. A name resolver uses at most 11 logical HTTP operations;
-one list or exact-get operation adds one, for a worst case of 12 logical
-operations and 72 physical attempts. Each replay-safe operation stops after
-six physical attempts. Offline direct-router and production-stdio fixtures
-cover schema/runtime parity, cursor binding, authorization, ambiguity,
-returned identity, malformed values, cancellation, timeout, 5xx handling,
-redaction, and the aggregate ceilings. Ignored disposable-space tests retain
-the real-server happy path.
+one list or exact-get operation adds one. Pure zero-I/O tests cover strict
+runtime decoding and pre-cancellation. Cleanup-owned real-server direct-router
+and production-stdio tests cover bounded member pages, exact returned identity,
+minimized output, read-only parity, and the erased dispatch/operation future
+boundaries required to stay within the default worker stack. Malformed
+responses, latency, 5xx, retry, and connection-fault cases remain deferred to
+the P4 fault-injection server design; the member tests contain no custom HTTP
+server.
 
 ### Optional files workflows
 
@@ -927,8 +935,11 @@ runtime and advertises their static capability alongside the tool catalog.
 - `src/discovery.rs` — typed status and schema-discovery contracts and
   transport-neutral handlers.
 - `src/schema.rs` — strict input/output schema generation.
-- `src/schema_tag_toolset.rs` - production-unlinked schema tag contracts,
-  handlers, and real-server acceptance.
+- `src/schema_toolset.rs` — complete production schema descriptor and
+  composition/token gates.
+- `src/schema_space_toolset.rs`, `src/schema_type_toolset.rs`,
+  `src/schema_property_toolset.rs`, and `src/schema_tag_toolset.rs` — bounded
+  schema workflow contracts, handlers, and real-server acceptance.
 - `src/protocol.rs` — tool contracts and annotation profiles.
 - `src/resources.rs` — exact document template, empty instance listing, and
   bounded resource reads.
