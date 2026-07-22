@@ -11,6 +11,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add an ignored serial tier-2 production-router scenario proving live numeric
   and checkbox filter matches by exact identity, with continuation derived from
   checked upstream pagination and no client-side post-pagination emulation.
+- Design document `designs/body-block-tools.md` (`any-2f0g.22`): a default-off
+  workflow-oriented `body-blocks` MCP registry with bounded typed body reads,
+  verified create/update/delete/move operations, flat rich-page plans, honest
+  partial and indeterminate outcomes, closed network behavior, and exact work,
+  frame, schema, and token budgets.
 - Classify the new `anytype-api` `AnytypeError::BodyGraph` variant in the
   exhaustive error and health mappings (`ToolErrorCode::Upstream`, health
   status `body_graph`). Plumbing only: no `any-mcp` tool can surface a body
