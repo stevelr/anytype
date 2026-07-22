@@ -96,6 +96,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add an ignored serial disposable-space Markdown fidelity matrix covering
+  headings, lists, checkboxes, one-line and consecutive-line quotes, fenced
+  code, links, tables, Unicode, underscores, escapes, and multiline bodies.
+  Stable REST exports and fresh `ObjectShow` identity/type/order evidence lock
+  byte-identical replay for seven representative cohorts, unsupported drift
+  for consecutive quotes, fenced code, tables, underscores, and escapes, and
+  the absence of any block-ID preservation promise.
 - Add a cache-independent type-property classification read that reconciles
   the flattened REST type representation with Heart's separate featured and
   ordinary recommended source lists. It exposes the exact non-featured set

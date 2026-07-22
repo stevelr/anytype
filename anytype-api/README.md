@@ -252,8 +252,21 @@ and `canonical()` forms for the deliberately closed subset of empty bodies and
 single plain lines containing alphanumeric characters, internal ASCII spaces,
 and underscores. It accepts either raw or already-canonical values and is
 idempotent on replay. It returns `None` for punctuation, multiline Markdown,
-and ambiguous backslash forms; callers must preserve those bytes rather than
-guess at Markdown equivalence.
+and ambiguous backslash forms; callers must reject or separately verify those
+forms rather than guess at Markdown equivalence or blindly replay export bytes.
+
+The ignored disposable-space matrix in
+`tests/test_markdown_fidelity.rs` characterizes the current server's narrower
+export/replacement behavior with two stable REST reads and two fresh
+`ObjectShow` reads on each side of an exact exported-Markdown replacement.
+Representative headings, bullet/numbered lists, checkboxes, a one-line quote,
+a link, Unicode, and multiline paragraphs retain byte-identical exports.
+Consecutive quote lines, fenced code, tables, literal underscores, and explicit
+backslash escapes drift at the byte and typed-block-content levels; they have
+no replay-stability contract. Every tested PATCH also replaces block IDs, even
+when exported bytes stay identical, so exported-Markdown replacement never
+promises block identity. The matrix currently establishes no intermediate
+typed-semantic-only cohort.
 
 ## Archived Object Cleanup
 
