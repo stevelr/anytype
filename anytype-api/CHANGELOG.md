@@ -8,6 +8,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add typed attached-discussion discovery and idempotent ensure operations for
+  Basic and Note parent objects. A required-layout REST wire preflight plus
+  bounded, cleanup-owned gRPC reads verify the exact parent relation and the
+  derived discussion's space, smart-block type, layout, and deterministic
+  unique key. Ensure reads before writing, dispatches at most one
+  `ObjectAddDiscussion`, retains the returned candidate, and reconciles every
+  dispatched outcome without replay; cancellation leaves reconciliation in an
+  owned task. A closed payload-free error kind preserves authentication,
+  malformed-evidence, cleanup, deadline, upstream, and indeterminate outcome
+  classes. Public cumulative work counters and one finite absolute operation
+  deadline make HTTP, show, close, reconciliation, and write ownership
+  observable. Pure lifecycle/state-machine tests and cleanup-owned disposable
+  real-server coverage replace any semantic mock or fault emulation.
 - Add a cleanup-owned test helper that attaches one exact-name saved-view
   filter to a privately proven collection view. It performs one authenticated
   filter-add RPC and requires the server-assigned filter identity plus exact

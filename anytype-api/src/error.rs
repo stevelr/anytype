@@ -327,6 +327,14 @@ pub enum AnytypeError {
         kind: crate::types::TypePropertyClassificationErrorKind,
     },
 
+    /// A bounded attached-discussion operation failed without exposing identity
+    /// or upstream payload data.
+    #[snafu(display("Attached discussion operation failed: {kind}"))]
+    AttachedDiscussion {
+        /// Closed, payload-free failure classification.
+        kind: crate::attached_discussions::AttachedDiscussionErrorKind,
+    },
+
     /// The previous operation could not be confirmed within the expected time interval.
     /// For more information, see the notes about eventual consistency in the project [README](../README.md).
     #[snafu(display(
@@ -469,6 +477,7 @@ impl AnytypeError {
             Self::TypePropertyClassification { .. } => {
                 ("type_property_classification", None, None, None)
             }
+            Self::AttachedDiscussion { .. } => ("attached_discussion", None, None, None),
             Self::VerifyTimeout { .. } => ("verify_timeout", None, None, None),
             Self::Other { .. } => ("other", None, None, None),
         };
@@ -524,6 +533,7 @@ impl AnytypeError {
             | Self::BodyMutationIndeterminate { .. }
             | Self::CollectionMembershipEvidence { .. }
             | Self::TypePropertyClassification { .. }
+            | Self::AttachedDiscussion { .. }
             | Self::VerifyTimeout { .. }
             | Self::Other { .. } => false,
         }

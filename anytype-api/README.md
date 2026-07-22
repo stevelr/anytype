@@ -10,7 +10,7 @@ An ergonomic Anytype API client in Rust.
 
 ## Overview
 
-`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, Views, Files, and Chats, with optional key storage and caching. REST is preferred when it has equivalent functionality; gRPC supplies richer file metadata/upload options, structured chat messages, and event streaming.
+`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, Views, Files, and Chats, with optional key storage and caching. REST is preferred when it has equivalent functionality; gRPC supplies richer file metadata/upload options, structured chat messages, attached object discussions, and event streaming.
 
 Applications authenticate with Anytype servers using access tokens. One token is required for http apis, and if gRPC apis are used (for files or chats), an additional gRPC token is required. The `anytype` library helps generate tokens and store them in a KeyStore.
 
@@ -381,6 +381,57 @@ return without I/O; names retain the normal finite scan and ambiguity rules.
 
 `files().preload(space)` accepts either `from_path(path)` or `from_url(url)` as
 its source and always runs over gRPC, returning the preload file id.
+
+## Attached Discussions (REST + gRPC)
+
+Pages and notes can own one derived discussion object. This is not an ordinary
+space chat: scope begins with the exact parent, and successful discovery proves
+the derived object's space, discussion smart-block type, discussion layout, and
+deterministic `discussion-<parent_id>` unique key.
+
+```rust,no_run
+use anytype::prelude::*;
+
+# async fn example(client: &AnytypeClient) -> Result<(), AnytypeError> {
+let current = client
+    .attached_discussion("space_id", "parent_object_id")
+    .get()
+    .await?;
+
+if current.discussion_id().is_none() {
+    let attached = client
+        .attached_discussion("space_id", "parent_object_id")
+        .ensure()
+        .await?;
+    println!("{}", attached.discussion_id().unwrap_or_default());
+}
+# Ok(())
+# }
+```
+
+`get` returns the closed `AttachedDiscussion::Absent` or
+`AttachedDiscussion::Attached` state after a cache-independent REST parent
+preflight and bounded gRPC reads. The exact REST wire requires an explicit
+layout, and only Basic- and Note-layout parents are accepted. `ensure` reads
+first and never calls the upstream attachment RPC for an already attached
+parent. When absent, it dispatches at most one mutation and then rereads the
+parent and independently verifies the derived discussion; transport errors,
+malformed evidence, and an unconfirmed final state are not retried. Once
+dispatch begins, reconciliation continues in an owned task even if the caller
+cancels its future. Each gRPC call has a finite deadline capped at five seconds,
+the whole operation has a caller-adjustable absolute deadline capped at thirty
+seconds, and every show owns a separate bounded close.
+The total budget reserves time for each owned close and, once a write is
+admitted, for one fresh reconciliation read.
+
+`AttachedDiscussionErrorKind` provides closed, payload-free classifications for
+unsupported layouts, malformed identity evidence, RPC and operation deadlines,
+cleanup failure, upstream failure, owned-task failure, and indeterminate
+mutation outcomes. gRPC unauthenticated and permission-denied statuses remain
+structural authentication errors without retaining status text. Use
+`client.attached_discussion_metrics()` to inspect cumulative parent GET, show,
+accepted-show, close, successful-close, write-dispatch, and reconciliation
+counters.
 
 ## Chats
 
