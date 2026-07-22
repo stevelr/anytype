@@ -459,6 +459,16 @@ most six physical attempts. Exact injected retry sequences remain deferred
 with the other transport faults rather than being emulated by a semantic
 server.
 
+The draft [attached discussions design](designs/attached-discussions-toolset.md)
+keeps page discussions separate from ordinary chats. A future default-off
+`discussions` registry contributes only `object_discussion_get`, returning a
+normal absent state or the stable `discussionId` attached to one exact Basic or
+Note parent. It does not read comments or expose attachment as an MCP mutation.
+Selecting it alongside `chats` lets the returned ID feed the existing bounded
+message tools without changing their schemas, cursors, or catalog snapshots.
+Production linkage remains blocked on the typed `anytype-api` read primitive
+and independent design review.
+
 The production-unlinked schema-property slice implements `property_create`
 and `property_update` through `anytype-api` only. Create accepts every closed
 property format, restricts an optional 1..20 tag batch to select formats,
