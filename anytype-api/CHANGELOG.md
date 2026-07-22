@@ -118,18 +118,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Numeric/checkbox callback failures now retain a closed fixture or exact
   comparison stage and payload-free `TestError`/API diagnostic category, so
   callback execution is distinguishable from pre-callback convergence without
-  exposing fixture or request values.
+  exposing fixture or request values. The ignored compatibility matrix now
+  completes all eleven fixed cases independently on object-list and scoped
+  search before cleanup and asserts afterward, emitting only the 22 canonical
+  static endpoint/case labels, closed failure categories, and validated HTTP
+  status codes/classes when available.
   Setup, readiness, and callback evidence now uses exhaustive enums end to end,
   preventing callers from forging diagnostic strings. The cleanup-owned filter
   fixture also replaces its cache-only `due_date` lookup and fallback with the
   bounded cache-independent property resolver required by disposable clients.
-- Replace the stale `anytype-heart#2879` numeric/checkbox limitation with exact
-  query-encoding unit regressions and a cleanup-owned real-server matrix over
-  object-list and scoped-search endpoints. The matrix covers all six numeric
-  comparisons, both checkbox comparisons, integer and negative-decimal values,
-  and missing-property semantics without coercion or client-side filtering.
-  Document the remaining new-space readiness gate and upstream issue closure
-  recommendation in `FILTER_STATUS.md`.
+- Reconcile `anytype-heart#2879` with exact query-encoding unit regressions and
+  a cleanup-owned real-server matrix over object-list and scoped-search
+  endpoints. On `anytype-cli` 0.3.6, all eleven object-list cells return HTTP
+  400; scoped search returns six exact-identity passes and five bounded semantic
+  failures. The object-list issue remains open, while the scoped-search
+  mismatches require separate upstream reports. The matrix covers all six
+  numeric comparisons, both checkbox comparisons, integer and negative-decimal
+  values, and missing-property semantics without coercion or client-side
+  filtering.
 - Property and tag create/update builders now offer a cache-independent
   `no_cache_refresh()` path. It invalidates a primed space-property cache after
   the write instead of silently collecting every tag page, so mutation request

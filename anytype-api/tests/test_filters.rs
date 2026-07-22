@@ -20,6 +20,18 @@
 //! ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_filters \
 //!   test_filter_number_checkbox_condition_matrix -- --ignored
 //! ```
+//!
+//! The ignored matrix always executes all eleven fixed cases independently on
+//! both endpoints before cleanup. It then reports only the static endpoint and
+//! case labels, a closed failure category, and a validated HTTP status/class
+//! when one was available; request values, URLs, response bodies, and fixture
+//! identities are never retained.
+//!
+//! On the `anytype-cli` 0.3.6 acceptance server, all eleven object-list cells
+//! return HTTP 400. Scoped search passes number `eq`, `gt`, `gte`, negative
+//! decimal `eq`, checkbox `eq true`, and checkbox `ne false`; its other five
+//! cells fail bounded exact-identity convergence. Keep the test ignored as a
+//! deliberate compatibility probe until those upstream behaviors change.
 
 mod common;
 
@@ -32,16 +44,16 @@ use anytype::{
     prelude::*,
     test_assert,
     test_util::{
-        DisposableCallbackStage, DisposableRun, TestContext, TestError, TestResult,
-        disposable_callback_error, with_disposable_space_context, with_test_context,
+        DisposableCallbackStage, DisposableFailureCategory, DisposableRun, TestContext, TestError,
+        TestResult, disposable_callback_error, with_disposable_space_context, with_test_context,
     },
 };
 use serial_test::serial;
 use tokio::time::{Duration, sleep};
 
 use crate::common::{
-    create_object_with_retry, ensure_properties_and_type, lookup_property_tag_with_retry,
-    unique_test_name,
+    create_object_with_retry, ensure_properties_and_type, ensure_properties_and_type_quiet,
+    lookup_property_tag_with_retry, unique_test_name,
 };
 
 // =============================================================================
@@ -50,8 +62,23 @@ use crate::common::{
 
 /// Creates a set of test objects with various property values for filter testing
 async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, String)> {
+    create_test_objects_with_logging(ctx, true).await
+}
+
+async fn create_filter_matrix_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, String)> {
+    create_test_objects_with_logging(ctx, false).await
+}
+
+async fn create_test_objects_with_logging(
+    ctx: &TestContext,
+    emit_values: bool,
+) -> TestResult<(Vec<Object>, String)> {
     // Ensure all required properties exist before creating objects
-    let type_key = ensure_properties_and_type(ctx).await?;
+    let type_key = if emit_values {
+        ensure_properties_and_type(ctx).await?
+    } else {
+        ensure_properties_and_type_quiet(ctx).await?
+    };
     let decimal_priority =
         serde_json::Number::from_f64(-2.5).ok_or_else(|| TestError::Assertion {
             message: "finite decimal fixture must be representable".to_owned(),
@@ -126,7 +153,7 @@ async fn create_test_objects(ctx: &TestContext) -> TestResult<(Vec<Object>, Stri
     Ok((objects, type_key))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NumericCheckboxCase {
     NumberEqualInteger,
     NumberNotEqual,
@@ -223,6 +250,365 @@ impl NumericCheckboxCase {
             Self::CheckboxNotEqualFalse => DisposableCallbackStage::CheckboxNotEqualFalse,
         }
     }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::NumberEqualInteger => 0,
+            Self::NumberNotEqual => 1,
+            Self::NumberLess => 2,
+            Self::NumberLessOrEqual => 3,
+            Self::NumberGreater => 4,
+            Self::NumberGreaterOrEqual => 5,
+            Self::NumberEqualDecimal => 6,
+            Self::CheckboxEqualTrue => 7,
+            Self::CheckboxEqualFalse => 8,
+            Self::CheckboxNotEqualTrue => 9,
+            Self::CheckboxNotEqualFalse => 10,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterEndpoint {
+    ObjectList,
+    ScopedSearch,
+}
+
+impl FilterEndpoint {
+    const ALL: [Self; 2] = [Self::ObjectList, Self::ScopedSearch];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::ObjectList => 0,
+            Self::ScopedSearch => 1,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ObjectList => "object_list",
+            Self::ScopedSearch => "scoped_search",
+        }
+    }
+}
+
+const FILTER_INVENTORY_LEN: usize = FilterEndpoint::ALL.len() * NumericCheckboxCase::ALL.len();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SafeHttpStatusClass {
+    Informational,
+    Success,
+    Redirection,
+    ClientError,
+    ServerError,
+}
+
+impl SafeHttpStatusClass {
+    const fn from_code(code: u16) -> Option<Self> {
+        match code {
+            100..=199 => Some(Self::Informational),
+            200..=299 => Some(Self::Success),
+            300..=399 => Some(Self::Redirection),
+            400..=499 => Some(Self::ClientError),
+            500..=599 => Some(Self::ServerError),
+            _ => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Informational => "informational",
+            Self::Success => "success",
+            Self::Redirection => "redirection",
+            Self::ClientError => "client_error",
+            Self::ServerError => "server_error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SafeHttpStatus {
+    code: u16,
+    class: SafeHttpStatusClass,
+}
+
+impl SafeHttpStatus {
+    const fn from_code(code: u16) -> Option<Self> {
+        match SafeHttpStatusClass::from_code(code) {
+            Some(class) => Some(Self { code, class }),
+            None => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterCaseOutcome {
+    Passed,
+    Failed {
+        category: DisposableFailureCategory,
+        status: Option<SafeHttpStatus>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FilterCaseInventory {
+    outcomes: [Option<FilterCaseOutcome>; FILTER_INVENTORY_LEN],
+}
+
+impl FilterCaseInventory {
+    const fn new() -> Self {
+        Self {
+            outcomes: [None; FILTER_INVENTORY_LEN],
+        }
+    }
+
+    const fn index(endpoint: FilterEndpoint, case: NumericCheckboxCase) -> usize {
+        endpoint.index() * NumericCheckboxCase::ALL.len() + case.index()
+    }
+
+    fn record(
+        &mut self,
+        endpoint: FilterEndpoint,
+        case: NumericCheckboxCase,
+        outcome: FilterCaseOutcome,
+    ) -> TestResult<()> {
+        let slot = &mut self.outcomes[Self::index(endpoint, case)];
+        if slot.is_some() {
+            return Err(TestError::Assertion {
+                message: format!(
+                    "duplicate filter inventory case: {} {}",
+                    endpoint.label(),
+                    case.label()
+                ),
+            });
+        }
+        *slot = Some(outcome);
+        Ok(())
+    }
+
+    fn ensure_complete(&self) -> TestResult<()> {
+        for endpoint in FilterEndpoint::ALL {
+            for case in NumericCheckboxCase::ALL {
+                if self.outcomes[Self::index(endpoint, case)].is_none() {
+                    return Err(TestError::Assertion {
+                        message: format!(
+                            "missing filter inventory case: {} {}",
+                            endpoint.label(),
+                            case.label()
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn failure_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Some(FilterCaseOutcome::Failed { .. })))
+            .count()
+    }
+
+    fn render(&self) -> TestResult<String> {
+        self.ensure_complete()?;
+        let mut lines = Vec::with_capacity(FILTER_INVENTORY_LEN);
+        for endpoint in FilterEndpoint::ALL {
+            for case in NumericCheckboxCase::ALL {
+                let line = match self.outcomes[Self::index(endpoint, case)] {
+                    Some(FilterCaseOutcome::Passed) => format!(
+                        "endpoint={} case={} result=pass",
+                        endpoint.label(),
+                        case.label()
+                    ),
+                    Some(FilterCaseOutcome::Failed {
+                        category,
+                        status: Some(status),
+                    }) => format!(
+                        "endpoint={} case={} result=fail category={} http_status={} http_class={}",
+                        endpoint.label(),
+                        case.label(),
+                        category,
+                        status.code,
+                        status.class.label(),
+                    ),
+                    Some(FilterCaseOutcome::Failed {
+                        category,
+                        status: None,
+                    }) => format!(
+                        "endpoint={} case={} result=fail category={} http_status=unavailable",
+                        endpoint.label(),
+                        case.label(),
+                        category,
+                    ),
+                    None => {
+                        return Err(TestError::Assertion {
+                            message: format!(
+                                "missing filter inventory case: {} {}",
+                                endpoint.label(),
+                                case.label()
+                            ),
+                        });
+                    }
+                };
+                lines.push(line);
+            }
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
+fn safe_http_status(error: &TestError) -> Option<SafeHttpStatus> {
+    let code = match error {
+        TestError::Api {
+            source: AnytypeError::ApiError { code, .. },
+        } => Some(*code),
+        TestError::Api {
+            source: AnytypeError::Http { source, .. },
+        } => source.status().map(|status| status.as_u16()),
+        TestError::Api {
+            source: AnytypeError::FileHeaderEvidenceTooLarge { status, .. },
+        }
+        | TestError::Api {
+            source: AnytypeError::InvalidFileResponseHeader { status, .. },
+        } => Some(*status),
+        _ => None,
+    };
+    code.and_then(SafeHttpStatus::from_code)
+}
+
+fn closed_filter_case_outcome(
+    case: NumericCheckboxCase,
+    result: TestResult<()>,
+) -> FilterCaseOutcome {
+    match result {
+        Ok(()) => FilterCaseOutcome::Passed,
+        Err(error) => {
+            let status = safe_http_status(&error);
+            let category = match disposable_callback_error(case.callback_stage(), error) {
+                TestError::DisposableCallback { category, .. } => category,
+                _ => DisposableFailureCategory::Callback,
+            };
+            FilterCaseOutcome::Failed { category, status }
+        }
+    }
+}
+
+#[test]
+fn filter_case_inventory_aggregates_in_canonical_order() -> TestResult<()> {
+    let incomplete = FilterCaseInventory::new()
+        .render()
+        .expect_err("a partial 22-slot inventory must fail closed");
+    assert!(matches!(incomplete, TestError::Assertion { .. }));
+
+    let mut inventory = FilterCaseInventory::new();
+    for endpoint in FilterEndpoint::ALL.into_iter().rev() {
+        for case in NumericCheckboxCase::ALL.into_iter().rev() {
+            inventory.record(endpoint, case, FilterCaseOutcome::Passed)?;
+        }
+    }
+
+    let report = inventory.render()?;
+    let lines = report.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), FILTER_INVENTORY_LEN);
+    assert_eq!(
+        lines.first().copied(),
+        Some("endpoint=object_list case=number eq integer result=pass")
+    );
+    assert_eq!(
+        lines.get(NumericCheckboxCase::ALL.len()).copied(),
+        Some("endpoint=scoped_search case=number eq integer result=pass")
+    );
+    assert_eq!(
+        lines.last().copied(),
+        Some("endpoint=scoped_search case=checkbox ne false result=pass")
+    );
+    assert_eq!(inventory.failure_count(), 0);
+
+    let duplicate = inventory
+        .record(
+            FilterEndpoint::ObjectList,
+            NumericCheckboxCase::NumberEqualInteger,
+            FilterCaseOutcome::Passed,
+        )
+        .expect_err("duplicate inventory entries must fail closed");
+    assert!(matches!(duplicate, TestError::Assertion { .. }));
+    Ok(())
+}
+
+#[test]
+fn filter_case_inventory_redacts_failures_and_retains_safe_status() -> TestResult<()> {
+    const SECRET_BODY: &str = "secret-upstream-filter-body";
+    const SECRET_URL: &str = "http://secret.invalid/v1/spaces/secret/filter?token=secret";
+    let failed = closed_filter_case_outcome(
+        NumericCheckboxCase::NumberEqualInteger,
+        Err(TestError::Api {
+            source: AnytypeError::ApiError {
+                code: 500,
+                method: "GET".to_owned(),
+                url: SECRET_URL.to_owned(),
+                message: SECRET_BODY.to_owned(),
+            },
+        }),
+    );
+    assert_eq!(
+        failed,
+        FilterCaseOutcome::Failed {
+            category: DisposableFailureCategory::ApiError,
+            status: Some(SafeHttpStatus {
+                code: 500,
+                class: SafeHttpStatusClass::ServerError,
+            }),
+        }
+    );
+
+    let mut inventory = FilterCaseInventory::new();
+    for endpoint in FilterEndpoint::ALL {
+        for case in NumericCheckboxCase::ALL {
+            inventory.record(
+                endpoint,
+                case,
+                if endpoint == FilterEndpoint::ObjectList
+                    && case == NumericCheckboxCase::NumberEqualInteger
+                {
+                    failed
+                } else {
+                    FilterCaseOutcome::Passed
+                },
+            )?;
+        }
+    }
+    let report = inventory.render()?;
+    assert_eq!(inventory.failure_count(), 1);
+    assert!(report.starts_with(
+        "endpoint=object_list case=number eq integer result=fail category=api_error http_status=500 http_class=server_error\n"
+    ));
+    assert!(!report.contains(SECRET_BODY));
+    assert!(!report.contains("secret.invalid"));
+    assert!(!report.contains("token="));
+    Ok(())
+}
+
+#[test]
+fn filter_case_inventory_discards_non_http_status_codes() {
+    let failed = closed_filter_case_outcome(
+        NumericCheckboxCase::NumberEqualInteger,
+        Err(TestError::Api {
+            source: AnytypeError::ApiError {
+                code: 700,
+                method: "GET".to_owned(),
+                url: "secret-url".to_owned(),
+                message: "secret-body".to_owned(),
+            },
+        }),
+    );
+    assert_eq!(
+        failed,
+        FilterCaseOutcome::Failed {
+            category: DisposableFailureCategory::ApiError,
+            status: None,
+        }
+    );
 }
 
 fn sorted_ids(objects: &[Object]) -> Vec<String> {
@@ -246,46 +632,48 @@ fn expected_ids(objects: &[Object], indexes: &[usize]) -> TestResult<Vec<String>
     Ok(ids)
 }
 
-async fn assert_filter_case(
+async fn assert_filter_endpoint_case(
     ctx: &TestContext,
     objects: &[Object],
     type_key: &str,
+    endpoint: FilterEndpoint,
     case: NumericCheckboxCase,
 ) -> TestResult<()> {
     const MAX_INDEX_ATTEMPTS: usize = 20;
 
     let expected = expected_ids(objects, case.expected_indexes())?;
-    let mut last_list_count = 0;
-    let mut last_search_count = 0;
+    let mut last_count = 0;
     for attempt in 1..=MAX_INDEX_ATTEMPTS {
-        let listed = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::type_in([type_key]))
-            .filter(case.filter()?)
-            .limit(100)
-            .list()
-            .await?
-            .collect_all()
-            .await?;
-        let searched = ctx
-            .client
-            .search_in(&ctx.space_id)
-            .types([type_key])
-            .filters(FilterExpression::from(vec![case.filter()?]))
-            .limit(100)
-            .execute()
-            .await?
-            .collect_all()
-            .await?;
+        let actual = match endpoint {
+            FilterEndpoint::ObjectList => {
+                ctx.client
+                    .objects(&ctx.space_id)
+                    .filter(Filter::type_in([type_key]))
+                    .filter(case.filter()?)
+                    .limit(100)
+                    .list()
+                    .await?
+                    .collect_all()
+                    .await?
+            }
+            FilterEndpoint::ScopedSearch => {
+                ctx.client
+                    .search_in(&ctx.space_id)
+                    .types([type_key])
+                    .filters(FilterExpression::from(vec![case.filter()?]))
+                    .limit(100)
+                    .execute()
+                    .await?
+                    .collect_all()
+                    .await?
+            }
+        };
 
-        let listed_ids = sorted_ids(&listed);
-        let searched_ids = sorted_ids(&searched);
-        if listed_ids == expected && searched_ids == expected {
+        let actual_ids = sorted_ids(&actual);
+        if actual_ids == expected {
             return Ok(());
         }
-        last_list_count = listed_ids.len();
-        last_search_count = searched_ids.len();
+        last_count = actual_ids.len();
         if attempt < MAX_INDEX_ATTEMPTS {
             sleep(Duration::from_millis(250)).await;
         }
@@ -293,23 +681,13 @@ async fn assert_filter_case(
 
     Err(TestError::Assertion {
         message: format!(
-            "{} did not converge to {} exact cleanup-owned identities: list returned {}, search returned {}",
+            "{} {} did not converge to {} exact cleanup-owned identities: returned {}",
+            endpoint.label(),
             case.label(),
             expected.len(),
-            last_list_count,
-            last_search_count,
+            last_count,
         ),
     })
-}
-
-fn assert_disposable_completed(outcome: DisposableRun<()>, callback_ran: &AtomicBool, suite: &str) {
-    match outcome {
-        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
-        DisposableRun::Skipped(reason) => {
-            assert!(!callback_ran.load(Ordering::SeqCst));
-            eprintln!("{suite} skipped before callback: {reason:?}");
-        }
-    }
 }
 
 // =============================================================================
@@ -589,8 +967,7 @@ async fn test_filter_number_range() -> TestResult<()> {
 }
 
 #[tokio::test]
-#[test_log::test]
-#[ignore = "requires configured real server and disposable test admission"]
+#[ignore = "upstream compatibility probe; requires disposable real-server admission"]
 #[serial(disposable_anytype_api)]
 async fn test_filter_number_checkbox_condition_matrix() {
     let callback_ran = Arc::new(AtomicBool::new(false));
@@ -600,21 +977,50 @@ async fn test_filter_number_checkbox_condition_matrix() {
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
-                let (objects, type_key) = create_test_objects(&ctx).await.map_err(|error| {
+                let (objects, type_key) =
+                    create_filter_matrix_objects(&ctx).await.map_err(|error| {
+                        disposable_callback_error(DisposableCallbackStage::Fixture, error)
+                    })?;
+                let mut inventory = FilterCaseInventory::new();
+                for endpoint in FilterEndpoint::ALL {
+                    for case in NumericCheckboxCase::ALL {
+                        let outcome = closed_filter_case_outcome(
+                            case,
+                            assert_filter_endpoint_case(&ctx, &objects, &type_key, endpoint, case)
+                                .await,
+                        );
+                        inventory.record(endpoint, case, outcome).map_err(|error| {
+                            disposable_callback_error(case.callback_stage(), error)
+                        })?;
+                    }
+                }
+                inventory.ensure_complete().map_err(|error| {
                     disposable_callback_error(DisposableCallbackStage::Fixture, error)
                 })?;
-                for case in NumericCheckboxCase::ALL {
-                    assert_filter_case(&ctx, &objects, &type_key, case)
-                        .await
-                        .map_err(|error| disposable_callback_error(case.callback_stage(), error))?;
-                }
-                Ok(())
+                Ok(inventory)
             })
         },
     ))
     .await
     .expect("cleanup-safe numeric/checkbox filter harness");
-    assert_disposable_completed(outcome, &callback_ran, "numeric/checkbox filter matrix");
+    match outcome {
+        DisposableRun::Completed(inventory) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            let report = inventory
+                .render()
+                .expect("complete static filter inventory");
+            eprintln!("{report}");
+            assert_eq!(
+                inventory.failure_count(),
+                0,
+                "real-server filter matrix contains unsupported endpoint cases:\n{report}",
+            );
+        }
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("numeric/checkbox filter matrix skipped before callback: {reason:?}");
+        }
+    }
 }
 
 // =============================================================================
