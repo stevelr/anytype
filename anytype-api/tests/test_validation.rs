@@ -21,7 +21,10 @@ mod common;
 
 use std::{fs, path::PathBuf};
 
-use anytype::{prelude::*, test_util::with_test_context_unit};
+use anytype::{
+    prelude::*,
+    test_util::{test_client, with_test_context_unit},
+};
 use common::{create_object_with_retry, unique_test_name};
 
 struct EmptyFileKeystore {
@@ -325,36 +328,12 @@ async fn test_update_without_changes() {
 #[tokio::test]
 #[test_log::test]
 async fn test_create_space_without_name() {
-    with_test_context_unit(|ctx| async move {
-        // Create space with empty name may be rejected or allowed (server dependent)
-        let result = ctx.client.new_space("").create().await;
-
-        match result {
-            Ok(space) => {
-                if space.name.is_empty() {
-                    println!("✓ Space creation without name allowed (empty name returned)");
-                } else {
-                    println!(
-                        "⚠ Space creation without name returned non-empty name: {}",
-                        space.name
-                    );
-                }
-            }
-            Err(AnytypeError::Validation { message }) => {
-                assert!(
-                    message.contains("name") || message.contains("empty"),
-                    "Error message should mention name or empty: {}",
-                    message
-                );
-                println!(
-                    "✓ Correctly rejected space creation without name: {}",
-                    message
-                );
-            }
-            Err(e) => panic!("Expected Validation error or success, got: {:?}", e),
-        }
-    })
-    .await
+    let client = test_client().expect("create validation client");
+    let result = client.new_space("").create().await;
+    assert!(matches!(
+        result,
+        Err(AnytypeError::Validation { ref message }) if message == "space name cannot be empty"
+    ));
 }
 
 // =============================================================================
