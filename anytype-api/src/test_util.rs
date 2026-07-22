@@ -30,13 +30,19 @@ use anytype_rpc::{
         object_type::Layout,
     },
 };
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use futures::FutureExt;
 use parking_lot::Mutex;
 use prost_types::{Struct, Value, value::Kind};
 use serde::Deserialize;
 use snafu::prelude::*;
 use tonic::Request;
+
+mod disposable;
+pub use disposable::{
+    DisposableChildEnvironment, DisposableRun, DisposableSkip, DisposableTestError,
+    with_disposable_space_context,
+};
 
 #[allow(unused_imports)]
 use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
@@ -45,7 +51,7 @@ use crate::{
     grpc_util::with_token_request,
     http_client::GetPaged,
     objects::{DataModel, Object, ObjectLayout},
-    spaces::Space,
+    spaces::{Space, SpaceModel},
     types::{Type, TypeLayout},
     verify::verify_semantic,
     views::ViewLayout,
@@ -141,6 +147,11 @@ pub enum TestError {
 
     #[snafu(display("Test assertion failed: {message}"))]
     Assertion { message: String },
+
+    #[snafu(display(
+        "test space creation may have committed; reconcile only from the exact create-intent name and UTC timestamp"
+    ))]
+    SpaceCreateIndeterminate,
 }
 
 /// Builds a typed pre-dispatch view authentication failure for downstream tests.
@@ -169,6 +180,22 @@ impl From<AnytypeError> for TestError {
 // TestContext
 // =============================================================================
 
+type OwnedChildStopper = Box<dyn FnMut() -> TestResult<()> + Send>;
+type OwnedChildStart = Arc<dyn Fn() -> TestResult<()> + Send + Sync>;
+
+enum OwnedChildRegistryState {
+    Open {
+        spawn_attempts: usize,
+        stoppers: Vec<OwnedChildStopper>,
+    },
+    Sealed,
+}
+
+struct OwnedChildRegistry {
+    state: Mutex<OwnedChildRegistryState>,
+    mark_running: Option<OwnedChildStart>,
+}
+
 /// Shared test context providing client and space configuration
 #[doc(hidden)]
 pub struct TestContext {
@@ -177,6 +204,8 @@ pub struct TestContext {
     start_time: Instant,
     api_call_count: AtomicUsize,
     cleanup: TestCleanup,
+    disposable_child_environment: Option<DisposableChildEnvironment>,
+    owned_children: OwnedChildRegistry,
 }
 
 /// Identity returned for a cleanup-owned collection view fixture.
@@ -213,13 +242,100 @@ impl TestContext {
         let client = test_client_named("anytype_test")?;
         let space_id = example_space_id(&client).await?;
 
-        Ok(Self {
+        Ok(Self::for_space(client, space_id))
+    }
+
+    pub(super) fn for_space(client: AnytypeClient, space_id: String) -> Self {
+        Self::for_disposable_space(client, space_id, None, None)
+    }
+
+    pub(super) fn for_disposable_space(
+        client: AnytypeClient,
+        space_id: String,
+        disposable_child_environment: Option<DisposableChildEnvironment>,
+        mark_child_running: Option<OwnedChildStart>,
+    ) -> Self {
+        Self {
             client,
             space_id,
             start_time: Instant::now(),
             api_call_count: AtomicUsize::new(0),
             cleanup: TestCleanup::default(),
-        })
+            disposable_child_environment,
+            owned_children: OwnedChildRegistry {
+                state: Mutex::new(OwnedChildRegistryState::Open {
+                    spawn_attempts: 0,
+                    stoppers: Vec::new(),
+                }),
+                mark_running: mark_child_running,
+            },
+        }
+    }
+
+    /// Returns the sanitized environment for a spawned test child.
+    ///
+    /// This is present only inside [`with_disposable_space_context`]. A child
+    /// The environment clears ambient process state and carries only the
+    /// approved endpoints, limits, selectors, and environment credentials.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn disposable_child_environment(&self) -> Option<&DisposableChildEnvironment> {
+        self.disposable_child_environment.as_ref()
+    }
+
+    /// Atomically spawns and registers a child owned by this disposable test.
+    ///
+    /// `spawn` must return the owned value and its idempotent stop-and-wait
+    /// operation together. The durable ledger is marked child-running before
+    /// `spawn` is invoked, and the registry lock remains held until the stopper
+    /// is installed. Once callback cleanup seals the registry, later calls are
+    /// rejected before invoking `spawn`.
+    #[doc(hidden)]
+    pub fn spawn_owned_child<T, S, F>(&self, spawn: F) -> TestResult<T>
+    where
+        S: FnMut() -> TestResult<()> + Send + 'static,
+        F: FnOnce() -> (T, S),
+    {
+        let mut registry = self.owned_children.state.lock();
+        let OwnedChildRegistryState::Open {
+            spawn_attempts,
+            stoppers,
+        } = &mut *registry
+        else {
+            return Err(child_registry_error());
+        };
+        let mark_running = self
+            .owned_children
+            .mark_running
+            .as_ref()
+            .ok_or_else(child_registry_error)?;
+        mark_running()?;
+        *spawn_attempts = spawn_attempts
+            .checked_add(1)
+            .ok_or_else(child_registry_error)?;
+        let (owned, stopper) = spawn();
+        stoppers.push(Box::new(stopper));
+        Ok(owned)
+    }
+
+    pub(super) fn seal_and_stop_owned_children(&self) -> ChildStopReport {
+        let (spawn_attempts, stoppers) = {
+            let mut registry = self.owned_children.state.lock();
+            match std::mem::replace(&mut *registry, OwnedChildRegistryState::Sealed) {
+                OwnedChildRegistryState::Open {
+                    spawn_attempts,
+                    stoppers,
+                } => (spawn_attempts, stoppers),
+                OwnedChildRegistryState::Sealed => {
+                    return ChildStopReport {
+                        outcome: ChildOwnershipOutcome::Unproven,
+                        errors: vec![child_registry_error()],
+                        panics: Vec::new(),
+                    };
+                }
+            }
+        };
+        run_owned_child_stoppers(spawn_attempts, stoppers)
     }
 
     pub fn increment_calls(&self, count: usize) {
@@ -520,36 +636,46 @@ impl TestContext {
     /// Creates a disposable space owned by this test context.
     ///
     /// The normal authenticated REST create path is used without its built-in
-    /// follow-up verification. A complete bounded pre-create space snapshot
-    /// establishes ownership: the returned ID must be valid, different from
-    /// the context space, and absent from that snapshot before it is registered
-    /// exactly once for teardown. Registration precedes every follow-up check.
-    /// Teardown removes only IDs registered by this helper through Anytype's
-    /// irreversible `SpaceDelete` RPC and then proves each ID is absent from a
-    /// complete bounded REST space listing.
+    /// follow-up verification. A complete bounded pre-create space inventory
+    /// validates pagination, every ID/name, and uniqueness. The returned space
+    /// must have the exact requested name, regular-space model, and a valid ID
+    /// that differs from the context space and was absent from that inventory.
+    /// Only then is its exact ID/name pair registered once for teardown, before
+    /// follow-up verification.
+    ///
+    /// Teardown revalidates that exact ID/name/model in another strict complete
+    /// inventory before Anytype's irreversible `SpaceDelete` RPC and proves the
+    /// ID absent from the same evidence after every acknowledged or uncertain
+    /// delete response.
     ///
     /// This test-only lifecycle must not be used for pre-existing spaces.
+    /// The supplied name is recorded immediately before POST and therefore must
+    /// be a generated non-secret fixture name.
     /// If an untrusted create response reuses a pre-existing ID, the helper
     /// refuses cleanup ownership even though that can leave an unknown newly
     /// created server-side resource behind.
     pub async fn create_space_fixture(&self, name: impl Into<String>) -> TestResult<Space> {
         let name = name.into();
-        self.client
-            .config
-            .limits
-            .validate_name(name.clone(), "test space")?;
-        let preexisting_ids = complete_space_id_snapshot(&self.client).await?;
-        let created = retry_definitive_rate_limit("space fixture", || async {
-            self.client.new_space(&name).no_verify().create().await
-        })
-        .await?;
+        validate_space_fixture_name(&self.client.config.limits, &name, "test space")?;
+        let preexisting = complete_space_inventory(&self.client).await?;
+        let created =
+            execute_space_create_after_intent(&name, record_space_create_intent, || async {
+                retry_definitive_rate_limit("space fixture", || async {
+                    self.client.new_space(&name).no_verify().create().await
+                })
+                .await
+            })
+            .await
+            .map_err(classify_space_create_error)?;
         validate_and_register_owned_space_fixture(
             &self.cleanup,
             &self.client.config.limits,
             &self.space_id,
-            &preexisting_ids,
-            &created.id,
-        )?;
+            &preexisting,
+            &name,
+            &created,
+        )
+        .map_err(|_| TestError::SpaceCreateIndeterminate)?;
 
         let config = space_fixture_verify_config(&self.client);
         let expected_id = created.id.clone();
@@ -559,7 +685,7 @@ impl TestContext {
             "Test space",
             &expected_id,
             || space_listing_evidence(&self.client, &expected_id, Some(&expected_name)),
-            |evidence| evidence.complete && evidence.present && evidence.name_matches,
+            |evidence| evidence.present && evidence.name_matches && evidence.object_matches,
         )
         .await
         .map_err(TestError::from)?;
@@ -1886,10 +2012,59 @@ pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
 pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
     collection_fixtures: Mutex<BTreeSet<(String, String, String)>>,
-    space_fixtures: Mutex<BTreeSet<String>>,
+    space_fixtures: Mutex<BTreeMap<String, String>>,
     template_resources: Mutex<Vec<TemplateFixtureResource>>,
     registered_ids: Mutex<BTreeSet<String>>,
     temp_paths: Mutex<Vec<PathBuf>>,
+}
+
+pub(super) struct ChildStopReport {
+    pub(super) outcome: ChildOwnershipOutcome,
+    pub(super) errors: Vec<TestError>,
+    pub(super) panics: Vec<Box<dyn std::any::Any + Send>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildOwnershipOutcome {
+    NoChildren,
+    Stopped,
+    Unproven,
+}
+
+fn run_owned_child_stoppers(
+    spawn_attempts: usize,
+    mut stoppers: Vec<OwnedChildStopper>,
+) -> ChildStopReport {
+    if spawn_attempts == 0 {
+        return ChildStopReport {
+            outcome: ChildOwnershipOutcome::NoChildren,
+            errors: Vec::new(),
+            panics: Vec::new(),
+        };
+    }
+    let mut errors = Vec::new();
+    if spawn_attempts != stoppers.len() {
+        errors.push(child_registry_error());
+    }
+    stoppers.reverse();
+    let mut panics = Vec::new();
+    for mut stopper in stoppers {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut stopper)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => errors.push(error),
+            Err(payload) => panics.push(payload),
+        }
+    }
+    let stopped = errors.is_empty() && panics.is_empty();
+    ChildStopReport {
+        outcome: if stopped {
+            ChildOwnershipOutcome::Stopped
+        } else {
+            ChildOwnershipOutcome::Unproven
+        },
+        errors,
+        panics,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1946,8 +2121,9 @@ impl TemplateFixtureResource {
 
 impl TestCleanup {
     pub fn is_empty(&self) -> bool {
-        // Inspect each registry under its own guard. The collection claim is
-        // the only operation that holds multiple registry locks at once.
+        // Inspect each registry under its own guard. Creation claims that hold
+        // multiple locks always acquire authoritative IDs before their private
+        // provenance registry.
         let objects_empty = self.objects.lock().is_empty();
         let collections_empty = self.collection_fixtures.lock().is_empty();
         let spaces_empty = self.space_fixtures.lock().is_empty();
@@ -1977,9 +2153,9 @@ impl TestCleanup {
     }
 
     fn claim_collection_fixture(&self, space_id: &str, id: &str, type_id: &str) -> bool {
-        // This is the sole multi-registry critical section. Keep its lock order
-        // authoritative IDs -> generic cleanup entries -> private provenance.
-        // Every other registry method releases one guard before taking another.
+        // Keep the shared claim lock order authoritative IDs -> generic cleanup
+        // entries -> private provenance. Space claims use authoritative IDs ->
+        // private space provenance.
         let mut registered_ids = self.registered_ids.lock();
         let mut objects = self.objects.lock();
         let mut fixtures = self.collection_fixtures.lock();
@@ -2038,13 +2214,16 @@ impl TestCleanup {
         self.registered_ids.lock().contains(id)
     }
 
-    /// Remembers an exact space ID created by `TestContext::create_space_fixture`.
-    fn add_space_fixture(&self, id: &str) -> bool {
-        let claimed = self.registered_ids.lock().insert(id.to_owned());
-        if !claimed {
+    /// Remembers exact ID/name provenance created by `TestContext::create_space_fixture`.
+    fn add_space_fixture(&self, id: &str, name: &str) -> bool {
+        let mut registered_ids = self.registered_ids.lock();
+        let mut spaces = self.space_fixtures.lock();
+        if registered_ids.contains(id) || spaces.contains_key(id) {
             return false;
         }
-        self.space_fixtures.lock().insert(id.into())
+        registered_ids.insert(id.to_owned());
+        spaces.insert(id.to_owned(), name.to_owned());
+        true
     }
 
     fn add_template_resource(&self, resource: TemplateFixtureResource) -> TestResult<()> {
@@ -2092,7 +2271,7 @@ impl TestCleanup {
     /// Cleans up all remembered items.
     /// Child resources are deleted in reverse creation order and grouped as
     /// template-owned resources, objects, properties, then types. The
-    /// deduplicated disposable-space set is processed only after all child
+    /// deduplicated disposable-space registry is processed only after all child
     /// resources. Template-owned resources re-prove their exact type/source
     /// provenance before each destructive request. A failed child proof skips
     /// every remaining cleanup request for that owned type and returns a
@@ -2128,12 +2307,16 @@ impl TestCleanup {
         };
         objects.reverse();
 
+        let mut ordinary_cleanup_failed = false;
+
         // First delete objects
         for (space_id, id, _) in objects
             .iter()
             .filter(|(_, _, model)| *model == DataModel::Object)
         {
-            let _ = client.object(space_id, id).delete().await;
+            if client.object(space_id, id).delete().await.is_err() {
+                ordinary_cleanup_failed = true;
+            }
         }
 
         // then properties and tags
@@ -2141,14 +2324,27 @@ impl TestCleanup {
             .iter()
             .filter(|(_, _, model)| *model == DataModel::Property)
         {
-            let tags = client.tags(space_id, prop_id).list().await;
-            if let Ok(tags) = tags {
-                for tag in tags.collect_all().await.unwrap_or_default() {
-                    //eprintln!("cleanup tag {}", &tag.id);
-                    let _ = client.tag(space_id, prop_id, tag.id).delete().await;
-                }
+            match client.tags(space_id, prop_id).list().await {
+                Ok(tags) => match tags.collect_all().await {
+                    Ok(tags) => {
+                        for tag in tags {
+                            if client
+                                .tag(space_id, prop_id, tag.id)
+                                .delete()
+                                .await
+                                .is_err()
+                            {
+                                ordinary_cleanup_failed = true;
+                            }
+                        }
+                    }
+                    Err(_) => ordinary_cleanup_failed = true,
+                },
+                Err(_) => ordinary_cleanup_failed = true,
             }
-            let _ = client.property(space_id, prop_id).delete().await;
+            if client.property(space_id, prop_id).delete().await.is_err() {
+                ordinary_cleanup_failed = true;
+            }
         }
 
         // then types
@@ -2156,7 +2352,9 @@ impl TestCleanup {
             .iter()
             .filter(|(_, _, model)| *model == DataModel::Type)
         {
-            let _ = client.get_type(space_id, type_id).delete().await;
+            if client.get_type(space_id, type_id).delete().await.is_err() {
+                ordinary_cleanup_failed = true;
+            }
         }
         self.collection_fixtures.lock().clear();
 
@@ -2168,8 +2366,11 @@ impl TestCleanup {
             std::mem::take(&mut *guard)
         };
         let mut space_cleanup_failed = false;
-        for space_id in space_fixtures.into_iter().rev() {
-            if delete_space_fixture(client, &space_id).await.is_err() {
+        for (space_id, expected_name) in space_fixtures.into_iter().rev() {
+            if delete_space_fixture(client, &space_id, &expected_name)
+                .await
+                .is_err()
+            {
                 space_cleanup_failed = true;
             }
         }
@@ -2190,10 +2391,25 @@ impl TestCleanup {
         if template_cleanup_failed {
             return Err(template_cleanup_provenance_error());
         }
+        if ordinary_cleanup_failed {
+            return Err(child_cleanup_error());
+        }
         if space_cleanup_failed {
             return Err(space_cleanup_error());
         }
         Ok(())
+    }
+}
+
+fn child_cleanup_error() -> TestError {
+    TestError::Assertion {
+        message: "registered child-resource cleanup failed".to_owned(),
+    }
+}
+
+fn child_registry_error() -> TestError {
+    TestError::Assertion {
+        message: "owned child lifecycle is unproven".to_owned(),
     }
 }
 
@@ -2401,7 +2617,18 @@ fn classify_template_cleanup(error: AnytypeError, stage: &'static str) -> TestEr
     template_cleanup_provenance_error()
 }
 
-async fn complete_space_id_snapshot(client: &AnytypeClient) -> TestResult<BTreeSet<String>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SpaceInventoryIdentity {
+    name: String,
+    object: SpaceModel,
+}
+
+#[derive(Debug)]
+struct CompleteSpaceInventory {
+    by_id: BTreeMap<String, SpaceInventoryIdentity>,
+}
+
+async fn complete_space_inventory(client: &AnytypeClient) -> TestResult<CompleteSpaceInventory> {
     let response = client
         .spaces()
         .limit(SPACE_FIXTURE_SCAN_LIMIT)
@@ -2409,37 +2636,59 @@ async fn complete_space_id_snapshot(client: &AnytypeClient) -> TestResult<BTreeS
         .list()
         .await?
         .into_response();
-    if !space_page_is_complete(&response) {
-        return Err(space_fixture_ownership_error());
-    }
-    Ok(response.items.into_iter().map(|space| space.id).collect())
+    strict_space_inventory(&client.config.limits, response)
+        .map_err(|_| space_fixture_ownership_error())
 }
 
 fn validate_and_register_owned_space_fixture(
     cleanup: &TestCleanup,
     limits: &crate::validation::ValidationLimits,
     current_space_id: &str,
-    preexisting_ids: &BTreeSet<String>,
-    returned_id: &str,
+    preexisting: &CompleteSpaceInventory,
+    expected_name: &str,
+    returned: &Space,
 ) -> TestResult<()> {
-    limits.validate_id(returned_id, "test space")?;
-    if returned_id == current_space_id || preexisting_ids.contains(returned_id) {
+    limits
+        .validate_id(&returned.id, "test space")
+        .map_err(|_| space_fixture_ownership_error())?;
+    validate_space_fixture_name(limits, &returned.name, "test space")
+        .map_err(|_| space_fixture_ownership_error())?;
+    if returned.id == current_space_id
+        || preexisting.by_id.contains_key(&returned.id)
+        || returned.name != expected_name
+        || returned.object != SpaceModel::Space
+    {
         // An untrusted duplicate response may leak a newly created server-side
         // space, but must never authorize deletion of pre-existing state.
         return Err(space_fixture_ownership_error());
     }
-    if !cleanup.add_space_fixture(returned_id) {
+    if !cleanup.add_space_fixture(&returned.id, expected_name) {
         return Err(space_fixture_ownership_error());
     }
     Ok(())
 }
 
-async fn delete_space_fixture(client: &AnytypeClient, space_id: &str) -> TestResult<()> {
+async fn delete_space_fixture(
+    client: &AnytypeClient,
+    space_id: &str,
+    expected_name: &str,
+) -> TestResult<()> {
     client
         .config
         .limits
         .validate_id(space_id, "test space")
         .map_err(|_| space_cleanup_error())?;
+    validate_space_fixture_name(&client.config.limits, expected_name, "test space")
+        .map_err(|_| space_cleanup_error())?;
+
+    let predelete = space_listing_evidence(client, space_id, Some(expected_name))
+        .await
+        .map_err(|_| space_cleanup_error())?;
+    match plan_space_delete(&predelete)? {
+        SpaceDeletePlan::AlreadyAbsent => return Ok(()),
+        SpaceDeletePlan::DispatchOnce => {}
+    }
+
     let grpc = client
         .grpc_client()
         .await
@@ -2452,22 +2701,32 @@ async fn delete_space_fixture(client: &AnytypeClient, space_id: &str) -> TestRes
         grpc.token(),
     )
     .map_err(|_| space_cleanup_error())?;
-    let response = commands
+    let acknowledged = commands
         .space_delete(request)
         .await
-        .map_err(space_cleanup_transport_error)?
-        .into_inner();
-    if !space_delete_succeeded(response.error.as_ref().map(|error| error.code)) {
-        return Err(space_cleanup_error());
-    }
+        .map(|response| response.into_inner())
+        .map(|response| space_delete_succeeded(response.error.as_ref().map(|error| error.code)))
+        .unwrap_or(false);
+    prove_space_absent(client, space_id, acknowledged).await
+}
 
+async fn prove_space_absent(
+    client: &AnytypeClient,
+    space_id: &str,
+    delete_acknowledged: bool,
+) -> TestResult<()> {
+    if !delete_acknowledged {
+        eprintln!(
+            "disposable test space delete response indeterminate: reconciling_by_complete_absence id={space_id}"
+        );
+    }
     let config = space_fixture_verify_config(client);
     verify_semantic(
         &config,
         "Deleted test space",
         space_id,
         || space_listing_evidence(client, space_id, None),
-        |evidence| evidence.complete && !evidence.present,
+        |evidence| space_fixture_absence_result(evidence).is_ok(),
     )
     .await
     .map(|_| ())
@@ -2476,9 +2735,40 @@ async fn delete_space_fixture(client: &AnytypeClient, space_id: &str) -> TestRes
 
 #[derive(Debug)]
 struct SpaceListingEvidence {
-    complete: bool,
     present: bool,
     name_matches: bool,
+    object_matches: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SpaceDeletePlan {
+    AlreadyAbsent,
+    DispatchOnce,
+}
+
+fn plan_space_delete(evidence: &SpaceListingEvidence) -> TestResult<SpaceDeletePlan> {
+    if !evidence.present {
+        // A complete strict inventory already proves absence; no destructive
+        // request is necessary.
+        return Ok(SpaceDeletePlan::AlreadyAbsent);
+    }
+    if space_fixture_is_safe_to_delete(evidence) {
+        Ok(SpaceDeletePlan::DispatchOnce)
+    } else {
+        Err(space_cleanup_error())
+    }
+}
+
+fn space_fixture_is_safe_to_delete(evidence: &SpaceListingEvidence) -> bool {
+    evidence.present && evidence.name_matches && evidence.object_matches
+}
+
+fn space_fixture_absence_result(evidence: &SpaceListingEvidence) -> TestResult<()> {
+    if evidence.present {
+        Err(space_cleanup_error())
+    } else {
+        Ok(())
+    }
 }
 
 async fn space_listing_evidence(
@@ -2493,23 +2783,73 @@ async fn space_listing_evidence(
         .list()
         .await?
         .into_response();
-    let complete = space_page_is_complete(&response);
-    let matching_space = response.items.iter().find(|space| space.id == space_id);
+    let inventory = strict_space_inventory(&client.config.limits, response)?;
+    let matching_space = inventory.by_id.get(space_id);
     let present = matching_space.is_some();
     let name_matches = expected_name
         .is_none_or(|expected| matching_space.is_some_and(|space| space.name == expected));
     Ok(SpaceListingEvidence {
-        complete,
         present,
         name_matches,
+        object_matches: matching_space.is_none_or(|space| space.object == SpaceModel::Space),
     })
 }
 
-fn space_page_is_complete(response: &crate::paged::PaginatedResponse<Space>) -> bool {
-    response.pagination.offset == 0
-        && !response.pagination.has_more
-        && response.items.len() <= SPACE_FIXTURE_SCAN_LIMIT as usize
-        && response.pagination.total == response.items.len()
+fn strict_space_inventory(
+    limits: &crate::validation::ValidationLimits,
+    response: crate::paged::PaginatedResponse<Space>,
+) -> Result<CompleteSpaceInventory, AnytypeError> {
+    if response.pagination.offset != 0
+        || response.pagination.limit != SPACE_FIXTURE_SCAN_LIMIT
+        || response.pagination.has_more
+        || response.items.len() > SPACE_FIXTURE_SCAN_LIMIT as usize
+        || response.pagination.total != response.items.len()
+    {
+        return Err(AnytypeError::Other {
+            message: "space inventory pagination is incomplete".to_owned(),
+        });
+    }
+
+    let expected_len = response.items.len();
+    let mut by_id = BTreeMap::new();
+    for space in response.items {
+        limits.validate_id(&space.id, "space inventory id")?;
+        validate_space_fixture_name(limits, &space.name, "space inventory name")?;
+        if by_id
+            .insert(
+                space.id,
+                SpaceInventoryIdentity {
+                    name: space.name,
+                    object: space.object,
+                },
+            )
+            .is_some()
+        {
+            return Err(AnytypeError::Other {
+                message: "space inventory contains duplicate ids".to_owned(),
+            });
+        }
+    }
+    if by_id.len() != expected_len {
+        return Err(AnytypeError::Other {
+            message: "space inventory identity count is inconsistent".to_owned(),
+        });
+    }
+    Ok(CompleteSpaceInventory { by_id })
+}
+
+fn validate_space_fixture_name(
+    limits: &crate::validation::ValidationLimits,
+    name: &str,
+    description: &str,
+) -> Result<(), AnytypeError> {
+    limits.validate_name(name, description)?;
+    if name.chars().any(char::is_control) {
+        return Err(AnytypeError::Validation {
+            message: "test space identity names cannot contain control characters".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn space_delete_succeeded(error_code: Option<i32>) -> bool {
@@ -2523,9 +2863,50 @@ fn space_fixture_verify_config(client: &AnytypeClient) -> VerifyConfig {
     config
 }
 
+async fn execute_space_create_after_intent<T, Record, Create, CreateFuture>(
+    name: &str,
+    record_intent: Record,
+    create: Create,
+) -> Result<T, AnytypeError>
+where
+    Record: FnOnce(&str),
+    Create: FnOnce() -> CreateFuture,
+    CreateFuture: std::future::Future<Output = Result<T, AnytypeError>>,
+{
+    record_intent(name);
+    create().await
+}
+
+fn record_space_create_intent(name: &str) {
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    eprintln!("disposable test space create intent: at={timestamp} name={name}");
+}
+
 fn space_cleanup_error() -> TestError {
     TestError::Assertion {
         message: "registered test space cleanup failed".to_owned(),
+    }
+}
+
+fn classify_space_create_error(error: AnytypeError) -> TestError {
+    let definitively_rejected = matches!(
+        &error,
+        AnytypeError::Validation { .. }
+            | AnytypeError::Serialization { .. }
+            | AnytypeError::Auth { .. }
+            | AnytypeError::Unauthorized
+            | AnytypeError::Forbidden
+            | AnytypeError::NoKeyStore
+            | AnytypeError::KeyStore { .. }
+            | AnytypeError::NotFound { .. }
+    ) || matches!(
+        &error,
+        AnytypeError::ApiError { code, .. } if (400..=499).contains(code)
+    );
+    if definitively_rejected {
+        TestError::from(error)
+    } else {
+        TestError::SpaceCreateIndeterminate
     }
 }
 
@@ -2535,6 +2916,7 @@ fn space_fixture_ownership_error() -> TestError {
     }
 }
 
+#[cfg(test)]
 fn space_cleanup_transport_error(_: tonic::Status) -> TestError {
     space_cleanup_error()
 }
@@ -2542,24 +2924,60 @@ fn space_cleanup_transport_error(_: tonic::Status) -> TestError {
 #[cfg(test)]
 mod space_tests {
     use super::*;
+    use crate::paged::{PaginatedResponse, PaginationMeta};
 
     const CURRENT_SPACE_ID: &str = "bafyreiafl45wf5eaxiby44pxrkhia3y5jsyix3ov2jzqiftsxjotujqlh4";
     const STALE_SPACE_ID: &str = "bafyreifmrdlvfk5uolhph6xmh6geta47auzqjilcsxarpyxlkrbqxks64a";
     const OWNED_SPACE_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
 
-    fn registered_spaces(cleanup: &TestCleanup) -> BTreeSet<String> {
+    const OWNED_SPACE_NAME: &str = "Automated test 123_0";
+
+    fn registered_spaces(cleanup: &TestCleanup) -> BTreeMap<String, String> {
         cleanup.space_fixtures.lock().clone()
+    }
+
+    fn space(id: &str, name: &str) -> Space {
+        Space {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            object: SpaceModel::Space,
+            description: None,
+            icon: None,
+            gateway_url: None,
+            network_id: None,
+        }
+    }
+
+    fn empty_inventory() -> CompleteSpaceInventory {
+        CompleteSpaceInventory {
+            by_id: BTreeMap::new(),
+        }
+    }
+
+    fn inventory_page(items: Vec<Space>) -> PaginatedResponse<Space> {
+        let total = items.len();
+        PaginatedResponse {
+            items,
+            pagination: PaginationMeta {
+                has_more: false,
+                limit: SPACE_FIXTURE_SCAN_LIMIT,
+                offset: 0,
+                total,
+            },
+        }
     }
 
     #[test]
     fn malformed_create_response_never_enters_deletion_registry() {
         let cleanup = TestCleanup::default();
+        let returned = space("malformed-space-id", OWNED_SPACE_NAME);
         let result = validate_and_register_owned_space_fixture(
             &cleanup,
             &crate::validation::ValidationLimits::default(),
             CURRENT_SPACE_ID,
-            &BTreeSet::new(),
-            "malformed-space-id",
+            &empty_inventory(),
+            OWNED_SPACE_NAME,
+            &returned,
         );
         assert!(result.is_err());
         assert!(registered_spaces(&cleanup).is_empty());
@@ -2568,12 +2986,14 @@ mod space_tests {
     #[test]
     fn current_space_create_response_never_enters_deletion_registry() {
         let cleanup = TestCleanup::default();
+        let returned = space(CURRENT_SPACE_ID, OWNED_SPACE_NAME);
         let result = validate_and_register_owned_space_fixture(
             &cleanup,
             &crate::validation::ValidationLimits::default(),
             CURRENT_SPACE_ID,
-            &BTreeSet::new(),
-            CURRENT_SPACE_ID,
+            &empty_inventory(),
+            OWNED_SPACE_NAME,
+            &returned,
         );
         assert!(result.is_err());
         assert!(registered_spaces(&cleanup).is_empty());
@@ -2582,13 +3002,19 @@ mod space_tests {
     #[test]
     fn stale_create_response_never_enters_deletion_registry() {
         let cleanup = TestCleanup::default();
-        let preexisting = BTreeSet::from([STALE_SPACE_ID.to_owned()]);
+        let preexisting = strict_space_inventory(
+            &crate::validation::ValidationLimits::default(),
+            inventory_page(vec![space(STALE_SPACE_ID, "Ambient")]),
+        )
+        .unwrap();
+        let returned = space(STALE_SPACE_ID, OWNED_SPACE_NAME);
         let result = validate_and_register_owned_space_fixture(
             &cleanup,
             &crate::validation::ValidationLimits::default(),
             CURRENT_SPACE_ID,
             &preexisting,
-            STALE_SPACE_ID,
+            OWNED_SPACE_NAME,
+            &returned,
         );
         assert!(result.is_err());
         assert!(registered_spaces(&cleanup).is_empty());
@@ -2598,13 +3024,15 @@ mod space_tests {
     fn duplicate_create_response_is_registered_for_at_most_one_delete() {
         let cleanup = TestCleanup::default();
         let limits = crate::validation::ValidationLimits::default();
+        let returned = space(OWNED_SPACE_ID, OWNED_SPACE_NAME);
         assert!(
             validate_and_register_owned_space_fixture(
                 &cleanup,
                 &limits,
                 CURRENT_SPACE_ID,
-                &BTreeSet::new(),
-                OWNED_SPACE_ID,
+                &empty_inventory(),
+                OWNED_SPACE_NAME,
+                &returned,
             )
             .is_ok()
         );
@@ -2613,15 +3041,221 @@ mod space_tests {
                 &cleanup,
                 &limits,
                 CURRENT_SPACE_ID,
-                &BTreeSet::new(),
-                OWNED_SPACE_ID,
+                &empty_inventory(),
+                OWNED_SPACE_NAME,
+                &returned,
             )
             .is_err()
         );
         assert_eq!(
             registered_spaces(&cleanup),
-            BTreeSet::from([OWNED_SPACE_ID.to_owned()])
+            BTreeMap::from([(OWNED_SPACE_ID.to_owned(), OWNED_SPACE_NAME.to_owned())])
         );
+    }
+
+    #[test]
+    fn mismatched_returned_name_or_model_never_grants_deletion_authority() {
+        let limits = crate::validation::ValidationLimits::default();
+        for returned in [
+            space(OWNED_SPACE_ID, "Unexpected name"),
+            Space {
+                object: SpaceModel::Chat,
+                ..space(OWNED_SPACE_ID, OWNED_SPACE_NAME)
+            },
+        ] {
+            let cleanup = TestCleanup::default();
+            assert!(
+                validate_and_register_owned_space_fixture(
+                    &cleanup,
+                    &limits,
+                    CURRENT_SPACE_ID,
+                    &empty_inventory(),
+                    OWNED_SPACE_NAME,
+                    &returned,
+                )
+                .is_err()
+            );
+            assert!(registered_spaces(&cleanup).is_empty());
+        }
+    }
+
+    #[test]
+    fn strict_inventory_rejects_duplicate_malformed_and_incomplete_pages() {
+        let limits = crate::validation::ValidationLimits::default();
+        let valid = strict_space_inventory(
+            &limits,
+            inventory_page(vec![space(CURRENT_SPACE_ID, "Current")]),
+        )
+        .unwrap();
+        assert_eq!(valid.by_id.len(), 1);
+
+        let duplicate = inventory_page(vec![
+            space(CURRENT_SPACE_ID, "Current"),
+            space(CURRENT_SPACE_ID, "Duplicate"),
+        ]);
+        assert!(strict_space_inventory(&limits, duplicate).is_err());
+
+        let malformed = inventory_page(vec![space("malformed-space-id", "Malformed")]);
+        assert!(strict_space_inventory(&limits, malformed).is_err());
+
+        let malformed_name = inventory_page(vec![space(CURRENT_SPACE_ID, "bad\0name")]);
+        assert!(strict_space_inventory(&limits, malformed_name).is_err());
+
+        let mut incomplete = inventory_page(vec![space(CURRENT_SPACE_ID, "Current")]);
+        incomplete.pagination.total += 1;
+        assert!(strict_space_inventory(&limits, incomplete).is_err());
+
+        let mut continued = inventory_page(vec![space(CURRENT_SPACE_ID, "Current")]);
+        continued.pagination.has_more = true;
+        assert!(strict_space_inventory(&limits, continued).is_err());
+
+        let mut wrong_limit = inventory_page(vec![space(CURRENT_SPACE_ID, "Current")]);
+        wrong_limit.pagination.limit -= 1;
+        assert!(strict_space_inventory(&limits, wrong_limit).is_err());
+
+        let mut wrong_offset = inventory_page(vec![space(CURRENT_SPACE_ID, "Current")]);
+        wrong_offset.pagination.offset = 1;
+        assert!(strict_space_inventory(&limits, wrong_offset).is_err());
+
+        let oversized = inventory_page(vec![
+            space(CURRENT_SPACE_ID, "Current");
+            SPACE_FIXTURE_SCAN_LIMIT as usize + 1
+        ]);
+        assert!(strict_space_inventory(&limits, oversized).is_err());
+    }
+
+    #[test]
+    fn delete_protocol_requires_exact_identity_and_dispatches_at_most_once() {
+        let absent = SpaceListingEvidence {
+            present: false,
+            name_matches: false,
+            object_matches: true,
+        };
+        assert_eq!(
+            plan_space_delete(&absent).unwrap(),
+            SpaceDeletePlan::AlreadyAbsent
+        );
+
+        let wrong_name = SpaceListingEvidence {
+            present: true,
+            name_matches: false,
+            object_matches: true,
+        };
+        assert!(plan_space_delete(&wrong_name).is_err());
+
+        let wrong_model = SpaceListingEvidence {
+            present: true,
+            name_matches: true,
+            object_matches: false,
+        };
+        assert!(plan_space_delete(&wrong_model).is_err());
+
+        let exact = SpaceListingEvidence {
+            present: true,
+            name_matches: true,
+            object_matches: true,
+        };
+        let mut delete_requests = 0;
+        if plan_space_delete(&exact).unwrap() == SpaceDeletePlan::DispatchOnce {
+            delete_requests += 1;
+        }
+        assert_eq!(delete_requests, 1);
+    }
+
+    #[test]
+    fn acknowledged_and_indeterminate_delete_responses_require_the_same_absence_proof() {
+        let absent = SpaceListingEvidence {
+            present: false,
+            name_matches: false,
+            object_matches: true,
+        };
+        let persistent = SpaceListingEvidence {
+            present: true,
+            name_matches: true,
+            object_matches: true,
+        };
+        for _delete_acknowledged in [true, false] {
+            assert!(space_fixture_absence_result(&absent).is_ok());
+            assert!(space_fixture_absence_result(&persistent).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn create_intent_is_recorded_before_post_future_is_polled() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let intent_events = Arc::clone(&events);
+        let post_events = Arc::clone(&events);
+        execute_space_create_after_intent(
+            OWNED_SPACE_NAME,
+            move |_| intent_events.lock().push("intent"),
+            move || async move {
+                post_events.lock().push("post");
+                Ok::<_, AnytypeError>(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*events.lock(), vec!["intent", "post"]);
+    }
+
+    #[test]
+    fn create_failures_are_classified_and_rendered_without_upstream_secrets() {
+        const SECRET: &str = "create-response-secret-sentinel";
+        let error = classify_space_create_error(AnytypeError::ResponseTooLarge {
+            limit: 1,
+            declared: Some(2),
+        });
+        assert!(matches!(error, TestError::SpaceCreateIndeterminate));
+
+        let definitive = classify_space_create_error(AnytypeError::Validation {
+            message: "invalid generated name".to_owned(),
+        });
+        assert!(matches!(definitive, TestError::Api { .. }));
+
+        let definitive_4xx = classify_space_create_error(AnytypeError::ApiError {
+            code: 418,
+            method: "POST".to_owned(),
+            url: "http://localhost/v1/spaces".to_owned(),
+            message: SECRET.to_owned(),
+        });
+        assert!(matches!(definitive_4xx, TestError::Api { .. }));
+        assert!(!definitive_4xx.to_string().contains(SECRET));
+
+        let indeterminate_5xx = classify_space_create_error(AnytypeError::ApiError {
+            code: 500,
+            method: "POST".to_owned(),
+            url: "http://localhost/v1/spaces".to_owned(),
+            message: SECRET.to_owned(),
+        });
+        assert!(matches!(
+            indeterminate_5xx,
+            TestError::SpaceCreateIndeterminate
+        ));
+        assert!(!indeterminate_5xx.to_string().contains(SECRET));
+    }
+
+    #[test]
+    fn ambient_prefix_test12_and_intent_only_names_never_authorize_delete() {
+        let cleanup = TestCleanup::default();
+        let limits = crate::validation::ValidationLimits::default();
+        for returned in [
+            space(CURRENT_SPACE_ID, OWNED_SPACE_NAME),
+            space(OWNED_SPACE_ID, "Automated test"),
+            space(OWNED_SPACE_ID, "test12"),
+        ] {
+            assert!(
+                validate_and_register_owned_space_fixture(
+                    &cleanup,
+                    &limits,
+                    CURRENT_SPACE_ID,
+                    &empty_inventory(),
+                    OWNED_SPACE_NAME,
+                    &returned,
+                )
+                .is_err()
+            );
+        }
+        assert!(registered_spaces(&cleanup).is_empty());
     }
 
     #[test]
@@ -3433,6 +4067,119 @@ mod tests {
         assert!(requests[0].starts_with(&format!(
             "GET /v1/spaces/{SPACE_ID}/types/{COLLECTION_TYPE_ID} HTTP/1.1"
         )));
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_an_ordinary_child_delete_failure() {
+        let (base_url, requests) = template_paged_fixture_server(vec!["{}".to_owned()]).await;
+        let client = template_fixture_http_client(base_url);
+        let cleanup = TestCleanup::default();
+        cleanup.add_object(SPACE_ID, COLLECTION_ID);
+
+        let rendered = cleanup
+            .cleanup(&client)
+            .await
+            .expect_err("malformed delete response remains a cleanup defect")
+            .to_string();
+        assert_eq!(
+            rendered,
+            "Test assertion failed: registered child-resource cleanup failed"
+        );
+        let requests = requests.await.expect("object delete request");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!(
+            "DELETE /v1/spaces/{SPACE_ID}/objects/{COLLECTION_ID} HTTP/1.1"
+        )));
+    }
+
+    #[test]
+    fn owned_child_stoppers_run_in_reverse_and_retain_all_defects() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first_order = Arc::clone(&order);
+        let second_order = Arc::clone(&order);
+        let third_order = Arc::clone(&order);
+        let stoppers: Vec<OwnedChildStopper> = vec![
+            Box::new(move || {
+                first_order.lock().push(1);
+                Ok(())
+            }),
+            Box::new(move || {
+                second_order.lock().push(2);
+                Err(child_cleanup_error())
+            }),
+            Box::new(move || {
+                third_order.lock().push(3);
+                panic!("owned-child-stopper")
+            }),
+        ];
+        let report = run_owned_child_stoppers(3, stoppers);
+        assert_eq!(*order.lock(), vec![3, 2, 1]);
+        assert_eq!(report.outcome, ChildOwnershipOutcome::Unproven);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.panics.len(), 1);
+    }
+
+    #[test]
+    fn owned_child_registry_is_atomic_sealed_and_never_equates_empty_with_stopped() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let marks = Arc::new(AtomicUsize::new(0));
+        let marks_for_context = Arc::clone(&marks);
+        let context = TestContext::for_disposable_space(
+            template_fixture_http_client("http://127.0.0.1:1".to_owned()),
+            SPACE_ID.to_owned(),
+            None,
+            Some(Arc::new(move || {
+                marks_for_context.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })),
+        );
+        let owned = context
+            .spawn_owned_child(|| (7_u8, || Ok(())))
+            .expect("spawn and registration are one operation");
+        assert_eq!(owned, 7);
+        assert_eq!(marks.load(Ordering::SeqCst), 1);
+        let report = context.seal_and_stop_owned_children();
+        assert_eq!(report.outcome, ChildOwnershipOutcome::Stopped);
+
+        let late_spawn_ran = Arc::new(AtomicBool::new(false));
+        let late_spawn_ran_in_closure = Arc::clone(&late_spawn_ran);
+        assert!(
+            context
+                .spawn_owned_child(move || {
+                    late_spawn_ran_in_closure.store(true, Ordering::SeqCst);
+                    ((), || Ok(()))
+                })
+                .is_err()
+        );
+        assert!(!late_spawn_ran.load(Ordering::SeqCst));
+
+        let no_children = TestContext::for_disposable_space(
+            template_fixture_http_client("http://127.0.0.1:1".to_owned()),
+            SPACE_ID.to_owned(),
+            None,
+            Some(Arc::new(|| Ok(()))),
+        )
+        .seal_and_stop_owned_children();
+        assert_eq!(no_children.outcome, ChildOwnershipOutcome::NoChildren);
+    }
+
+    #[test]
+    fn panicking_owned_spawn_is_recorded_as_unproven() {
+        let context = TestContext::for_disposable_space(
+            template_fixture_http_client("http://127.0.0.1:1".to_owned()),
+            SPACE_ID.to_owned(),
+            None,
+            Some(Arc::new(|| Ok(()))),
+        );
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: TestResult<()> = context
+                .spawn_owned_child(|| -> ((), fn() -> TestResult<()>) { panic!("spawn-stage") });
+        }));
+        assert!(panic.is_err());
+        let report = context.seal_and_stop_owned_children();
+        assert_eq!(report.outcome, ChildOwnershipOutcome::Unproven);
+        assert_eq!(report.errors.len(), 1);
     }
 
     #[test]

@@ -75,6 +75,26 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   with typed secret-safe errors. Each physical response, including an
   intermediate retry, is checked against the allowlisted-header evidence
   ceiling before retry or body processing.
+- Add `with_disposable_space_context` for fixture-heavy live suites. A required
+  `ANYTYPE_TEST_SPACE_PREFIX` explicitly authorizes case-insensitive cleanup of
+  every matching current space name. The helper validates the prefix before
+  credential or filesystem access and returns a typed skip, acquires a
+  backend-wide process lease, writes a durable owner-private recovery ledger,
+  sweeps interrupted matching runs with deadline-bounded, SQLite-backed,
+  enumerate-before-delete fixed-window pagination, creates a 128-bit random
+  name,
+  uses cache-disabled exact-ID readiness/deletion/absence reads, and preserves
+  callback, child-cleanup, deletion, absence, and harness-state outcomes under
+  returned errors and panics. Disposable runs require the explicitly selected
+  environment keystore, an operator-selected service, and complete HTTP plus
+  gRPC credentials. The parent captures an exact bounded credential set and
+  exposes a child-command configurator that starts from `env_clear`; file,
+  keyring, implicit, unknown, or over-budget stores skip before authentication
+  or mutation and no credential snapshot file is created. Registered
+  idempotent child stoppers run before resource cleanup, while durable
+  running/stopped state prevents final ledger cleanup if a child may survive.
+  Unix recovery uses no-follow directory-relative opens and unlinks; unproved
+  process or Windows ACL isolation fails before credential capture or mutation.
 - Add `objects::plain_markdown_representation`, a documented closed contract
   that separates the safe Anytype write form from the exact canonical read form
   for empty bodies and single plain lines containing alphanumeric characters,
@@ -124,12 +144,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   distinct server-assigned ID, and finitely verifies the complete two-view REST
   result. Collection teardown owns the mutation.
 - Add a test-only disposable-space lifecycle that registers validated REST
-  create IDs before verification only after a complete pre-create snapshot
-  proves they are neither current nor pre-existing, structurally deduplicates
-  its private deletion registry, deletes it through the irreversible exact-ID
-  `SpaceDelete` RPC after child-resource cleanup, and requires bounded complete
-  REST absence evidence during teardown. No production space-delete API is
-  exposed; ambiguous responses favor a leak over deleting existing state.
+  create ID/name/model provenance before verification only after a strict
+  complete pre-create inventory proves the ID is neither current nor
+  pre-existing. It revalidates that exact provenance before the irreversible
+  exact-ID `SpaceDelete` RPC, reconciles uncertain delete responses through
+  strict bounded absence, and structurally deduplicates its private registry.
+  No production space-delete API is exposed; malformed, mismatched, concurrent,
+  or ambiguous evidence favors a leak over deleting existing state.
 - object requests now offer `delete_once()` for soft-delete workflows that
   must reconcile an uncertain response without middleware replaying `DELETE`
 - bounded predicate-based semantic read-after-write verification with finite
