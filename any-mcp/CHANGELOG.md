@@ -24,34 +24,50 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   paragraph text, an optional exact reply target, and a required process-local
   idempotency key. It resolves scope before cohort admission, preflights a
   reply by exact GET without projecting its unreturned text, sends at most one
-  non-replayed POST, validates the
-  server-assigned ID, and requires one exact readback of text, paragraph,
-  marks, attachments, and reply identity. Concurrent identical callers share
-  the leader result without another GET or POST; changed normalized input
-  conflicts; later successful replay performs one fresh exact GET and never
-  compares mutable presentation or content. Definitive POST rejection and
-  post-dispatch uncertainty before an assigned ID remain terminal for the key.
-  Once POST returns a valid assigned ID, the candidate is retained before
-  verification; ordinary not-found, authentication/permission, bounded-result,
-  upstream GET, timeout, and cancellation outcomes remain safe for later
-  exact-GET-only retry and can never dispatch a second POST. Direct-router and
-  persistent preview-stdio acceptance use a cleanup-owned disposable real
-  chat, prove exact leader, replay, conflict, missing-reply retry,
-  retained-capacity, reply leader, and reply replay work, register every
-  message immediately, and leave no prefix-owned space. Concurrent cohort
-  admission and completion run through the actual router with a test-only
-  deterministic admission gate, proving one POST, one leader GET, zero waiter
-  GETs, and identical returned detail without timing or latency injection. A
-  test-owned child-process stdio harness covers the exact reviewed registry,
-  while a second spawned child proves the shipped composition still rejects
-  the production-unlinked tool. One absolute deadline
-  now covers resolution, admission, detached leader execution, verification,
-  and the earlier of each waiter or leader deadline. Fixed catalog/result
-  token evidence plus exact direct/preview rejection, pre-cancellation, terminal,
-  retained-capacity, and retryable reply-preflight tests require no fault or
-  mock server. Boxed parity scenarios also lock the ordinary 2-MiB test-stack
-  regression. Fault and latency
-  injection remains deferred to the P4 fault-injection design.
+  non-replayed POST, validates the server-assigned ID, and requires one exact
+  readback of text, paragraph, marks, attachments, and reply identity.
+  Concurrent identical callers share the leader result without another GET or
+  POST; changed normalized input conflicts; later successful replay performs
+  one fresh exact GET and never compares mutable presentation or content.
+  Definitive POST rejection and post-dispatch uncertainty before an assigned
+  ID remain terminal for the key. Once POST returns a valid assigned ID, the
+  candidate is retained before verification; ordinary not-found,
+  authentication/permission, bounded-result, upstream GET, timeout, and
+  cancellation outcomes remain safe for later exact-GET-only retry and can
+  never dispatch a second POST. Direct-router and persistent preview-stdio
+  acceptance use a cleanup-owned disposable real chat, prove exact leader,
+  replay, conflict, missing-reply retry, retained-capacity, reply leader, and
+  reply replay work, register every message immediately, and leave no
+  prefix-owned space. Concurrent cohort admission and completion run through
+  the actual router with a test-only deterministic admission gate, proving one
+  POST, one leader GET, zero waiter GETs, and identical returned detail without
+  timing or latency injection. A test-owned child-process stdio harness covers
+  the exact reviewed registry, while a second spawned child proves the shipped
+  composition still rejects the production-unlinked tool. One absolute
+  deadline now covers resolution, admission, detached leader execution,
+  verification, and the earlier of each waiter or leader deadline. Fixed
+  catalog/result token evidence plus exact direct/preview rejection,
+  pre-cancellation, terminal, retained-capacity, and retryable reply-preflight
+  tests require no fault or mock server. Boxed parity scenarios also lock the
+  ordinary 2-MiB test-stack regression. Fault and latency injection remains
+  deferred to the P4 fault-injection design.
+- Link the complete default-off `schema` production registry. Read-write mode
+  exposes exactly `space_create`, `space_update`, `type_get`, `type_create`,
+  `type_update`, `property_create`, `property_update`, `tag_create`, and
+  `tag_update`; read-only mode retains only `type_get`, with common
+  `optional_toolset_status` counted once. The descriptor composes the reviewed
+  slices through one per-runtime handler cohort, requires authenticated HTTP
+  and gRPC through `anytype-api`, preserves byte-identical no-selection Phase 1
+  catalogs/status, and rejects absent or stale mutation calls before decoding
+  or I/O. Actual composed `o200k_base` snapshots lock 7,856 schema-domain and
+  8,112 schema-selected contribution tokens beneath the 9,500/10,000 ceilings,
+  plus all profile/access/mixed totals and per-tool maximum representative
+  results. Aggregate dispatch and success-path mutation boundaries use
+  heap-owned futures so the complete registry stays within the default worker
+  stack. Direct routing and one spawned production-stdio disposable workflow
+  cover the exact nine-tool inventory and cleanup without mock or fault
+  servers; independent property-scoped API reads verify the created and updated
+  tag IDs, names, colors, and ownership rather than trusting MCP output alone.
 - Add the production-unlinked `collection_member_list` read slice for the
   future `views-write` registry. The strict tool resolves one space, binds an
   opaque cursor to the exact resolved space, collection, limit, registry, and
@@ -209,11 +225,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `member_list` pagination and exact `member_get` reads. Results expose only
   validated member IDs, explicit space-local names, closed roles, and closed
   statuses; network identities, global names, and icons never enter MCP
-  schemas, results, or diagnostics. Direct-router and production-stdio
-  fixtures cover strict runtime inputs, cursor binding, permissions,
-  ambiguity, response identity, controlled failures, malformed values,
-  redaction, and logical plus physical work ceilings. Disposable real-server
-  scenarios verify the same minimized happy-path wire contract.
+  schemas, results, or diagnostics. Pure zero-I/O tests cover strict inputs and
+  pre-cancellation, while cleanup-owned real-server direct-router and
+  production-stdio scenarios verify bounded pages, exact response identity,
+  minimized results, read-only parity, and the erased future boundaries needed
+  for default-stack execution. Malformed, latency, 5xx, retry, and
+  connection-fault cases remain deferred to the P4 fault-injection design;
+  member tests no longer contain a custom HTTP server.
 - Add ignored serial production-stdio disposable lifecycle sentinels that
   prove exact create/read object and space identity, registered fallible child
   shutdown, cleanup before a deliberate callback panic resumes, and exact

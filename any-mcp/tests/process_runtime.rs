@@ -129,7 +129,7 @@ fn optional_selector_fails_before_auth_with_fixed_secret_safe_category() {
 }
 
 #[test]
-fn unfinished_optional_registry_is_unsupported_before_auth() {
+fn linked_schema_registry_reaches_auth_without_echoing_selector() {
     let output = unauthenticated_command()
         .env("ANY_MCP_TOOLSETS", "schema")
         .output()
@@ -141,7 +141,7 @@ fn unfinished_optional_registry_is_unsupported_before_auth() {
         "stdout is reserved for MCP frames"
     );
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
-    assert!(stderr.contains("unsupported optional toolset selector"));
+    assert!(stderr.contains("HTTP credentials are missing"));
     assert!(!stderr.contains("schema"));
-    assert!(!stderr.contains("HTTP credentials are missing"));
+    assert!(!stderr.contains("unsupported optional toolset selector"));
 }

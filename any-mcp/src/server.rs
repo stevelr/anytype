@@ -38,9 +38,9 @@ use crate::{
     object_read::{ObjectGetInput, ObjectReadHandlers, ObjectSearchInput},
     object_update::{ObjectUpdateInput, ObjectUpdateOutput, object_update, object_update_tool},
     optional_toolsets::{
-        OptionalCatalog, OptionalToolsetRegistry, OptionalToolsetStatusInput,
-        OptionalToolsetStatusOutput, compose_optional_catalog, optional_toolset_status_tool,
-        production_optional_registries,
+        OptionalCatalog, OptionalRegistryFuture, OptionalToolsetRegistry,
+        OptionalToolsetStatusInput, OptionalToolsetStatusOutput, compose_optional_catalog,
+        optional_toolset_status_tool, production_optional_registries,
     },
     protocol::WorkflowTool,
     resources::AnytypeResources,
@@ -333,171 +333,174 @@ impl AnyMcpServer {
         not(test),
         expect(dead_code, reason = "stable-version dispatch seam is used by tests")
     )]
-    pub(crate) async fn dispatch_tool(
-        &self,
+    pub(crate) fn dispatch_tool<'a>(
+        &'a self,
         request: CallToolRequestParams,
-        cancellation: &tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, ErrorData> {
+        cancellation: &'a tokio_util::sync::CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         self.dispatch_tool_for_protocol(request, &PROTOCOL_VERSION, cancellation)
-            .await
     }
 
-    pub(crate) async fn dispatch_tool_for_protocol(
-        &self,
+    pub(crate) fn dispatch_tool_for_protocol<'a>(
+        &'a self,
         request: CallToolRequestParams,
-        protocol_version: &ProtocolVersion,
-        cancellation: &tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, ErrorData> {
-        let name = request.name.as_ref();
-        let selected_by_profile = match self.runtime.profile() {
-            ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
-            ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
-        };
-        let optional_selected = self
-            .state
-            .optional_catalog
-            .registry_for_tool(name)
-            .is_some()
-            || self.state.optional_catalog.is_read_only_mutation(name)
-            || (name == "optional_toolset_status" && self.state.optional_catalog.is_selected());
-        if !selected_by_profile && !optional_selected {
-            return Err(ErrorData::method_not_found::<CallToolRequestMethod>());
-        }
-        if request.task.is_some() {
-            return Err(invalid_arguments());
-        }
-        if self.state.optional_catalog.is_read_only_mutation(name) {
-            return Ok(tool_error(&ToolError::read_only()));
-        }
-        if name == "optional_toolset_status" {
-            let _input = decode_arguments::<OptionalToolsetStatusInput>(request.arguments)?;
-            let contract = self
+        protocol_version: &'a ProtocolVersion,
+        cancellation: &'a tokio_util::sync::CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        Box::pin(async move {
+            let name = request.name.as_ref();
+            let selected_by_profile = match self.runtime.profile() {
+                ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
+                ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
+            };
+            let optional_selected = self
                 .state
-                .optional_status_contract
-                .as_ref()
-                .ok_or_else(|| {
-                    ErrorData::internal_error("Optional status contract unavailable.", None)
-                })?;
-            return contract
-                .success(self.state.optional_catalog.status())
-                .map_err(|_| ErrorData::internal_error("Optional status encoding failed.", None));
-        }
-        if let Some(registry) = self.state.optional_catalog.registry_for_tool(name) {
-            return registry
-                .call_tool(
-                    request,
-                    &self.runtime,
-                    &self.state.cursors,
-                    protocol_version,
-                    cancellation,
-                )
-                .await;
-        }
-        let arguments = request.arguments;
-        match request.name.as_ref() {
-            SERVER_STATUS => {
-                let input = decode_arguments::<ServerStatusInput>(arguments)?;
-                Ok(self.discovery().server_status(input, cancellation).await)
+                .optional_catalog
+                .registry_for_tool(name)
+                .is_some()
+                || self.state.optional_catalog.is_read_only_mutation(name)
+                || (name == "optional_toolset_status" && self.state.optional_catalog.is_selected());
+            if !selected_by_profile && !optional_selected {
+                return Err(ErrorData::method_not_found::<CallToolRequestMethod>());
             }
-            SPACE_LIST => {
-                let input = decode_arguments::<SpaceListInput>(arguments)?;
-                Ok(self.discovery().space_list(input, cancellation).await)
+            if request.task.is_some() {
+                return Err(invalid_arguments());
             }
-            TYPE_LIST => {
-                let input = decode_arguments::<TypeListInput>(arguments)?;
-                Ok(self.discovery().type_list(input, cancellation).await)
+            if self.state.optional_catalog.is_read_only_mutation(name) {
+                return Ok(tool_error(&ToolError::read_only()));
             }
-            PROPERTY_LIST => {
-                let input = decode_arguments::<PropertyListInput>(arguments)?;
-                Ok(self.discovery().property_list(input, cancellation).await)
-            }
-            TAG_LIST => {
-                let input = decode_arguments::<TagListInput>(arguments)?;
-                Ok(self.discovery().tag_list(input, cancellation).await)
-            }
-            TEMPLATE_LIST => {
-                let input = decode_arguments::<TemplateListInput>(arguments)?;
-                Ok(self.discovery().template_list(input, cancellation).await)
-            }
-            OBJECT_SEARCH => {
-                let input = decode_arguments::<ObjectSearchInput>(arguments)?;
-                Ok(self
+            if name == "optional_toolset_status" {
+                let _input = decode_arguments::<OptionalToolsetStatusInput>(request.arguments)?;
+                let contract = self
                     .state
-                    .object_read
-                    .object_search(input, cancellation)
+                    .optional_status_contract
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ErrorData::internal_error("Optional status contract unavailable.", None)
+                    })?;
+                return contract
+                    .success(self.state.optional_catalog.status())
+                    .map_err(|_| {
+                        ErrorData::internal_error("Optional status encoding failed.", None)
+                    });
+            }
+            if let Some(registry) = self.state.optional_catalog.registry_for_tool(name) {
+                return registry
+                    .call_tool(
+                        request,
+                        &self.runtime,
+                        &self.state.cursors,
+                        protocol_version,
+                        cancellation,
+                    )
+                    .await;
+            }
+            let arguments = request.arguments;
+            match request.name.as_ref() {
+                SERVER_STATUS => {
+                    let input = decode_arguments::<ServerStatusInput>(arguments)?;
+                    Ok(self.discovery().server_status(input, cancellation).await)
+                }
+                SPACE_LIST => {
+                    let input = decode_arguments::<SpaceListInput>(arguments)?;
+                    Ok(self.discovery().space_list(input, cancellation).await)
+                }
+                TYPE_LIST => {
+                    let input = decode_arguments::<TypeListInput>(arguments)?;
+                    Ok(self.discovery().type_list(input, cancellation).await)
+                }
+                PROPERTY_LIST => {
+                    let input = decode_arguments::<PropertyListInput>(arguments)?;
+                    Ok(self.discovery().property_list(input, cancellation).await)
+                }
+                TAG_LIST => {
+                    let input = decode_arguments::<TagListInput>(arguments)?;
+                    Ok(self.discovery().tag_list(input, cancellation).await)
+                }
+                TEMPLATE_LIST => {
+                    let input = decode_arguments::<TemplateListInput>(arguments)?;
+                    Ok(self.discovery().template_list(input, cancellation).await)
+                }
+                OBJECT_SEARCH => {
+                    let input = decode_arguments::<ObjectSearchInput>(arguments)?;
+                    Ok(self
+                        .state
+                        .object_read
+                        .object_search(input, cancellation)
+                        .await)
+                }
+                OBJECT_GET => {
+                    let input = decode_arguments::<ObjectGetInput>(arguments)?;
+                    Ok(self.state.object_read.object_get(input, cancellation).await)
+                }
+                VIEW_LIST => {
+                    let input = decode_arguments::<ViewListInput>(arguments)?;
+                    Ok(self.state.view_read.view_list(input, cancellation).await)
+                }
+                VIEW_OBJECT_LIST => {
+                    let input = decode_arguments::<ViewObjectListInput>(arguments)?;
+                    Ok(self
+                        .state
+                        .view_read
+                        .view_object_list(input, cancellation)
+                        .await)
+                }
+                OBJECT_CREATE => {
+                    if let Some(error) = self.reject_read_only_mutation() {
+                        return Ok(error);
+                    }
+                    let input = decode_arguments::<ObjectCreateInput>(arguments)?;
+                    Ok(self
+                        .state
+                        .object_create
+                        .object_create(self.state.access, input, cancellation)
+                        .await)
+                }
+                OBJECT_UPDATE => {
+                    if let Some(error) = self.reject_read_only_mutation() {
+                        return Ok(error);
+                    }
+                    let input = decode_arguments::<ObjectUpdateInput>(arguments)?;
+                    Ok(object_update(
+                        &self.runtime,
+                        &self.state.object_update_contract,
+                        self.state.access,
+                        &input,
+                        cancellation,
+                    )
                     .await)
-            }
-            OBJECT_GET => {
-                let input = decode_arguments::<ObjectGetInput>(arguments)?;
-                Ok(self.state.object_read.object_get(input, cancellation).await)
-            }
-            VIEW_LIST => {
-                let input = decode_arguments::<ViewListInput>(arguments)?;
-                Ok(self.state.view_read.view_list(input, cancellation).await)
-            }
-            VIEW_OBJECT_LIST => {
-                let input = decode_arguments::<ViewObjectListInput>(arguments)?;
-                Ok(self
-                    .state
-                    .view_read
-                    .view_object_list(input, cancellation)
+                }
+                OBJECT_EDIT => {
+                    if let Some(error) = self.reject_read_only_mutation() {
+                        return Ok(error);
+                    }
+                    let input = decode_arguments::<ObjectEditInput>(arguments)?;
+                    Ok(object_edit(
+                        &self.runtime,
+                        &self.state.object_edit_contract,
+                        self.state.access,
+                        &input,
+                        cancellation,
+                    )
                     .await)
-            }
-            OBJECT_CREATE => {
-                if let Some(error) = self.reject_read_only_mutation() {
-                    return Ok(error);
                 }
-                let input = decode_arguments::<ObjectCreateInput>(arguments)?;
-                Ok(self
-                    .state
-                    .object_create
-                    .object_create(self.state.access, input, cancellation)
+                OBJECT_ARCHIVE => {
+                    if let Some(error) = self.reject_read_only_mutation() {
+                        return Ok(error);
+                    }
+                    let input = decode_arguments::<ObjectArchiveInput>(arguments)?;
+                    Ok(object_archive(
+                        &self.runtime,
+                        &self.state.object_archive_contract,
+                        self.state.access,
+                        &input,
+                        cancellation,
+                    )
                     .await)
-            }
-            OBJECT_UPDATE => {
-                if let Some(error) = self.reject_read_only_mutation() {
-                    return Ok(error);
                 }
-                let input = decode_arguments::<ObjectUpdateInput>(arguments)?;
-                Ok(object_update(
-                    &self.runtime,
-                    &self.state.object_update_contract,
-                    self.state.access,
-                    &input,
-                    cancellation,
-                )
-                .await)
+                _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
             }
-            OBJECT_EDIT => {
-                if let Some(error) = self.reject_read_only_mutation() {
-                    return Ok(error);
-                }
-                let input = decode_arguments::<ObjectEditInput>(arguments)?;
-                Ok(object_edit(
-                    &self.runtime,
-                    &self.state.object_edit_contract,
-                    self.state.access,
-                    &input,
-                    cancellation,
-                )
-                .await)
-            }
-            OBJECT_ARCHIVE => {
-                if let Some(error) = self.reject_read_only_mutation() {
-                    return Ok(error);
-                }
-                let input = decode_arguments::<ObjectArchiveInput>(arguments)?;
-                Ok(object_archive(
-                    &self.runtime,
-                    &self.state.object_archive_contract,
-                    self.state.access,
-                    &input,
-                    cancellation,
-                )
-                .await)
-            }
-            _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
-        }
+        })
     }
 
     pub(crate) fn list_tools_wire(

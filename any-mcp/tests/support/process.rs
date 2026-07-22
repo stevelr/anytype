@@ -29,6 +29,9 @@ pub const MAX_STDERR_BYTES: usize = 1024 * 1024;
 pub struct ProcessOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// Fixed classification of the child status without numeric or platform detail.
+    #[allow(dead_code)]
+    pub exit_category: &'static str,
 }
 
 /// Bounded output retained when a child exits or times out before responding.
@@ -154,6 +157,7 @@ impl ProtocolProcess {
                 let output = self.shutdown(false, false).unwrap_or(ProcessOutput {
                     stdout: Vec::new(),
                     stderr: Vec::new(),
+                    exit_category: "unknown",
                 });
                 let category = match error {
                     mpsc::RecvTimeoutError::Timeout => "response_timeout",
@@ -188,6 +192,7 @@ impl ProtocolProcess {
     fn shutdown(&mut self, graceful: bool, require_success: bool) -> Result<ProcessOutput, String> {
         drop(self.stdin.take());
         let mut errors = Vec::new();
+        let mut terminated_by_driver = false;
         let status = self.child.take().and_then(|mut child| {
             if graceful {
                 let deadline = Instant::now() + self.deadline;
@@ -196,6 +201,7 @@ impl ProtocolProcess {
                         Ok(Some(status)) => break Some(status),
                         Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
                         Ok(None) => {
+                            terminated_by_driver = true;
                             errors.push("any-mcp did not exit after clean stdin EOF".to_owned());
                             if let Err(error) = child.kill() {
                                 errors.push(format!("kill hung any-mcp child: {error}"));
@@ -226,20 +232,44 @@ impl ProtocolProcess {
                     }
                 }
             } else {
-                if let Err(error) = child.kill() {
-                    errors.push(format!("kill dropped any-mcp child: {error}"));
-                }
-                match child.wait() {
-                    Ok(status) => Some(status),
+                match child.try_wait() {
+                    Ok(Some(status)) => Some(status),
+                    Ok(None) => {
+                        terminated_by_driver = true;
+                        if let Err(error) = child.kill() {
+                            errors.push(format!("kill dropped any-mcp child: {error}"));
+                        }
+                        match child.wait() {
+                            Ok(status) => Some(status),
+                            Err(error) => {
+                                errors.push(format!("wait for dropped any-mcp child: {error}"));
+                                None
+                            }
+                        }
+                    }
                     Err(error) => {
-                        errors.push(format!("wait for dropped any-mcp child: {error}"));
-                        None
+                        errors.push(format!("poll dropped any-mcp child: {error}"));
+                        terminated_by_driver = true;
+                        if let Err(kill_error) = child.kill() {
+                            errors.push(format!(
+                                "kill dropped any-mcp child after poll error: {kill_error}"
+                            ));
+                        }
+                        match child.wait() {
+                            Ok(status) => Some(status),
+                            Err(wait_error) => {
+                                errors.push(format!(
+                                    "wait for dropped any-mcp child after poll error: {wait_error}"
+                                ));
+                                None
+                            }
+                        }
                     }
                 }
             }
         });
         if require_success
-            && let Some(status) = status
+            && let Some(status) = status.as_ref()
             && !status.success()
         {
             errors.push(format!(
@@ -249,8 +279,22 @@ impl ProtocolProcess {
 
         let stdout = join_reader(self.stdout_thread.take(), "stdout", &mut errors);
         let stderr = join_reader(self.stderr_thread.take(), "stderr", &mut errors);
+        let exit_category = if terminated_by_driver {
+            "terminated"
+        } else {
+            match status.as_ref() {
+                Some(status) if status.success() => "success",
+                Some(status) if status.code().is_some() => "exit_code",
+                Some(_) => "signal",
+                None => "unknown",
+            }
+        };
         if errors.is_empty() {
-            Ok(ProcessOutput { stdout, stderr })
+            Ok(ProcessOutput {
+                stdout,
+                stderr,
+                exit_category,
+            })
         } else {
             Err(errors.join("; "))
         }

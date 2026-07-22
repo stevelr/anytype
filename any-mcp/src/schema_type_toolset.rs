@@ -5,9 +5,8 @@
 
 //! Optional schema-toolset workflows for bounded type reads and mutations.
 //!
-//! This module exports a complete, reviewed type slice without linking the
-//! incomplete `schema` registry into production. Terminal schema integration
-//! composes it with the independently landed space, property, and tag slices.
+//! The production `schema` descriptor composes this reviewed slice with the
+//! space, property, and tag slices.
 
 use std::{
     borrow::Cow,
@@ -49,7 +48,7 @@ use crate::{
         HandlerError, HandlerOperationError, MutationAccess, MutationProgress, MutationStage,
         execute_mutation_handler, execute_prepared_handler, require_mutation_access,
     },
-    optional_toolsets::OptionalRegistryTool,
+    optional_toolsets::{OptionalRegistryFuture, OptionalRegistryTool},
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
@@ -630,7 +629,7 @@ pub fn type_update_tool() -> Result<WorkflowTool<TypeOutput>, SchemaContractErro
     )
 }
 
-/// Returns the complete schema-type slice for later registry composition.
+/// Returns the complete schema-type slice for registry composition.
 pub fn schema_type_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
         OptionalRegistryTool::read(type_get_tool()?),
@@ -691,34 +690,45 @@ impl SchemaTypeHandlers {
     }
 
     /// Dispatches one schema-type tool after the caller's catalog gate.
-    pub async fn call_tool(
-        &self,
+    pub fn call_tool<'a>(
+        &'a self,
         request: CallToolRequestParams,
-        runtime: &RuntimeContext,
-        cancellation: &CancellationToken,
-    ) -> Result<CallToolResult, ErrorData> {
-        if runtime.is_read_only() && matches!(request.name.as_ref(), TYPE_CREATE | TYPE_UPDATE) {
-            return Ok(tool_error(&ToolError::validation()));
-        }
-        match request.name.as_ref() {
-            TYPE_GET => {
-                let input = decode_arguments::<TypeGetInput>(request.arguments)?;
-                Ok(self.type_get(runtime, input, cancellation).await)
+        runtime: &'a RuntimeContext,
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        Box::pin(async move {
+            if runtime.is_read_only() && matches!(request.name.as_ref(), TYPE_CREATE | TYPE_UPDATE)
+            {
+                return Ok(tool_error(&ToolError::validation()));
             }
-            TYPE_CREATE => {
-                let input = decode_arguments::<TypeCreateInput>(request.arguments)?;
-                Ok(self
-                    .type_create(runtime, MutationAccess::Allowed, input, cancellation)
+            match request.name.as_ref() {
+                TYPE_GET => {
+                    let input = decode_arguments::<TypeGetInput>(request.arguments)?;
+                    Ok(Box::pin(self.type_get(runtime, input, cancellation)).await)
+                }
+                TYPE_CREATE => {
+                    let input = decode_arguments::<TypeCreateInput>(request.arguments)?;
+                    Ok(Box::pin(self.type_create(
+                        runtime,
+                        MutationAccess::Allowed,
+                        input,
+                        cancellation,
+                    ))
                     .await)
-            }
-            TYPE_UPDATE => {
-                let input = decode_arguments::<TypeUpdateInput>(request.arguments)?;
-                Ok(self
-                    .type_update(runtime, MutationAccess::Allowed, input, cancellation)
+                }
+                TYPE_UPDATE => {
+                    let input = decode_arguments::<TypeUpdateInput>(request.arguments)?;
+                    Ok(Box::pin(self.type_update(
+                        runtime,
+                        MutationAccess::Allowed,
+                        input,
+                        cancellation,
+                    ))
                     .await)
+                }
+                _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
             }
-            _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
-        }
+        })
     }
 
     async fn type_get(
@@ -749,201 +759,205 @@ impl SchemaTypeHandlers {
         .await
     }
 
-    async fn type_create(
-        &self,
-        runtime: &RuntimeContext,
+    fn type_create<'a>(
+        &'a self,
+        runtime: &'a RuntimeContext,
         access: MutationAccess,
         input: TypeCreateInput,
-        cancellation: &CancellationToken,
-    ) -> CallToolResult {
-        if let Err(error) = require_mutation_access(access) {
-            return tool_error(error.tool_error());
-        }
-        let normalized = NormalizedTypeCreate::from(input);
-        let Some(key) = normalized.idempotency_key.clone() else {
-            let progress = MutationProgress::new();
-            return execute_type_create(
-                runtime,
-                &self.create_contract,
-                normalized,
-                cancellation,
-                &progress,
-                &self.verify_config,
-                self.create_observer.clone(),
-            )
-            .await
-            .result;
-        };
-
-        let fingerprint = normalized.fingerprint();
-        match self.idempotency.begin(key.clone(), fingerprint).await {
-            BeginAttempt::Cached(result) => result,
-            BeginAttempt::Indeterminate => tool_error(&ToolError::mutation_indeterminate()),
-            BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
-            BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
-            BeginAttempt::Expired => tool_error(&ToolError::upstream()),
-            BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
-            BeginAttempt::Lead(attempt) => {
-                let supervision = TypeCreateSupervision {
-                    runtime: runtime.clone(),
-                    contract: self.create_contract.clone(),
-                    store: self.idempotency.clone(),
-                    key,
-                    attempt: attempt.clone(),
-                    normalized,
-                    verify_config: self.verify_config.clone(),
-                    observer: self.create_observer.clone(),
-                };
-                tokio::spawn(async move { supervise_type_create(supervision).await });
-                wait_for_attempt(attempt, cancellation).await
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, CallToolResult> {
+        Box::pin(async move {
+            if let Err(error) = require_mutation_access(access) {
+                return tool_error(error.tool_error());
             }
-        }
+            let normalized = NormalizedTypeCreate::from(input);
+            let Some(key) = normalized.idempotency_key.clone() else {
+                let progress = MutationProgress::new();
+                return Box::pin(execute_type_create(
+                    runtime,
+                    &self.create_contract,
+                    normalized,
+                    cancellation,
+                    &progress,
+                    &self.verify_config,
+                    self.create_observer.clone(),
+                ))
+                .await
+                .result;
+            };
+
+            let fingerprint = normalized.fingerprint();
+            match self.idempotency.begin(key.clone(), fingerprint).await {
+                BeginAttempt::Cached(result) => result,
+                BeginAttempt::Indeterminate => tool_error(&ToolError::mutation_indeterminate()),
+                BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
+                BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
+                BeginAttempt::Expired => tool_error(&ToolError::upstream()),
+                BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
+                BeginAttempt::Lead(attempt) => {
+                    let supervision = TypeCreateSupervision {
+                        runtime: runtime.clone(),
+                        contract: self.create_contract.clone(),
+                        store: self.idempotency.clone(),
+                        key,
+                        attempt: attempt.clone(),
+                        normalized,
+                        verify_config: self.verify_config.clone(),
+                        observer: self.create_observer.clone(),
+                    };
+                    tokio::spawn(async move { supervise_type_create(supervision).await });
+                    wait_for_attempt(attempt, cancellation).await
+                }
+            }
+        })
     }
 
-    async fn type_update(
-        &self,
-        runtime: &RuntimeContext,
+    fn type_update<'a>(
+        &'a self,
+        runtime: &'a RuntimeContext,
         access: MutationAccess,
         input: TypeUpdateInput,
-        cancellation: &CancellationToken,
-    ) -> CallToolResult {
-        if let Err(error) = require_mutation_access(access) {
-            return tool_error(error.tool_error());
-        }
-        if !input.has_mutation() {
-            return tool_error(&ToolError::validation());
-        }
+        cancellation: &'a CancellationToken,
+    ) -> OptionalRegistryFuture<'a, CallToolResult> {
+        Box::pin(async move {
+            if let Err(error) = require_mutation_access(access) {
+                return tool_error(error.tool_error());
+            }
+            if !input.has_mutation() {
+                return tool_error(&ToolError::validation());
+            }
 
-        let client = runtime.client().clone();
-        let verify_config = self.verify_config.clone();
-        let progress = MutationProgress::new();
-        let operation_progress = progress.clone();
-        let operation_cancellation = cancellation.clone();
-        let before_patch = self.before_patch.clone();
-        execute_mutation_handler(
-            runtime,
-            &self.update_contract,
-            OperationContext::new(TYPE_UPDATE),
-            cancellation,
-            &progress,
-            async move {
-                let (space_id, type_id) =
-                    resolve_type(&client, &input.space, &input.type_ref).await?;
-                let current = client
-                    .get_type(space_id.as_str(), type_id.as_str())
-                    .get_direct()
-                    .await?;
-                checked_type_summary(&current, Some(&type_id))
-                    .map_err(HandlerOperationError::from)?;
-
-                let baseline = if input.recommended_properties.is_none() {
-                    None
-                } else {
-                    let classification = client
+            let client = runtime.client().clone();
+            let verify_config = self.verify_config.clone();
+            let progress = MutationProgress::new();
+            let operation_progress = progress.clone();
+            let operation_cancellation = cancellation.clone();
+            let before_patch = self.before_patch.clone();
+            execute_mutation_handler(
+                runtime,
+                &self.update_contract,
+                OperationContext::new(TYPE_UPDATE),
+                cancellation,
+                &progress,
+                Box::pin(async move {
+                    let (space_id, type_id) =
+                        resolve_type(&client, &input.space, &input.type_ref).await?;
+                    let current = client
                         .get_type(space_id.as_str(), type_id.as_str())
-                        .classify_properties_with_deadline(MAX_TYPE_PROPERTY_RPC_TIMEOUT)
+                        .get_direct()
                         .await?;
-                    Some(
-                        checked_classification(&classification)
-                            .map_err(classification_preflight)?,
-                    )
-                };
+                    checked_type_summary(&current, Some(&type_id))
+                        .map_err(HandlerOperationError::from)?;
 
-                if operation_cancellation.is_cancelled() {
-                    return Err(HandlerError::new(ToolError::upstream()).into());
-                }
-                if update_already_satisfied(&current, &type_id, &input, baseline.as_ref()) {
-                    return checked_type_summary(&current, Some(&type_id))
-                        .map(TypeOutput::from)
-                        .map_err(HandlerOperationError::from);
-                }
+                    let baseline = if input.recommended_properties.is_none() {
+                        None
+                    } else {
+                        let classification = client
+                            .get_type(space_id.as_str(), type_id.as_str())
+                            .classify_properties_with_deadline(MAX_TYPE_PROPERTY_RPC_TIMEOUT)
+                            .await?;
+                        Some(
+                            checked_classification(&classification)
+                                .map_err(classification_preflight)?,
+                        )
+                    };
 
-                let mut request = client
-                    .update_type(space_id.as_str(), type_id.as_str())
-                    .no_verify();
-                if let Some(name) = input.name.as_ref() {
-                    request = request.name(name.as_str());
-                }
-                if let Some(key) = input.key.as_ref() {
-                    request = request.key(key.as_str());
-                }
-                if let Some(plural_name) = input.plural_name.as_ref() {
-                    request = request.plural_name(plural_name.as_str());
-                }
-                if let Some(layout) = input.layout.as_ref() {
-                    request = request.layout((*layout).into());
-                }
-                if let Some(properties) = input.recommended_properties.as_ref() {
-                    request = request.properties(properties.0.iter().map(PropertySpec::to_api));
-                }
-
-                if let Some(hook) = before_patch {
-                    hook(&operation_cancellation);
-                }
-                if operation_cancellation.is_cancelled() {
-                    return Err(HandlerError::new(ToolError::upstream()).into());
-                }
-                operation_progress.mark_dispatched();
-                let response_anomaly = match request.update().await {
-                    Ok(returned) => !type_matches_update_metadata(&returned, &type_id, &input),
-                    Err(error) if type_patch_rejection_is_definitive(&error) => {
-                        return Err(error.into());
+                    if operation_cancellation.is_cancelled() {
+                        return Err(HandlerError::new(ToolError::upstream()).into());
                     }
-                    Err(_) => true,
-                };
+                    if update_already_satisfied(&current, &type_id, &input, baseline.as_ref()) {
+                        return checked_type_summary(&current, Some(&type_id))
+                            .map(TypeOutput::from)
+                            .map_err(HandlerOperationError::from);
+                    }
 
-                let verify_client = client.clone();
-                let verify_space_id = space_id.as_str().to_owned();
-                let verify_type_id = type_id.as_str().to_owned();
-                let verify_recommendations = baseline.is_some();
-                let verified = verify_semantic_with_remaining(
-                    &verify_config,
-                    "type",
-                    type_id.as_str(),
-                    move |remaining| {
-                        let client = verify_client.clone();
-                        let space_id = verify_space_id.clone();
-                        let type_id = verify_type_id.clone();
-                        async move {
-                            let typ = client.get_type(&space_id, &type_id).get_direct().await?;
-                            let classification = if verify_recommendations {
-                                let timeout = remaining.min(MAX_TYPE_PROPERTY_RPC_TIMEOUT);
-                                let raw = client
-                                    .get_type(&space_id, &type_id)
-                                    .classify_properties_with_deadline(timeout)
-                                    .await?;
-                                Some(checked_classification(&raw).map_err(|_| {
-                                    AnytypeError::Other {
-                                        message: "type verification classification was invalid"
-                                            .to_owned(),
-                                    }
-                                })?)
-                            } else {
-                                None
-                            };
-                            Ok(TypeEvidence {
-                                typ,
-                                classification,
-                            })
+                    let mut request = client
+                        .update_type(space_id.as_str(), type_id.as_str())
+                        .no_verify();
+                    if let Some(name) = input.name.as_ref() {
+                        request = request.name(name.as_str());
+                    }
+                    if let Some(key) = input.key.as_ref() {
+                        request = request.key(key.as_str());
+                    }
+                    if let Some(plural_name) = input.plural_name.as_ref() {
+                        request = request.plural_name(plural_name.as_str());
+                    }
+                    if let Some(layout) = input.layout.as_ref() {
+                        request = request.layout((*layout).into());
+                    }
+                    if let Some(properties) = input.recommended_properties.as_ref() {
+                        request = request.properties(properties.0.iter().map(PropertySpec::to_api));
+                    }
+
+                    if let Some(hook) = before_patch {
+                        hook(&operation_cancellation);
+                    }
+                    if operation_cancellation.is_cancelled() {
+                        return Err(HandlerError::new(ToolError::upstream()).into());
+                    }
+                    operation_progress.mark_dispatched();
+                    let response_anomaly = match request.update().await {
+                        Ok(returned) => !type_matches_update_metadata(&returned, &type_id, &input),
+                        Err(error) if type_patch_rejection_is_definitive(&error) => {
+                            return Err(error.into());
                         }
-                    },
-                    |evidence| {
-                        evidence_matches_update(evidence, &type_id, &input, baseline.as_ref())
-                    },
-                )
-                .await
-                .map_err(|_| indeterminate_operation())?;
+                        Err(_) => true,
+                    };
 
-                if response_anomaly {
-                    return Err(indeterminate_operation());
-                }
-                checked_type_summary(&verified.typ, Some(&type_id))
-                    .map(TypeOutput::from)
-                    .map_err(|_| indeterminate_operation())
-            },
-            |output| async move { Ok(output) },
-        )
-        .await
+                    let verify_client = client.clone();
+                    let verify_space_id = space_id.as_str().to_owned();
+                    let verify_type_id = type_id.as_str().to_owned();
+                    let verify_recommendations = baseline.is_some();
+                    let verified = verify_semantic_with_remaining(
+                        &verify_config,
+                        "type",
+                        type_id.as_str(),
+                        move |remaining| {
+                            let client = verify_client.clone();
+                            let space_id = verify_space_id.clone();
+                            let type_id = verify_type_id.clone();
+                            async move {
+                                let typ = client.get_type(&space_id, &type_id).get_direct().await?;
+                                let classification = if verify_recommendations {
+                                    let timeout = remaining.min(MAX_TYPE_PROPERTY_RPC_TIMEOUT);
+                                    let raw = client
+                                        .get_type(&space_id, &type_id)
+                                        .classify_properties_with_deadline(timeout)
+                                        .await?;
+                                    Some(checked_classification(&raw).map_err(|_| {
+                                        AnytypeError::Other {
+                                            message: "type verification classification was invalid"
+                                                .to_owned(),
+                                        }
+                                    })?)
+                                } else {
+                                    None
+                                };
+                                Ok(TypeEvidence {
+                                    typ,
+                                    classification,
+                                })
+                            }
+                        },
+                        |evidence| {
+                            evidence_matches_update(evidence, &type_id, &input, baseline.as_ref())
+                        },
+                    )
+                    .await
+                    .map_err(|_| indeterminate_operation())?;
+
+                    if response_anomaly {
+                        return Err(indeterminate_operation());
+                    }
+                    checked_type_summary(&verified.typ, Some(&type_id))
+                        .map(TypeOutput::from)
+                        .map_err(|_| indeterminate_operation())
+                }),
+                |output| Box::pin(async move { Ok(output) }),
+            )
+            .await
+        })
     }
 }
 
@@ -1072,7 +1086,7 @@ async fn execute_type_create(
         OperationContext::new(TYPE_CREATE),
         cancellation,
         progress,
-        async move {
+        Box::pin(async move {
             let resolved = client.resolve_space_id(input.space.as_str()).await?;
             let space_id = EntityId::new(resolved).map_err(unsafe_upstream)?;
             let mut request = client
@@ -1118,8 +1132,8 @@ async fn execute_type_create(
             checked_type_summary(&verified, Some(&id))
                 .map(TypeOutput::from)
                 .map_err(|_| indeterminate_operation())
-        },
-        |output| async move { Ok(output) },
+        }),
+        |output| Box::pin(async move { Ok(output) }),
     )
     .await;
     let disposition = if result.is_error == Some(false) {
@@ -3112,12 +3126,18 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_does_not_link_partial_schema_slice() {
+    fn production_registry_links_one_complete_schema_descriptor() {
         let names = crate::optional_toolsets::production_optional_registries()
             .iter()
             .map(|registry| registry.metadata().name.to_owned())
             .collect::<Vec<_>>();
-        assert!(!names.iter().any(|name| name == "schema"));
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "schema")
+                .count(),
+            1
+        );
     }
 
     #[test]

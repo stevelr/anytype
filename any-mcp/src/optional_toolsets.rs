@@ -31,6 +31,7 @@ use crate::{
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     runtime::RuntimeContext,
     schema::SchemaContractError,
+    schema_toolset::SCHEMA_REGISTRY,
 };
 
 /// Environment variable selecting optional production registries.
@@ -332,8 +333,8 @@ pub fn production_optional_registries() -> &'static [&'static dyn OptionalToolse
     &PRODUCTION_OPTIONAL_REGISTRIES
 }
 
-static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 2] =
-    [MEMBERS_REGISTRY, &FILE_CONTENT_REGISTRY];
+static PRODUCTION_OPTIONAL_REGISTRIES: [&dyn OptionalToolsetRegistry; 3] =
+    [MEMBERS_REGISTRY, &FILE_CONTENT_REGISTRY, SCHEMA_REGISTRY];
 
 /// Returns immutable production metadata without building schemas or clients.
 #[must_use]
