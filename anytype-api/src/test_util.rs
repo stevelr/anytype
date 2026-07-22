@@ -265,6 +265,8 @@ pub enum DisposableFailureCategory {
     BodyGraph,
     /// Body mutation outcome was indeterminate.
     BodyMutationIndeterminate,
+    /// Bounded body RPC lifecycle failed.
+    BodyRpcLifecycle,
     /// Collection membership evidence was incomplete.
     CollectionMembershipEvidence,
     /// Type-property classification failed.
@@ -382,6 +384,7 @@ closed_diagnostic_display!(DisposableFailureCategory, {
     DisposableFailureCategory::CacheDisabled => "cache_disabled",
     DisposableFailureCategory::BodyGraph => "body_graph",
     DisposableFailureCategory::BodyMutationIndeterminate => "body_mutation_indeterminate",
+    DisposableFailureCategory::BodyRpcLifecycle => "body_rpc_lifecycle",
     DisposableFailureCategory::CollectionMembershipEvidence => "collection_membership_evidence",
     DisposableFailureCategory::TypePropertyClassification => "type_property_classification",
     DisposableFailureCategory::AttachedDiscussion => "attached_discussion",
