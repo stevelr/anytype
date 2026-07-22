@@ -120,7 +120,7 @@ where
     writer.flush().await.map_err(|_| ServeError::StdioTransport)
 }
 
-async fn serve_preview<R, W>(
+pub(crate) async fn serve_preview<R, W>(
     server: AnyMcpServer,
     mut reader: R,
     writer: W,

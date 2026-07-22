@@ -507,6 +507,13 @@ table creation proves the canonical ordered columns/rows layout regions,
 direct column and row membership, dimensions, and exact first-row header state;
 aggregate descendant counts are never accepted as table evidence.
 
+## Cache-independent Space Reads
+
+Use `client.space(space_id).get_direct()` when an exact mutation preflight or
+read-after-write check must bypass the process space cache. It performs one
+scoped REST GET, rejects a response carrying a different space ID, and returns
+the exact result without reading or priming the cache.
+
 ## Type Property Classification (REST + gRPC)
 
 `Type.properties` is the REST server's flattened visible list: featured

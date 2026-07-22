@@ -55,6 +55,7 @@
 //! protocol compatibility, token baselines, and operational guidance.
 
 pub mod config;
+mod create_idempotency;
 pub mod cursor;
 pub mod discovery;
 pub mod domain;
@@ -79,6 +80,7 @@ pub mod resources;
 pub mod result;
 pub mod runtime;
 pub mod schema;
+pub mod schema_space_toolset;
 pub mod server;
 mod stdio;
 pub mod validation;

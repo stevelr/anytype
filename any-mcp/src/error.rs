@@ -183,6 +183,9 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::InvalidFileResponseHeader { .. }
         | AnytypeError::ChatSseEventTooLarge { .. }
         | AnytypeError::ChatSseTransport { .. }
+        | AnytypeError::ChatTimestamp { .. }
+        | AnytypeError::ChatHistoryEvidence { .. }
+        | AnytypeError::ChatEditTimestampNotAdvanced
         | AnytypeError::TooManyRetries { .. }
         | AnytypeError::Deserialization { .. }
         | AnytypeError::BodyGraph { .. }
@@ -340,6 +343,9 @@ impl ToolError {
             AnytypeError::Http { .. }
             | AnytypeError::InvalidFileResponseHeader { .. }
             | AnytypeError::ChatSseTransport { .. }
+            | AnytypeError::ChatTimestamp { .. }
+            | AnytypeError::ChatHistoryEvidence { .. }
+            | AnytypeError::ChatEditTimestampNotAdvanced
             | AnytypeError::ApiError { .. }
             | AnytypeError::TooManyRetries { .. }
             | AnytypeError::Deserialization { .. }

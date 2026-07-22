@@ -577,6 +577,11 @@ impl UpstreamDiagnostic {
             },
             AnytypeError::ChatSseEventTooLarge { .. } => Self::new("chat_sse_event_too_large"),
             AnytypeError::ChatSseTransport { .. } => Self::new("chat_sse_transport"),
+            AnytypeError::ChatTimestamp { .. } => Self::new("chat_timestamp"),
+            AnytypeError::ChatHistoryEvidence { .. } => Self::new("chat_history_evidence"),
+            AnytypeError::ChatEditTimestampNotAdvanced => {
+                Self::new("chat_edit_timestamp_not_advanced")
+            }
             AnytypeError::RateLimitExceeded { .. } => Self::new("rate_limit"),
             AnytypeError::Validation { .. } => Self::new("validation"),
             AnytypeError::NoKeyStore | AnytypeError::KeyStore { .. } => Self::new("keystore"),

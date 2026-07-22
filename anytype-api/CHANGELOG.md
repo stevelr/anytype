@@ -29,6 +29,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   independent exact readback whose `modified_at` strictly advances. Scripted
   transport and prefix-authorized disposable-server coverage lock routes,
   terminal pagination, insertion stability, typed failures, and cleanup.
+- Add a cache-independent exact space GET for bounded mutation preflight and
+  semantic readback, plus an opaque disposable-test claim that safely registers
+  a space created through another reviewed client surface immediately after
+  its exact response is returned.
 - Add a bounded direct collection-membership observation that exact-checks
   space, collection, and object identity, rejects Set/query lists, and combines
   a canonical collection-scoped Heart query with independent unscoped index

@@ -168,7 +168,14 @@ fn validate_definitions(schema: &JsonObject, root: &serde_json::Value) -> bool {
 fn validate_object_schema(schema: &JsonObject, root: &serde_json::Value) -> bool {
     if !has_only_keywords(
         schema,
-        &["type", "properties", "required", "additionalProperties"],
+        &[
+            "type",
+            "properties",
+            "required",
+            "additionalProperties",
+            "minProperties",
+            "maxProperties",
+        ],
     ) {
         return false;
     }
@@ -187,7 +194,28 @@ fn validate_object_schema(schema: &JsonObject, root: &serde_json::Value) -> bool
         }),
         Some(_) => false,
     };
-    properties_are_strict && validate_required_properties(schema)
+    let property_count = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map_or(0, serde_json::Map::len) as u64;
+    let minimum = match schema.get("minProperties") {
+        Some(value) => match value.as_u64() {
+            Some(value) => value,
+            None => return false,
+        },
+        None => 0,
+    };
+    let maximum = match schema.get("maxProperties") {
+        Some(value) => match value.as_u64() {
+            Some(value) => value,
+            None => return false,
+        },
+        None => property_count,
+    };
+    properties_are_strict
+        && minimum <= maximum
+        && maximum <= property_count
+        && validate_required_properties(schema)
 }
 
 fn validate_array_schema(schema: &JsonObject, root: &serde_json::Value) -> bool {
@@ -962,5 +990,32 @@ mod tests {
             &mismatched_properties,
             &mismatched_properties
         ));
+    }
+
+    #[test]
+    fn object_property_count_constraints_fail_closed() {
+        let valid = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "value": {
+                    "type": "string",
+                    "maxLength": 8,
+                    "description": "Bounded value."
+                }
+            },
+            "minProperties": 1,
+            "maxProperties": 1,
+            "required": ["value"]
+        });
+        assert!(strict_wire_schema(&valid, &valid));
+        for malformed in [json!("1"), json!(1.5), json!(-1), json!(null)] {
+            let mut schema = valid.clone();
+            schema["minProperties"] = malformed.clone();
+            assert!(!strict_wire_schema(&schema, &schema));
+            let mut schema = valid.clone();
+            schema["maxProperties"] = malformed;
+            assert!(!strict_wire_schema(&schema, &schema));
+        }
     }
 }

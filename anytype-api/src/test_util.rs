@@ -1208,6 +1208,50 @@ impl TestContext {
         Ok(created)
     }
 
+    /// Prepares cleanup ownership evidence for a space created through another
+    /// reviewed client surface.
+    ///
+    /// Call [`Self::claim_prepared_space_fixture`] synchronously with the exact
+    /// create response immediately after that surface returns. Preparation
+    /// records the generated non-secret name before dispatch and captures a
+    /// complete bounded inventory, so a forged or pre-existing identity can
+    /// never become deletion-authorized.
+    #[doc(hidden)]
+    pub async fn prepare_space_fixture_claim(
+        &self,
+        name: impl Into<String>,
+    ) -> TestResult<PreparedSpaceFixtureClaim> {
+        let expected_name = name.into();
+        validate_space_fixture_name(&self.client.config.limits, &expected_name, "test space")?;
+        let preexisting = complete_space_inventory(&self.client).await?;
+        record_space_create_intent(&expected_name);
+        Ok(PreparedSpaceFixtureClaim {
+            expected_name,
+            preexisting,
+        })
+    }
+
+    /// Claims a just-returned external space response for guarded teardown.
+    ///
+    /// The claim is rejected unless the identity is a new regular space with
+    /// the exact prepared name. Successful registration occurs before this
+    /// method returns.
+    #[doc(hidden)]
+    pub fn claim_prepared_space_fixture(
+        &self,
+        claim: &PreparedSpaceFixtureClaim,
+        returned: &Space,
+    ) -> TestResult<()> {
+        validate_and_register_owned_space_fixture(
+            &self.cleanup,
+            &self.client.config.limits,
+            &self.space_id,
+            &claim.preexisting,
+            &claim.expected_name,
+            returned,
+        )
+    }
+
     /// Creates a custom type and cleanup-owned templates from new source objects.
     ///
     /// The custom type and every source object use the authenticated REST API
@@ -3783,6 +3827,14 @@ struct SpaceInventoryIdentity {
 #[derive(Debug)]
 struct CompleteSpaceInventory {
     by_id: BTreeMap<String, SpaceInventoryIdentity>,
+}
+
+/// Opaque pre-dispatch proof used to register an externally created test space.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct PreparedSpaceFixtureClaim {
+    expected_name: String,
+    preexisting: CompleteSpaceInventory,
 }
 
 async fn complete_space_inventory(client: &AnytypeClient) -> TestResult<CompleteSpaceInventory> {
