@@ -850,7 +850,7 @@ fn convert_message_summary(
     })
 }
 
-fn convert_message_detail(
+pub(crate) fn convert_message_detail(
     message: &ChatMessage,
     chat_id: &str,
 ) -> Result<MessageDetail, HandlerError> {
@@ -870,6 +870,19 @@ fn convert_message_detail(
         rest_attachment_count: common.rest_attachment_count,
         structured_blocks_observable: false,
     })
+}
+
+/// Validates exact reply-target evidence without projecting its unreturned text.
+pub(crate) fn validate_message_reference(
+    message: &ChatMessage,
+    chat_id: &str,
+    expected_message_id: &str,
+) -> Result<(), HandlerError> {
+    if message.id != expected_message_id {
+        return Err(HandlerError::new(ToolError::upstream()));
+    }
+    convert_message_common(message, chat_id)?;
+    Ok(())
 }
 
 struct CommonMessage {
@@ -960,7 +973,7 @@ fn truncate_text(value: &str, limit: usize) -> Result<(String, bool, u32), Handl
     Ok((prefix, count > limit, scalar_count))
 }
 
-fn bounded_output<T: Serialize>(value: T, limit: usize) -> Result<T, HandlerError> {
+pub(crate) fn bounded_output<T: Serialize>(value: T, limit: usize) -> Result<T, HandlerError> {
     let bytes = serde_json::to_vec(&value).map_err(|_| HandlerError::new(ToolError::upstream()))?;
     if bytes.len() > limit {
         Err(HandlerError::new(ToolError::bounded_result()))

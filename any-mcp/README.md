@@ -429,10 +429,11 @@ and stdio scenarios assert the same cursor-mismatch and read-only outcomes.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
 
-The production-unlinked `chats` read slice implements `chat_list`,
-`chat_message_list`, `chat_message_get`, and `chat_message_search` for later
-composition with the separately tracked add/delete workflows. It uses REST
-through `anytype-api` only. Chat lists default to 10 and cap at 20; message
+The production-unlinked `chats` slices implement `chat_list`,
+`chat_message_list`, `chat_message_get`, `chat_message_search`, and
+`chat_message_add` for later composition with the separately tracked delete
+workflow. They use REST through `anytype-api` only. Chat lists default to 10
+and cap at 20; message
 lists and searches default to 8 and cap at 12. Older-history cursors keep one
 validated opaque server anchor and a one-based page number only in the bounded
 process-local cursor registry, never in MCP output or diagnostics, and stop at
@@ -468,6 +469,34 @@ Selecting it alongside `chats` lets the returned ID feed the existing bounded
 message tools without changing their schemas, cursors, or catalog snapshots.
 Production linkage remains blocked on the typed `anytype-api` read primitive
 and independent design review.
+
+`chat_message_add` accepts exact plain paragraph text from 1 through 8,192
+Unicode scalar values, a required process-local idempotency key, and an
+optional exact reply target. A new key may perform one reply preflight GET,
+exactly one non-replayed POST, and one exact assigned-ID GET. Initial success
+requires the requested text, paragraph/no-mark/no-attachment shape, and reply
+identity. Identical concurrent calls share that leader result; reuse with
+different resolved scope, chat, text, or reply conflicts before domain I/O.
+After verified success, later replay never sends another POST and instead
+returns one freshly validated exact GET, so independent changes to message
+content or presentation are visible and do not defeat duplicate control.
+Definitive POST rejection and uncertainty before Anytype returns a valid
+assigned ID are terminal for that key during the process. After a valid ID is
+returned, the process retains that candidate before verification. Initial
+verification may therefore return an ordinary not-found,
+authentication/permission, bounded-result, or upstream GET error; every later
+identical retry performs only a fresh exact GET for the retained ID and never
+another POST. Reply preflight validates exact scoped
+identity and timestamps but does not apply the returned-detail text ceiling to
+the unreturned target. Resolution, admission, detached leader work, and
+verification share one absolute invocation deadline; a waiter observes the
+earlier of its own and the leader's deadline. The fixed catalog/result
+snapshot keeps the actual tool at or below its reviewed 2,000-token ceiling.
+Deterministic process tests drive real stdio frames through a test-owned child
+composing this exact reviewed registry and separately prove that the shipped
+production composition continues to reject the unlinked tool.
+The slice exposes no edit, attachment, rich
+block, reaction, read-state, pin-state, streaming, or gRPC capability.
 
 The production-unlinked schema-property slice implements `property_create`
 and `property_update` through `anytype-api` only. Create accepts every closed

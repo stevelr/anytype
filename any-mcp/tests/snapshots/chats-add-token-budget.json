@@ -1,0 +1,15 @@
+{
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)",
+  "catalog_ceiling_tokens": 2000,
+  "catalog": {
+    "tools": ["chat_message_add"],
+    "sha256": "ae10a1256860b809c5947d3a247014604953cce76abb15134407c17e094bf3a9",
+    "tokens": 1152
+  },
+  "maximum_result": {
+    "sha256": "81f9255667530e97637373d3833e3ec08dd1f75bc7b444de7f4ba3f7f97c6230",
+    "structured_bytes": 16856,
+    "encoded_result_tokens": 20842,
+    "ceiling_bytes": 49152
+  }
+}
