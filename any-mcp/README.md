@@ -179,6 +179,11 @@ or tighter memory limits should lower `ANY_MCP_DOCUMENT_RESPONSE_BYTES` and/or
 `ANY_MCP_MAX_CONCURRENCY`; oversized documents then fail explicitly with
 `bounded_result`.
 
+The shipped server gives each Tokio worker an explicit 8 MiB stack. This
+finite cross-platform setting keeps the aggregate typed dispatcher reliable in
+debug and production builds. It raises reserved virtual address space per
+worker; physical commitment remains operating-system dependent.
+
 Every workflow handler uses the runtime execution seam, which includes permit
 wait in its timeout and observes request cancellation. The client
 is shared without a mutex held across upstream awaits. Closing stdin cleanly
@@ -500,6 +505,21 @@ permission acceptance. Genuine direct-router and spawned-stdio HTTP 403
 coverage remains blocked until a disposable non-owner collection with owner
 cleanup is available; the persistent read-only fixture is never mutated and
 invalid credentials are not used as a permission substitute.
+
+A second shared disposable scenario covers representative layouts without
+adding a Kanban-specific MCP surface. It verifies Basic and Collection type
+layouts, Grid and Kanban saved views, filtered view pagination, and ordinary
+Select-property column movement through `object_update`. The same direct,
+shipped stable-stdio, and shipped preview-stdio workflow removes and re-adds a
+card through the generic collection-member tools, walks canonical membership
+with `limit: 1`, and independently confirms that saved-view visibility never
+changes direct membership. The shipped server's explicit finite worker stack
+keeps filtered layout inventory reliable. Each shipped child uses the
+disposable environment and a registered stop-and-wait action that completes
+before fixture or space cleanup. All fixtures are cleanup-owned; `test12` is
+not mutated, and deterministic fault cases remain deferred to the P4
+fault-injection design.
+
 An earlier live mutation run was blocked before the scenario callback when
 disposable-space creation applied but its response did not complete; both
 ledger-named spaces were removed and absence proved. A later run entered the

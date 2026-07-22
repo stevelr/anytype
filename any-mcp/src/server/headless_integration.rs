@@ -42,7 +42,7 @@ mod live_scenario;
 
 use live_scenario::{
     ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId, run_chats_registry_scenario,
-    run_scenario,
+    run_live_scenario_on_large_stack, run_representative_layout_scenario, run_scenario,
 };
 
 fn arguments(value: Value) -> JsonObject {
@@ -129,6 +129,35 @@ async fn live_chats_server(ctx: &TestContext) -> AnyMcpServer {
         selected,
     );
     AnyMcpServer::new(runtime).expect("production chats MCP catalog")
+}
+
+async fn live_views_write_server(ctx: &TestContext) -> AnyMcpServer {
+    ctx.client
+        .ping_http()
+        .await
+        .expect("layout suite requires authenticated HTTP");
+    ctx.client
+        .ping_grpc()
+        .await
+        .expect("layout suite requires authenticated gRPC");
+    let selected = OptionalToolsetSelection::parse(
+        Some("views-write".to_owned()),
+        &production_optional_metadata(),
+    )
+    .expect("complete views-write registry");
+    let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+        ctx.client.clone(),
+        2,
+        Duration::from_secs(30),
+        StartupStatus {
+            http_available: true,
+            grpc_available: true,
+        },
+        ApplicationProfile::Standard,
+        false,
+        selected,
+    );
+    AnyMcpServer::new(runtime).expect("production views-write MCP catalog")
 }
 
 async fn call(server: &AnyMcpServer, name: &'static str, value: Value) -> CallToolResult {
@@ -2218,6 +2247,42 @@ async fn headless_direct_chats_registry_runs_all_six_workflows() {
     if let DisposableRun::Skipped(reason) = outcome {
         eprintln!("direct chats registry acceptance skipped before callback: {reason:?}");
     }
+}
+
+#[test]
+#[serial_test::serial(disposable_anytype_api)]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+fn headless_direct_ordinary_tools_cover_representative_layouts() {
+    run_live_scenario_on_large_stack("direct-representative-layouts", || async {
+        let outcome = Box::pin(with_disposable_space_context(
+            "any-mcp-direct-layouts",
+            |ctx| {
+                Box::pin(async move {
+                    let server = live_views_write_server(ctx.as_ref()).await;
+                    let mut driver = DirectRouterDriver { server: &server };
+                    let evidence = Box::pin(run_representative_layout_scenario(
+                        &mut driver,
+                        ctx.as_ref(),
+                    ))
+                    .await
+                    .map_err(|message| {
+                        eprintln!("direct representative-layout scenario failed: stage={message}");
+                        TestError::Assertion { message }
+                    })?;
+                    assert_eq!(evidence.member_ids.len(), 3);
+                    assert_ne!(evidence.kanban_view_id, evidence.grid_view_id);
+                    Ok(())
+                })
+            },
+        ))
+        .await
+        .expect("cleanup-safe direct representative-layout acceptance");
+        if let DisposableRun::Skipped(reason) = outcome {
+            eprintln!(
+                "direct representative-layout acceptance skipped before callback: {reason:?}"
+            );
+        }
+    });
 }
 
 #[tokio::test]

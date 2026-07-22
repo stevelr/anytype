@@ -27,6 +27,21 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   scope/layout, input, cancellation, deadline, authentication, redaction,
   result, and work matrices accompany it. Transport fault injection remains
   deferred to P4.
+- Add one transport-neutral, cleanup-owned real-server scenario for ordinary
+  MCP workflows across representative Basic, Collection, Grid, filtered, and
+  Kanban layouts. Direct routing and the shipped stable/preview stdio process
+  use only `type_list`, `view_list`, `view_object_list`, `object_update`, and
+  `collection_member_list`/`add`/`remove`: status-column movement remains an
+  ordinary Select-property update, and canonical membership is independently
+  proved complete even when a saved view hides members. Both view and
+  membership paths paginate at `limit: 1`; no layout-specific tool, mock
+  server, or fault server is introduced. Deterministic fault cases remain
+  deferred to the P4 fault-injection design, and the persistent read-only
+  fixture is never mutated. Configure the shipped Tokio runtime with a finite
+  8 MiB worker stack so aggregate typed dispatch remains reliable during
+  filtered layout inventory in debug and production builds, lock that worker
+  flavor and stack behavior with an isolated regression probe, and register
+  every spawned child for guaranteed stop-and-wait before disposable cleanup.
 - Link the complete default-off `chats` production registry through HTTP-only
   `anytype-api` workflows. Read-write mode exposes exactly `chat_list`,
   `chat_message_list`, `chat_message_get`, `chat_message_search`,
