@@ -8,6 +8,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add the production-unlinked `discussions` candidate with exactly one
+  read-only `object_discussion_get` workflow. It resolves one explicit space,
+  validates one exact parent ID, and reuses the typed `anytype-api` attached
+  discussion read to return a closed `absent`/`attached` union containing only
+  stable IDs. The registry requires authenticated HTTP and gRPC, remains
+  available unchanged in read-only mode, performs no writes, exposes no
+  comments, and leaves the linked `chats` contracts unchanged. Strict schema,
+  default-off, error, redaction, byte, token, direct-router, stdio, and
+  cleanup-owned real-server coverage accompany the candidate. The shipped
+  server rejects both its selector and stale method calls. Production
+  acceptance remains blocked because the mandatory configured read-only
+  fixture contains a `DiscussionObject` whose unique key violates Heart's
+  exact deterministic parent binding; no legacy-key allowlist is accepted.
+  The upstream fixture must be corrected or migrated and the viewer-positive
+  test must pass. A non-default test-owned binary supplies real stable and
+  preview OS-process coverage without changing the shipped inventory; exact
+  scope/layout, input, cancellation, deadline, authentication, redaction,
+  result, and work matrices accompany it. Transport fault injection remains
+  deferred to P4.
 - Link the complete default-off `chats` production registry through HTTP-only
   `anytype-api` workflows. Read-write mode exposes exactly `chat_list`,
   `chat_message_list`, `chat_message_get`, `chat_message_search`,

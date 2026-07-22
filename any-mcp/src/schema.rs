@@ -58,8 +58,12 @@ where
 fn require_strict_root(schema: Arc<JsonObject>) -> Result<Arc<JsonObject>, SchemaContractError> {
     let dialect_is_current =
         schema.get("$schema").and_then(serde_json::Value::as_str) == Some(JSON_SCHEMA_DIALECT);
-    let root_is_object = schema.get("type").and_then(serde_json::Value::as_str) == Some("object");
     let root = serde_json::Value::Object(schema.as_ref().clone());
+    let root_is_object = schema.get("type").and_then(serde_json::Value::as_str) == Some("object")
+        || schema
+            .get("oneOf")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|branches| is_discriminated_union(branches, &root));
     let all_values_are_bounded = strict_wire_schema(&root, &root);
 
     if dialect_is_current && root_is_object && all_values_are_bounded {
@@ -113,6 +117,17 @@ fn strict_wire_schema(value: &serde_json::Value, root: &serde_json::Value) -> bo
                     serde_json::Value::Object(_) | serde_json::Value::Bool(false)
                 )
             });
+    }
+
+    if schema.get("type").and_then(serde_json::Value::as_str) == Some("object")
+        && let Some(branches) = schema.get("oneOf").and_then(serde_json::Value::as_array)
+    {
+        return has_only_keywords(schema, &["type", "oneOf"])
+            && branches.len() >= 2
+            && branches
+                .iter()
+                .all(|branch| strict_wire_schema(branch, root))
+            && is_discriminated_union(branches, root);
     }
 
     match schema.get("type") {

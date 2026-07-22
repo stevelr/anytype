@@ -1,0 +1,39 @@
+{
+  "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)",
+  "base_catalog": {
+    "sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
+    "bytes": 39818,
+    "tokens": 9658
+  },
+  "base_read_only_catalog": {
+    "sha256": "a48ad91bbadf5998424432022add295fa273ac6584dc87032925c1ec303e452c",
+    "bytes": 34951,
+    "tokens": 8369
+  },
+  "tool": {
+    "sha256": "52ec9d0d42f61d46b2f83580fb4b2a25826d6badb73866591311dcfc746e2b42",
+    "bytes": 2047,
+    "tokens": 553
+  },
+  "selected_catalog": {
+    "sha256": "91d7b69abbd40f4cd28e59929a42a269e3ef732c5be0179ac16eb6773f299395",
+    "bytes": 42907,
+    "tokens": 10467
+  },
+  "selected_read_only_catalog": {
+    "sha256": "6610cc0158731c9e6984a27edfd4ede91353f4987583dbe38b926bc17b562050",
+    "bytes": 38040,
+    "tokens": 9178
+  },
+  "selected_contribution_tokens": 809,
+  "selected_read_only_contribution_tokens": 809,
+  "maximum_result": {
+    "sha256": "532b3660634c0d3efccd197054fa424f049f98db3043f104573d554ad1d78e7e",
+    "bytes": 1764,
+    "tokens": 374
+  },
+  "catalog_ceiling_tokens": 1500,
+  "selection_ceiling_tokens": 2000,
+  "result_ceiling_bytes": 2048,
+  "result_ceiling_tokens": 600
+}

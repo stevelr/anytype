@@ -63,7 +63,7 @@ pub(crate) async fn serve_stdio(
     }
 }
 
-async fn serve_stable<R, W>(
+pub(crate) async fn serve_stable<R, W>(
     server: AnyMcpServer,
     mut reader: R,
     mut writer: W,

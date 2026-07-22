@@ -147,8 +147,8 @@ stated maximum.
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
   fail closed without being echoed. The linked production names are `chats`,
-  `files`, `members`, `schema`, and `views-write`; incomplete registries remain
-  rejected;
+  `files`, `members`, `schema`, and `views-write`; acceptance-blocked
+  `discussions` remains rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
   and
 - `ANY_MCP_DOCUMENT_RESPONSE_BYTES` defaults to 64 MiB, has a maximum of 64
@@ -333,9 +333,10 @@ Stable and experimental protocol modes use the same composed catalog.
 Only `compact` and `standard` application profiles exist. The optional
 `chats`, `members`, `files`, `schema`, and `views-write` registries are linked
 and can be selected explicitly or combined in one comma-separated
-`ANY_MCP_TOOLSETS` value; they are absent by default. Proposed `admin` toolsets
-are not selectable in this release. Their names become valid selectors only
-when a complete independently reviewed production registry is linked.
+`ANY_MCP_TOOLSETS` value; they are absent by default. Acceptance-blocked
+`discussions` and proposed `admin` are not selectable in this release. Their
+names become valid selectors only when a complete independently reviewed
+production registry is linked.
 
 The production `schema` registry includes `space_create` and `space_update`.
 Both workflows use `anytype-api` only and return just a validated space ID,
@@ -523,15 +524,35 @@ most six physical attempts. Exact injected retry sequences remain deferred
 with the other transport faults rather than being emulated by a semantic
 server.
 
-The draft [attached discussions design](designs/attached-discussions-toolset.md)
-keeps page discussions separate from ordinary chats. A future default-off
-`discussions` registry contributes only `object_discussion_get`, returning a
-normal absent state or the stable `discussionId` attached to one exact Basic or
-Note parent. It does not read comments or expose attachment as an MCP mutation.
-Selecting it alongside `chats` lets the returned ID feed the existing bounded
-message tools without changing their schemas, cursors, or catalog snapshots.
-Production linkage remains blocked on the typed `anytype-api` read primitive
-and independent design review.
+The approved [attached discussions design](designs/attached-discussions-toolset.md)
+keeps page discussions separate from ordinary chats. Its production-unlinked
+candidate contains only `object_discussion_get`, which returns normal `absent`
+state or the stable `discussionId` attached to one exact Basic or Note parent.
+It does not read comments or expose attachment as an MCP mutation. The
+candidate requires authenticated HTTP and gRPC through `anytype-api`, performs
+no write dispatches, and has the same contract in read-only mode. Its returned
+ID can feed separately reviewed bounded chat-message tools unchanged without
+altering their schemas, cursors, or snapshots. The shipped server rejects both
+the `discussions` selector and stale `object_discussion_get` calls.
+
+The cleanup-owned current-server acceptance scenario passes, but production
+acceptance remains blocked on the mandatory configured viewer fixture. Its
+existing `DiscussionObject` fails closed because its unique key is not the
+Heart-defined `discussion-{parent_id}` value. Heart used that exact binding
+from the introduction of discussions, so this implementation does not accept
+the distinct legacy derived-chat key or weaken parent binding. The fixture
+must be corrected or migrated upstream and the ignored viewer-positive test
+must pass before this registry is considered accepted for release.
+The non-default `acceptance-harness` feature builds a test-owned discussions
+binary only; it does not alter the shipped registry inventory. Cleanup-owned
+acceptance drives that binary as separate stable and preview OS processes,
+checks Basic and Note absence, Action rejection, wrong-space rejection, exact
+attached identity, unchanged chat-message handoff, repeated stable output, and
+exact HTTP and Show/Close work. Offline direct, stable, and preview coverage
+locks strict inputs, unknown tools, read-only parity, framed pre-I/O
+cancellation, deadline and authentication classification, redaction, result
+encoding, and zero-work rejection paths without a semantic mock or fault
+server.
 
 `chat_message_add` accepts exact plain paragraph text from 1 through 8,192
 Unicode scalar values, a required process-local idempotency key, and an
@@ -1019,6 +1040,8 @@ runtime and advertises their static capability alongside the tool catalog.
 - `src/domain.rs` — bounded values, object summaries, and resource URIs.
 - `src/discovery.rs` — typed status and schema-discovery contracts and
   transport-neutral handlers.
+- `src/discussion_toolset.rs` — exact read-only attached-discussion discovery
+  and its production-unlinked optional-registry descriptor.
 - `src/schema.rs` — strict input/output schema generation.
 - `src/schema_toolset.rs` — complete production schema descriptor and
   composition/token gates.
