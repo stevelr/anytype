@@ -488,10 +488,11 @@ current run ledger remained.
 Latency, dropped connections, malformed bodies, and injected 5xx behavior are
 explicitly deferred to the P4 fault-injection design.
 
-The production-unlinked `chats` read slice implements `chat_list`,
-`chat_message_list`, `chat_message_get`, and `chat_message_search` for later
-composition with the separately tracked add/delete workflows. It uses REST
-through `anytype-api` only. Chat lists default to 10 and cap at 20; message
+The production-unlinked `chats` slices implement `chat_list`,
+`chat_message_list`, `chat_message_get`, `chat_message_search`,
+`chat_message_add`, and `chat_message_delete` for later composition into the
+complete registry. They use REST through `anytype-api` only. Chat lists default
+to 10 and cap at 20; message
 lists and searches default to 8 and cap at 12. Older-history cursors keep one
 validated opaque server anchor and a one-based page number only in the bounded
 process-local cursor registry, never in MCP output or diagnostics, and stop at
@@ -554,6 +555,26 @@ real stdio frames through a test-owned child composing this exact reviewed
 registry and separately prove that the shipped production composition
 continues to reject the unlinked tool. The slice exposes no edit, attachment,
 rich block, reaction, read-state, pin-state, streaming, or gRPC capability.
+
+`chat_message_delete` accepts exact space, chat, and message identities, the
+canonical 24-character UTC-millisecond `modified_at` returned by an exact
+message read, and the literal `delete_message` confirmation. It performs one
+exact preflight and compares the timestamp byte-for-byte before dispatching
+exactly one non-replayed DELETE. The timestamp is advisory rather than an
+atomic revision: equal-millisecond edits and a writer racing after preflight
+can still evade it. A successful result additionally requires bounded exact
+GET verification to observe authoritative absence. A lost, malformed,
+cancelled, or timed-out DELETE response remains mutation-indeterminate even if
+verification later observes absence; the handler never retries DELETE.
+Accepted-but-unverified deletion is also indeterminate. The result contains
+only resolved identities, `deleted: true`, and the accepted prior timestamp;
+message content never enters results or diagnostics. Each verification read
+is capped by both the remaining three-second/ten-attempt verification budget
+and the common request deadline. A stable-ID invocation admits at most 12
+logical operations and 67 physical attempts; maximum name resolution raises
+those aggregate ceilings to 23 and 133 respectively, with exactly one physical
+DELETE in either case. This slice remains production-unlinked until the
+complete `chats` registry lands.
 
 The production `schema` registry includes `property_create` and
 `property_update` through `anytype-api` only. Create accepts every closed

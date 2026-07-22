@@ -8,6 +8,22 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add the production-unlinked `chat_message_delete` mutation slice through
+  `anytype-api` REST only. Its closed input requires an exact space, chat,
+  message, canonical UTC-millisecond `expected_modified_at`, and the literal
+  `delete_message` confirmation. One exact preflight binds identity and the
+  advisory timestamp before exactly one non-replayed DELETE. Success requires
+  bounded authoritative absence, with every verification read capped by the
+  remaining three-second verification and common request budgets;
+  accepted-but-unverified and uncertain
+  dispatches remain mutation-indeterminate, including uncertain-plus-absent.
+  Direct-router validation and read-only checks perform no HTTP. Pure
+  state-machine and actual handler-control tests prove accepted, rejected,
+  permission, not-found, cancellation, deadline, bounded, and single-dispatch
+  behavior without a mock server, and disposable real-server
+  acceptance covers a stale edit sentinel, direct deletion, a test-owned
+  spawned stdio process, exact absence, and registered cleanup. Transport
+  faults and latency remain deferred to the P4 fault-injection design.
 - Design a separate default-off `discussions` registry with one read-only
   `object_discussion_get` workflow. The closed result distinguishes normal
   absence from an attached `discussion_id`, binds the exact space and Basic or
