@@ -791,6 +791,26 @@ async fn test_types_replace_and_clear_recommended_properties() -> TestResult<()>
         .await?;
         ctx.register_type(&created.id);
 
+        let cached_type_count = ctx.client.cache().num_types();
+        let cached_property_count = ctx.client.cache().num_properties();
+        let initial = ctx
+            .client
+            .get_type(&ctx.space_id, &created.id)
+            .classify_properties()
+            .await?;
+        assert_eq!(ctx.client.cache().num_types(), cached_type_count);
+        assert_eq!(ctx.client.cache().num_properties(), cached_property_count);
+        assert!(!initial.featured_ids.is_empty());
+        assert_eq!(
+            initial
+                .replaceable()
+                .iter()
+                .map(|property| property.key.as_str())
+                .collect::<Vec<_>>(),
+            vec![first_key.as_str(), second_key.as_str()]
+        );
+        let featured_ids = initial.featured_ids;
+
         let replaced = ctx
             .client
             .update_type(&ctx.space_id, &created.id)
@@ -804,6 +824,20 @@ async fn test_types_replace_and_clear_recommended_properties() -> TestResult<()>
 
         assert!(replaced.properties.iter().any(|p| p.key == first_key));
         assert!(!replaced.properties.iter().any(|p| p.key == second_key));
+        let replaced_classification = ctx
+            .client
+            .get_type(&ctx.space_id, &created.id)
+            .classify_properties()
+            .await?;
+        assert_eq!(replaced_classification.featured_ids, featured_ids);
+        assert_eq!(
+            replaced_classification
+                .replaceable()
+                .iter()
+                .map(|property| property.key.as_str())
+                .collect::<Vec<_>>(),
+            vec![first_key.as_str()]
+        );
 
         let cleared = ctx
             .client
@@ -814,7 +848,14 @@ async fn test_types_replace_and_clear_recommended_properties() -> TestResult<()>
 
         assert!(!cleared.properties.iter().any(|p| p.key == first_key));
         assert!(!cleared.properties.iter().any(|p| p.key == second_key));
-        ctx.increment_calls(3);
+        let cleared_classification = ctx
+            .client
+            .get_type(&ctx.space_id, &created.id)
+            .classify_properties()
+            .await?;
+        assert_eq!(cleared_classification.featured_ids, featured_ids);
+        assert!(cleared_classification.replaceable().is_empty());
+        ctx.increment_calls(9);
 
         Ok(())
     })

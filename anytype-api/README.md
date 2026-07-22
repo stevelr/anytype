@@ -416,6 +416,47 @@ model (dataviews, widgets, unknown styles or marks from newer servers) reads
 as an explicit `Unsupported` marker carrying only a content-free structural
 summary, so trees from newer hearts stay complete, ordered, and honest.
 
+## Type Property Classification (REST + gRPC)
+
+`Type.properties` is the REST server's flattened visible list: featured
+properties appear before ordinary recommended properties, but the wire model
+does not expose the boundary and may omit system-featured definitions. Do not
+infer replaceability from list position or known property keys. Use the
+source-backed classification read when preparing or verifying an exact type
+property replacement:
+
+```rust,no_run
+use anytype::prelude::*;
+
+# async fn example(client: &AnytypeClient) -> Result<(), AnytypeError> {
+let properties = client
+    .get_type("space_id", "type_id")
+    .classify_properties()
+    .await?;
+
+for property in properties.replaceable() {
+    println!("{} ({})", property.name, property.key);
+}
+# Ok(())
+# }
+```
+
+The read does not inspect or prime the all-types or all-properties caches. It
+combines one cache-independent REST type GET with one gRPC `ObjectShow` of the
+same type and reconciles the REST definitions against Heart's authoritative
+`recommendedFeaturedRelations` and `recommendedRelations` source lists. The
+returned `recommended` list is the complete non-featured set replaced by
+`UpdateTypeRequest::properties` and cleared by `clear_properties`.
+
+The source lists are capped at 1,000 combined links. Duplicate, overlapping,
+malformed, missing, extra, or cross-source-inconsistent evidence fails the
+whole read rather than truncating or guessing. The transports are not an
+atomic snapshot, so a concurrent edit or eventual-consistency window may
+require rereading. gRPC credentials are required. `featured_ids` preserves the
+exact source list; `featured` contains only definitions visible on the REST
+type. Hidden and file recommendation lists are separate Heart concepts and are
+not part of this replaceable-property model.
+
 ## Status and Compatibility
 
 The crate has 100% coverage of the Anytype REST api 2025-11-08.
@@ -428,6 +469,7 @@ Plus:
   - File metadata, listing/search, preload, URL upload, and rich upload options.
   - Structured chat blocks, full-fidelity message reads, chat-object search,
     name resolution, cross-chat previews, and reconnecting subscriptions.
+  - Exact featured versus replaceable type-property classification.
 
 ### Apis not covered
 
