@@ -367,6 +367,25 @@ let message_id = chats
     .add_message("chat_id", MessageContent::new().bold("Hello"))
     .send()
     .await?;
+let first_history = chats.older_messages("chat_id").limit(8).get().await?;
+if let Some(before) = first_history.next_before {
+    let older = chats
+        .older_messages("chat_id")
+        .before(before)
+        .limit(8)
+        .get()
+        .await?;
+    println!("{} older messages", older.messages.len());
+}
+let edit = chats
+    .edit_message(
+        "chat_id",
+        &message_id,
+        MessageContent::new().italic("Edited"),
+    )
+    .send_verified()
+    .await?;
+assert!(edit.after.modified_at > edit.before.modified_at);
 let mut events = chats
     .message_stream("chat_id")
     .limit(20)
@@ -383,6 +402,16 @@ while let Some(event) = events.next().await {
 Structured message blocks, full-fidelity reads, cross-chat previews, reconnect
 watermarks, and dynamic subscription control remain available as gRPC
 extensions because the REST representation omits blocks and per-user state.
+
+Older REST history uses a typed page with a 1 through 12 item limit. Its
+`next_before` value is an equality-only opaque server token limited to 256
+ASCII graphic bytes. Pass it only to the next `older_messages` request; do not
+parse or sort it. Each returned window preserves Heart's oldest-to-newest
+order, while continuation moves to an older window. Message timestamps fail
+closed when the server value is out of range and format canonically with UTC
+millisecond precision through `canonical_chat_timestamp`. `send_verified`
+performs GET, PATCH, and an independent GET and fails when the supported edit
+does not strictly advance `modified_at`.
 
 ## Rich Chat Streaming (gRPC)
 
@@ -694,7 +723,7 @@ failures through the configured gRPC endpoint. The adjacent dataview test was
 not formerly mock-backed, but shares the disposable tier so the body test file
 does not require ambient inventory.
 
-The body, chat-discovery, and chat-stream files are ignored in ordinary test
+The body, chat-discovery, chat-prerequisites, and chat-stream files are ignored in ordinary test
 runs. Run each in its own admitted, single-threaded process; do not run these
 commands concurrently:
 
@@ -702,6 +731,7 @@ commands concurrently:
 source .test-env
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_body -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_discovery -- --ignored --test-threads=1 --nocapture
+ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_prerequisites -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_stream -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_kanban_fixture -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_process_watcher watcher_completes_on_real_import_finish_fallback -- --ignored --exact --test-threads=1 --nocapture

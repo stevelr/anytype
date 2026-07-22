@@ -56,7 +56,7 @@ use anytype_rpc::anytype::rpc::{
     workspace::open as workspace_open,
 };
 use anytype_rpc::model;
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, SecondsFormat, TimeZone, Utc};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use prost_types::{Struct, Value};
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
@@ -109,6 +109,99 @@ pub struct ChatListResult {
 pub struct ChatMessagesPage {
     pub messages: Vec<ChatMessage>,
     pub state: ChatState,
+}
+
+/// Maximum number of messages returned by one older-history REST page.
+pub const MAX_CHAT_HISTORY_PAGE_SIZE: u32 = 12;
+
+/// Maximum encoded length of an opaque older-history anchor.
+pub const MAX_MESSAGE_BEFORE_ANCHOR_BYTES: usize = 256;
+
+/// Opaque server token that requests the next older REST message page.
+///
+/// The token is intentionally comparable only for equality. Callers must not
+/// infer temporal or numeric order from its bytes.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct MessageBeforeAnchor(String);
+
+impl std::fmt::Debug for MessageBeforeAnchor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MessageBeforeAnchor([redacted])")
+    }
+}
+
+impl TryFrom<String> for MessageBeforeAnchor {
+    type Error = AnytypeError;
+
+    fn try_from(value: String) -> Result<Self> {
+        if value.is_empty()
+            || value.len() > MAX_MESSAGE_BEFORE_ANCHOR_BYTES
+            || !value.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::InvalidAnchor,
+            });
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<MessageBeforeAnchor> for String {
+    fn from(anchor: MessageBeforeAnchor) -> Self {
+        anchor.0
+    }
+}
+
+impl MessageBeforeAnchor {
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+/// One bounded server-ordered page of older REST chat messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageHistoryPage {
+    /// Messages in the exact oldest-to-newest order returned for this window.
+    pub messages: Vec<ChatMessage>,
+    /// Opaque anchor for the next older page, when this page was full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<MessageBeforeAnchor>,
+}
+
+/// Fixed field classification for a malformed chat timestamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum ChatTimestampField {
+    /// Message creation timestamp.
+    CreatedAt,
+    /// Message modification timestamp.
+    ModifiedAt,
+}
+
+/// Closed classification for incomplete older-history evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum ChatHistoryEvidenceKind {
+    /// An input or returned anchor exceeded its fixed safe wire contract.
+    InvalidAnchor,
+    /// A page contained the same message identity more than once.
+    DuplicateMessageId,
+    /// The server returned more rows than the requested bounded page size.
+    TooManyMessages,
+    /// A full page did not provide a usable final order token.
+    MissingNextAnchor,
+    /// A successor page returned the same anchor that it consumed.
+    NonProgress,
+}
+
+/// Evidence from one supported REST edit and its exact readback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageEditEvidence {
+    /// Canonical message state captured before PATCH dispatch.
+    pub before: ChatMessage,
+    /// Canonical message state independently fetched after PATCH dispatch.
+    pub after: ChatMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -932,6 +1025,20 @@ impl<'a> SpaceChatsClient<'a> {
         }
     }
 
+    /// Read one bounded page of older REST messages in server order.
+    ///
+    /// The initial request has no anchor. A successor request accepts only the
+    /// opaque [`MessageBeforeAnchor`] returned by the preceding page.
+    pub fn older_messages(&self, chat_id: impl Into<String>) -> ChatMessageHistoryRequest<'a> {
+        ChatMessageHistoryRequest {
+            client: self.client,
+            space_id: self.space_id.clone(),
+            chat_id: chat_id.into(),
+            before: None,
+            limit: MAX_CHAT_HISTORY_PAGE_SIZE,
+        }
+    }
+
     /// Add a plain message using the REST API.
     ///
     /// Use [`ChatClient::add_message`] for structured gRPC blocks. REST
@@ -1221,6 +1328,38 @@ impl ChatHttpEditMessageRequest<'_> {
             )
             .await
     }
+
+    /// Send the edit and prove that an independent exact read advanced
+    /// `modified_at`.
+    ///
+    /// This performs one exact GET before PATCH and one exact GET afterward.
+    /// It returns fixed typed evidence failure when either read returns a
+    /// different identity or the supported edit does not strictly advance the
+    /// timestamp.
+    pub async fn send_verified(self) -> Result<ChatMessageEditEvidence> {
+        let ChatHttpEditMessageRequest {
+            client,
+            space_id,
+            chat_id,
+            message_id,
+            content,
+            attachments,
+        } = self;
+        let scoped = client.chats().in_space(&space_id);
+        let before = scoped.get_message(&chat_id, &message_id).get().await?;
+        validate_exact_chat_message(&before, &message_id)?;
+        scoped
+            .edit_message(&chat_id, &message_id, content)
+            .attachments(attachments)
+            .send()
+            .await?;
+        let after = scoped.get_message(&chat_id, &message_id).get().await?;
+        validate_exact_chat_message(&after, &message_id)?;
+        if after.modified_at <= before.modified_at {
+            return Err(AnytypeError::ChatEditTimestampNotAdvanced);
+        }
+        Ok(ChatMessageEditEvidence { before, after })
+    }
 }
 
 /// Builder for the REST chat Server-Sent Events endpoint.
@@ -1442,7 +1581,97 @@ impl ChatHttpListMessagesRequest<'_> {
                 query.into(),
             )
             .await?;
-        Ok(response.messages.into_iter().map(Into::into).collect())
+        response
+            .messages
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect()
+    }
+}
+
+/// Builder for bounded, server-ordered older REST message history.
+pub struct ChatMessageHistoryRequest<'a> {
+    client: &'a AnytypeClient,
+    space_id: String,
+    chat_id: String,
+    before: Option<MessageBeforeAnchor>,
+    limit: u32,
+}
+
+impl ChatMessageHistoryRequest<'_> {
+    /// Use the opaque continuation returned by the preceding page.
+    #[must_use]
+    pub fn before(mut self, anchor: MessageBeforeAnchor) -> Self {
+        self.before = Some(anchor);
+        self
+    }
+
+    /// Set the page size from 1 through [`MAX_CHAT_HISTORY_PAGE_SIZE`].
+    #[must_use]
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// Execute one bounded older-history request.
+    ///
+    /// The response preserves Heart's oldest-to-newest order within each
+    /// window. Successive windows move toward older history. A full page
+    /// returns its first row's order token as the next opaque before-anchor. A
+    /// short page is terminal.
+    pub async fn get(self) -> Result<ChatMessageHistoryPage> {
+        if !(1..=MAX_CHAT_HISTORY_PAGE_SIZE).contains(&self.limit) {
+            return Err(AnytypeError::Validation {
+                message: format!(
+                    "chat history limit must be between 1 and {MAX_CHAT_HISTORY_PAGE_SIZE}"
+                ),
+            });
+        }
+        let requested_limit =
+            usize::try_from(self.limit).map_err(|_| AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::TooManyMessages,
+            })?;
+        let consumed = self.before.clone();
+        let query = Query::default()
+            .set_limit_opt(Some(self.limit))
+            .add_param_opt(
+                "before_order_id",
+                self.before.map(MessageBeforeAnchor::into_inner),
+            );
+        let response: HttpChatHistoryResponse = self
+            .client
+            .client
+            .get_request(
+                &chat_message_path(&self.space_id, &self.chat_id, None),
+                query.into(),
+            )
+            .await?;
+        let messages = decode_history_messages(response.messages, self.limit)?;
+        let next_before = if messages.len() == requested_limit {
+            let order_id = messages
+                .first()
+                .map(|message| message.order_id.clone())
+                .ok_or(AnytypeError::ChatHistoryEvidence {
+                    kind: ChatHistoryEvidenceKind::MissingNextAnchor,
+                })?;
+            let next = MessageBeforeAnchor::try_from(order_id).map_err(|_| {
+                AnytypeError::ChatHistoryEvidence {
+                    kind: ChatHistoryEvidenceKind::MissingNextAnchor,
+                }
+            })?;
+            if consumed.as_ref() == Some(&next) {
+                return Err(AnytypeError::ChatHistoryEvidence {
+                    kind: ChatHistoryEvidenceKind::NonProgress,
+                });
+            }
+            Some(next)
+        } else {
+            None
+        };
+        Ok(ChatMessageHistoryPage {
+            messages,
+            next_before,
+        })
     }
 }
 
@@ -1464,7 +1693,7 @@ impl ChatGetMessageRequest<'_> {
                 QueryWithFilters::default(),
             )
             .await?;
-        Ok(response.message.into())
+        response.message.try_into()
     }
 }
 
@@ -1513,7 +1742,11 @@ impl ChatSearchMessagesRequest<'_> {
             )
             .await?;
         Ok(ChatMessageSearchPage {
-            items: response.items.into_iter().map(Into::into).collect(),
+            items: response
+                .items
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>>>()?,
             pagination: response.pagination,
         })
     }
@@ -1741,6 +1974,11 @@ struct HttpChatMessagesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct HttpChatHistoryResponse {
+    messages: Vec<HttpChatMessage>,
+}
+
+#[derive(Debug, Deserialize)]
 struct HttpChatMessageResponse {
     message: HttpChatMessage,
 }
@@ -1819,17 +2057,22 @@ struct HttpMessageAttachment {
     kind: String,
 }
 
-impl From<HttpChatMessage> for ChatMessage {
-    fn from(message: HttpChatMessage) -> Self {
+impl TryFrom<HttpChatMessage> for ChatMessage {
+    type Error = AnytypeError;
+
+    fn try_from(message: HttpChatMessage) -> Result<Self> {
         let reactions = http_reactions(message.reactions);
-        Self {
+        Ok(Self {
             id: message.id,
             order_id: message.order_id,
             state_id: String::new(),
             creator: message.creator,
             creator_name: empty_to_none(message.creator_name),
-            created_at: timestamp_to_datetime(message.created_at),
-            modified_at: timestamp_to_datetime(message.modified_at),
+            created_at: timestamp_to_datetime(message.created_at, ChatTimestampField::CreatedAt)?,
+            modified_at: timestamp_to_datetime(
+                message.modified_at,
+                ChatTimestampField::ModifiedAt,
+            )?,
             reply_to_message_id: empty_to_none(message.reply_to_message_id),
             content: MessageContent {
                 text: message.content.text,
@@ -1864,8 +2107,40 @@ impl From<HttpChatMessage> for ChatMessage {
             pinned: message.pinned,
             unread_reaction: false,
             blocks: Vec::new(),
-        }
+        })
     }
+}
+
+fn decode_history_messages(messages: Vec<HttpChatMessage>, limit: u32) -> Result<Vec<ChatMessage>> {
+    let limit = usize::try_from(limit).map_err(|_| AnytypeError::ChatHistoryEvidence {
+        kind: ChatHistoryEvidenceKind::TooManyMessages,
+    })?;
+    if messages.len() > limit {
+        return Err(AnytypeError::ChatHistoryEvidence {
+            kind: ChatHistoryEvidenceKind::TooManyMessages,
+        });
+    }
+    let mut seen = std::collections::HashSet::with_capacity(messages.len());
+    let mut decoded = Vec::with_capacity(messages.len());
+    for message in messages {
+        let message = ChatMessage::try_from(message)?;
+        if !seen.insert(message.id.clone()) {
+            return Err(AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::DuplicateMessageId,
+            });
+        }
+        decoded.push(message);
+    }
+    Ok(decoded)
+}
+
+fn validate_exact_chat_message(message: &ChatMessage, expected_id: &str) -> Result<()> {
+    if message.id != expected_id {
+        return Err(AnytypeError::Validation {
+            message: "chat message response identity did not match the request".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn http_reactions(
@@ -1942,14 +2217,14 @@ fn parse_chat_http_event(frame: &[u8]) -> Result<Option<ChatHttpEvent>> {
             let payload: HttpChatMessageResponse = serde_json::from_value(envelope.payload)
                 .map_err(|source| AnytypeError::Deserialization { source })?;
             ChatHttpEvent::MessageAdded {
-                message: payload.message.into(),
+                message: payload.message.try_into()?,
             }
         }
         "message_updated" => {
             let payload: HttpChatMessageResponse = serde_json::from_value(envelope.payload)
                 .map_err(|source| AnytypeError::Deserialization { source })?;
             ChatHttpEvent::MessageUpdated {
-                message: payload.message.into(),
+                message: payload.message.try_into()?,
             }
         }
         "message_deleted" => {
@@ -1976,14 +2251,16 @@ fn parse_chat_http_event(frame: &[u8]) -> Result<Option<ChatHttpEvent>> {
     Ok(Some(event))
 }
 
-impl From<HttpChatMessageSearchResult> for ChatMessageSearchResult {
-    fn from(result: HttpChatMessageSearchResult) -> Self {
-        Self {
-            message: result.message.into(),
+impl TryFrom<HttpChatMessageSearchResult> for ChatMessageSearchResult {
+    type Error = AnytypeError;
+
+    fn try_from(result: HttpChatMessageSearchResult) -> Result<Self> {
+        Ok(Self {
+            message: result.message.try_into()?,
             score: result.score,
             highlight: result.highlight,
             highlight_ranges: result.highlight_ranges,
-        }
+        })
     }
 }
 
@@ -2777,7 +3054,7 @@ impl ChatListMessagesRequest<'_> {
             .messages
             .into_iter()
             .map(chat_message_from_grpc)
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         if let Some(read_type) = self.unread_only {
             messages = filter_unread_messages(messages, &read_type);
         }
@@ -2826,11 +3103,11 @@ impl ChatGetMessagesRequest<'_> {
             .into_inner();
 
         ensure_error_ok(response.error.as_ref(), "chat get messages")?;
-        Ok(response
+        response
             .messages
             .into_iter()
             .map(chat_message_from_grpc)
-            .collect())
+            .collect()
     }
 }
 
@@ -3270,7 +3547,10 @@ fn last_modified_date(details: &Struct) -> Option<String> {
         // f64 has 53 bit mantissa and we only need 31 bits for timestamp in seconds,
         // so this isn't lossy
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-        return Some(timestamp_to_datetime(value as i64).to_rfc3339());
+        return Utc
+            .timestamp_opt(value as i64, 0)
+            .single()
+            .map(|timestamp| timestamp.to_rfc3339());
     }
     None
 }
@@ -3321,7 +3601,7 @@ fn value_number(value: f64) -> Value {
 // gRPC conversion helpers
 // ============================================================================
 
-pub(crate) fn chat_message_from_grpc(message: model::ChatMessage) -> ChatMessage {
+pub(crate) fn chat_message_from_grpc(message: model::ChatMessage) -> Result<ChatMessage> {
     let content = message
         .message
         .map(message_content_from_grpc)
@@ -3341,14 +3621,14 @@ pub(crate) fn chat_message_from_grpc(message: model::ChatMessage) -> ChatMessage
         .into_iter()
         .filter_map(message_block_from_grpc)
         .collect();
-    ChatMessage {
+    Ok(ChatMessage {
         id: message.id,
         order_id: message.order_id,
         state_id: message.state_id,
         creator: message.creator,
         creator_name: None,
-        created_at: timestamp_to_datetime(message.created_at),
-        modified_at: timestamp_to_datetime(message.modified_at),
+        created_at: timestamp_to_datetime(message.created_at, ChatTimestampField::CreatedAt)?,
+        modified_at: timestamp_to_datetime(message.modified_at, ChatTimestampField::ModifiedAt)?,
         reply_to_message_id: empty_to_none(message.reply_to_message_id),
         content,
         attachments,
@@ -3360,7 +3640,7 @@ pub(crate) fn chat_message_from_grpc(message: model::ChatMessage) -> ChatMessage
         pinned: message.pinned,
         unread_reaction: message.unread_reaction,
         blocks,
-    }
+    })
 }
 
 fn message_content_from_grpc(content: model::chat_message::MessageContent) -> MessageContent {
@@ -3714,19 +3994,32 @@ fn filter_unread_messages(
     }
 }
 
-fn timestamp_to_datetime(value: i64) -> DateTime<FixedOffset> {
-    let offset = FixedOffset::east_opt(0).unwrap();
-    if value.abs() > 10_000_000_000 {
-        offset
-            .timestamp_millis_opt(value)
-            .single()
-            .unwrap_or_else(|| offset.timestamp_opt(0, 0).single().unwrap())
+fn timestamp_to_datetime(value: i64, field: ChatTimestampField) -> Result<DateTime<FixedOffset>> {
+    let timestamp = if value.unsigned_abs() > 10_000_000_000 {
+        Utc.timestamp_millis_opt(value).single()
     } else {
-        offset
-            .timestamp_opt(value, 0)
-            .single()
-            .unwrap_or_else(|| offset.timestamp_opt(0, 0).single().unwrap())
+        Utc.timestamp_opt(value, 0).single()
     }
+    .filter(|timestamp| (1..=9999).contains(&timestamp.year()))
+    .ok_or(AnytypeError::ChatTimestamp { field })?;
+    Ok(timestamp.fixed_offset())
+}
+
+/// Format a validated chat timestamp as canonical UTC milliseconds.
+///
+/// # Errors
+///
+/// Returns [`AnytypeError::ChatTimestamp`] when the supplied value cannot be
+/// represented in the required year 0001 through 9999 range.
+pub fn canonical_chat_timestamp(
+    timestamp: DateTime<FixedOffset>,
+    field: ChatTimestampField,
+) -> Result<String> {
+    let timestamp = timestamp.with_timezone(&Utc);
+    if !(1..=9999).contains(&timestamp.year()) {
+        return Err(AnytypeError::ChatTimestamp { field });
+    }
+    Ok(timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 fn empty_to_none(value: String) -> Option<String> {
@@ -3738,11 +4031,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        ChatHttpEvent, ChatHttpSseState, ChatMessage, HttpChatMessage, MessageAttachment,
-        MessageAttachmentType, MessageBlock, MessageBlockLink, MessageBlockLinkType,
-        MessageBlockText, MessageContent, MessageTextMarkType, MessageTextStyle, ReadMessagesBody,
-        append_sse_byte, chat_message_from_grpc, chat_message_path, chat_stream_diagnostic_path,
-        grpc_message_block, message_block_from_grpc,
+        ChatHistoryEvidenceKind, ChatHttpEvent, ChatHttpSseState, ChatMessage, ChatTimestampField,
+        HttpChatMessage, MAX_CHAT_HISTORY_PAGE_SIZE, MAX_MESSAGE_BEFORE_ANCHOR_BYTES,
+        MessageAttachment, MessageAttachmentType, MessageBeforeAnchor, MessageBlock,
+        MessageBlockLink, MessageBlockLinkType, MessageBlockText, MessageContent,
+        MessageTextMarkType, MessageTextStyle, ReadMessagesBody, append_sse_byte,
+        canonical_chat_timestamp, chat_message_from_grpc, chat_message_path,
+        chat_stream_diagnostic_path, decode_history_messages, grpc_message_block,
+        message_block_from_grpc, timestamp_to_datetime,
     };
     use anytype_rpc::model;
     use futures::StreamExt;
@@ -3760,12 +4056,39 @@ mod tests {
         keystore::HttpCredentials,
     };
 
-    static NEXT_MOCK_ID: AtomicU64 = AtomicU64::new(1);
+    static NEXT_SCRIPT_ID: AtomicU64 = AtomicU64::new(1);
 
-    async fn mock_http_client(
+    fn scripted_client(
+        address: std::net::SocketAddr,
+        app_name: &str,
+        configure: impl FnOnce(&mut ClientConfig),
+    ) -> AnytypeClient {
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path =
+            std::env::temp_dir().join(format!("anytype-{app_name}-{}-{id}.db", std::process::id()));
+        let mut config = ClientConfig::default().app_name(app_name);
+        config.base_url = Some(format!("http://{address}"));
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("{app_name}-{id}"));
+        configure(&mut config);
+        let client = AnytypeClient::with_config(config).expect("create scripted client");
+        client.set_api_key(HttpCredentials::new("test-token"));
+        client
+    }
+
+    async fn scripted_http_client(
         status: &str,
         content_type: &str,
         body: &str,
+    ) -> (AnytypeClient, JoinHandle<String>) {
+        scripted_http_client_with_config(status, content_type, body, |_| {}).await
+    }
+
+    async fn scripted_http_client_with_config(
+        status: &str,
+        content_type: &str,
+        body: &str,
+        configure: impl FnOnce(&mut ClientConfig),
     ) -> (AnytypeClient, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -3778,12 +4101,15 @@ mod tests {
             body.len()
         );
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept mock request");
+            let (mut stream, _) = listener.accept().await.expect("accept scripted request");
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
             let mut expected_len = None;
             loop {
-                let read = stream.read(&mut chunk).await.expect("read mock request");
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("read scripted request");
                 if read == 0 {
                     break;
                 }
@@ -3810,22 +4136,109 @@ mod tests {
             stream
                 .write_all(response.as_bytes())
                 .await
-                .expect("write mock response");
+                .expect("write scripted response");
             String::from_utf8(request).expect("HTTP request is UTF-8")
         });
 
-        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
-        let key_path = std::env::temp_dir().join(format!(
-            "anytype-chat-http-unit-{}-{id}.db",
-            std::process::id()
-        ));
-        let mut config = ClientConfig::default().app_name("chat-http-unit");
-        config.base_url = Some(format!("http://{address}"));
-        config.keystore = Some(format!("file:path={}", key_path.display()));
-        config.keystore_service = Some(format!("chat-http-unit-{id}"));
-        let client = AnytypeClient::with_config(config).expect("create mock client");
-        client.set_api_key(HttpCredentials::new("test-token"));
+        let client = scripted_client(address, "chat-http-unit", configure);
         (client, server)
+    }
+
+    async fn scripted_http_sequence(
+        responses: Vec<(&'static str, &'static str, String)>,
+    ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
+        scripted_http_sequence_with_config(responses, |_| {}).await
+    }
+
+    async fn scripted_http_sequence_with_config(
+        responses: Vec<(&'static str, &'static str, String)>,
+        configure: impl FnOnce(&mut ClientConfig),
+    ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted chat HTTP sequence");
+        let address = listener
+            .local_addr()
+            .expect("scripted chat HTTP sequence address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(responses.len());
+            for (status, content_type, body) in responses {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept scripted sequence request");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                let mut expected_len = None;
+                loop {
+                    let read = stream
+                        .read(&mut chunk)
+                        .await
+                        .expect("read scripted sequence request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    if expected_len.is_none()
+                        && let Some(header_end) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let body_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or_default();
+                        expected_len = Some(header_end + 4 + body_len);
+                    }
+                    if expected_len.is_some_and(|length| request.len() >= length) {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write scripted sequence response");
+                requests.push(String::from_utf8(request).expect("HTTP request is UTF-8"));
+            }
+            requests
+        });
+
+        let client = scripted_client(address, "chat-http-sequence", configure);
+        (client, server)
+    }
+
+    fn scripted_message(
+        id: &str,
+        order_id: &str,
+        text: &str,
+        created_at: i64,
+        modified_at: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "order_id": order_id,
+            "creator": "participant-id",
+            "created_at": created_at,
+            "modified_at": modified_at,
+            "content": {"text": text, "style": "paragraph"}
+        })
+    }
+
+    fn scripted_message_response(message: serde_json::Value) -> String {
+        serde_json::json!({"message": message}).to_string()
+    }
+
+    fn scripted_messages_response(messages: Vec<serde_json::Value>) -> String {
+        serde_json::json!({"messages": messages}).to_string()
     }
 
     fn request_json(request: &str) -> serde_json::Value {
@@ -3835,9 +4248,477 @@ mod tests {
         serde_json::from_str(body).expect("request body is JSON")
     }
 
+    #[test]
+    fn chat_timestamps_are_fallible_and_canonical_utc_milliseconds() {
+        let epoch = timestamp_to_datetime(0, ChatTimestampField::CreatedAt)
+            .expect("Unix epoch is representable");
+        assert_eq!(
+            canonical_chat_timestamp(epoch, ChatTimestampField::CreatedAt)
+                .expect("format canonical timestamp"),
+            "1970-01-01T00:00:00.000Z"
+        );
+        let one_millisecond = timestamp_to_datetime(10_000_000_001, ChatTimestampField::ModifiedAt)
+            .expect("millisecond timestamp is representable");
+        assert_eq!(one_millisecond.timestamp_millis(), 10_000_000_001);
+
+        for value in [i64::MIN, i64::MAX] {
+            let error = timestamp_to_datetime(value, ChatTimestampField::ModifiedAt)
+                .expect_err("out-of-range timestamp must fail");
+            assert!(matches!(
+                error,
+                AnytypeError::ChatTimestamp {
+                    field: ChatTimestampField::ModifiedAt
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn message_before_anchor_is_bounded_opaque_and_redacted() {
+        let anchor = MessageBeforeAnchor::try_from("opaque-anchor".to_string())
+            .expect("valid opaque anchor");
+        assert_eq!(format!("{anchor:?}"), "MessageBeforeAnchor([redacted])");
+        let encoded = serde_json::to_string(&anchor).expect("serialize bounded anchor");
+        assert_eq!(encoded, "\"opaque-anchor\"");
+        let decoded: MessageBeforeAnchor =
+            serde_json::from_str(&encoded).expect("deserialize bounded anchor");
+        assert_eq!(decoded, anchor);
+        assert!(serde_json::from_str::<MessageBeforeAnchor>("\"unsafe anchor\"").is_err());
+        assert!(matches!(
+            MessageBeforeAnchor::try_from(String::new()),
+            Err(AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::InvalidAnchor
+            })
+        ));
+        assert!(MessageBeforeAnchor::try_from("x".repeat(MAX_MESSAGE_BEFORE_ANCHOR_BYTES)).is_ok());
+        assert!(matches!(
+            MessageBeforeAnchor::try_from("x".repeat(MAX_MESSAGE_BEFORE_ANCHOR_BYTES + 1)),
+            Err(AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::InvalidAnchor
+            })
+        ));
+        assert!(matches!(
+            MessageBeforeAnchor::try_from("unsafe anchor".to_string()),
+            Err(AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::InvalidAnchor
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_rest_timestamp_returns_typed_error_without_epoch_fallback() {
+        let body = scripted_message_response(scripted_message(
+            "m1",
+            "o1",
+            "text",
+            i64::MAX,
+            1_717_405_200,
+        ));
+        let (client, server) = scripted_http_client("200 OK", "application/json", &body).await;
+        let error = client
+            .chats()
+            .in_space("space-id")
+            .get_message("chat-id", "m1")
+            .get()
+            .await
+            .expect_err("invalid created_at must fail the complete read");
+        assert!(matches!(
+            error,
+            AnytypeError::ChatTimestamp {
+                field: ChatTimestampField::CreatedAt
+            }
+        ));
+        let request = server.await.expect("scripted malformed timestamp request");
+        assert!(request.starts_with("GET /v1/spaces/space-id/chats/chat-id/messages/m1 HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn older_history_preserves_order_and_uses_only_opaque_before_successors() {
+        let timestamp = 1_717_405_200_i64;
+        let responses = vec![
+            (
+                "200 OK",
+                "application/json",
+                scripted_messages_response(vec![
+                    scripted_message("m2", "o2", "middle", timestamp, timestamp),
+                    scripted_message("m3", "o3", "newest", timestamp, timestamp),
+                ]),
+            ),
+            (
+                "201 Created",
+                "application/json",
+                r#"{"message_id":"newer-message"}"#.to_string(),
+            ),
+            (
+                "200 OK",
+                "application/json",
+                scripted_messages_response(vec![scripted_message(
+                    "m1", "o1", "oldest", timestamp, timestamp,
+                )]),
+            ),
+        ];
+        let (client, server) = scripted_http_sequence(responses).await;
+        let chats = client.chats().in_space("space-id");
+        let first = chats
+            .older_messages("chat-id")
+            .limit(2)
+            .get()
+            .await
+            .expect("initial older-history page");
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["m2", "m3"]
+        );
+        let anchor = first.next_before.expect("full page continuation");
+        let newer_id = chats
+            .add_message("chat-id", MessageContent::new().text("newer"))
+            .send()
+            .await
+            .expect("scripted newer insertion");
+        assert_eq!(newer_id, "newer-message");
+        let second = chats
+            .older_messages("chat-id")
+            .before(anchor)
+            .limit(2)
+            .get()
+            .await
+            .expect("disjoint older successor");
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["m1"]
+        );
+        assert!(second.next_before.is_none());
+
+        let requests = server.await.expect("scripted history requests");
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[0]
+                .starts_with("GET /v1/spaces/space-id/chats/chat-id/messages?limit=2 HTTP/1.1")
+        );
+        assert!(
+            requests[1].starts_with("POST /v1/spaces/space-id/chats/chat-id/messages HTTP/1.1")
+        );
+        let second_line = requests[2].lines().next().expect("second request line");
+        assert!(second_line.starts_with("GET /v1/spaces/space-id/chats/chat-id/messages?"));
+        assert!(second_line.contains("limit=2"));
+        assert!(second_line.contains("before_order_id=o2"));
+        assert!(!second_line.contains("after_order_id"));
+    }
+
+    #[tokio::test]
+    async fn older_history_rejects_malformed_success_and_response_overrun() {
+        let (client, server) = scripted_http_client("200 OK", "application/json", "{}").await;
+        let error = client
+            .chats()
+            .in_space("space-id")
+            .older_messages("chat-id")
+            .limit(2)
+            .get()
+            .await
+            .expect_err("missing messages evidence must fail");
+        assert!(matches!(error, AnytypeError::Deserialization { .. }));
+        assert!(!format!("{error:?}").contains("{}"));
+        server.await.expect("scripted malformed-success request");
+
+        let timestamp = 1_717_405_200_i64;
+        let body = scripted_messages_response(vec![scripted_message(
+            "m1",
+            "o1",
+            "private text",
+            timestamp,
+            timestamp,
+        )]);
+        let (client, server) =
+            scripted_http_client_with_config("200 OK", "application/json", &body, |config| {
+                config.response_limits.json_bytes = 32
+            })
+            .await;
+        let error = client
+            .chats()
+            .in_space("space-id")
+            .older_messages("chat-id")
+            .limit(1)
+            .get()
+            .await
+            .expect_err("history response above the JSON ceiling must fail");
+        assert!(matches!(
+            error,
+            AnytypeError::ResponseTooLarge {
+                limit: 32,
+                declared: Some(_)
+            }
+        ));
+        assert!(!format!("{error:?}").contains("private text"));
+        server.await.expect("scripted response-overrun request");
+    }
+
+    #[tokio::test]
+    async fn older_history_rejects_invalid_limits_before_io() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind invalid-limit sentinel");
+        let address = listener.local_addr().expect("invalid-limit address");
+        let client = scripted_client(address, "chat-history-invalid-limit", |_| {});
+
+        for limit in [0, MAX_CHAT_HISTORY_PAGE_SIZE + 1] {
+            let error = client
+                .chats()
+                .in_space("space-id")
+                .older_messages("chat-id")
+                .limit(limit)
+                .get()
+                .await
+                .expect_err("invalid limit must fail");
+            assert!(matches!(error, AnytypeError::Validation { .. }));
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "invalid limits must not open a connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_older_history_releases_the_transport() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind history cancellation sentinel");
+        let address = listener.local_addr().expect("history cancellation address");
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept cancellable history request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket
+                    .read(&mut chunk)
+                    .await
+                    .expect("read cancellable history request");
+                assert_ne!(read, 0, "history request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            accepted_tx
+                .send(())
+                .expect("signal accepted history request");
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                matches!(socket.read(&mut chunk).await, Ok(0) | Err(_))
+            })
+            .await
+            .expect("cancelled history request closes promptly")
+        });
+        let client = scripted_client(address, "chat-history-cancel", |_| {});
+        let request = tokio::spawn(async move {
+            client
+                .chats()
+                .in_space("space-id")
+                .older_messages("chat-id")
+                .limit(2)
+                .get()
+                .await
+        });
+        accepted_rx.await.expect("history request was accepted");
+        request.abort();
+        assert!(
+            request
+                .await
+                .expect_err("aborted history request must cancel")
+                .is_cancelled()
+        );
+        assert!(server.await.expect("history cancellation sentinel"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn older_history_retry_failure_has_four_physical_attempts() {
+        let responses = (0..4)
+            .map(|_| {
+                (
+                    "504 Gateway Timeout",
+                    "text/plain",
+                    "retryable failure".to_string(),
+                )
+            })
+            .collect();
+        let (client, server) = scripted_http_sequence(responses).await;
+        let error = client
+            .chats()
+            .in_space("space-id")
+            .older_messages("chat-id")
+            .limit(2)
+            .get()
+            .await
+            .expect_err("history GET must stop after its finite status retry budget");
+        assert!(matches!(error, AnytypeError::ApiError { code: 504, .. }));
+        let requests = server.await.expect("scripted retry-failure requests");
+        assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|request| {
+            request.starts_with("GET /v1/spaces/space-id/chats/chat-id/messages?limit=2 HTTP/1.1")
+        }));
+        let metrics = client.http_metrics();
+        assert_eq!(metrics.logical_operations, 1);
+        assert_eq!(metrics.physical_attempts, 4);
+        assert_eq!(metrics.retries, 3);
+    }
+
+    #[tokio::test]
+    async fn older_history_rejects_duplicate_overflow_and_nonprogress_evidence() {
+        let timestamp = 1_717_405_200_i64;
+        let duplicate = vec![
+            serde_json::from_value(scripted_message("same", "o2", "a", timestamp, timestamp))
+                .expect("decode scripted message"),
+            serde_json::from_value(scripted_message("same", "o1", "b", timestamp, timestamp))
+                .expect("decode scripted message"),
+        ];
+        assert!(matches!(
+            decode_history_messages(duplicate, 2),
+            Err(AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::DuplicateMessageId
+            })
+        ));
+
+        let over_limit = (0..=MAX_CHAT_HISTORY_PAGE_SIZE)
+            .map(|index| {
+                serde_json::from_value(scripted_message(
+                    &format!("m{index}"),
+                    &format!("o{index}"),
+                    "text",
+                    timestamp,
+                    timestamp,
+                ))
+                .expect("decode scripted message")
+            })
+            .collect();
+        assert!(matches!(
+            decode_history_messages(over_limit, MAX_CHAT_HISTORY_PAGE_SIZE),
+            Err(AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::TooManyMessages
+            })
+        ));
+
+        let response = scripted_messages_response(vec![scripted_message(
+            "m1",
+            "same-anchor",
+            "text",
+            timestamp,
+            timestamp,
+        )]);
+        let (client, server) = scripted_http_client("200 OK", "application/json", &response).await;
+        let error = client
+            .chats()
+            .in_space("space-id")
+            .older_messages("chat-id")
+            .before(
+                MessageBeforeAnchor::try_from("same-anchor".to_string())
+                    .expect("valid consumed anchor"),
+            )
+            .limit(1)
+            .get()
+            .await
+            .expect_err("same successor anchor must fail");
+        assert!(matches!(
+            error,
+            AnytypeError::ChatHistoryEvidence {
+                kind: ChatHistoryEvidenceKind::NonProgress
+            }
+        ));
+        server.await.expect("scripted nonprogress request");
+    }
+
+    #[tokio::test]
+    async fn verified_rest_edit_requires_strict_timestamp_advance() {
+        let before = scripted_message("m1", "o1", "before", 1, 1);
+        let after = scripted_message("m1", "o1", "after", 1, 2);
+        let responses = vec![
+            (
+                "200 OK",
+                "application/json",
+                scripted_message_response(before),
+            ),
+            ("200 OK", "application/json", String::new()),
+            (
+                "200 OK",
+                "application/json",
+                scripted_message_response(after),
+            ),
+        ];
+        let (client, server) = scripted_http_sequence(responses).await;
+        let evidence = client
+            .chats()
+            .in_space("space-id")
+            .edit_message("chat-id", "m1", MessageContent::new().italic("after"))
+            .send_verified()
+            .await
+            .expect("verified REST edit");
+        assert!(evidence.after.modified_at > evidence.before.modified_at);
+        assert_eq!(evidence.after.content.text, "after");
+
+        let requests = server.await.expect("scripted edit requests");
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[0].starts_with("GET /v1/spaces/space-id/chats/chat-id/messages/m1 HTTP/1.1")
+        );
+        assert!(
+            requests[1].starts_with("PATCH /v1/spaces/space-id/chats/chat-id/messages/m1 HTTP/1.1")
+        );
+        assert!(
+            requests[2].starts_with("GET /v1/spaces/space-id/chats/chat-id/messages/m1 HTTP/1.1")
+        );
+        assert_eq!(
+            request_json(&requests[1]),
+            serde_json::json!({
+                "text": "after",
+                "style": "paragraph",
+                "marks": [{"from": 0, "to": 5, "type": "italic"}]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_rest_edit_rejects_equal_timestamp_readback() {
+        let before = scripted_message("m1", "o1", "before", 1, 2);
+        let after = scripted_message("m1", "o1", "after", 1, 2);
+        let responses = vec![
+            (
+                "200 OK",
+                "application/json",
+                scripted_message_response(before),
+            ),
+            ("200 OK", "application/json", String::new()),
+            (
+                "200 OK",
+                "application/json",
+                scripted_message_response(after),
+            ),
+        ];
+        let (client, server) = scripted_http_sequence(responses).await;
+        let error = client
+            .chats()
+            .in_space("space-id")
+            .edit_message("chat-id", "m1", MessageContent::new().text("after"))
+            .send_verified()
+            .await
+            .expect_err("equal modified_at must fail");
+        assert!(matches!(error, AnytypeError::ChatEditTimestampNotAdvanced));
+        assert_eq!(
+            server.await.expect("scripted equal-timestamp edit").len(),
+            3
+        );
+    }
+
     #[tokio::test]
     async fn rest_add_message_sends_current_wire_shape() {
-        let (client, server) = mock_http_client(
+        let (client, server) = scripted_http_client(
             "201 Created",
             "application/json",
             r#"{"message_id":"message-id"}"#,
@@ -3874,7 +4755,7 @@ mod tests {
 
     #[tokio::test]
     async fn rest_edit_message_uses_patch_and_http_style_names() {
-        let (client, server) = mock_http_client("200 OK", "application/json", "").await;
+        let (client, server) = scripted_http_client("200 OK", "application/json", "").await;
         client
             .chats()
             .in_space("space-id")
@@ -3906,7 +4787,7 @@ mod tests {
     #[tokio::test]
     async fn rest_list_chats_forwards_dynamic_filter_values() {
         let body = r#"{"data":[],"pagination":{"has_more":false,"limit":25,"offset":3,"total":0}}"#;
-        let (client, server) = mock_http_client("200 OK", "application/json", body).await;
+        let (client, server) = scripted_http_client("200 OK", "application/json", body).await;
         let result = client
             .chats()
             .in_space("space-id")
@@ -3944,7 +4825,7 @@ mod tests {
             "event: reactions_updated\n",
             "data: {\"type\":\"reactions_updated\",\"payload\":{\"id\":\"m2\",\"reactions\":{\"👍\":[\"p1\"]}}}\n\n",
         );
-        let (client, server) = mock_http_client("200 OK", "text/event-stream", body).await;
+        let (client, server) = scripted_http_client("200 OK", "text/event-stream", body).await;
         let mut events = client
             .chats()
             .in_space("space-id")
@@ -3986,7 +4867,7 @@ mod tests {
 
     #[tokio::test]
     async fn rest_chat_stream_rejects_invalid_configuration_before_connecting() {
-        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
         let key_path = std::env::temp_dir().join(format!(
             "anytype-chat-validation-unit-{}-{id}.db",
             std::process::id()
@@ -4116,7 +4997,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_path_ids_are_validated_before_url_construction() {
-        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
         let key_path = std::env::temp_dir().join(format!(
             "anytype-chat-path-validation-unit-{}-{id}.db",
             std::process::id()
@@ -4201,7 +5082,7 @@ mod tests {
         let address = listener.local_addr().expect("closed endpoint address");
         drop(listener);
 
-        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
         let key_path = std::env::temp_dir().join(format!(
             "anytype-chat-open-error-unit-{}-{id}.db",
             std::process::id()
@@ -4239,7 +5120,7 @@ mod tests {
     #[tokio::test]
     async fn overflowing_stream_terminates_and_releases_transport_state() {
         let (mut client, server) =
-            mock_http_client("200 OK", "text/event-stream", "123456789").await;
+            scripted_http_client("200 OK", "text/event-stream", "123456789").await;
         client.config.response_limits.chat_sse_event_bytes = 8;
         let mut events = client
             .chats()
@@ -4266,7 +5147,7 @@ mod tests {
     async fn one_transport_chunk_can_carry_multiple_exact_limit_events() {
         let event = "data: {\"type\":\"bounded\",\"payload\":null}\n\n";
         let body = format!("{event}{event}");
-        let (mut client, server) = mock_http_client("200 OK", "text/event-stream", &body).await;
+        let (mut client, server) = scripted_http_client("200 OK", "text/event-stream", &body).await;
         client.config.response_limits.chat_sse_event_bytes = event.len() as u64;
         let mut events = client
             .chats()
@@ -4320,7 +5201,7 @@ mod tests {
             assert!(closed, "stream cancellation must not leave transport live");
         });
 
-        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
         let key_path = std::env::temp_dir().join(format!(
             "anytype-chat-cancel-unit-{}-{id}.db",
             std::process::id()
@@ -4364,7 +5245,7 @@ mod tests {
         }))
         .expect("deserialize current anytype-heart chat message");
 
-        let message = ChatMessage::from(wire);
+        let message = ChatMessage::try_from(wire).expect("valid REST timestamp evidence");
         assert_eq!(message.creator_name.as_deref(), Some("Alice"));
         assert!(matches!(message.content.style, MessageTextStyle::Header1));
         assert!(matches!(
@@ -4398,7 +5279,7 @@ mod tests {
         }))
         .expect("deserialize future-compatible chat message");
 
-        let message = ChatMessage::from(wire);
+        let message = ChatMessage::try_from(wire).expect("valid REST timestamp evidence");
         assert!(matches!(
             message.content.style,
             MessageTextStyle::Other(ref value) if value == "future_style"
@@ -4471,7 +5352,7 @@ mod tests {
             }))],
         };
 
-        let converted = chat_message_from_grpc(message);
+        let converted = chat_message_from_grpc(message).expect("valid gRPC timestamp evidence");
         assert_eq!(converted.state_id, "state-id");
         assert!(converted.read);
         assert!(converted.synced);
