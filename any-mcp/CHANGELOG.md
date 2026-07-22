@@ -16,6 +16,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   verified create/update/delete/move operations, flat rich-page plans, honest
   partial and indeterminate outcomes, closed network behavior, and exact work,
   frame, schema, and token budgets.
+- Map verified body-block mutation uncertainty from `anytype-api` directly to
+  the fixed secret-safe mutation-indeterminate conflict result and runtime
+  category; this is plumbing for the separately tracked optional body workflow
+  tools.
 - Classify the new `anytype-api` `AnytypeError::BodyGraph` variant in the
   exhaustive error and health mappings (`ToolErrorCode::Upstream`, health
   status `body_graph`). Plumbing only: no `any-mcp` tool can surface a body

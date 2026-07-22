@@ -74,6 +74,8 @@ pub const MAX_BLOCK_ID_BYTES: usize = 256;
 pub const MAX_EMBED_TEXT_BYTES: usize = 65_536;
 /// Hard ceiling on the byte length of a color token.
 pub const MAX_COLOR_TOKEN_BYTES: usize = 32;
+/// Hard ceiling on relation keys shown by one link-card block.
+pub const MAX_LINK_RELATIONS: usize = 64;
 
 /// Per-request bounds for a body read.
 ///
@@ -536,6 +538,15 @@ pub struct TextMark {
     pub kind: MarkKind,
 }
 
+impl TextMark {
+    /// Creates an inline mark. Its range is validated against the enclosing
+    /// text when the mark is used in a constructor or mutation.
+    #[must_use]
+    pub fn new(range: TextRange, kind: MarkKind) -> Self {
+        Self { range, kind }
+    }
+}
+
 /// Callout icon attached to a `Callout`-styled text block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
@@ -707,6 +718,8 @@ pub struct LinkCard {
     pub icon_size: LinkIconSize,
     /// Description mode.
     pub description: LinkDescriptionMode,
+    /// Bounded relation keys displayed by the card, in exact server order.
+    pub relations: Vec<String>,
 }
 
 /// Typed relation view content.
@@ -741,6 +754,25 @@ pub struct EmbedContent {
     pub processor: EmbedProcessor,
     /// Embed source text, at most [`BodyLimits::max_embed_text_bytes`] bytes.
     pub text: String,
+}
+
+impl EmbedContent {
+    /// Creates a bounded embed value for an update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnytypeError::Validation`](crate::error::AnytypeError::Validation)
+    /// when `text` exceeds [`BodyLimits::max_embed_text_bytes`]. Processor-
+    /// specific mutation policy is checked by the body editor.
+    pub fn new(processor: EmbedProcessor, text: impl Into<String>) -> crate::Result<Self> {
+        let text = text.into();
+        if text.len() > MAX_EMBED_TEXT_BYTES {
+            return Err(crate::error::AnytypeError::Validation {
+                message: format!("embed text exceeds {MAX_EMBED_TEXT_BYTES} bytes"),
+            });
+        }
+        Ok(Self { processor, text })
+    }
 }
 
 /// File kind shown by a file block.
@@ -879,7 +911,7 @@ pub enum BlockContent {
 // ============================================================================
 
 /// One block with its exact identity, typed content, and ordered children.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct BodyBlock {
     /// Exact server-assigned block ID.
@@ -1500,7 +1532,7 @@ fn convert_content(
                     })
                 },
             )),
-        ContentValue::Link(link) => Ok(convert_link(block, link)),
+        ContentValue::Link(link) => convert_link(block, link),
         ContentValue::Relation(relation) => Ok(BlockContent::Relation(RelationView {
             key: relation.key.clone(),
         })),
@@ -1521,32 +1553,50 @@ fn convert_content(
     }
 }
 
-fn convert_link(block: &model::Block, link: &model::block::content::Link) -> BlockContent {
+fn convert_link(
+    block: &model::Block,
+    link: &model::block::content::Link,
+) -> std::result::Result<BlockContent, Violation> {
     use model::block::content::link::{CardStyle, Description, IconSize};
     let card_style = match CardStyle::try_from(link.card_style) {
         Ok(CardStyle::Text) => LinkCardStyle::Text,
         Ok(CardStyle::Card) => LinkCardStyle::Card,
         Ok(CardStyle::Inline) => LinkCardStyle::Inline,
-        Err(_) => return opaque(block, "link_unknown_appearance"),
+        Err(_) => return Ok(opaque(block, "link_unknown_appearance")),
     };
     let icon_size = match IconSize::try_from(link.icon_size) {
         Ok(IconSize::SizeNone) => LinkIconSize::None,
         Ok(IconSize::SizeSmall) => LinkIconSize::Small,
         Ok(IconSize::SizeMedium) => LinkIconSize::Medium,
-        Err(_) => return opaque(block, "link_unknown_appearance"),
+        Err(_) => return Ok(opaque(block, "link_unknown_appearance")),
     };
     let description = match Description::try_from(link.description) {
         Ok(Description::None) => LinkDescriptionMode::None,
         Ok(Description::Added) => LinkDescriptionMode::Added,
         Ok(Description::Content) => LinkDescriptionMode::Content,
-        Err(_) => return opaque(block, "link_unknown_appearance"),
+        Err(_) => return Ok(opaque(block, "link_unknown_appearance")),
     };
-    BlockContent::Link(LinkCard {
+    if link.relations.len() > MAX_LINK_RELATIONS {
+        return Err(Violation::new(
+            BodyGraphErrorKind::Oversized,
+            format!("block {} has too many link relations", block.id),
+        ));
+    }
+    if link.relations.iter().any(|key| {
+        key.is_empty() || key.len() > MAX_BLOCK_ID_BYTES || key.chars().any(char::is_control)
+    }) {
+        return Err(Violation::new(
+            BodyGraphErrorKind::MalformedBlock,
+            format!("block {} has a malformed link relation", block.id),
+        ));
+    }
+    Ok(BlockContent::Link(LinkCard {
         target_object_id: link.target_block_id.clone(),
         card_style,
         icon_size,
         description,
-    })
+        relations: link.relations.clone(),
+    }))
 }
 
 fn convert_file(block: &model::Block, file: &model::block::content::File) -> BlockContent {
@@ -2406,6 +2456,7 @@ mod tests {
                 card_style: LinkCardStyle::Card,
                 icon_size: LinkIconSize::Medium,
                 description: LinkDescriptionMode::Content,
+                relations: Vec::new(),
             })
         );
         assert_eq!(

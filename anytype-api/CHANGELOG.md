@@ -80,6 +80,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   replaced or cleared by type updates, preserves exact featured IDs even when
   REST omits a system definition, caps source evidence at 1,000 links, and
   fails closed on malformed or cross-transport-inconsistent evidence.
+- Add verified typed body-block mutations through `BodySnapshot::edit`:
+  single-block create/append, exact-field update, delete, reorder, and bounded
+  sequential batches all require fresh `ObjectShow` evidence before reporting
+  success. Constructors cover paragraphs, headings, bullets, numbered lists,
+  checkboxes, toggles, callouts, quotes, code, dividers, tables, link/relation
+  cards, bookmarks, LaTeX, Mermaid, YouTube, colors, alignment, and
+  backgrounds, including complete divider-style and link-card appearance
+  updates with bounded relation keys. Wrong-context, restricted, system, file,
+  table-structural, and otherwise unsafe targets fail locally. Every write RPC
+  is dispatched exactly once; timeout, cancellation, connection loss,
+  shutdown, malformed/oversized replies, unknown response codes, and unproved
+  writes return secret-safe receipt-bearing indeterminate errors with the last
+  complete observed snapshot when available. Table receipts require the exact
+  ordered columns/rows layout topology, direct row/column membership, and
+  first-row header state; system text, featured-relation, file, and structural
+  blocks are rejected consistently as targets, target parents, and computed
+  first-child anchors.
+  Bookmark previews are never fetched, providing an explicit SSRF-safe
+  networking policy, while YouTube URLs use a strict HTTPS host/ID allowlist.
 - REST file request builders now support caller-specific success/error body
   limits, bounded allowlisted-header evidence, checked byte ranges, and one
   cumulative physical-attempt ceiling. File metadata and validators are

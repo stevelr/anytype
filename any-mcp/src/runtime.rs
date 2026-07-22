@@ -547,6 +547,9 @@ impl UpstreamDiagnostic {
             AnytypeError::Grpc { .. } | AnytypeError::GrpcUnavailable { .. } => Self::new("grpc"),
             AnytypeError::CacheDisabled => Self::new("cache"),
             AnytypeError::BodyGraph { .. } => Self::new("body_graph"),
+            AnytypeError::BodyMutationIndeterminate { .. } => {
+                Self::new("body_mutation_indeterminate")
+            }
             AnytypeError::VerifyTimeout { .. } => Self::new("verification"),
             AnytypeError::Other { .. } => Self::new("other"),
         }
@@ -1452,8 +1455,18 @@ mod tests {
             });
         assert_eq!(malformed_file.category, "invalid_file_response_header");
         assert_eq!(malformed_file.http_status, Some(206));
+        let body_mutation =
+            UpstreamDiagnostic::from_error(&AnytypeError::BodyMutationIndeterminate {
+                object_id: secret.to_owned(),
+                block_id: None,
+                attempts: 1,
+                timeout: Duration::from_secs(1),
+                observed: None,
+            });
+        assert_eq!(body_mutation.category, "body_mutation_indeterminate");
         assert!(
-            !format!("{api:?}{auth:?}{grpc:?}{file_headers:?}{malformed_file:?}").contains(secret)
+            !format!("{api:?}{auth:?}{grpc:?}{file_headers:?}{malformed_file:?}{body_mutation:?}")
+                .contains(secret)
         );
     }
 
