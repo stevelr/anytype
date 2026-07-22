@@ -8,6 +8,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Design a separate default-off `discussions` registry with one read-only
+  `object_discussion_get` workflow. The closed result distinguishes normal
+  absence from an attached `discussion_id`, binds the exact space and Basic or
+  Note parent, verifies the derived Heart discussion type and deterministic
+  parent unique key through a typed `anytype-api` primitive, and exposes no
+  comments or message metadata. The design keeps the approved six-tool `chats`
+  contracts byte-identical and defers MCP attachment because Heart has no
+  detach pair, raw repeat returns a generic error, and raw attach resolves only
+  by object ID. Direct and spawned-stdio acceptance uses cleanup-owned real
+  spaces; the operator-supplied read-only `Page One` fixture is optional
+  corroboration, never mutated. Fault injection remains P4.
 - Add the production-unlinked `collection_member_list` read slice for the
   future `views-write` registry. The strict tool resolves one space, binds an
   opaque cursor to the exact resolved space, collection, limit, registry, and
