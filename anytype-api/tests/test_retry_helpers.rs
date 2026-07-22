@@ -111,7 +111,7 @@ fn live_mutation_retry_inventory_is_current() {
         (
             "integration.rs",
             include_str!("integration.rs"),
-            1,
+            2,
             0,
             0,
             11,
@@ -164,9 +164,9 @@ fn live_mutation_retry_inventory_is_current() {
             "test_properties.rs",
             include_str!("test_properties.rs"),
             14,
-            10,
+            11,
             0,
-            10,
+            9,
         ),
         ("test_search.rs", include_str!("test_search.rs"), 7, 0, 0, 1),
         ("test_tags.rs", include_str!("test_tags.rs"), 32, 3, 0, 6),
@@ -226,6 +226,6 @@ fn live_mutation_retry_inventory_is_current() {
         excluded_calls += excluded;
     }
 
-    assert_eq!(setup_calls, 123);
-    assert_eq!(excluded_calls, 61);
+    assert_eq!(setup_calls, 125);
+    assert_eq!(excluded_calls, 60);
 }

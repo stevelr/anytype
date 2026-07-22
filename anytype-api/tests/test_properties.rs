@@ -35,13 +35,15 @@ async fn test_set_text_property() -> TestResult<()> {
         let name = unique_test_name("Text Property Test");
         let description_value = "This is a text property value";
 
-        let obj = ctx
-            .client
-            .new_object(&ctx.space_id, "page")
-            .name(&name)
-            .set_text("description", description_value)
-            .create()
-            .await?;
+        let obj = create_object_with_retry("text property setup object", || async {
+            ctx.client
+                .new_object(&ctx.space_id, "page")
+                .name(&name)
+                .set_text("description", description_value)
+                .create()
+                .await
+        })
+        .await?;
         ctx.register_object(&obj.id);
 
         // Verify the text property was set

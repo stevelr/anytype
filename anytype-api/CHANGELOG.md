@@ -40,6 +40,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Unauthenticated live tests now use unique empty file keystores, so valid
+  ambient `env` credentials cannot silently authenticate their control clients.
+- Text-property integration setup now uses the existing finite definitive-429
+  retry seam before registering the created object for cleanup.
+- Pagination-offset integration coverage now owns and filters an exact
+  cleanup-registered object cohort, so concurrent tests cannot shift its page
+  windows through unrelated ambient-space mutations.
 - Search requests now reject pagination limits outside `1..=1000` with the
   stable validation error before global or space-scoped HTTP dispatch.
 - Refresh the live mutation retry inventory for the seven bounded fixture

@@ -871,8 +871,10 @@ mod custom_properties {
 
 mod pagination {
 
-    use anytype::test_util::*;
+    use anytype::{prelude::Filter, test_util::*};
     use serial_test::serial;
+
+    use super::common::unique_test_name;
 
     /// Test pagination limit is respected
     #[tokio::test]
@@ -905,10 +907,25 @@ mod pagination {
     #[serial]
     async fn test_pagination_offset() {
         with_test_context_unit(|ctx| async move {
+            let cohort = unique_test_name("Pagination Offset");
+            for index in 0..4 {
+                let object = retry_definitive_rate_limit("pagination offset fixture", || async {
+                    ctx.client
+                        .new_object(&ctx.space_id, "page")
+                        .name(format!("{cohort}-{index}"))
+                        .create()
+                        .await
+                })
+                .await
+                .expect("Failed to create pagination fixture object");
+                ctx.register_object(&object.id);
+            }
+
             // Get first page
             let page1 = ctx
                 .client
                 .objects(&ctx.space_id)
+                .filter(Filter::text_contains("name", &cohort))
                 .limit(2)
                 .offset(0)
                 .list()
@@ -919,23 +936,21 @@ mod pagination {
             let page2 = ctx
                 .client
                 .objects(&ctx.space_id)
+                .filter(Filter::text_contains("name", &cohort))
                 .limit(2)
                 .offset(2)
                 .list()
                 .await
                 .expect("Failed to get page 2");
 
-            // Pages should be different (if enough data exists)
-            if !page1.is_empty() && !page2.is_empty() {
-                let page1_ids: Vec<&str> = page1.iter().map(|o| o.id.as_str()).collect();
-                let page2_ids: Vec<&str> = page2.iter().map(|o| o.id.as_str()).collect();
-
-                for id in &page2_ids {
-                    assert!(
-                        !page1_ids.contains(id),
-                        "Page 2 should not contain items from page 1"
-                    );
-                }
+            assert_eq!(page1.len(), 2, "first page should contain two fixtures");
+            assert_eq!(page2.len(), 2, "second page should contain two fixtures");
+            let page1_ids: Vec<&str> = page1.iter().map(|object| object.id.as_str()).collect();
+            for object in &page2 {
+                assert!(
+                    !page1_ids.contains(&object.id.as_str()),
+                    "Page 2 should not contain items from page 1"
+                );
             }
         })
         .await
