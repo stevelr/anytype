@@ -1,61 +1,61 @@
 {
-  "object_get": {
-    "body": {
-      "offset": 0,
-      "sha256": "829cfe841af8426369b7e664d09c6b10e6816a3c084eb0a3fda2488ad7dd0208",
-      "text": "# Roadmap\n\nShip the portable MCP server. 🦀",
-      "total_chars": 42
-    },
-    "object": {
-      "properties": [
-        {
-          "key": "status",
-          "value": {
-            "format": "text",
-            "text": "In progress"
-          }
-        },
-        {
-          "key": "done",
-          "value": {
-            "checkbox": false,
-            "format": "checkbox"
-          }
-        }
-      ],
-      "summary": {
-        "id": "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
-        "last_modified": "2026-07-20T08:00:00Z",
-        "name": "Roadmap",
-        "resource_uri": "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
-        "space_id": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
-        "type_key": "page"
-      }
-    }
-  },
-  "object_search": {
-    "items": [
-      {
-        "properties": [],
-        "summary": {
-          "id": "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
-          "last_modified": "2026-07-20T08:00:00Z",
-          "name": "Roadmap",
-          "resource_uri": "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
-          "space_id": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
-          "type_key": "page"
-        }
-      },
-      {
-        "properties": [],
-        "summary": {
-          "id": "bafyreifqjkmpt6eif4mbxxygla7lreah3w7tcbgw5gcrfxkfqj4o6t6aem",
-          "name": "Release notes",
-          "resource_uri": "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreifqjkmpt6eif4mbxxygla7lreah3w7tcbgw5gcrfxkfqj4o6t6aem",
-          "space_id": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
-          "type_key": "page"
-        }
-      }
-    ]
-  }
+	"object_get": {
+		"body": {
+			"offset": 0,
+			"sha256": "829cfe841af8426369b7e664d09c6b10e6816a3c084eb0a3fda2488ad7dd0208",
+			"text": "# Roadmap\n\nShip the portable MCP server. 🦀",
+			"total_chars": 42
+		},
+		"object": {
+			"properties": [
+				{
+					"key": "status",
+					"value": {
+						"format": "text",
+						"text": "In progress"
+					}
+				},
+				{
+					"key": "done",
+					"value": {
+						"checkbox": false,
+						"format": "checkbox"
+					}
+				}
+			],
+			"summary": {
+				"id": "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
+				"last_modified": "2026-07-20T08:00:00Z",
+				"name": "Roadmap",
+				"resource_uri": "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
+				"space_id": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
+				"type_key": "page"
+			}
+		}
+	},
+	"object_search": {
+		"items": [
+			{
+				"properties": [],
+				"summary": {
+					"id": "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
+					"last_modified": "2026-07-20T08:00:00Z",
+					"name": "Roadmap",
+					"resource_uri": "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ",
+					"space_id": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
+					"type_key": "page"
+				}
+			},
+			{
+				"properties": [],
+				"summary": {
+					"id": "bafyreifqjkmpt6eif4mbxxygla7lreah3w7tcbgw5gcrfxkfqj4o6t6aem",
+					"name": "Release notes",
+					"resource_uri": "anytype://spaces/bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7/objects/bafyreifqjkmpt6eif4mbxxygla7lreah3w7tcbgw5gcrfxkfqj4o6t6aem",
+					"space_id": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
+					"type_key": "page"
+				}
+			}
+		]
+	}
 }
