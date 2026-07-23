@@ -413,9 +413,11 @@ direct, stable-stdio, and preview-stdio paths. The removed semantic mock/custom
 server is prohibited; latency, connection, malformed/status, and retry faults
 remain P4 behind the separately reviewed fault-injection design.
 Raw stable/preview body-frame parity permits only the preview protocol's
-required `resultType: complete` field. Response IDs, JSON-RPC envelopes,
-duplicated text content, structured payloads, errors, cursors, snapshot hashes,
-opaque summaries, and domain IDs remain exact.
+required `resultType: complete` field on result envelopes. JSON-RPC error
+envelopes receive no normalization: response IDs, versions, error
+code/message/data, and shapes remain exact. Duplicated text content, structured
+payloads, cursors, snapshot hashes, opaque summaries, and domain IDs also
+remain exact.
 
 R4 also fixes emoji and callout payloads at the current 64-byte API ceiling,
 requires both UTF-16 mark endpoints to be `u32` scalar boundaries, and gives

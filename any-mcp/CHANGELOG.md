@@ -33,9 +33,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   plan. Exact 2,048/2,049-block, UTF-16 endpoint, lifecycle-counter,
   protocol-aware raw stable/preview frame, descriptor, and atomic
   read-restriction regressions close the acceptance matrix. Raw-frame parity
-  permits only the preview protocol's required `resultType: complete`; envelope
-  IDs, duplicated text, structured payloads, errors, and every domain value
-  remain exact. Ignored body acceptance also fails closed unless
+  permits only the preview protocol's required `resultType: complete` on result
+  envelopes; JSON-RPC error envelopes receive no exception. Envelope IDs,
+  duplicated text, structured payloads, error code/message/data, and every
+  domain value remain exact. Ignored body acceptance also fails closed unless
   a reviewed absolute redacted server-log path is configured, and its
   fixture-heavy shared workflow is heap-owned for default-stack execution.
   The production router returns optional-registry futures before constructing
