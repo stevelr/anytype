@@ -4798,6 +4798,14 @@ fn projected_table_subtree_matches(
     };
     let canonical_cell = |cell: &&BlockSummary| {
         cell.child_count == 0
+            && cell.restrictions
+                == (RestrictionsProjection {
+                    read: false,
+                    edit: false,
+                    remove: false,
+                    drag: false,
+                    drop_on: false,
+                })
             && cell.align == WireHorizontalAlign::Left
             && cell.vertical_align == WireVerticalAlign::Top
             && cell.background_color.is_none()
@@ -10639,6 +10647,14 @@ mod tests {
             .expect("cell")
             .background_color =
             Some(ColorInput::new("yellow".to_owned()).expect("background color"));
+        let mut restricted_cell = valid.clone();
+        restricted_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .restrictions
+            .edit = true;
         let mut cell_with_child = valid.clone();
         cell_with_child
             .items
@@ -10698,6 +10714,7 @@ mod tests {
             aligned_cell,
             vertical_cell,
             background_cell,
+            restricted_cell,
             cell_with_child,
             extra_cell,
             reordered_cells,
