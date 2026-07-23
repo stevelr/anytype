@@ -885,6 +885,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::test_util::{DisposableRun, unique_suffix, with_disposable_space_context};
 
     const SPACE: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaa";
     const PARENT: &str = "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1266,6 +1267,105 @@ mod tests {
         );
     }
 
+    // This probe intentionally pins an observed upstream defect. Once
+    // ObjectAddDiscussion becomes idempotent, update or retire the second-call
+    // expectation while retaining the stable-parent reread.
+    #[tokio::test]
+    #[ignore = "records current upstream behavior on a configured disposable real server"]
+    #[serial_test::serial(disposable_anytype_api)]
+    async fn live_upstream_raw_object_add_discussion_repeat_is_non_idempotent() {
+        let outcome = Box::pin(with_disposable_space_context(
+            "attached-discussion-raw-repeat",
+            |ctx| {
+                Box::pin(async move {
+                    let parent = ctx
+                        .client
+                        .new_object(&ctx.space_id, "page")
+                        .name(format!("attached-discussion-raw-{}", unique_suffix()))
+                        .create()
+                        .await?;
+                    ctx.register_object(&parent.id);
+                    let writes_before = ctx.client.attached_discussion_metrics().write_dispatches;
+
+                    let (grpc, request, timeout) = prepare_discussion_add(
+                        &ctx.client,
+                        &parent.id,
+                        MAX_ATTACHED_DISCUSSION_RPC_TIMEOUT,
+                        OperationBudget::new(MAX_ATTACHED_DISCUSSION_OPERATION_TIMEOUT),
+                    )
+                    .await?;
+                    let first = dispatch_prepared(
+                        ctx.client.attached_discussion_metrics.as_ref(),
+                        grpc,
+                        request,
+                        timeout,
+                    )
+                    .await?;
+                    let discussion_id = first.discussion_id;
+                    if !discussion_id.is_empty() {
+                        ctx.register_object(&discussion_id);
+                    }
+                    assert_eq!(
+                        first.error.as_ref().map(|error| error.code),
+                        Some(discussion_add::response::error::Code::Null as i32)
+                    );
+                    assert!(
+                        !discussion_id.is_empty(),
+                        "first raw create must return a discussion identity"
+                    );
+
+                    let (grpc, request, timeout) = prepare_discussion_add(
+                        &ctx.client,
+                        &parent.id,
+                        MAX_ATTACHED_DISCUSSION_RPC_TIMEOUT,
+                        OperationBudget::new(MAX_ATTACHED_DISCUSSION_OPERATION_TIMEOUT),
+                    )
+                    .await?;
+                    let repeated = dispatch_prepared(
+                        ctx.client.attached_discussion_metrics.as_ref(),
+                        grpc,
+                        request,
+                        timeout,
+                    )
+                    .await?;
+                    let repeated_discussion_id = repeated.discussion_id;
+                    if !repeated_discussion_id.is_empty() {
+                        ctx.register_object(&repeated_discussion_id);
+                    }
+                    assert_eq!(
+                        repeated.error.as_ref().map(|error| error.code),
+                        Some(discussion_add::response::error::Code::UnknownError as i32)
+                    );
+                    assert!(
+                        repeated_discussion_id.is_empty(),
+                        "failed repeat must not expose an unexpected identity"
+                    );
+
+                    let reread = ctx
+                        .client
+                        .attached_discussion(&ctx.space_id, &parent.id)
+                        .get()
+                        .await?;
+                    assert!(
+                        reread
+                            .discussion_id()
+                            .is_some_and(|observed| observed == discussion_id),
+                        "parent reread must retain the first discussion identity"
+                    );
+                    assert_eq!(
+                        ctx.client.attached_discussion_metrics().write_dispatches - writes_before,
+                        2
+                    );
+                    Ok(())
+                })
+            },
+        ))
+        .await
+        .expect("cleanup-safe raw attached-discussion probe");
+
+        assert!(matches!(outcome, DisposableRun::Completed(())));
+    }
+
     #[tokio::test]
     async fn injected_show_lifecycle_counts_work_and_cleanup_precedes_evidence() {
         let metrics = AttachedDiscussionMetrics::default();
@@ -1452,6 +1552,7 @@ mod tests {
     async fn invalid_input_and_deadlines_fail_before_io() {
         let client = AnytypeClient::with_config(crate::client::ClientConfig {
             base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
             disable_cache: true,
             ..crate::client::ClientConfig::default()
         })

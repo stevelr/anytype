@@ -408,117 +408,146 @@ impl AnyMcpServer {
         request: CallToolRequestParams,
         cancellation: &'a tokio_util::sync::CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
-        Box::pin(async move {
-            #[cfg(test)]
-            self.state
-                .phase1_dispatch_polls
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let arguments = request.arguments;
-            match request.name.as_ref() {
-                SERVER_STATUS => {
-                    let input = decode_arguments::<ServerStatusInput>(arguments)?;
-                    Ok(self.discovery().server_status(input, cancellation).await)
-                }
-                SPACE_LIST => {
-                    let input = decode_arguments::<SpaceListInput>(arguments)?;
-                    Ok(self.discovery().space_list(input, cancellation).await)
-                }
-                TYPE_LIST => {
-                    let input = decode_arguments::<TypeListInput>(arguments)?;
-                    Ok(self.discovery().type_list(input, cancellation).await)
-                }
-                PROPERTY_LIST => {
-                    let input = decode_arguments::<PropertyListInput>(arguments)?;
-                    Ok(self.discovery().property_list(input, cancellation).await)
-                }
-                TAG_LIST => {
-                    let input = decode_arguments::<TagListInput>(arguments)?;
-                    Ok(self.discovery().tag_list(input, cancellation).await)
-                }
-                TEMPLATE_LIST => {
-                    let input = decode_arguments::<TemplateListInput>(arguments)?;
-                    Ok(self.discovery().template_list(input, cancellation).await)
-                }
-                OBJECT_SEARCH => {
-                    let input = decode_arguments::<ObjectSearchInput>(arguments)?;
-                    Ok(self
-                        .state
-                        .object_read
-                        .object_search(input, cancellation)
-                        .await)
-                }
-                OBJECT_GET => {
-                    let input = decode_arguments::<ObjectGetInput>(arguments)?;
-                    Ok(self.state.object_read.object_get(input, cancellation).await)
-                }
-                VIEW_LIST => {
-                    let input = decode_arguments::<ViewListInput>(arguments)?;
-                    Ok(self.state.view_read.view_list(input, cancellation).await)
-                }
-                VIEW_OBJECT_LIST => {
-                    let input = decode_arguments::<ViewObjectListInput>(arguments)?;
-                    Ok(self
-                        .state
-                        .view_read
-                        .view_object_list(input, cancellation)
-                        .await)
-                }
-                OBJECT_CREATE => {
-                    if let Some(error) = self.reject_read_only_mutation() {
-                        return Ok(error);
-                    }
-                    let input = decode_arguments::<ObjectCreateInput>(arguments)?;
-                    Ok(self
-                        .state
-                        .object_create
-                        .object_create(self.state.access, input, cancellation)
-                        .await)
-                }
-                OBJECT_UPDATE => {
-                    if let Some(error) = self.reject_read_only_mutation() {
-                        return Ok(error);
-                    }
-                    let input = decode_arguments::<ObjectUpdateInput>(arguments)?;
-                    Ok(object_update(
-                        &self.runtime,
-                        &self.state.object_update_contract,
-                        self.state.access,
-                        &input,
-                        cancellation,
-                    )
+        // Select before constructing the async route so each handler has its
+        // own erased heap frame. One aggregate async match exceeds the default
+        // debug-build worker stack even when that aggregate future is boxed.
+        let name = request.name;
+        let arguments = request.arguments;
+        match name.as_ref() {
+            SERVER_STATUS => self.phase1_route(async move {
+                let input = decode_arguments::<ServerStatusInput>(arguments)?;
+                Ok(self.discovery().server_status(input, cancellation).await)
+            }),
+            SPACE_LIST => self.phase1_route(async move {
+                let input = decode_arguments::<SpaceListInput>(arguments)?;
+                Ok(self.discovery().space_list(input, cancellation).await)
+            }),
+            TYPE_LIST => self.phase1_route(async move {
+                let input = decode_arguments::<TypeListInput>(arguments)?;
+                Ok(self.discovery().type_list(input, cancellation).await)
+            }),
+            PROPERTY_LIST => self.phase1_route(async move {
+                let input = decode_arguments::<PropertyListInput>(arguments)?;
+                Ok(self.discovery().property_list(input, cancellation).await)
+            }),
+            TAG_LIST => self.phase1_route(async move {
+                let input = decode_arguments::<TagListInput>(arguments)?;
+                Ok(self.discovery().tag_list(input, cancellation).await)
+            }),
+            TEMPLATE_LIST => self.phase1_route(async move {
+                let input = decode_arguments::<TemplateListInput>(arguments)?;
+                Ok(self.discovery().template_list(input, cancellation).await)
+            }),
+            OBJECT_SEARCH => self.phase1_route(async move {
+                let input = decode_arguments::<ObjectSearchInput>(arguments)?;
+                Ok(self
+                    .state
+                    .object_read
+                    .object_search(input, cancellation)
                     .await)
-                }
-                OBJECT_EDIT => {
-                    if let Some(error) = self.reject_read_only_mutation() {
-                        return Ok(error);
-                    }
-                    let input = decode_arguments::<ObjectEditInput>(arguments)?;
-                    Ok(object_edit(
-                        &self.runtime,
-                        &self.state.object_edit_contract,
-                        self.state.access,
-                        &input,
-                        cancellation,
-                    )
+            }),
+            OBJECT_GET => self.phase1_route(async move {
+                let input = decode_arguments::<ObjectGetInput>(arguments)?;
+                Ok(self.state.object_read.object_get(input, cancellation).await)
+            }),
+            VIEW_LIST => self.phase1_route(async move {
+                let input = decode_arguments::<ViewListInput>(arguments)?;
+                Ok(self.state.view_read.view_list(input, cancellation).await)
+            }),
+            VIEW_OBJECT_LIST => self.phase1_route(async move {
+                let input = decode_arguments::<ViewObjectListInput>(arguments)?;
+                Ok(self
+                    .state
+                    .view_read
+                    .view_object_list(input, cancellation)
                     .await)
+            }),
+            OBJECT_CREATE => self.phase1_route(async move {
+                if let Some(error) = self.reject_read_only_mutation() {
+                    return Ok(error);
                 }
-                OBJECT_ARCHIVE => {
-                    if let Some(error) = self.reject_read_only_mutation() {
-                        return Ok(error);
-                    }
-                    let input = decode_arguments::<ObjectArchiveInput>(arguments)?;
-                    Ok(object_archive(
-                        &self.runtime,
-                        &self.state.object_archive_contract,
-                        self.state.access,
-                        &input,
-                        cancellation,
-                    )
+                let input = decode_arguments::<ObjectCreateInput>(arguments)?;
+                Ok(self
+                    .state
+                    .object_create
+                    .object_create(self.state.access, input, cancellation)
                     .await)
+            }),
+            OBJECT_UPDATE => self.phase1_route(async move {
+                if let Some(error) = self.reject_read_only_mutation() {
+                    return Ok(error);
                 }
-                _ => Err(ErrorData::method_not_found::<CallToolRequestMethod>()),
-            }
-        })
+                let input = decode_arguments::<ObjectUpdateInput>(arguments)?;
+                Ok(object_update(
+                    &self.runtime,
+                    &self.state.object_update_contract,
+                    self.state.access,
+                    &input,
+                    cancellation,
+                )
+                .await)
+            }),
+            OBJECT_EDIT => self.phase1_route(async move {
+                if let Some(error) = self.reject_read_only_mutation() {
+                    return Ok(error);
+                }
+                let input = decode_arguments::<ObjectEditInput>(arguments)?;
+                Ok(object_edit(
+                    &self.runtime,
+                    &self.state.object_edit_contract,
+                    self.state.access,
+                    &input,
+                    cancellation,
+                )
+                .await)
+            }),
+            OBJECT_ARCHIVE => self.phase1_route(async move {
+                if let Some(error) = self.reject_read_only_mutation() {
+                    return Ok(error);
+                }
+                let input = decode_arguments::<ObjectArchiveInput>(arguments)?;
+                Ok(object_archive(
+                    &self.runtime,
+                    &self.state.object_archive_contract,
+                    self.state.access,
+                    &input,
+                    cancellation,
+                )
+                .await)
+            }),
+            _ => self.phase1_route(async {
+                Err(ErrorData::method_not_found::<CallToolRequestMethod>())
+            }),
+        }
+    }
+
+    fn phase1_route<'a, F>(
+        &'a self,
+        route: F,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>>
+    where
+        F: std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send + 'a,
+    {
+        #[cfg(test)]
+        {
+            // Keep decoding, read-only admission, and test poll accounting lazy.
+            let state = Arc::clone(&self.state);
+            let mut route = Box::pin(route);
+            let mut first_poll = true;
+            Box::pin(std::future::poll_fn(move |context| {
+                if first_poll {
+                    state
+                        .phase1_dispatch_polls
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    first_poll = false;
+                }
+                std::future::Future::poll(route.as_mut(), context)
+            }))
+        }
+        #[cfg(not(test))]
+        {
+            Box::pin(route)
+        }
     }
 
     #[cfg(test)]
@@ -777,6 +806,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        optional_toolsets::{OptionalToolsetSelection, production_optional_metadata},
         resources::OBJECT_RESOURCE_TEMPLATE,
         runtime::{StartupStatus, serve_transport},
     };
@@ -794,6 +824,42 @@ mod tests {
     const REPRESENTATIVE_RESULTS_SNAPSHOT: &str =
         include_str!("../tests/snapshots/result-representatives.json");
     const TOKEN_BUDGET_SNAPSHOT: &str = include_str!("../tests/snapshots/token-budget.json");
+    const OPTIONAL_READ_TOOL_NAMES: [&str; 12] = [
+        "body_block_list",
+        "chat_list",
+        "chat_message_get",
+        "chat_message_list",
+        "chat_message_search",
+        "collection_member_list",
+        "file_metadata",
+        "file_read",
+        "member_get",
+        "member_list",
+        "optional_toolset_status",
+        "type_get",
+    ];
+    const OPTIONAL_CREATE_TOOL_NAMES: [&str; 8] = [
+        "body_block_create",
+        "chat_message_add",
+        "file_upload",
+        "property_create",
+        "rich_page_create",
+        "space_create",
+        "tag_create",
+        "type_create",
+    ];
+    const OPTIONAL_UPDATE_TOOL_NAMES: [&str; 10] = [
+        "body_block_delete",
+        "body_block_move",
+        "body_block_update",
+        "chat_message_delete",
+        "collection_member_add",
+        "collection_member_remove",
+        "property_update",
+        "space_update",
+        "tag_update",
+        "type_update",
+    ];
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -844,6 +910,22 @@ mod tests {
         read_only: bool,
         startup_status: StartupStatus,
     ) -> RuntimeContext {
+        runtime_at_with_availability_and_optional_toolsets(
+            base_url,
+            profile,
+            read_only,
+            startup_status,
+            OptionalToolsetSelection::default(),
+        )
+    }
+
+    fn runtime_at_with_availability_and_optional_toolsets(
+        base_url: String,
+        profile: ApplicationProfile,
+        read_only: bool,
+        startup_status: StartupStatus,
+        optional_toolsets: OptionalToolsetSelection,
+    ) -> RuntimeContext {
         let client = AnytypeClient::with_config(ClientConfig {
             base_url: Some(base_url),
             keystore: Some("env".to_string()),
@@ -853,13 +935,38 @@ mod tests {
         })
         .expect("in-memory test client");
         client.set_api_key(HttpCredentials::new("fixture-token"));
-        RuntimeContext::from_parts_with_profile(
+        RuntimeContext::from_parts_with_profile_and_optional_toolsets(
             client,
             1,
             Duration::from_secs(1),
             startup_status,
             profile,
             read_only,
+            optional_toolsets,
+        )
+    }
+
+    fn runtime_with_all_optional_toolsets(
+        profile: ApplicationProfile,
+        read_only: bool,
+    ) -> RuntimeContext {
+        let metadata = production_optional_metadata();
+        let selector = metadata
+            .iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>()
+            .join(",");
+        let selection = OptionalToolsetSelection::parse(Some(selector), &metadata)
+            .expect("complete production optional selection");
+        runtime_at_with_availability_and_optional_toolsets(
+            "http://127.0.0.1:1".to_owned(),
+            profile,
+            read_only,
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            selection,
         )
     }
 
@@ -1155,7 +1262,14 @@ mod tests {
             self.require_allowed_keys(
                 schema,
                 path,
-                &["type", "properties", "required", "additionalProperties"],
+                &[
+                    "type",
+                    "properties",
+                    "required",
+                    "additionalProperties",
+                    "minProperties",
+                    "maxProperties",
+                ],
             )?;
             if schema.get("additionalProperties") != Some(&Value::Bool(false)) {
                 return Err(format!(
@@ -1193,6 +1307,31 @@ mod tests {
                         ));
                     }
                 }
+            }
+            let property_count = properties.map_or(0, serde_json::Map::len);
+            let minimum = match schema.get("minProperties") {
+                Some(value) => value.as_u64().ok_or_else(|| {
+                    format!("{path}/minProperties: must be a nonnegative integer")
+                })?,
+                None => 0,
+            };
+            let maximum = match schema.get("maxProperties") {
+                Some(value) => value.as_u64().ok_or_else(|| {
+                    format!("{path}/maxProperties: must be a nonnegative integer")
+                })?,
+                None => u64::try_from(property_count)
+                    .map_err(|_| format!("{path}/properties: property count is impractical"))?,
+            };
+            if minimum > maximum {
+                return Err(format!("{path}/minProperties: exceeds maxProperties"));
+            }
+            if usize::try_from(maximum)
+                .ok()
+                .is_none_or(|maximum| maximum > property_count)
+            {
+                return Err(format!(
+                    "{path}/maxProperties: exceeds declared property count"
+                ));
             }
             Ok(())
         }
@@ -1534,13 +1673,23 @@ mod tests {
             audit_schema(&output)
                 .unwrap_or_else(|error| panic!("{}/outputSchema: {error}", tool.name));
 
-            let expected = if READ_TOOL_NAMES.contains(&tool.name.as_ref()) {
+            let name = tool.name.as_ref();
+            let is_read =
+                READ_TOOL_NAMES.contains(&name) || OPTIONAL_READ_TOOL_NAMES.contains(&name);
+            let is_create = name == OBJECT_CREATE || OPTIONAL_CREATE_TOOL_NAMES.contains(&name);
+            let is_update = [OBJECT_UPDATE, OBJECT_EDIT, OBJECT_ARCHIVE].contains(&name)
+                || OPTIONAL_UPDATE_TOOL_NAMES.contains(&name);
+            assert!(
+                is_read || is_create || is_update,
+                "{name} has no independently reviewed annotation class"
+            );
+            let expected = if is_read {
                 json!({
                     "readOnlyHint": true,
                     "destructiveHint": false,
                     "openWorldHint": false
                 })
-            } else if tool.name == OBJECT_CREATE {
+            } else if is_create {
                 json!({
                     "readOnlyHint": false,
                     "destructiveHint": false,
@@ -1993,10 +2142,25 @@ mod tests {
 
     #[test]
     fn every_catalog_schema_is_recursively_bounded_and_annotations_are_exact() {
-        let normal = AnyMcpServer::new(runtime(false)).expect("normal static catalog");
-        assert_catalog_contracts(&normal);
-        let read_only = AnyMcpServer::new(runtime(true)).expect("read-only static catalog");
-        assert_catalog_contracts(&read_only);
+        for profile in [ApplicationProfile::Compact, ApplicationProfile::Standard] {
+            for read_only in [false, true] {
+                let server = AnyMcpServer::new(runtime_with_profile(profile, read_only))
+                    .expect("base static catalog");
+                assert_catalog_contracts(&server);
+            }
+        }
+    }
+
+    #[test]
+    fn every_all_selected_optional_schema_is_recursively_bounded_and_annotations_are_exact() {
+        for profile in [ApplicationProfile::Compact, ApplicationProfile::Standard] {
+            for read_only in [false, true] {
+                let server =
+                    AnyMcpServer::new(runtime_with_all_optional_toolsets(profile, read_only))
+                        .expect("all-selected production catalog");
+                assert_catalog_contracts(&server);
+            }
+        }
     }
 
     #[test]
@@ -2195,6 +2359,37 @@ mod tests {
                 "reject open maps",
             ),
             (
+                "malformed object minimum",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {},
+                    "minProperties": "0"
+                }),
+                "minProperties: must be a nonnegative integer",
+            ),
+            (
+                "object minimum exceeds maximum",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"value": {"type": "boolean"}},
+                    "minProperties": 1,
+                    "maxProperties": 0
+                }),
+                "minProperties: exceeds maxProperties",
+            ),
+            (
+                "object maximum exceeds fields",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"value": {"type": "boolean"}},
+                    "maxProperties": 2
+                }),
+                "maxProperties: exceeds declared property count",
+            ),
+            (
                 "number missing bounds",
                 json!({"type": "number"}),
                 "exactly one of minimum or exclusiveMinimum",
@@ -2312,6 +2507,17 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn phase_one_route_selection_remains_lazy_until_polled() {
+        let server = AnyMcpServer::new(runtime(false)).expect("standard static catalog");
+        let cancellation = CancellationToken::new();
+        let route = server.dispatch_tool(CallToolRequestParams::new(SPACE_LIST), &cancellation);
+
+        assert_eq!(server.phase1_dispatch_polls(), 0);
+        drop(route);
+        assert_eq!(server.phase1_dispatch_polls(), 0);
     }
 
     #[tokio::test]

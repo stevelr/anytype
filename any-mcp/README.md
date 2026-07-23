@@ -1319,14 +1319,15 @@ release is published by this documentation change.
 
 The ignored live suite checks authenticated HTTP and gRPC before work and runs
 serially so mutation verification does not compete with itself for the
-server's rate limit. Every standard direct-router and spawned-stdio scenario
-uses a prefix-authorized disposable space; the spawned production child is
-registered for stop-and-wait cleanup before protocol initialization. Every
-created object, type, and property is registered immediately for cleanup. The
-suite requires a running headless server, env-only disposable credentials
-from `.test-env`, and `anyr auth status` reporting both HTTP and gRPC pings as
-OK. Run the direct-router and spawned-stdio targets explicitly from the
-repository root:
+server's rate limit. All 27 library cases use a prefix-authorized disposable
+space; no direct-router case mutates an ambient fixture. Spawned disposable
+workflows register each production child for stop-and-wait cleanup before
+protocol initialization, while focused spawned profile sentinels retain their
+cleanup-owned test context. Every created object, type, and property is
+registered immediately for cleanup. The suite requires a running headless
+server, env-only disposable credentials from `.test-env`, and `anyr auth
+status` reporting both HTTP and gRPC pings as OK. Run the direct-router and
+spawned-stdio targets explicitly from the repository root:
 
 ```sh
 source .test-env
@@ -1340,6 +1341,12 @@ cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
 cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- --ignored --test-threads=1
 ```
 
+The protected workflow validates
+`ANYTYPE_TEST_SPACE_PREFIX` as 1 through 485 ASCII letters, digits, hyphens, or
+underscores after sourcing its environment, exports the dedicated-process
+gate, and rejects any captured test output reporting a skipped admission.
+Protected CI therefore cannot pass without running the disposable callbacks.
+
 The selectable `headless_direct_standard_*` and
 `headless_stdio_standard_*` cases cover discovery, document/resource access,
 views, mutations, exported-Markdown no-op replacement, and archive through
@@ -1352,9 +1359,9 @@ evidence. Discovery additionally proves exact identities for a forwarded flat
 list filter and rejects a continuation cursor whose filter binding changes
 through both entry paths. Existing focused live regressions remain alongside
 this acceptance baseline. `server::headless_integration` contains 19 ignored
-direct-router cases; the library command also selects seven focused
-cross-entry optional-registry regressions. The spawned target contains exactly
-18 ignored live cases.
+direct-router cases; the library command also selects eight focused
+cross-entry regressions (seven optional-registry cases plus files), for 27
+cases total. The spawned target contains exactly 21 ignored live cases.
 
 The shared Markdown no-op scenario independently waits for stable REST exports
 and fresh `ObjectShow` identity/type/order evidence, supplies the complete

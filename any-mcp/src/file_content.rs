@@ -2635,7 +2635,9 @@ mod tests {
 
     use anytype::{
         prelude::{AnytypeClient, ClientConfig, HttpCredentials},
-        test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
+        test_util::{
+            DisposableRun, TestContext, TestResult, unique_suffix, with_disposable_space_context,
+        },
     };
     use rmcp::model::{ErrorCode, ListToolsResult, ResourceContents};
     use serde_json::{Map, json};
@@ -2928,6 +2930,219 @@ mod tests {
             FileSha256::digest(&decoded),
             FileSha256::digest(expected_bytes)
         );
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LivePayloadKind {
+        Image,
+        Audio,
+        TextResource,
+        BlobResource,
+    }
+
+    impl LivePayloadKind {
+        const fn wire_name(self) -> &'static str {
+            match self {
+                Self::Image => "image",
+                Self::Audio => "audio",
+                Self::TextResource => "text_resource",
+                Self::BlobResource => "blob_resource",
+            }
+        }
+    }
+
+    fn minimal_wave() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(45);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&37_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.push(128);
+        bytes
+    }
+
+    async fn assert_live_native_file(
+        ctx: &Arc<TestContext>,
+        direct_server: &AnyMcpServer,
+        name: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        expected_kind: LivePayloadKind,
+    ) -> TestResult<()> {
+        let uploaded = ctx
+            .client
+            .files()
+            .upload(&ctx.space_id)
+            .bytes(name, bytes.clone())
+            .mime(media_type)
+            .multipart_limit_bytes(4_096)
+            .response_limit_bytes(MAX_UPLOAD_RESPONSE_BYTES)
+            .error_limit_bytes(MAX_ERROR_BODY_BYTES)
+            .upload()
+            .await?;
+        ctx.register_file(&uploaded.id);
+
+        let normalized_media_type = media_type
+            .parse::<mime::Mime>()
+            .expect("live fixture MIME")
+            .to_string();
+        let arguments = json!({
+            "space":ctx.space_id,
+            "file_id":uploaded.id,
+            "offset":0,
+            "length":bytes.len()
+        });
+        let read = direct_tool(direct_server, "file_read", arguments.clone()).await;
+        assert_eq!(read.is_error, Some(false), "{read:?}");
+        let structured = read
+            .structured_content
+            .as_ref()
+            .expect("live native structured content");
+        assert_eq!(structured["file_id"], uploaded.id);
+        assert_eq!(structured["space_id"], ctx.space_id);
+        assert_eq!(structured["media_type"], normalized_media_type);
+        assert_eq!(structured["offset"], 0);
+        assert_eq!(structured["requested_bytes"], bytes.len());
+        assert_eq!(structured["returned_bytes"], bytes.len());
+        assert_eq!(structured["total_bytes"], bytes.len());
+        assert_eq!(structured["complete"], true);
+        assert_eq!(
+            structured["content_sha256"],
+            FileSha256::digest(&bytes).as_str()
+        );
+        assert_eq!(structured["content_kind"], expected_kind.wire_name());
+        assert_eq!(read.content.len(), 2);
+
+        match expected_kind {
+            LivePayloadKind::Image => {
+                let image = read.content[1].as_image().expect("native image");
+                assert_eq!(image.mime_type, normalized_media_type);
+                assert_eq!(
+                    BASE64_STANDARD.decode(&image.data).expect("image base64"),
+                    bytes
+                );
+            }
+            LivePayloadKind::Audio => {
+                let audio = read.content[1].as_audio().expect("native audio");
+                assert_eq!(audio.mime_type, normalized_media_type);
+                assert_eq!(
+                    BASE64_STANDARD.decode(&audio.data).expect("audio base64"),
+                    bytes
+                );
+            }
+            LivePayloadKind::TextResource => {
+                let ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    ..
+                } = payload_resource(&read)
+                else {
+                    panic!("expected native text resource")
+                };
+                assert_eq!(
+                    uri,
+                    structured["resource_uri"].as_str().expect("resource URI")
+                );
+                assert_eq!(mime_type.as_deref(), Some(normalized_media_type.as_str()));
+                assert_eq!(text.as_bytes(), bytes);
+            }
+            LivePayloadKind::BlobResource => {
+                let ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } = payload_resource(&read)
+                else {
+                    panic!("expected native blob resource")
+                };
+                assert_eq!(
+                    uri,
+                    structured["resource_uri"].as_str().expect("resource URI")
+                );
+                assert_eq!(mime_type.as_deref(), Some(normalized_media_type.as_str()));
+                assert_eq!(BASE64_STANDARD.decode(blob).expect("blob base64"), bytes);
+            }
+        }
+
+        let stdio = production_stdio_tool(
+            production_files_server(ctx.client.clone(), false),
+            "file_read",
+            arguments,
+        )
+        .await;
+        assert_eq!(stdio["result"]["isError"], false, "{stdio}");
+        assert_eq!(&stdio["result"]["structuredContent"], structured);
+        assert_eq!(
+            stdio["result"]["content"],
+            serde_json::to_value(&read.content).expect("direct content JSON")
+        );
+
+        let uri = structured["resource_uri"]
+            .as_str()
+            .expect("live native resource URI");
+        let direct_resource = direct_server
+            .read_resource_wire(
+                ReadResourceRequestParams::new(uri),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("direct native resources/read");
+        let stdio_resource = production_stdio_request(
+            production_files_server(ctx.client.clone(), false),
+            "resources/read",
+            json!({"uri":uri}),
+        )
+        .await;
+        assert!(stdio_resource.get("error").is_none(), "{stdio_resource}");
+        assert_eq!(
+            serde_json::to_value(&direct_resource.contents).expect("direct resource JSON"),
+            stdio_resource["result"]["contents"]
+        );
+        assert_eq!(direct_resource.contents.len(), 1);
+        match expected_kind {
+            LivePayloadKind::TextResource => {
+                let ResourceContents::TextResourceContents {
+                    uri: actual_uri,
+                    mime_type,
+                    text,
+                    ..
+                } = &direct_resource.contents[0]
+                else {
+                    panic!("expected text resource read")
+                };
+                assert_eq!(actual_uri, uri);
+                assert_eq!(mime_type.as_deref(), Some(normalized_media_type.as_str()));
+                assert_eq!(text.as_bytes(), bytes);
+            }
+            LivePayloadKind::Image | LivePayloadKind::Audio | LivePayloadKind::BlobResource => {
+                let ResourceContents::BlobResourceContents {
+                    uri: actual_uri,
+                    mime_type,
+                    blob,
+                    ..
+                } = &direct_resource.contents[0]
+                else {
+                    panic!("expected blob resource read")
+                };
+                assert_eq!(actual_uri, uri);
+                assert_eq!(mime_type.as_deref(), Some(normalized_media_type.as_str()));
+                assert_eq!(
+                    BASE64_STANDARD.decode(blob).expect("resource base64"),
+                    bytes
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -4109,7 +4324,7 @@ mod tests {
     #[test]
     #[serial_test::serial(disposable_anytype_files)]
     #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-    fn production_direct_and_stdio_upload_metadata_ranges_hash_and_cleanup() {
+    fn headless_production_direct_and_stdio_files_native_ranges_hash_and_cleanup() {
         run_large_future(|| async {
             let outcome = Box::pin(with_disposable_space_context(
             "any-mcp-files-terminal",
@@ -4156,7 +4371,7 @@ mod tests {
                         .as_str()
                         .expect("direct candidate id")
                         .to_owned();
-                    ctx.register_object(&direct_id);
+                    ctx.register_file(&direct_id);
                     assert_eq!(uploaded_value["space_id"], ctx.space_id);
                     assert_eq!(uploaded_value["content_sha256"], expected_hash.as_str());
                     assert_eq!(uploaded_value["reused"], false);
@@ -4275,7 +4490,7 @@ mod tests {
                         .as_str()
                         .expect("stdio candidate id")
                         .to_owned();
-                    ctx.register_object(&stdio_id);
+                    ctx.register_file(&stdio_id);
                     let stdio_metadata = production_stdio_tool(
                         production_files_server(ctx.client.clone(), false),
                         "file_metadata",
@@ -4323,6 +4538,43 @@ mod tests {
                             stdio_resource["result"]["contents"]
                         );
                     }
+
+                    assert_live_native_file(
+                        &ctx,
+                        &direct_server,
+                        "native-utf8.txt",
+                        "text/plain; charset=utf-8",
+                        "native UTF-8: café\n".as_bytes().to_vec(),
+                        LivePayloadKind::TextResource,
+                    )
+                    .await?;
+                    assert_live_native_file(
+                        &ctx,
+                        &direct_server,
+                        "unsupported-charset.txt",
+                        "text/plain; charset=iso-8859-1",
+                        vec![0xe9],
+                        LivePayloadKind::BlobResource,
+                    )
+                    .await?;
+                    assert_live_native_file(
+                        &ctx,
+                        &direct_server,
+                        "native-image.svg",
+                        "image/svg+xml",
+                        br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.to_vec(),
+                        LivePayloadKind::Image,
+                    )
+                    .await?;
+                    assert_live_native_file(
+                        &ctx,
+                        &direct_server,
+                        "native-audio.wav",
+                        "audio/wav",
+                        minimal_wave(),
+                        LivePayloadKind::Audio,
+                    )
+                    .await?;
                     Ok(())
                 })
             },
