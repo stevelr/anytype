@@ -4269,11 +4269,11 @@ impl OptionalExecutableWorkflow {
         }
     }
 
-    /// Production registry routed by this workflow.
-    pub const fn registry(self) -> OptionalRegistry {
+    /// Production registry that carries this executable workflow.
+    pub const fn carrier_registry(self) -> OptionalRegistry {
         match self {
-            Self::Fast(workflow) => workflow.registry(),
-            Self::RealHeadless(workflow) => workflow.registry(),
+            Self::Fast(workflow) => workflow.carrier_registry(),
+            Self::RealHeadless(workflow) => workflow.carrier_registry(),
         }
     }
 }
@@ -4311,11 +4311,6 @@ const CHAT_OPERATIONS: &[OptionalOperation] = &[
 ];
 const MEMBER_OPERATIONS: &[OptionalOperation] =
     &[OptionalOperation::MemberList, OptionalOperation::MemberGet];
-const MEMBER_REAL_OPERATIONS: &[OptionalOperation] = &[
-    OptionalOperation::OptionalToolsetStatus,
-    OptionalOperation::MemberList,
-    OptionalOperation::MemberGet,
-];
 const FILE_READ_OPERATIONS: &[OptionalOperation] = &[
     OptionalOperation::FileMetadata,
     OptionalOperation::FileRead,
@@ -4374,14 +4369,16 @@ impl OptionalScenarioId {
     /// Exact executable scenario inventory owned by the common foundation and
     /// the six linked production descriptors.
     pub const EXECUTABLE: [Self; 64] = [
-        define_fast(
-            "optional_toolset_status_direct_contract",
+        define_fast_with_owner(
+            "common_optional_status",
+            OptionalRegistry::CommonFoundation,
             OptionalFastWorkflow::OptionalStatus,
             STATUS_OPERATIONS,
         ),
-        define_fast(
-            "optional_toolset_status_stdio_contract",
-            OptionalFastWorkflow::OptionalStatus,
+        define_real_with_owner(
+            "common_optional_status_headless",
+            OptionalRegistry::CommonFoundation,
+            OptionalRealWorkflow::Members,
             STATUS_OPERATIONS,
         ),
         define_fast(
@@ -4577,7 +4574,7 @@ impl OptionalScenarioId {
         define_real(
             "members_headless",
             OptionalRealWorkflow::Members,
-            MEMBER_REAL_OPERATIONS,
+            MEMBER_OPERATIONS,
         ),
         define_fast(
             "file_content_direct_contract",
@@ -4734,10 +4731,19 @@ const fn define_fast(
     workflow: OptionalFastWorkflow,
     operations: &'static [OptionalOperation],
 ) -> OptionalScenarioId {
+    define_fast_with_owner(name, workflow.carrier_registry(), workflow, operations)
+}
+
+const fn define_fast_with_owner(
+    name: &'static str,
+    registry: OptionalRegistry,
+    workflow: OptionalFastWorkflow,
+    operations: &'static [OptionalOperation],
+) -> OptionalScenarioId {
     OptionalScenarioId {
         name,
         tier: OptionalEvidenceTier::Fast,
-        registry: workflow.registry(),
+        registry,
         workflow: OptionalExecutableWorkflow::Fast(workflow),
         operations,
     }
@@ -4748,10 +4754,19 @@ const fn define_real(
     workflow: OptionalRealWorkflow,
     operations: &'static [OptionalOperation],
 ) -> OptionalScenarioId {
+    define_real_with_owner(name, workflow.carrier_registry(), workflow, operations)
+}
+
+const fn define_real_with_owner(
+    name: &'static str,
+    registry: OptionalRegistry,
+    workflow: OptionalRealWorkflow,
+    operations: &'static [OptionalOperation],
+) -> OptionalScenarioId {
     OptionalScenarioId {
         name,
         tier: OptionalEvidenceTier::RealHeadless,
-        registry: workflow.registry(),
+        registry,
         workflow: OptionalExecutableWorkflow::RealHeadless(workflow),
         operations,
     }
@@ -4823,11 +4838,11 @@ const fn optional_owner(
 pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 62] = &[
     optional_owner(
         OptionalOperation::OptionalToolsetStatus,
-        optional_fast("optional_toolset_status_direct_contract"),
+        optional_fast("common_optional_status"),
     ),
     optional_owner(
         OptionalOperation::OptionalToolsetStatus,
-        optional_real("members_headless"),
+        optional_real("common_optional_status_headless"),
     ),
     optional_owner(
         OptionalOperation::BodyBlockList,
@@ -5210,11 +5225,11 @@ where
     Ok(())
 }
 
-/// One descriptor-tagged optional scenario declaration.
+/// One normative-owner-tagged optional scenario declaration.
 ///
-/// Keeping the descriptor identity beside the scenario name prevents a valid
-/// identifier from one registry from silently satisfying another registry's
-/// inventory.
+/// Keeping the common foundation or descriptor identity beside the scenario
+/// name prevents a valid identifier from one owner from silently satisfying
+/// another owner's inventory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptionalScenarioDeclaration {
     registry: OptionalRegistry,
@@ -5283,9 +5298,7 @@ fn optional_scenario_inventory(
                 scenario.registry().as_str()
             ));
         }
-        if scenario.workflow().tier() != declaration.tier
-            || scenario.workflow().registry() != declaration.registry
-        {
+        if scenario.workflow().tier() != declaration.tier {
             return Err(format!(
                 "optional scenario workflow mismatch: {}",
                 scenario.as_str()
@@ -5393,10 +5406,15 @@ fn validate_optional_typed_ownership(
                 OptionalExecutableWorkflow::RealHeadless(owner.operation.real_workflow())
             }
         };
-        if expected_workflow.registry() != operation_registry {
+        let carrier_registry = expected_workflow.carrier_registry();
+        if operation_registry != OptionalRegistry::CommonFoundation
+            && carrier_registry != operation_registry
+        {
             return Err(format!(
-                "optional operation workflow registry mismatch: {:?}",
-                owner.operation
+                "optional operation carrier mismatch: {:?} is owned by {}, carried by {}",
+                owner.operation,
+                operation_registry.as_str(),
+                carrier_registry.as_str()
             ));
         }
         if owner.scenario.workflow() != expected_workflow {
@@ -5709,6 +5727,32 @@ mod ownership_tests {
     }
 
     #[test]
+    fn optional_inventory_rejects_common_status_declared_by_members() {
+        for name in ["common_optional_status", "common_optional_status_headless"] {
+            let mut declarations = OptionalScenarioId::EXECUTABLE
+                .iter()
+                .map(|scenario| OptionalScenarioDeclaration {
+                    registry: scenario.registry(),
+                    name: scenario.as_str(),
+                    tier: scenario.tier(),
+                })
+                .collect::<Vec<_>>();
+            let declaration = declarations
+                .iter_mut()
+                .find(|declaration| declaration.name == name)
+                .expect("common status declaration");
+            declaration.registry = OptionalRegistry::Members;
+
+            assert_eq!(
+                optional_scenario_inventory(&declarations).unwrap_err(),
+                format!(
+                    "optional scenario descriptor mismatch: {name} declared by members, owned by common-foundation"
+                )
+            );
+        }
+    }
+
+    #[test]
     fn optional_owner_rejects_correct_broad_workflow_with_wrong_scenario() {
         let mut owners = OPTIONAL_LIVE_OWNERSHIP.to_vec();
         let owner = owners
@@ -5749,6 +5793,16 @@ mod ownership_tests {
                     OptionalEvidenceTier::Fast,
                     OptionalEvidenceTier::RealHeadless,
                 ])
+        }));
+        let status_owners = OPTIONAL_LIVE_OWNERSHIP
+            .iter()
+            .filter(|owner| owner.operation == OptionalOperation::OptionalToolsetStatus)
+            .collect::<Vec<_>>();
+        assert_eq!(status_owners.len(), 2);
+        assert!(status_owners.iter().all(|owner| {
+            owner.operation.registry() == OptionalRegistry::CommonFoundation
+                && owner.scenario.registry() == OptionalRegistry::CommonFoundation
+                && owner.scenario.workflow().carrier_registry() == OptionalRegistry::Members
         }));
     }
 
