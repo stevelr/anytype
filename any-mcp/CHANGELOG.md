@@ -41,7 +41,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   proves the pre-derived insertion parent/index, exact prior structure and
   values, parent-only restriction refresh, and one closed canonical generated
   table subtree instead of misclassifying legitimate parent refresh as an
-  indeterminate conflict.
+  indeterminate conflict. Opaque page roots now retain their exact kind and
+  structural child count while allowing only the insertion parent's
+  protobuf-derived approximate byte summary to refresh.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection
