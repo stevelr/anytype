@@ -476,6 +476,14 @@ impl BodyEditor<'_> {
         self
     }
 
+    /// Returns the verification configuration for downstream contract tests.
+    #[cfg(feature = "test-fixtures")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fixture_verify_config(&self) -> &VerifyConfig {
+        &self.verify
+    }
+
     /// Uses one finite gRPC configuration for acquisition, the write, every
     /// verification show/close pair, and fallback cleanup.
     ///

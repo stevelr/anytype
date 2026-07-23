@@ -23,11 +23,11 @@ use anytype::{
     error::AnytypeError,
     prelude::{
         AnytypeClient, BlockChange, BlockContent, BlockId, BlockMutation, BlockRestrictions,
-        BodyBlock, BodyLimits, BodyRpcConfig, BodyRpcMetrics, BodySnapshot, BookmarkState,
-        CalloutIcon, ColorToken, DividerStyle, EmbedContent, EmbedProcessor, FileBlockKind,
-        FileBlockState, FileBlockStyle, HorizontalAlign, InsertPosition, LayoutStyle,
-        LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind, NewBlock, TextMark, TextRange,
-        TextStyle, VerticalAlign,
+        BodyBlock, BodyEditor, BodyLimits, BodyRpcConfig, BodyRpcMetrics, BodySnapshot,
+        BookmarkState, CalloutIcon, ColorToken, DividerStyle, EmbedContent, EmbedProcessor,
+        FileBlockKind, FileBlockState, FileBlockStyle, HorizontalAlign, InsertPosition,
+        LayoutStyle, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind, NewBlock,
+        TextMark, TextRange, TextStyle, VerifyConfig, VerticalAlign,
     },
 };
 use rmcp::{
@@ -133,6 +133,7 @@ const JSON_SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
 const MAX_BODY_INPUT_BYTES: usize = 524_288;
 const MAX_BODY_REQUEST_FRAME_BYTES: usize = 557_056;
 const MAX_BODY_SUCCESS_FRAME_BYTES: usize = 1_114_112;
+const MAX_BODY_VERIFY_ATTEMPTS: usize = 3;
 const BODY_FRAME_ENVELOPE_HEADROOM: usize = 32 * 1_024;
 const MAX_LIST_REQUEST_TOKENS: usize = 2_000;
 const MAX_PRIMITIVE_REQUEST_TOKENS: usize = 60_000;
@@ -146,6 +147,29 @@ const MAX_PRIMITIVE_SUCCESS_BYTES: usize = 96 * 1_024;
 const MAX_RICH_SUCCESS_BYTES: usize = 128 * 1_024;
 
 static BODY_TOKENIZER: OnceLock<Option<CoreBPE>> = OnceLock::new();
+
+fn body_verify_config(client: &AnytypeClient) -> VerifyConfig {
+    let mut verify = client
+        .get_config()
+        .get_verify_config()
+        .cloned()
+        .unwrap_or_default();
+    verify.max_attempts = verify
+        .effective_max_attempts()
+        .min(MAX_BODY_VERIFY_ATTEMPTS);
+    verify
+}
+
+fn body_editor<'a>(
+    snapshot: &'a BodySnapshot,
+    client: &'a AnytypeClient,
+    rpc: BodyRpcConfig,
+) -> BodyEditor<'a> {
+    snapshot
+        .edit(client)
+        .verify_with(body_verify_config(client))
+        .rpc_config(rpc)
+}
 
 #[derive(Clone, Copy)]
 struct BodyFrameBounds {
@@ -4388,10 +4412,7 @@ impl BodyHandlers {
                     project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
                 let projected_change = input.change.clone();
                 let metrics = prepared.rpc.metrics();
-                let editor = prepared
-                    .snapshot
-                    .edit(&client)
-                    .rpc_config(prepared.rpc.clone());
+                let editor = body_editor(&prepared.snapshot, &client, prepared.rpc.clone());
                 update_transition_stage_diagnostic("update_dispatch_ready");
                 let receipt = match observe_body_dispatch(
                     editor.update(&block_id, change),
@@ -4481,10 +4502,7 @@ impl BodyHandlers {
                 validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                     .map_err(HandlerOperationError::from)?;
                 let metrics = prepared.rpc.metrics();
-                let editor = prepared
-                    .snapshot
-                    .edit(&client)
-                    .rpc_config(prepared.rpc.clone());
+                let editor = body_editor(&prepared.snapshot, &client, prepared.rpc.clone());
                 let receipt =
                     observe_body_dispatch(editor.delete(&block_id), metrics, operation_progress)
                         .await?;
@@ -4569,10 +4587,7 @@ impl BodyHandlers {
                 validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                     .map_err(HandlerOperationError::from)?;
                 let metrics = prepared.rpc.metrics();
-                let editor = prepared
-                    .snapshot
-                    .edit(&client)
-                    .rpc_config(prepared.rpc.clone());
+                let editor = body_editor(&prepared.snapshot, &client, prepared.rpc.clone());
                 let receipt = observe_body_dispatch(
                     editor.move_block(&block_id, &target_id, input.position.into()),
                     metrics,
@@ -6069,7 +6084,7 @@ async fn execute_block_create(
             validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                 .map_err(HandlerOperationError::from)?;
             let metrics = rpc.metrics();
-            let editor = snapshot.edit(&client).rpc_config(rpc);
+            let editor = body_editor(&snapshot, &client, rpc);
             let receipt = observe_body_dispatch(
                 editor.create(new, &target_id, input.position.into()),
                 metrics,
@@ -7091,7 +7106,7 @@ async fn execute_rich_create(
             }
         };
         let before_polls = rpc.metrics().snapshot().write_polls;
-        let editor = current.edit(&client).rpc_config(rpc.clone());
+        let editor = body_editor(&current, &client, rpc.clone());
         let observed_write = observe_body_dispatch(
             editor.create(new, &target, InsertPosition::LastChild),
             rpc.metrics(),
@@ -7716,6 +7731,50 @@ mod tests {
             ..ClientConfig::default()
         })
         .expect("body-block registry client")
+    }
+
+    #[test]
+    fn production_body_editor_caps_verification_without_widening_client_policy() {
+        let snapshot = anytype::body::test_fixtures::bounded_text_snapshot(1, None)
+            .expect("single-root body fixture");
+        let timeout = Duration::from_millis(917);
+        let initial_delay = Duration::from_millis(23);
+        let max_delay = Duration::from_millis(71);
+        for (configured, expected) in [(0, 3), (1, 1), (2, 2), (3, 3), (4, 3), (10, 3), (10_001, 3)]
+        {
+            let client = AnytypeClient::with_config(ClientConfig {
+                base_url: Some("http://127.0.0.1:1".to_owned()),
+                keystore: Some("env".to_owned()),
+                keystore_service: Some("body-blocks-verify-budget".to_owned()),
+                app_name: "body-blocks-verify-budget".to_owned(),
+                disable_cache: true,
+                verify: Some(VerifyConfig {
+                    timeout,
+                    initial_delay,
+                    max_delay,
+                    max_attempts: configured,
+                }),
+                ..ClientConfig::default()
+            })
+            .expect("verification-budget client");
+            let editor = body_editor(&snapshot, &client, BodyRpcConfig::default());
+            let effective = editor.fixture_verify_config();
+            assert_eq!(effective.max_attempts, expected);
+            assert_eq!(effective.timeout, timeout);
+            assert_eq!(effective.initial_delay, initial_delay);
+            assert_eq!(effective.max_delay, max_delay);
+        }
+
+        let default_client = client();
+        let default_editor = body_editor(&snapshot, &default_client, BodyRpcConfig::default());
+        let defaulted = default_editor.fixture_verify_config();
+        assert_eq!(defaulted.max_attempts, MAX_BODY_VERIFY_ATTEMPTS);
+        assert_eq!(defaulted.timeout, VerifyConfig::default().timeout);
+        assert_eq!(
+            defaulted.initial_delay,
+            VerifyConfig::default().initial_delay
+        );
+        assert_eq!(defaulted.max_delay, VerifyConfig::default().max_delay);
     }
 
     fn runtime(
