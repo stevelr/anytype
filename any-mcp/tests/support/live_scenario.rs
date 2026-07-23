@@ -464,21 +464,81 @@ fn expected_create_replay_metrics() -> BodyDriverMetrics {
     }
 }
 
+fn body_metric_call_marker(label: &'static str, event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=metric_call label={label} event={event}");
+    }
+}
+
+fn body_metric_availability_diagnostic(
+    label: &'static str,
+    before_available: bool,
+    after_available: bool,
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=metric_call label={label} event=availability \
+             before={before_available} after={after_available}"
+        );
+    }
+}
+
+fn body_metric_vector_diagnostic(
+    label: &'static str,
+    kind: &'static str,
+    metrics: BodyDriverMetrics,
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=metric_call label={label} event={kind} \
+             fields=page_create,show,foreground_attempt,foreground_confirmed,\
+fallback_attempt,fallback_confirmed,write,show_limit,non_show_limit,close_limit,mutation_limit \
+             values=[{},{},{},{},{},{},{},{},{},{},{}]",
+            metrics.page_create_polls,
+            metrics.show_attempts,
+            metrics.foreground_close_attempts,
+            metrics.foreground_close_confirmed,
+            metrics.fallback_close_attempts,
+            metrics.fallback_close_confirmed,
+            metrics.write_polls,
+            metrics.show_limit_rejections,
+            metrics.non_show_limit_rejections,
+            metrics.close_limit_rejections,
+            metrics.mutation_limit_rejections
+        );
+    }
+}
+
 async fn call_body_tool_with_metrics(
     driver: &mut impl McpDriver,
     name: &'static str,
     arguments: Value,
     expected: BodyDriverMetrics,
-    label: &str,
+    label: &'static str,
 ) -> Result<Value, String> {
+    body_metric_call_marker(label, "call_start");
     let before = driver.body_acceptance_metrics();
-    let result = driver.call_tool(name, arguments).await?;
-    if let (Some(before), Some(after)) = (before, driver.body_acceptance_metrics()) {
-        let observed = body_metrics_delta(before, after)?;
+    let result = driver.call_tool(name, arguments).await.inspect_err(|_| {
+        body_metric_call_marker(label, "driver_error");
+    })?;
+    body_metric_call_marker(label, "call_returned");
+    let after = driver.body_acceptance_metrics();
+    body_metric_availability_diagnostic(label, before.is_some(), after.is_some());
+    if let (Some(before), Some(after)) = (before, after) {
+        let observed = body_metrics_delta(before, after).inspect_err(|_| {
+            body_metric_call_marker(label, "delta_underflow");
+        })?;
         if observed != expected {
+            body_metric_call_marker(label, "metrics_mismatch");
+            body_metric_vector_diagnostic(label, "observed", observed);
+            body_metric_vector_diagnostic(label, "expected", expected);
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
+        body_metric_call_marker(label, "metrics_match");
+    } else {
+        body_metric_call_marker(label, "metrics_unavailable");
     }
+    body_metric_call_marker(label, "complete");
     Ok(result)
 }
 
