@@ -116,26 +116,17 @@ fn body_fixture_shape_diagnostic(
     }
     let blocks = snapshot.iter().collect::<Vec<_>>();
     let suffix = blocks.get(initial_blocks.len()..);
-    let prefix_ok = body_initial_full_prefix_unchanged(&blocks, initial_blocks);
-    let prefix_ids_ok = blocks.len() >= initial_blocks.len()
-        && blocks
-            .iter()
-            .zip(initial_blocks)
-            .all(|(actual, expected)| actual.id == expected.id);
+    let prefix_ids_ok = body_initial_prefix_ids_preserved(&blocks, initial_blocks);
     let root_nonchild_state_ok =
-        blocks
-            .first()
-            .zip(initial_blocks.first())
-            .is_some_and(|(actual, expected)| {
-                body_block_state_except_children_matches(actual, expected)
-            });
-    let nonroot_full_state_ok = blocks.len() >= initial_blocks.len()
-        && blocks
-            .iter()
-            .skip(1)
-            .zip(initial_blocks.iter().skip(1))
-            .all(|(actual, expected)| *actual == expected);
+        body_initial_root_nonchild_state_preserved(&blocks, initial_blocks);
+    let nonroot_full_state_ok = body_initial_nonroot_full_state_preserved(&blocks, initial_blocks);
     let root_children_prefix_ok = body_initial_root_children_preserved(snapshot, initial_blocks);
+    let prefix_ok = body_initial_prefix_gate(
+        prefix_ids_ok,
+        root_nonchild_state_ok,
+        nonroot_full_state_ok,
+        root_children_prefix_ok,
+    );
     let suffix_count_ok = suffix.is_some_and(|items| {
         items.len() == created_ids.len() && items.len() == expected_suffix.len()
     });
@@ -188,19 +179,36 @@ fn body_block_state_except_children_matches(actual: &BodyBlock, expected: &BodyB
         && actual.restrictions == expected.restrictions
 }
 
-fn body_initial_full_prefix_unchanged(blocks: &[&BodyBlock], initial_blocks: &[BodyBlock]) -> bool {
+fn body_initial_prefix_ids_preserved(blocks: &[&BodyBlock], initial_blocks: &[BodyBlock]) -> bool {
     blocks.len() >= initial_blocks.len()
         && blocks
             .iter()
             .zip(initial_blocks)
-            .enumerate()
-            .all(|(index, (actual, expected))| {
-                if index == 0 {
-                    body_block_state_except_children_matches(actual, expected)
-                } else {
-                    *actual == expected
-                }
-            })
+            .all(|(actual, expected)| actual.id == expected.id)
+}
+
+fn body_initial_root_nonchild_state_preserved(
+    blocks: &[&BodyBlock],
+    initial_blocks: &[BodyBlock],
+) -> bool {
+    blocks
+        .first()
+        .zip(initial_blocks.first())
+        .is_some_and(|(actual, expected)| {
+            body_block_state_except_children_matches(actual, expected)
+        })
+}
+
+fn body_initial_nonroot_full_state_preserved(
+    blocks: &[&BodyBlock],
+    initial_blocks: &[BodyBlock],
+) -> bool {
+    blocks.len() >= initial_blocks.len()
+        && blocks
+            .iter()
+            .skip(1)
+            .zip(initial_blocks.iter().skip(1))
+            .all(|(actual, expected)| *actual == expected)
 }
 
 fn body_initial_root_children_preserved(
@@ -211,6 +219,15 @@ fn body_initial_root_children_preserved(
         snapshot.root().children.get(..initial_root.children.len())
             == Some(initial_root.children.as_slice())
     })
+}
+
+fn body_initial_prefix_gate(
+    prefix_ids_ok: bool,
+    _root_nonchild_state_ok: bool,
+    nonroot_full_state_ok: bool,
+    root_children_prefix_ok: bool,
+) -> bool {
+    prefix_ids_ok && nonroot_full_state_ok && root_children_prefix_ok
 }
 
 fn body_pagination_suffix_spec(append_count: usize) -> Vec<(TextStyle, String)> {
@@ -253,9 +270,19 @@ fn is_exact_body_pagination_fixture(
     let Some(suffix) = blocks.get(initial_blocks.len()..) else {
         return false;
     };
-    let prefix_unchanged = body_initial_full_prefix_unchanged(&blocks, initial_blocks);
+    let prefix_ids_unchanged = body_initial_prefix_ids_preserved(&blocks, initial_blocks);
+    let root_nonchild_state_unchanged =
+        body_initial_root_nonchild_state_preserved(&blocks, initial_blocks);
+    let nonroot_full_state_unchanged =
+        body_initial_nonroot_full_state_preserved(&blocks, initial_blocks);
     let root_children_prefix_unchanged =
         body_initial_root_children_preserved(snapshot, initial_blocks);
+    let initial_prefix_valid = body_initial_prefix_gate(
+        prefix_ids_unchanged,
+        root_nonchild_state_unchanged,
+        nonroot_full_state_unchanged,
+        root_children_prefix_unchanged,
+    );
     let suffix_ids_match = suffix
         .iter()
         .map(|block| block.id.as_str())
@@ -281,8 +308,7 @@ fn is_exact_body_pagination_fixture(
             .map(|id| id.as_str())
             .eq(created_ids.iter().rev().map(String::as_str));
     blocks.len() == BODY_PAGINATION_ITEM_COUNT
-        && prefix_unchanged
-        && root_children_prefix_unchanged
+        && initial_prefix_valid
         && suffix.len() == created_ids.len()
         && suffix.len() == expected_suffix.len()
         && suffix_ids_match
@@ -319,6 +345,15 @@ fn body_pagination_fixture_plan_fills_twenty_including_preserved_root_prefix() {
             Some(TextStyle::Header1)
         );
     }
+}
+
+#[test]
+fn body_pagination_prefix_gate_allows_only_root_metadata_drift() {
+    assert!(body_initial_prefix_gate(true, true, true, true));
+    assert!(body_initial_prefix_gate(true, false, true, true));
+    assert!(!body_initial_prefix_gate(false, true, true, true));
+    assert!(!body_initial_prefix_gate(true, true, false, true));
+    assert!(!body_initial_prefix_gate(true, true, true, false));
 }
 
 /// Content-free evidence from one transport-neutral rich-body workflow.
