@@ -22,11 +22,128 @@ use anytype::{
     test_util::{TestContext, unique_suffix},
 };
 
+/// Seeded value that must never cross into spawned diagnostics.
+pub const BODY_DIAGNOSTIC_SECRET: &str = "SECRET_BODY_DIAGNOSTIC_SENTINEL";
+
 /// Content-free evidence from one transport-neutral rich-body workflow.
 #[derive(Debug, PartialEq, Eq)]
 pub struct BodyScenarioEvidence {
     pub normalized_results: Vec<Value>,
     pub listed_block_count: usize,
+}
+
+/// Content-free evidence from one read-only body catalog check.
+// This shared module is also compiled into direct-router unit tests, whose
+// body slice intentionally exercises only the read-write scenario.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct BodyReadOnlyEvidence {
+    pub body_tools: Vec<String>,
+    pub mutation_error_categories: Vec<String>,
+}
+
+/// Payload-free production lifecycle counters optionally exposed by a direct
+/// acceptance driver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BodyDriverMetrics {
+    pub page_create_polls: usize,
+    pub show_attempts: usize,
+    pub foreground_close_attempts: usize,
+    pub foreground_close_confirmed: usize,
+    pub fallback_close_attempts: usize,
+    pub fallback_close_confirmed: usize,
+    pub write_polls: usize,
+    pub show_limit_rejections: usize,
+    pub non_show_limit_rejections: usize,
+    pub close_limit_rejections: usize,
+    pub mutation_limit_rejections: usize,
+}
+
+fn body_metrics_delta(
+    before: BodyDriverMetrics,
+    after: BodyDriverMetrics,
+) -> Result<BodyDriverMetrics, String> {
+    macro_rules! delta {
+        ($field:ident) => {
+            after.$field.checked_sub(before.$field).ok_or_else(|| {
+                format!("body acceptance counter decreased: {}", stringify!($field))
+            })?
+        };
+    }
+    Ok(BodyDriverMetrics {
+        page_create_polls: delta!(page_create_polls),
+        show_attempts: delta!(show_attempts),
+        foreground_close_attempts: delta!(foreground_close_attempts),
+        foreground_close_confirmed: delta!(foreground_close_confirmed),
+        fallback_close_attempts: delta!(fallback_close_attempts),
+        fallback_close_confirmed: delta!(fallback_close_confirmed),
+        write_polls: delta!(write_polls),
+        show_limit_rejections: delta!(show_limit_rejections),
+        non_show_limit_rejections: delta!(non_show_limit_rejections),
+        close_limit_rejections: delta!(close_limit_rejections),
+        mutation_limit_rejections: delta!(mutation_limit_rejections),
+    })
+}
+
+fn expected_rich_metrics(page_create_polls: usize, blocks: usize) -> BodyDriverMetrics {
+    let shows = blocks.saturating_add(1);
+    BodyDriverMetrics {
+        page_create_polls,
+        show_attempts: shows,
+        foreground_close_attempts: shows,
+        foreground_close_confirmed: shows,
+        write_polls: blocks,
+        ..BodyDriverMetrics::default()
+    }
+}
+
+/// Proves that read-only mode advertises only body reads and rejects every
+/// direct mutation name before decoding caller arguments.
+#[allow(dead_code)]
+pub async fn run_body_read_only_scenario(
+    driver: &mut impl McpDriver,
+) -> Result<BodyReadOnlyEvidence, String> {
+    const BODY_TOOLS: [&str; 6] = [
+        "body_block_create",
+        "body_block_delete",
+        "body_block_list",
+        "body_block_move",
+        "body_block_update",
+        "rich_page_create",
+    ];
+    const MUTATIONS: [&str; 5] = [
+        "body_block_create",
+        "body_block_update",
+        "body_block_delete",
+        "body_block_move",
+        "rich_page_create",
+    ];
+    let body_tools = driver
+        .list_tools()
+        .await?
+        .into_iter()
+        .filter(|name| BODY_TOOLS.contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    if body_tools != ["body_block_list"] {
+        return Err("read-only body catalog was not the exact one-tool inventory".to_owned());
+    }
+    let mut mutation_error_categories = Vec::new();
+    for name in MUTATIONS {
+        let error = driver
+            .call_tool_error(name, json!({"SECRET_UNPARSED_BODY_VALUE":true}))
+            .await?;
+        if error.contains("SECRET_UNPARSED_BODY_VALUE") {
+            return Err("read-only mutation error exposed caller input".to_owned());
+        }
+        if !error.contains("validation") {
+            return Err("read-only mutation did not fail before argument decoding".to_owned());
+        }
+        mutation_error_categories.push("validation".to_owned());
+    }
+    Ok(BodyReadOnlyEvidence {
+        body_tools,
+        mutation_error_categories,
+    })
 }
 
 fn body_string<'a>(value: &'a Value, pointer: &str, field: &str) -> Result<&'a str, String> {
@@ -96,9 +213,8 @@ fn rich_root_contains_exact_suffix(snapshot: &BodySnapshot, ids: &[String]) -> b
         .iter()
         .map(|id| id.as_str())
         .collect::<Vec<_>>();
-    children
-        .windows(ids.len())
-        .any(|window| window.iter().copied().eq(ids.iter().map(String::as_str)))
+    let expected = ids.iter().map(String::as_str).collect::<Vec<_>>();
+    children.ends_with(&expected)
 }
 
 fn verify_table_shape(
@@ -284,14 +400,19 @@ pub async fn run_body_scenario(
 ) -> Result<BodyScenarioEvidence, String> {
     let mut normalized_results = Vec::new();
     let suffix = unique_suffix();
-    let markdown = (0..14)
-        .map(|index| format!("Paragraph {index}"))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let markdown = format!(
+        "# Existing heading\n\n{}",
+        (0..18)
+            .map(|index| format!("Paragraph {index}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    );
     let page = ctx
         .client
         .new_object(&ctx.space_id, "page")
-        .name(format!("Body {transport} {suffix}"))
+        .name(format!(
+            "Body {transport} {suffix} {BODY_DIAGNOSTIC_SECRET}"
+        ))
         .body(markdown)
         .create()
         .await
@@ -328,6 +449,9 @@ pub async fn run_body_scenario(
         .iter()
         .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
         .collect::<Result<Vec<_>, _>>()?;
+    if listed_block_ids.len() != 8 {
+        return Err("body first page did not contain the exact limit of eight".to_owned());
+    }
     let second = driver
         .call_tool(
             "body_block_list",
@@ -348,6 +472,11 @@ pub async fn run_body_scenario(
             .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?,
     );
+    if listed_block_ids.len() != 20 {
+        return Err(
+            "body terminal page did not consume the exact twelve remaining blocks".to_owned(),
+        );
+    }
     if second.get("next_cursor").is_some() {
         return Err("body two-page fixture unexpectedly returned a third cursor".to_owned());
     }
@@ -365,6 +494,16 @@ pub async fn run_body_scenario(
     if listed_block_ids != independent_ids {
         return Err("body pages did not preserve exact DFS order".to_owned());
     }
+    let heading_id = independent
+        .iter()
+        .find_map(|block| {
+            matches!(
+                block.content,
+                BlockContent::Text(ref content) if content.style == TextStyle::Header1
+            )
+            .then(|| block.id.as_str().to_owned())
+        })
+        .ok_or_else(|| "body fixture omitted the existing heading".to_owned())?;
 
     let stale_first = driver
         .call_tool(
@@ -442,7 +581,7 @@ pub async fn run_body_scenario(
             "body_block_create",
             json!({
                 "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"target_block_id":created_block_id,
+                "expected_snapshot_hash":snapshot_hash,"target_block_id":heading_id,
                 "position":"last_child",
                 "block":{"kind":"text","style":"paragraph","text":"targeted child","marks":[]},
                 "idempotency_key":format!("body-child-{transport}-{suffix}")
@@ -452,6 +591,25 @@ pub async fn run_body_scenario(
     normalized_results.push(normalize_body_result(&child));
     let child_id = body_string(&child, "/block/id", "child ID")?.to_owned();
     snapshot_hash = body_string(&child, "/snapshot_hash", "child hash")?.to_owned();
+    let heading_snapshot = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &page.id)
+        .fetch()
+        .await
+        .map_err(|_| "independent heading append read failed".to_owned())?;
+    let appended_under_heading = heading_snapshot
+        .iter()
+        .find(|block| block.id.as_str() == heading_id)
+        .is_some_and(|heading| {
+            heading
+                .children
+                .iter()
+                .any(|child| child.as_str() == child_id)
+        });
+    if !appended_under_heading {
+        return Err("targeted append did not land beneath the existing heading".to_owned());
+    }
     let moved = driver
         .call_tool(
             "body_block_move",
@@ -475,6 +633,104 @@ pub async fn run_body_scenario(
         )
         .await?;
     normalized_results.push(normalize_body_result(&deleted));
+    snapshot_hash = body_string(&deleted, "/snapshot_hash", "delete hash")?.to_owned();
+
+    let relation = driver
+        .call_tool(
+            "body_block_create",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
+                "position":"last_child","block":{"kind":"relation","key":"tag"},
+                "idempotency_key":format!("body-relation-{transport}-{suffix}")
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&relation));
+    let relation_id = body_string(&relation, "/block/id", "relation block ID")?.to_owned();
+    snapshot_hash = body_string(&relation, "/snapshot_hash", "relation hash")?.to_owned();
+    let relation_snapshot = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &page.id)
+        .fetch()
+        .await
+        .map_err(|_| "independent relation detection read failed".to_owned())?;
+    if !relation_snapshot.iter().any(|block| {
+        block.id.as_str() == relation_id
+            && matches!(
+                block.content,
+                BlockContent::Relation(ref relation) if relation.key == "tag"
+            )
+    }) {
+        return Err("created relation block was not independently detected".to_owned());
+    }
+    let relation_deleted = driver
+        .call_tool(
+            "body_block_delete",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"block_id":relation_id,
+                "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&relation_deleted));
+    snapshot_hash =
+        body_string(&relation_deleted, "/snapshot_hash", "relation delete hash")?.to_owned();
+    let recreated_relation = driver
+        .call_tool(
+            "body_block_create",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
+                "position":"last_child","block":{"kind":"relation","key":"tag"},
+                "idempotency_key":format!("body-relation-recreate-{transport}-{suffix}")
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&recreated_relation));
+    let recreated_relation_id =
+        body_string(&recreated_relation, "/block/id", "recreated relation ID")?.to_owned();
+    snapshot_hash = body_string(
+        &recreated_relation,
+        "/snapshot_hash",
+        "recreated relation hash",
+    )?
+    .to_owned();
+    let relation_moved = driver
+        .call_tool(
+            "body_block_move",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"block_id":recreated_relation_id,
+                "target_block_id":created_block_id,"position":"after"
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&relation_moved));
+    let moved_relation_snapshot = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &page.id)
+        .fetch()
+        .await
+        .map_err(|_| "independent moved relation read failed".to_owned())?;
+    let root_children = moved_relation_snapshot.children(&moved_relation_snapshot.root_id);
+    let adjacent = root_children.windows(2).any(|pair| {
+        pair[0].as_str() == created_block_id && pair[1].as_str() == recreated_relation_id
+    });
+    if !adjacent
+        || !moved_relation_snapshot.iter().any(|block| {
+            block.id.as_str() == recreated_relation_id
+                && matches!(
+                    block.content,
+                    BlockContent::Relation(ref relation) if relation.key == "tag"
+                )
+        })
+    {
+        return Err("relation recreation/move was not independently verified".to_owned());
+    }
 
     let rich_input = json!({
         "space":ctx.space_id,"name":format!("Rich {transport} {suffix}"),
@@ -516,9 +772,18 @@ pub async fn run_body_scenario(
         "mermaid",
         "table",
     ];
+    let before_rich_metrics = driver.body_acceptance_metrics();
     let rich = driver
         .call_tool("rich_page_create", rich_input.clone())
         .await?;
+    if let (Some(before), Some(after)) = (before_rich_metrics, driver.body_acceptance_metrics()) {
+        let observed = body_metrics_delta(before, after)?;
+        if observed != expected_rich_metrics(1, primary_keys.len()) {
+            return Err(format!(
+                "primary rich production metrics diverged: {observed:?}"
+            ));
+        }
+    }
     let rich_page_id = body_string(&rich, "/object_id", "rich page ID")?.to_owned();
     ctx.register_object(&rich_page_id);
     normalized_results.push(normalize_body_result(&rich));
@@ -536,7 +801,16 @@ pub async fn run_body_scenario(
     if !verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id) {
         return Err("independent primary rich ObjectShow verification failed".to_owned());
     }
+    let before_replay_metrics = driver.body_acceptance_metrics();
     let rich_replay = driver.call_tool("rich_page_create", rich_input).await?;
+    if let (Some(before), Some(after)) = (before_replay_metrics, driver.body_acceptance_metrics()) {
+        let observed = body_metrics_delta(before, after)?;
+        if observed != expected_rich_metrics(0, 0) {
+            return Err(format!(
+                "rich replay production metrics diverged: {observed:?}"
+            ));
+        }
+    }
     if rich_replay["object_id"] != rich["object_id"]
         || rich_replay["idempotency"]["key_reused"] != true
     {
@@ -566,9 +840,21 @@ pub async fn run_body_scenario(
         "link_inline",
         "table_plain",
     ];
+    let before_supplemental_metrics = driver.body_acceptance_metrics();
     let supplemental = driver
         .call_tool("rich_page_create", supplemental_input)
         .await?;
+    if let (Some(before), Some(after)) = (
+        before_supplemental_metrics,
+        driver.body_acceptance_metrics(),
+    ) {
+        let observed = body_metrics_delta(before, after)?;
+        if observed != expected_rich_metrics(1, supplemental_keys.len()) {
+            return Err(format!(
+                "supplemental rich production metrics diverged: {observed:?}"
+            ));
+        }
+    }
     let supplemental_page_id =
         body_string(&supplemental, "/object_id", "supplemental rich page ID")?.to_owned();
     ctx.register_object(&supplemental_page_id);
@@ -598,6 +884,10 @@ use sha2::{Digest, Sha256};
 
 /// Test-only transport seam used by both direct-router and stdio drivers.
 pub trait McpDriver {
+    fn body_acceptance_metrics(&self) -> Option<BodyDriverMetrics> {
+        None
+    }
+
     fn call_tool<'a>(
         &'a mut self,
         name: &'static str,
