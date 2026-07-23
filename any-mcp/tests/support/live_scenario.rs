@@ -19,12 +19,121 @@ use anytype::{
         HorizontalAlign, LayoutStyle, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind,
         TextStyle, VerticalAlign,
     },
-    prelude::{Color, InsertPosition, NewBlock, ObjectLayout, PropertyFormat},
+    prelude::{BodyOp, Color, InsertPosition, NewBlock, ObjectLayout, PropertyFormat},
     test_util::{TestContext, unique_suffix},
 };
 
 /// Seeded value that must never cross into spawned diagnostics.
 pub const BODY_DIAGNOSTIC_SECRET: &str = "SECRET_BODY_DIAGNOSTIC_SENTINEL";
+/// Exact non-root item count in the live pagination fixture.
+pub const BODY_PAGINATION_ITEM_COUNT: usize = 20;
+
+fn body_pagination_suffix_spec(append_count: usize) -> Vec<(TextStyle, String)> {
+    (0..append_count)
+        .map(|index| {
+            if index == 0 {
+                (TextStyle::Header1, "Existing heading".to_owned())
+            } else {
+                (TextStyle::Paragraph, format!("Paragraph {}", index - 1))
+            }
+        })
+        .collect()
+}
+
+fn body_pagination_append_operations(append_count: usize) -> Result<Vec<BodyOp>, String> {
+    if append_count > BODY_PAGINATION_ITEM_COUNT {
+        return Err("body fixture append count exceeds the exact page size".to_owned());
+    }
+    let mut operations = Vec::with_capacity(append_count);
+    for (style, text) in body_pagination_suffix_spec(append_count) {
+        let block = match style {
+            TextStyle::Header1 => NewBlock::heading(1, text)
+                .map_err(|_| "body fixture heading constructor failed".to_owned())?,
+            TextStyle::Paragraph => NewBlock::paragraph(text)
+                .map_err(|_| "body fixture paragraph constructor failed".to_owned())?,
+            _ => return Err("body fixture plan contained an unsupported style".to_owned()),
+        };
+        operations.push(BodyOp::Append { block });
+    }
+    Ok(operations)
+}
+
+fn is_exact_body_pagination_fixture(
+    snapshot: &BodySnapshot,
+    initial_blocks: &[BodyBlock],
+    created_ids: &[String],
+    expected_suffix: &[(TextStyle, String)],
+) -> bool {
+    let blocks = snapshot.iter().skip(1).collect::<Vec<_>>();
+    let Some(suffix) = blocks.get(initial_blocks.len()..) else {
+        return false;
+    };
+    let prefix_unchanged = blocks
+        .get(..initial_blocks.len())
+        .is_some_and(|prefix| prefix.iter().copied().eq(initial_blocks));
+    let suffix_ids_match = suffix
+        .iter()
+        .map(|block| block.id.as_str())
+        .eq(created_ids.iter().map(String::as_str));
+    let suffix_content_matches =
+        suffix
+            .iter()
+            .zip(expected_suffix)
+            .all(|(block, (expected_style, expected_text))| {
+                matches!(
+                    &block.content,
+                    BlockContent::Text(content)
+                        if content.style == *expected_style && content.text == *expected_text
+                )
+            });
+    let direct_root_suffix = snapshot.root().children.len() >= created_ids.len()
+        && snapshot
+            .root()
+            .children
+            .iter()
+            .rev()
+            .take(created_ids.len())
+            .map(|id| id.as_str())
+            .eq(created_ids.iter().rev().map(String::as_str));
+    blocks.len() == BODY_PAGINATION_ITEM_COUNT
+        && prefix_unchanged
+        && suffix.len() == created_ids.len()
+        && suffix.len() == expected_suffix.len()
+        && suffix_ids_match
+        && suffix_content_matches
+        && direct_root_suffix
+}
+
+#[test]
+fn body_pagination_fixture_plan_fills_twenty_while_preserving_initial_prefix() {
+    let expected = body_pagination_suffix_spec(17);
+    assert_eq!(expected.len(), 17);
+    assert_eq!(
+        expected.first(),
+        Some(&(TextStyle::Header1, "Existing heading".to_owned()))
+    );
+    assert_eq!(
+        expected.last(),
+        Some(&(TextStyle::Paragraph, "Paragraph 15".to_owned()))
+    );
+    for initial_count in [0, 3, 19] {
+        let append_count = BODY_PAGINATION_ITEM_COUNT - initial_count;
+        let operations =
+            body_pagination_append_operations(append_count).expect("valid fixture constructors");
+        assert_eq!(initial_count + operations.len(), BODY_PAGINATION_ITEM_COUNT);
+        assert!(
+            operations
+                .iter()
+                .all(|operation| matches!(operation, BodyOp::Append { .. }))
+        );
+        assert_eq!(
+            body_pagination_suffix_spec(append_count)
+                .first()
+                .map(|(style, _)| *style),
+            Some(TextStyle::Header1)
+        );
+    }
+}
 
 /// Content-free evidence from one transport-neutral rich-body workflow.
 #[derive(Debug, PartialEq, Eq)]
@@ -699,24 +808,89 @@ async fn run_body_scenario_inner(
 ) -> Result<BodyScenarioEvidence, String> {
     let mut normalized_results = Vec::new();
     let suffix = unique_suffix();
-    let markdown = format!(
-        "# Existing heading\n\n{}",
-        (0..18)
-            .map(|index| format!("Paragraph {index}"))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    );
     let page = ctx
         .client
         .new_object(&ctx.space_id, "page")
         .name(format!(
             "Body {transport} {suffix} {BODY_DIAGNOSTIC_SECRET}"
         ))
-        .body(markdown)
         .create()
         .await
         .map_err(|_| "body fixture page create failed".to_owned())?;
     ctx.register_object(&page.id);
+    let initial = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &page.id)
+        .fetch()
+        .await
+        .map_err(|_| "body initial fixture read failed".to_owned())?;
+    let initial_blocks = initial.iter().skip(1).cloned().collect::<Vec<_>>();
+    let append_count = BODY_PAGINATION_ITEM_COUNT
+        .checked_sub(initial_blocks.len())
+        .filter(|count| *count > 0)
+        .ok_or_else(|| "body initial fixture already contains twenty or more blocks".to_owned())?;
+    let expected_suffix = body_pagination_suffix_spec(append_count);
+    let fixture_operations = body_pagination_append_operations(append_count)?;
+    let operation_count = fixture_operations.len();
+    let fixture_outcome = initial
+        .edit(&ctx.client)
+        .apply_all(fixture_operations)
+        .await
+        .map_err(|_| "body deterministic fixture batch failed".to_owned())?;
+    if fixture_outcome.failed.is_some()
+        || !fixture_outcome.not_attempted.is_empty()
+        || fixture_outcome.applied.len() != operation_count
+    {
+        return Err("body deterministic fixture batch did not complete".to_owned());
+    }
+    let mut created_ids = Vec::with_capacity(operation_count);
+    for (receipt, (expected_style, expected_text)) in
+        fixture_outcome.applied.iter().zip(&expected_suffix)
+    {
+        let Some(affected) = receipt.affected.first() else {
+            return Err("body fixture append receipt omitted the created block".to_owned());
+        };
+        let receipt_is_exact = receipt.affected.len() == 1
+            && affected.space_id == ctx.space_id
+            && affected.object_id == page.id
+            && receipt
+                .snapshot
+                .get(&affected.block_id)
+                .is_some_and(|block| {
+                    matches!(
+                        &block.content,
+                        BlockContent::Text(content)
+                            if content.style == *expected_style
+                                && content.text == *expected_text
+                    )
+                })
+            && receipt.snapshot.root().children.last() == Some(&affected.block_id);
+        if !receipt_is_exact {
+            return Err("body fixture append receipt did not prove the exact suffix".to_owned());
+        }
+        created_ids.push(affected.block_id.as_str().to_owned());
+    }
+    if created_ids.len() != expected_suffix.len() {
+        return Err("body fixture append receipts did not cover the exact suffix".to_owned());
+    }
+    let heading_id = created_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| "body fixture omitted its created heading receipt".to_owned())?;
+    let fixture = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &page.id)
+        .fetch()
+        .await
+        .map_err(|_| "body deterministic fixture read failed".to_owned())?;
+    if !is_exact_body_pagination_fixture(&fixture, &initial_blocks, &created_ids, &expected_suffix)
+    {
+        return Err(
+            "body deterministic fixture did not contain the exact ordered blocks".to_owned(),
+        );
+    }
 
     let tools = driver.list_tools().await?;
     for name in [
@@ -788,16 +962,18 @@ async fn run_body_scenario_inner(
     if third["snapshot_hash"] != first["snapshot_hash"] {
         return Err("body pages mixed snapshot hashes".to_owned());
     }
-    listed_block_ids.extend(
-        third["items"]
-            .as_array()
-            .ok_or_else(|| "body third page omitted items".to_owned())?
-            .iter()
-            .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    if listed_block_ids.len() != 20 {
-        return Err("body terminal page did not consume the final four blocks".to_owned());
+    let third_ids = third["items"]
+        .as_array()
+        .ok_or_else(|| "body third page omitted items".to_owned())?
+        .iter()
+        .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    if third_ids.len() != BODY_PAGINATION_ITEM_COUNT - 16 {
+        return Err("body third page did not contain the final four blocks".to_owned());
+    }
+    listed_block_ids.extend(third_ids);
+    if listed_block_ids.len() != BODY_PAGINATION_ITEM_COUNT {
+        return Err("body pagination did not contain exactly twenty blocks".to_owned());
     }
     if third.get("next_cursor").is_some() {
         return Err("body three-page fixture unexpectedly returned a fourth cursor".to_owned());
@@ -811,22 +987,12 @@ async fn run_body_scenario_inner(
         .map_err(|_| "independent body read failed".to_owned())?;
     let independent_ids = independent
         .iter()
+        .skip(1)
         .map(|block| block.id.as_str().to_owned())
         .collect::<Vec<_>>();
     if listed_block_ids != independent_ids {
         return Err("body pages did not preserve exact DFS order".to_owned());
     }
-    let heading_id = independent
-        .iter()
-        .find_map(|block| {
-            matches!(
-                block.content,
-                BlockContent::Text(ref content) if content.style == TextStyle::Header1
-            )
-            .then(|| block.id.as_str().to_owned())
-        })
-        .ok_or_else(|| "body fixture omitted the existing heading".to_owned())?;
-
     let stale_first = driver
         .call_tool(
             "body_block_list",

@@ -41,8 +41,8 @@ use crate::runtime::{RuntimeContext, StartupStatus};
 mod live_scenario;
 
 use live_scenario::{
-    ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId, run_body_scenario,
-    run_chats_registry_scenario, run_live_scenario_on_large_stack,
+    BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
+    run_body_scenario, run_chats_registry_scenario, run_live_scenario_on_large_stack,
     run_representative_layout_scenario, run_scenario,
 };
 
@@ -2298,7 +2298,9 @@ fn headless_direct_body_blocks_runs_shared_scenario() {
                         .map_err(|_| TestError::Assertion {
                             message: "direct shared body scenario failed".to_owned(),
                         })?;
-                    if evidence.normalized_results.is_empty() || evidence.listed_block_count != 20 {
+                    if evidence.normalized_results.is_empty()
+                        || evidence.listed_block_count != BODY_PAGINATION_ITEM_COUNT
+                    {
                         return Err(TestError::Assertion {
                             message: "direct shared body evidence was incomplete".to_owned(),
                         });
