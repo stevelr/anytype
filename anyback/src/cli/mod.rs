@@ -3096,7 +3096,7 @@ mod tests {
 
     #[test]
     fn parse_global_color_invalid_value() {
-        let err = Cli::try_parse_from(["anyback", "--color", "badvalue", "list", "archive-dir"])
+        let err = Cli::try_parse_from(["anyback", "--color", "bad_value", "list", "archive-dir"])
             .unwrap_err();
         assert!(err.to_string().contains("invalid value"));
     }

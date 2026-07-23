@@ -114,7 +114,7 @@ init_cli_and_keystore() {
 
     account_key=$("$ANYTYPE_CLI_BIN" auth create "$ANY_USER" 2>/dev/null | extract_account_key)
     if [ -z "$account_key" ]; then
-      echo "acctount_key failed. exiting. Make sure headless server is running ('$ANYTYPE_CLI_BIN service start' or '$ANYTYPE_CLI_BIN serve')"
+      echo "account_key failed. exiting. Make sure headless server is running ('$ANYTYPE_CLI_BIN service start' or '$ANYTYPE_CLI_BIN serve')"
       exit 1
     fi
       

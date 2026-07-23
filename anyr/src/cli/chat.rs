@@ -1169,8 +1169,7 @@ impl OpTransport {
     }
 }
 
-/// Classifies a parsed chat command into its transport policy, following the
-/// "Chats > Transport policy" table in `docs/anyr-0.5-cli-gap-analysis.md`.
+/// Classifies a parsed chat command into the http/gRPC transport policy
 fn classify(command: &super::ChatCommands) -> OpTransport {
     use super::ChatCommands as C;
     use OpTransport as T;
@@ -1217,7 +1216,7 @@ fn classify(command: &super::ChatCommands) -> OpTransport {
                 // REST SSE requires a space to scope the stream; a single-chat
                 // listen without --space (e.g. `--chat <chat-id>` or a
                 // space-name target) is served by the gRPC listener, matching
-                // pre-transport behaviour.
+                // pre-transport behavior.
                 grpc(
                     "listen",
                     "the REST SSE listener requires --space; listening without it uses gRPC",

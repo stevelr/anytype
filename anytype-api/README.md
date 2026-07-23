@@ -650,7 +650,7 @@ transport uncertainty, or verification exhaustion returns
 `BodyMutationIndeterminate` with the last complete snapshot when available;
 callers must reread before retrying. Bookmark creation has an SSRF-safe policy:
 it validates and stores an unfetched absolute HTTP(S) URL but never invokes the
-server's URL-fetch RPC. YouTube embeds accept only canonicalizable HTTPS
+server's URL-fetch RPC. YouTube embeds accept only canonical-izable HTTPS
 `youtube.com`/`youtu.be` video URLs. Divider style and the complete link-card
 appearance (card style, icon size, description mode, and bounded relation-key
 list) are typed updates. System singleton, file, table-structural, unsupported,

@@ -25,7 +25,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 | membership_v2::CartProduct::is_lifetime     | new field                  |
 | membership_v2::Cart::applied_promocodes     | new field                  |
 | membership_v2::CryptoCheckout               | new struct                 |
-| membershiip_v2::Period::Lifetime            | new variant                |
+| membership_v2::Period::Lifetime             | new variant                |
 
 **Deprecated:**
 
