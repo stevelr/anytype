@@ -3759,13 +3759,6 @@ type BodyAcceptancePhaseFuture<'a, T> = Pin<Box<dyn Future<Output = TestResult<T
 type SharedBodyCallbackFuture = Pin<Box<dyn Future<Output = TestResult<String>>>>;
 
 #[cfg(feature = "acceptance-harness")]
-fn body_semantic_diagnostic(phase: &'static str, event: &'static str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase={phase} event={event}");
-    }
-}
-
-#[cfg(feature = "acceptance-harness")]
 struct SpawnedBodyEvidence {
     scenario: BodyScenarioEvidence,
     descriptors: Vec<Value>,
@@ -3788,72 +3781,6 @@ enum BodyFrameParityFailure {
     ErrorMessage,
     ErrorData,
     Payload,
-}
-
-#[cfg(feature = "acceptance-harness")]
-impl BodyFrameParityFailure {
-    const fn category(self) -> &'static str {
-        match self {
-            Self::StableResultType => "stable_result_type",
-            Self::PreviewResultType => "preview_result_type",
-            Self::EnvelopeVersion => "envelope_version",
-            Self::EnvelopeId => "envelope_id",
-            Self::EnvelopeShape => "envelope_shape",
-            Self::OutcomeShape => "outcome_shape",
-            Self::ResultShape => "result_shape",
-            Self::TextDuplicate => "text_duplicate",
-            Self::ErrorShape => "error_shape",
-            Self::ErrorCode => "error_code",
-            Self::ErrorMessage => "error_message",
-            Self::ErrorData => "error_data",
-            Self::Payload => "payload",
-        }
-    }
-}
-
-#[cfg(feature = "acceptance-harness")]
-fn body_frame_key_count(value: &Value, pointer: &str) -> usize {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_object)
-        .map_or(0, serde_json::Map::len)
-}
-
-#[cfg(feature = "acceptance-harness")]
-fn body_frame_parity_diagnostic(
-    index: usize,
-    failure: BodyFrameParityFailure,
-    stable: &Value,
-    preview: &Value,
-) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=parity event=frame_mismatch frame_index={index} \
-             category={} stable_envelope_keys={} preview_envelope_keys={} \
-             stable_has_jsonrpc={} preview_has_jsonrpc={} stable_has_id={} preview_has_id={} \
-             stable_has_result={} preview_has_result={} stable_has_error={} preview_has_error={} \
-             stable_result_keys={} preview_result_keys={} stable_error_keys={} preview_error_keys={} \
-             error_code_equal={} error_message_equal={} error_data_presence_equal={}",
-            failure.category(),
-            body_frame_key_count(stable, ""),
-            body_frame_key_count(preview, ""),
-            stable.get("jsonrpc").is_some(),
-            preview.get("jsonrpc").is_some(),
-            stable.get("id").is_some(),
-            preview.get("id").is_some(),
-            stable.get("result").is_some(),
-            preview.get("result").is_some(),
-            stable.get("error").is_some(),
-            preview.get("error").is_some(),
-            body_frame_key_count(stable, "/result"),
-            body_frame_key_count(preview, "/result"),
-            body_frame_key_count(stable, "/error"),
-            body_frame_key_count(preview, "/error"),
-            stable.pointer("/error/code") == preview.pointer("/error/code"),
-            stable.pointer("/error/message") == preview.pointer("/error/message"),
-            stable.pointer("/error/data").is_some() == preview.pointer("/error/data").is_some(),
-        );
-    }
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -3987,175 +3914,10 @@ fn validate_body_frame_text_duplicate(frame: &Value) -> Result<(), BodyFramePari
 
 #[cfg(feature = "acceptance-harness")]
 fn body_protocol_frames_match(stable: &[Value; 2], preview: &[Value; 2]) -> bool {
-    for (index, (stable_frame, preview_frame)) in stable.iter().zip(preview).enumerate() {
-        if let Err(failure) = compare_body_protocol_frame(stable_frame, preview_frame) {
-            body_frame_parity_diagnostic(index, failure, stable_frame, preview_frame);
-            return false;
-        }
-    }
-    true
-}
-
-#[cfg(feature = "acceptance-harness")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BodyScenarioMismatch {
-    ResultCount,
-    ListedBlockCount,
-    ObjectShape,
-    ArrayLength,
-    ValueType,
-    DomainId,
-    SnapshotHash,
-    Cursor,
-    UnsupportedApproxBytes,
-    OpaqueKind,
-    ChildCount,
-    Restriction,
-    Presentation,
-    ContentKind,
-    TextContent,
-    BooleanFlag,
-    Status,
-    Error,
-    Idempotency,
-    StructuralIndex,
-    OtherValue,
-}
-
-#[cfg(feature = "acceptance-harness")]
-impl BodyScenarioMismatch {
-    const fn category(self) -> &'static str {
-        match self {
-            Self::ResultCount => "result_count",
-            Self::ListedBlockCount => "listed_block_count",
-            Self::ObjectShape => "object_shape",
-            Self::ArrayLength => "array_length",
-            Self::ValueType => "value_type",
-            Self::DomainId => "domain_id",
-            Self::SnapshotHash => "snapshot_hash",
-            Self::Cursor => "cursor",
-            Self::UnsupportedApproxBytes => "unsupported_approx_bytes",
-            Self::OpaqueKind => "opaque_kind",
-            Self::ChildCount => "child_count",
-            Self::Restriction => "restriction",
-            Self::Presentation => "presentation",
-            Self::ContentKind => "content_kind",
-            Self::TextContent => "text_content",
-            Self::BooleanFlag => "boolean_flag",
-            Self::Status => "status",
-            Self::Error => "error",
-            Self::Idempotency => "idempotency",
-            Self::StructuralIndex => "structural_index",
-            Self::OtherValue => "other_value",
-        }
-    }
-}
-
-#[cfg(feature = "acceptance-harness")]
-fn body_scenario_field_category(field: Option<&str>) -> BodyScenarioMismatch {
-    match field {
-        Some(
-            "id" | "space_id" | "object_id" | "root_id" | "parent_id" | "block_id"
-            | "target_object_id",
-        ) => BodyScenarioMismatch::DomainId,
-        Some("snapshot_hash" | "final_snapshot_hash") => BodyScenarioMismatch::SnapshotHash,
-        Some("next_cursor") => BodyScenarioMismatch::Cursor,
-        Some("approx_bytes") => BodyScenarioMismatch::UnsupportedApproxBytes,
-        Some("opaque_kind") => BodyScenarioMismatch::OpaqueKind,
-        Some("child_count" | "deleted_subtree_blocks" | "listed_block_count") => {
-            BodyScenarioMismatch::ChildCount
-        }
-        Some("read" | "edit" | "remove" | "drag" | "drop_on") => BodyScenarioMismatch::Restriction,
-        Some(
-            "align" | "vertical_align" | "background_color" | "style" | "icon" | "processor"
-            | "source",
-        ) => BodyScenarioMismatch::Presentation,
-        Some("kind") => BodyScenarioMismatch::ContentKind,
-        Some("text") => BodyScenarioMismatch::TextContent,
-        Some("checked" | "is_header") => BodyScenarioMismatch::BooleanFlag,
-        Some("status") => BodyScenarioMismatch::Status,
-        Some("error_category" | "category" | "message" | "failed" | "not_attempted") => {
-            BodyScenarioMismatch::Error
-        }
-        Some("idempotency" | "key_reused" | "scope") => BodyScenarioMismatch::Idempotency,
-        Some("sibling_index" | "depth" | "index" | "position") => {
-            BodyScenarioMismatch::StructuralIndex
-        }
-        _ => BodyScenarioMismatch::OtherValue,
-    }
-}
-
-#[cfg(feature = "acceptance-harness")]
-fn first_body_value_mismatch(
-    stable: &Value,
-    preview: &Value,
-    field: Option<&str>,
-) -> Option<BodyScenarioMismatch> {
-    if stable == preview {
-        return None;
-    }
-    match (stable, preview) {
-        (Value::Object(stable), Value::Object(preview)) => {
-            if stable.keys().collect::<Vec<_>>() != preview.keys().collect::<Vec<_>>() {
-                return Some(BodyScenarioMismatch::ObjectShape);
-            }
-            stable.iter().find_map(|(key, value)| {
-                preview
-                    .get(key)
-                    .and_then(|other| first_body_value_mismatch(value, other, Some(key)))
-            })
-        }
-        (Value::Array(stable), Value::Array(preview)) => {
-            if stable.len() != preview.len() {
-                return Some(BodyScenarioMismatch::ArrayLength);
-            }
-            stable
-                .iter()
-                .zip(preview)
-                .find_map(|(value, other)| first_body_value_mismatch(value, other, field))
-        }
-        (Value::Null, Value::Null)
-        | (Value::Bool(_), Value::Bool(_))
-        | (Value::Number(_), Value::Number(_))
-        | (Value::String(_), Value::String(_)) => Some(body_scenario_field_category(field)),
-        _ => Some(BodyScenarioMismatch::ValueType),
-    }
-}
-
-#[cfg(feature = "acceptance-harness")]
-fn first_body_scenario_mismatch(
-    stable: &BodyScenarioEvidence,
-    preview: &BodyScenarioEvidence,
-) -> Option<(Option<usize>, BodyScenarioMismatch)> {
-    if stable.normalized_results.len() != preview.normalized_results.len() {
-        return Some((None, BodyScenarioMismatch::ResultCount));
-    }
-    for (index, (stable, preview)) in stable
-        .normalized_results
+    stable
         .iter()
-        .zip(&preview.normalized_results)
-        .enumerate()
-    {
-        if let Some(category) = first_body_value_mismatch(stable, preview, None) {
-            return Some((Some(index), category));
-        }
-    }
-    (stable.listed_block_count != preview.listed_block_count)
-        .then_some((None, BodyScenarioMismatch::ListedBlockCount))
-}
-
-#[cfg(feature = "acceptance-harness")]
-fn body_scenario_parity_diagnostic(stable: &BodyScenarioEvidence, preview: &BodyScenarioEvidence) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some()
-        && let Some((index, category)) = first_body_scenario_mismatch(stable, preview)
-    {
-        let index = index.map_or_else(|| "none".to_owned(), |index| index.to_string());
-        eprintln!(
-            "body_semantic_phase=parity event=scenario_mismatch \
-             result_index={index} pointer_category={}",
-            category.category()
-        );
-    }
+        .zip(preview)
+        .all(|(stable, preview)| compare_body_protocol_frame(stable, preview).is_ok())
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -4163,23 +3925,15 @@ fn run_direct_body_phase(
     ctx: &TestContext,
 ) -> BodyAcceptancePhaseFuture<'_, (BodyScenarioEvidence, Vec<Value>)> {
     Box::pin(async move {
-        body_semantic_diagnostic("direct", "phase_start");
-        let direct = BodyAcceptanceDirect::new(ctx.client.clone(), false).map_err(|_| {
-            body_semantic_diagnostic("direct", "driver construction failed");
-            sentinel_assertion("direct body driver construction failed")
-        })?;
-        let descriptors = direct.tool_descriptors().map_err(|_| {
-            body_semantic_diagnostic("direct", "descriptor serialization failed");
-            sentinel_assertion("direct body descriptors were not serializable")
-        })?;
+        let direct = BodyAcceptanceDirect::new(ctx.client.clone(), false)
+            .map_err(|_| sentinel_assertion("direct body driver construction failed"))?;
+        let descriptors = direct
+            .tool_descriptors()
+            .map_err(|_| sentinel_assertion("direct body descriptors were not serializable"))?;
         let mut direct_driver = DirectBodyDriver { driver: direct };
         let evidence = run_body_scenario(&mut direct_driver, ctx, "direct")
             .await
-            .map_err(|_| {
-                body_semantic_diagnostic("direct", "scenario_failed");
-                sentinel_assertion("direct shared body scenario failed")
-            })?;
-        body_semantic_diagnostic("direct", "phase_complete");
+            .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?;
         Ok((evidence, descriptors))
     })
 }
@@ -4193,50 +3947,30 @@ fn run_spawned_body_phase<'a>(
     parity_page_id: &'a str,
 ) -> BodyAcceptancePhaseFuture<'a, SpawnedBodyEvidence> {
     Box::pin(async move {
-        body_semantic_diagnostic(transport, "phase_start");
-        let child =
-            spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks")).map_err(|_| {
-                body_semantic_diagnostic(transport, "child spawn failed");
-                sentinel_assertion("spawned body child failed")
-            })?;
-        body_semantic_diagnostic(transport, "child_spawned");
+        let child = spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks"))
+            .map_err(|_| sentinel_assertion("spawned body child failed"))?;
         let (descriptors, frames) = {
             let mut guard = lock_driver(&child);
-            let process = guard.as_mut().ok_or_else(|| {
-                body_semantic_diagnostic(transport, "registered child missing");
-                sentinel_assertion("spawned body child missing")
-            })?;
+            let process = guard
+                .as_mut()
+                .ok_or_else(|| sentinel_assertion("spawned body child missing"))?;
             process.initialize();
-            let descriptors = process.body_tool_descriptors_sync().map_err(|_| {
-                body_semantic_diagnostic(transport, "descriptor request failed");
-                sentinel_assertion("spawned body descriptors failed")
-            })?;
+            let descriptors = process
+                .body_tool_descriptors_sync()
+                .map_err(|_| sentinel_assertion("spawned body descriptors failed"))?;
             let frames = process.raw_body_parity_frames(&ctx.space_id, parity_page_id);
             (descriptors, frames)
         };
-        body_semantic_diagnostic(transport, "protocol_ready");
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
         let scenario = run_body_scenario(&mut driver, ctx, transport)
             .await
-            .map_err(|_| {
-                body_semantic_diagnostic(transport, "scenario_failed");
-                sentinel_assertion("spawned shared body scenario failed")
-            })?;
-        body_semantic_diagnostic(transport, "scenario_complete");
+            .map_err(|_| sentinel_assertion("spawned shared body scenario failed"))?;
         let (_, output) = take_registered_body_driver(&child)?
             .try_finish()
-            .map_err(|_| {
-                body_semantic_diagnostic(transport, "child stop failed");
-                sentinel_assertion("spawned shared body child did not stop")
-            })?;
-        body_semantic_diagnostic(transport, "child_stopped");
-        require_body_diagnostics(&output.stderr, BODY_DIAGNOSTIC_SECRET.as_bytes(), true)
-            .inspect_err(|_| {
-                body_semantic_diagnostic(transport, "child diagnostics failed");
-            })?;
-        body_semantic_diagnostic(transport, "phase_complete");
+            .map_err(|_| sentinel_assertion("spawned shared body child did not stop"))?;
+        require_body_diagnostics(&output.stderr, BODY_DIAGNOSTIC_SECRET.as_bytes(), true)?;
         Ok(SpawnedBodyEvidence {
             scenario,
             descriptors,
@@ -4250,46 +3984,24 @@ fn run_spawned_read_only_body_phase<'a>(
     ctx: &'a TestContext,
     cleanup: Arc<Mutex<ChildCleanupRecord>>,
     options: DriverOptions,
-    transport: &'static str,
 ) -> BodyAcceptancePhaseFuture<'a, BodyReadOnlyEvidence> {
     Box::pin(async move {
-        body_semantic_diagnostic(transport, "phase_start");
-        let child =
-            spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks")).map_err(|_| {
-                body_semantic_diagnostic(transport, "child spawn failed");
-                sentinel_assertion("read-only body child failed")
-            })?;
-        body_semantic_diagnostic(transport, "child_spawned");
+        let child = spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks"))
+            .map_err(|_| sentinel_assertion("read-only body child failed"))?;
         lock_driver(&child)
             .as_mut()
-            .ok_or_else(|| {
-                body_semantic_diagnostic(transport, "registered child missing");
-                sentinel_assertion("read-only body child missing")
-            })?
+            .ok_or_else(|| sentinel_assertion("read-only body child missing"))?
             .initialize();
-        body_semantic_diagnostic(transport, "protocol_ready");
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
         let evidence = run_body_read_only_scenario(&mut driver)
             .await
-            .map_err(|_| {
-                body_semantic_diagnostic(transport, "scenario_failed");
-                sentinel_assertion("read-only body scenario failed")
-            })?;
-        body_semantic_diagnostic(transport, "scenario_complete");
+            .map_err(|_| sentinel_assertion("read-only body scenario failed"))?;
         let (_, output) = take_registered_body_driver(&child)?
             .try_finish()
-            .map_err(|_| {
-                body_semantic_diagnostic(transport, "child stop failed");
-                sentinel_assertion("read-only body child did not stop")
-            })?;
-        body_semantic_diagnostic(transport, "child_stopped");
-        require_body_diagnostics(&output.stderr, b"SECRET_UNPARSED_BODY_VALUE", false)
-            .inspect_err(|_| {
-                body_semantic_diagnostic(transport, "child diagnostics failed");
-            })?;
-        body_semantic_diagnostic(transport, "phase_complete");
+            .map_err(|_| sentinel_assertion("read-only body child did not stop"))?;
+        require_body_diagnostics(&output.stderr, b"SECRET_UNPARSED_BODY_VALUE", false)?;
         Ok(evidence)
     })
 }
@@ -4303,7 +4015,6 @@ fn run_shared_body_callback(
     preview_read_only_cleanup: Arc<Mutex<ChildCleanupRecord>>,
 ) -> SharedBodyCallbackFuture {
     Box::pin(async move {
-        body_semantic_diagnostic("parity", "callback_start");
         let parity_page = ctx
             .client
             .new_object(&ctx.space_id, "page")
@@ -4311,18 +4022,10 @@ fn run_shared_body_callback(
             .body("Protocol parity body")
             .create()
             .await
-            .map_err(|_| {
-                body_semantic_diagnostic("parity", "fixture page creation failed");
-                sentinel_assertion("body parity fixture page creation failed")
-            })?;
+            .map_err(|_| sentinel_assertion("body parity fixture page creation failed"))?;
         ctx.register_object(&parity_page.id);
-        body_semantic_diagnostic("parity", "fixture_created");
 
-        let (direct_evidence, direct_descriptors) =
-            run_direct_body_phase(&ctx).await.inspect_err(|_| {
-                body_semantic_diagnostic("direct", "phase failed");
-            })?;
-        body_semantic_diagnostic("parity", "direct_complete");
+        let (direct_evidence, direct_descriptors) = run_direct_body_phase(&ctx).await?;
         let stable = run_spawned_body_phase(
             &ctx,
             stable_cleanup,
@@ -4330,11 +4033,7 @@ fn run_shared_body_callback(
             "stable",
             &parity_page.id,
         )
-        .await
-        .inspect_err(|_| {
-            body_semantic_diagnostic("stable", "phase failed");
-        })?;
-        body_semantic_diagnostic("parity", "stable_complete");
+        .await?;
         let preview = run_spawned_body_phase(
             &ctx,
             preview_cleanup,
@@ -4342,49 +4041,29 @@ fn run_shared_body_callback(
             "preview",
             &parity_page.id,
         )
-        .await
-        .inspect_err(|_| {
-            body_semantic_diagnostic("preview", "phase failed");
-        })?;
-        body_semantic_diagnostic("parity", "preview_complete");
+        .await?;
         let stable_read_only = run_spawned_read_only_body_phase(
             &ctx,
             stable_read_only_cleanup,
             DriverOptions::READ_ONLY,
-            "stable_read_only",
         )
-        .await
-        .inspect_err(|_| {
-            body_semantic_diagnostic("stable_read_only", "phase failed");
-        })?;
-        body_semantic_diagnostic("parity", "stable_read_only_complete");
+        .await?;
         let preview_read_only = run_spawned_read_only_body_phase(
             &ctx,
             preview_read_only_cleanup,
             DriverOptions::PREVIEW_READ_ONLY,
-            "preview_read_only",
         )
-        .await
-        .inspect_err(|_| {
-            body_semantic_diagnostic("preview_read_only", "phase failed");
-        })?;
-        body_semantic_diagnostic("parity", "preview_read_only_complete");
+        .await?;
 
         inspect_reviewed_body_server_log(&[
             BODY_DIAGNOSTIC_SECRET.as_bytes(),
             b"SECRET_UNPARSED_BODY_VALUE",
-        ])
-        .inspect_err(|_| {
-            body_semantic_diagnostic("server_log", "reviewed log inspection failed");
-        })?;
-        body_semantic_diagnostic("parity", "server_log_checked");
+        ])?;
         if stable.descriptors != preview.descriptors || direct_descriptors != stable.descriptors {
-            body_semantic_diagnostic("parity", "direct stable preview descriptors diverged");
             return Err(sentinel_assertion(
                 "direct/stable/preview body descriptors, schemas, or annotations diverged",
             ));
         }
-        body_semantic_diagnostic("parity", "descriptors_match");
         if !body_protocol_frames_match(&stable.frames, &preview.frames)
             || stable.frames[0]
                 .pointer("/result/structuredContent/items")
@@ -4407,35 +4086,25 @@ fn run_shared_body_callback(
                 .and_then(Value::as_str)
                 != Some("validation")
         {
-            body_semantic_diagnostic("parity", "stable preview raw frames diverged");
             return Err(sentinel_assertion(
                 "stable/preview raw body success or error JSON-RPC frames diverged",
             ));
         }
-        body_semantic_diagnostic("parity", "frames_match");
         if stable.scenario != preview.scenario {
-            body_scenario_parity_diagnostic(&stable.scenario, &preview.scenario);
-            body_semantic_diagnostic("parity", "stable preview scenario evidence diverged");
             return Err(sentinel_assertion(
                 "stable and preview normalized body result shapes diverged",
             ));
         }
-        body_semantic_diagnostic("parity", "transport_scenarios_match");
         if direct_evidence != stable.scenario {
-            body_semantic_diagnostic("parity", "direct stable scenario evidence diverged");
             return Err(sentinel_assertion(
                 "direct and stdio normalized body result shapes diverged",
             ));
         }
-        body_semantic_diagnostic("parity", "direct_scenario_matches");
         if stable_read_only != preview_read_only {
-            body_semantic_diagnostic("parity", "read-only scenario evidence diverged");
             return Err(sentinel_assertion(
                 "stable and preview read-only body evidence diverged",
             ));
         }
-        body_semantic_diagnostic("parity", "read_only_scenarios_match");
-        body_semantic_diagnostic("parity", "callback_complete");
         Ok(ctx.space_id.clone())
     })
 }
@@ -4710,68 +4379,6 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
         &[success, error],
         &[preview_error, preview]
     ));
-}
-
-#[cfg(feature = "acceptance-harness")]
-#[test]
-fn body_scenario_diagnostic_reports_only_first_index_and_static_category() {
-    let stable = BodyScenarioEvidence {
-        normalized_results: vec![
-            json!({"status":"complete"}),
-            json!({"content":{
-                "kind":"unsupported",
-                "opaque_kind":"page",
-                "child_count":1,
-                "approx_bytes":0
-            }}),
-        ],
-        listed_block_count: 20,
-    };
-    let preview = BodyScenarioEvidence {
-        normalized_results: vec![
-            json!({"status":"complete"}),
-            json!({"content":{
-                "kind":"unsupported",
-                "opaque_kind":"page",
-                "child_count":1,
-                "approx_bytes":1
-            }}),
-        ],
-        listed_block_count: 20,
-    };
-    assert_eq!(
-        first_body_scenario_mismatch(&stable, &preview),
-        Some((Some(1), BodyScenarioMismatch::UnsupportedApproxBytes))
-    );
-
-    let count_drift = BodyScenarioEvidence {
-        normalized_results: stable.normalized_results.clone(),
-        listed_block_count: 19,
-    };
-    assert_eq!(
-        first_body_scenario_mismatch(&stable, &count_drift),
-        Some((None, BodyScenarioMismatch::ListedBlockCount))
-    );
-    let result_count_drift = BodyScenarioEvidence {
-        normalized_results: vec![json!({"status":"complete"})],
-        listed_block_count: 20,
-    };
-    assert_eq!(
-        first_body_scenario_mismatch(&stable, &result_count_drift),
-        Some((None, BodyScenarioMismatch::ResultCount))
-    );
-    let text_stable = BodyScenarioEvidence {
-        normalized_results: vec![json!({"content":{"kind":"text","text":"stable"}})],
-        listed_block_count: 1,
-    };
-    let text_preview = BodyScenarioEvidence {
-        normalized_results: vec![json!({"content":{"kind":"text","text":"preview"}})],
-        listed_block_count: 1,
-    };
-    assert_eq!(
-        first_body_scenario_mismatch(&text_stable, &text_preview),
-        Some((Some(0), BodyScenarioMismatch::TextContent))
-    );
 }
 
 #[cfg(feature = "acceptance-harness")]
