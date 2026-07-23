@@ -4777,6 +4777,21 @@ fn projected_table_subtree_matches(
     let Some(row_blocks) = projected_direct_children(after, &rows_region.id) else {
         return false;
     };
+    let canonical_cell = |cell: &&BlockSummary| {
+        cell.child_count == 0
+            && cell.align == WireHorizontalAlign::Left
+            && cell.vertical_align == WireVerticalAlign::Top
+            && cell.background_color.is_none()
+            && cell.content
+                == (BlockProjection::Text {
+                    text: String::new(),
+                    style: WireTextStyle::Paragraph,
+                    checked: false,
+                    color: None,
+                    icon: None,
+                    marks: Vec::new(),
+                })
+    };
     column_blocks.len() == columns
         && column_blocks
             .iter()
@@ -4787,9 +4802,8 @@ fn projected_table_subtree_matches(
                 == (BlockProjection::TableRow {
                     is_header: header_row && index == 0,
                 })
-                && projected_direct_children(after, &row.id).is_some_and(|cells| {
-                    cells.len() == columns && cells.iter().all(|cell| cell.child_count == 0)
-                })
+                && projected_direct_children(after, &row.id)
+                    .is_some_and(|cells| cells.len() == columns && cells.iter().all(canonical_cell))
         })
 }
 
@@ -7205,15 +7219,13 @@ mod tests {
 
     fn projected_text_insertion(
         before: &ProjectedSnapshot,
-        target: &EntityId,
-        position: WireInsertPosition,
+        parent_id: &str,
+        sibling_index: u64,
+        dfs_index: usize,
+        created_depth: u64,
         created_id: &str,
     ) -> ProjectedSnapshot {
-        let insertion = create_insertion(before, target, position).expect("fixture insertion");
-        let parent_id = insertion.parent.id.clone();
-        let parent_depth = insertion.parent.depth;
-        let sibling_index = insertion.sibling_index;
-        let dfs_index = insertion.dfs_index;
+        let parent_id = EntityId::new(parent_id).expect("fixture insertion parent");
         let mut items = before.items.clone();
         for block in &mut items {
             if block.id == parent_id {
@@ -7236,7 +7248,7 @@ mod tests {
                 created_id,
                 Some(parent_id.as_str()),
                 sibling_index,
-                parent_depth.checked_add(1).expect("fixture depth"),
+                created_depth,
                 0,
                 projected_text("created"),
             ),
@@ -9146,15 +9158,30 @@ mod tests {
         ]);
         let input = parse_block(text_block("created"));
         let cases = [
-            ("second", WireInsertPosition::Before, "parent", 1, 2),
-            ("first", WireInsertPosition::After, "parent", 1, 2),
-            ("parent", WireInsertPosition::FirstChild, "parent", 0, 2),
-            ("parent", WireInsertPosition::LastChild, "parent", 2, 2),
+            ("second", WireInsertPosition::Before, "parent", 1, 4, 2),
+            ("first", WireInsertPosition::After, "parent", 1, 4, 2),
+            ("parent", WireInsertPosition::FirstChild, "parent", 0, 2, 2),
+            ("parent", WireInsertPosition::LastChild, "parent", 2, 5, 2),
         ];
-        for (target, position, expected_parent, expected_index, expected_depth) in cases {
+        for (
+            target,
+            position,
+            expected_parent,
+            expected_index,
+            expected_dfs_index,
+            expected_depth,
+        ) in cases
+        {
             let target_id = EntityId::new(target).expect("target");
             let created_id = EntityId::new("created").expect("created");
-            let after = projected_text_insertion(&before, &target_id, position, "created");
+            let after = projected_text_insertion(
+                &before,
+                expected_parent,
+                expected_index,
+                expected_dfs_index,
+                expected_depth,
+                "created",
+            );
             let created = after
                 .items
                 .iter()
@@ -9203,7 +9230,19 @@ mod tests {
             (WireInsertPosition::LastChild, 1),
         ] {
             let created_id = EntityId::new("created").expect("created");
-            let mut after = projected_text_insertion(&root_before, &root_id, position, "created");
+            let expected_dfs_index = if position == WireInsertPosition::FirstChild {
+                1
+            } else {
+                2
+            };
+            let mut after = projected_text_insertion(
+                &root_before,
+                "root",
+                expected_index,
+                expected_dfs_index,
+                1,
+                "created",
+            );
             assert_eq!(
                 after
                     .items
@@ -9244,8 +9283,7 @@ mod tests {
         let target_id = EntityId::new("first").expect("target");
         let created_id = EntityId::new("created").expect("created");
         let input = parse_block(text_block("created"));
-        let valid =
-            projected_text_insertion(&before, &target_id, WireInsertPosition::After, "created");
+        let valid = projected_text_insertion(&before, "parent", 1, 4, 2, "created");
         assert!(verify_create_transition(
             &before,
             &valid,
@@ -9277,6 +9315,27 @@ mod tests {
             .find(|block| block.id.as_str() == "tail")
             .expect("tail")
             .content = projected_text("changed");
+        let mut alignment_drift = valid.clone();
+        alignment_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .align = WireHorizontalAlign::Center;
+        let mut vertical_alignment_drift = valid.clone();
+        vertical_alignment_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .vertical_align = WireVerticalAlign::Bottom;
+        let mut background_drift = valid.clone();
+        background_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .background_color = Some(ColorInput::new("red".to_owned()).expect("background color"));
         let mut parent_drift = valid.clone();
         parent_drift
             .items
@@ -9312,6 +9371,61 @@ mod tests {
             .find(|block| block.id == created_id)
             .expect("created")
             .content = projected_text("wrong");
+        let mut created_parent_drift = valid.clone();
+        created_parent_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .parent_id = Some(EntityId::new("root").expect("root"));
+        let mut created_index_drift = valid.clone();
+        created_index_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .sibling_index = 0;
+        let mut created_depth_drift = valid.clone();
+        created_depth_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .depth = 1;
+        let mut created_child_count_drift = valid.clone();
+        created_child_count_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .child_count = 1;
+        let mut created_alignment_drift = valid.clone();
+        created_alignment_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .align = WireHorizontalAlign::Right;
+        let mut created_vertical_drift = valid.clone();
+        created_vertical_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .vertical_align = WireVerticalAlign::Middle;
+        let mut created_background_drift = valid.clone();
+        created_background_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .background_color = Some(ColorInput::new("blue".to_owned()).expect("background color"));
+        let mut space_scope_drift = valid.clone();
+        space_scope_drift.space_id = EntityId::new("other-space").expect("space");
+        let mut object_scope_drift = valid.clone();
+        object_scope_drift.object_id = EntityId::new("other-object").expect("object");
+        let mut root_scope_drift = valid.clone();
+        root_scope_drift.root_id = EntityId::new("other-root").expect("root");
         let mut reordered = valid.clone();
         let created_position = reordered
             .items
@@ -9344,11 +9458,24 @@ mod tests {
             unrelated_restriction,
             identity_drift,
             content_drift,
+            alignment_drift,
+            vertical_alignment_drift,
+            background_drift,
             parent_drift,
             depth_drift,
             sibling_drift,
             child_count_drift,
             created_content_drift,
+            created_parent_drift,
+            created_index_drift,
+            created_depth_drift,
+            created_child_count_drift,
+            created_alignment_drift,
+            created_vertical_drift,
+            created_background_drift,
+            space_scope_drift,
+            object_scope_drift,
+            root_scope_drift,
             reordered,
             foreign_insertion,
         ] {
@@ -9468,6 +9595,54 @@ mod tests {
             .find(|block| block.id.as_str() == "rows")
             .expect("rows region")
             .parent_id = Some(root_id.clone());
+        let mut nonempty_cell = valid.clone();
+        nonempty_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .content = projected_text("unexpected");
+        let mut divider_cell = valid.clone();
+        divider_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .content = BlockProjection::Divider {
+            style: WireDividerStyle::Line,
+        };
+        let mut relation_cell = valid.clone();
+        relation_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .content = BlockProjection::Relation {
+            key: RelationKey::new("tag".to_owned()).expect("relation key"),
+        };
+        let mut column_cell = valid.clone();
+        column_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .content = BlockProjection::TableColumn;
+        let mut row_cell = valid.clone();
+        row_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .content = BlockProjection::TableRow { is_header: false };
+        let mut layout_cell = valid.clone();
+        layout_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .content = BlockProjection::Layout {
+            style: WireLayoutStyle::TableColumns,
+        };
         let mut reordered = valid.clone();
         let first_column = reordered
             .items
@@ -9480,7 +9655,18 @@ mod tests {
             .position(|block| block.id.as_str() == "column-2")
             .expect("second column");
         reordered.items.swap(first_column, second_column);
-        for invalid in [wrong_header, missing_cell, misplaced_region, reordered] {
+        for invalid in [
+            wrong_header,
+            missing_cell,
+            misplaced_region,
+            nonempty_cell,
+            divider_cell,
+            relation_cell,
+            column_cell,
+            row_cell,
+            layout_cell,
+            reordered,
+        ] {
             assert!(!verify_create_transition(
                 &before,
                 &invalid,
