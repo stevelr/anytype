@@ -45,7 +45,8 @@ mod support;
 use support::live_scenario::BodyDriverMetrics;
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    BODY_DIAGNOSTIC_SECRET, run_body_read_only_scenario, run_body_scenario,
+    BODY_DIAGNOSTIC_SECRET, BodyReadOnlyEvidence, BodyScenarioEvidence,
+    run_body_read_only_scenario, run_body_scenario,
 };
 use support::{
     live_scenario::{
@@ -3752,6 +3753,201 @@ async fn headless_body_blocks_direct_stable_preview_and_object_show() {
 }
 
 #[cfg(feature = "acceptance-harness")]
+type BodyAcceptancePhaseFuture<'a, T> = Pin<Box<dyn Future<Output = TestResult<T>> + 'a>>;
+
+#[cfg(feature = "acceptance-harness")]
+type SharedBodyCallbackFuture = Pin<Box<dyn Future<Output = TestResult<String>>>>;
+
+#[cfg(feature = "acceptance-harness")]
+struct SpawnedBodyEvidence {
+    scenario: BodyScenarioEvidence,
+    descriptors: Vec<Value>,
+    frames: [Value; 2],
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn run_direct_body_phase(
+    ctx: &TestContext,
+) -> BodyAcceptancePhaseFuture<'_, (BodyScenarioEvidence, Vec<Value>)> {
+    Box::pin(async move {
+        let direct = BodyAcceptanceDirect::new(ctx.client.clone(), false)
+            .map_err(|_| sentinel_assertion("direct body driver construction failed"))?;
+        let descriptors = direct
+            .tool_descriptors()
+            .map_err(|_| sentinel_assertion("direct body descriptors were not serializable"))?;
+        let mut direct_driver = DirectBodyDriver { driver: direct };
+        let evidence = run_body_scenario(&mut direct_driver, ctx, "direct")
+            .await
+            .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?;
+        Ok((evidence, descriptors))
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn run_spawned_body_phase<'a>(
+    ctx: &'a TestContext,
+    cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    options: DriverOptions,
+    transport: &'static str,
+    parity_page_id: &'a str,
+) -> BodyAcceptancePhaseFuture<'a, SpawnedBodyEvidence> {
+    Box::pin(async move {
+        let child = spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks"))?;
+        let (descriptors, frames) = {
+            let mut guard = lock_driver(&child);
+            let process = guard
+                .as_mut()
+                .ok_or_else(|| sentinel_assertion("spawned body child missing"))?;
+            process.initialize();
+            let descriptors = process
+                .body_tool_descriptors_sync()
+                .map_err(|_| sentinel_assertion("spawned body descriptors failed"))?;
+            let frames = process.raw_body_parity_frames(&ctx.space_id, parity_page_id);
+            (descriptors, frames)
+        };
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&child),
+        };
+        let scenario = run_body_scenario(&mut driver, ctx, transport)
+            .await
+            .map_err(|_| sentinel_assertion("spawned shared body scenario failed"))?;
+        let (_, output) = take_registered_body_driver(&child)?
+            .try_finish()
+            .map_err(|_| sentinel_assertion("spawned shared body child did not stop"))?;
+        require_body_diagnostics(&output.stderr, BODY_DIAGNOSTIC_SECRET.as_bytes(), true)?;
+        Ok(SpawnedBodyEvidence {
+            scenario,
+            descriptors,
+            frames,
+        })
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn run_spawned_read_only_body_phase(
+    ctx: &TestContext,
+    cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    options: DriverOptions,
+) -> BodyAcceptancePhaseFuture<'_, BodyReadOnlyEvidence> {
+    Box::pin(async move {
+        let child = spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks"))?;
+        lock_driver(&child)
+            .as_mut()
+            .ok_or_else(|| sentinel_assertion("read-only body child missing"))?
+            .initialize();
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&child),
+        };
+        let evidence = run_body_read_only_scenario(&mut driver)
+            .await
+            .map_err(|_| sentinel_assertion("read-only body scenario failed"))?;
+        let (_, output) = take_registered_body_driver(&child)?
+            .try_finish()
+            .map_err(|_| sentinel_assertion("read-only body child did not stop"))?;
+        require_body_diagnostics(&output.stderr, b"SECRET_UNPARSED_BODY_VALUE", false)?;
+        Ok(evidence)
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn run_shared_body_callback(
+    ctx: Arc<TestContext>,
+    stable_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    preview_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    stable_read_only_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    preview_read_only_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+) -> SharedBodyCallbackFuture {
+    Box::pin(async move {
+        let parity_page = ctx
+            .client
+            .new_object(&ctx.space_id, "page")
+            .name("Body protocol parity fixture")
+            .body("Protocol parity body")
+            .create()
+            .await?;
+        ctx.register_object(&parity_page.id);
+
+        let (direct_evidence, direct_descriptors) = run_direct_body_phase(&ctx).await?;
+        let stable = run_spawned_body_phase(
+            &ctx,
+            stable_cleanup,
+            DriverOptions::STANDARD,
+            "stable",
+            &parity_page.id,
+        )
+        .await?;
+        let preview = run_spawned_body_phase(
+            &ctx,
+            preview_cleanup,
+            DriverOptions::PREVIEW_STANDARD,
+            "preview",
+            &parity_page.id,
+        )
+        .await?;
+        let stable_read_only = run_spawned_read_only_body_phase(
+            &ctx,
+            stable_read_only_cleanup,
+            DriverOptions::READ_ONLY,
+        )
+        .await?;
+        let preview_read_only = run_spawned_read_only_body_phase(
+            &ctx,
+            preview_read_only_cleanup,
+            DriverOptions::PREVIEW_READ_ONLY,
+        )
+        .await?;
+
+        inspect_reviewed_body_server_log(&[
+            BODY_DIAGNOSTIC_SECRET.as_bytes(),
+            b"SECRET_UNPARSED_BODY_VALUE",
+        ])?;
+        if stable.descriptors != preview.descriptors || direct_descriptors != stable.descriptors {
+            return Err(sentinel_assertion(
+                "direct/stable/preview body descriptors, schemas, or annotations diverged",
+            ));
+        }
+        if stable.frames != preview.frames
+            || stable.frames[0]
+                .pointer("/result/structuredContent/items")
+                .and_then(Value::as_array)
+                .is_none()
+            || stable.frames[1]
+                .pointer("/result/structuredContent/code")
+                .and_then(Value::as_str)
+                != Some("validation")
+        {
+            return Err(sentinel_assertion(
+                "stable/preview raw body success or error JSON-RPC frames diverged",
+            ));
+        }
+        if stable.scenario != preview.scenario {
+            return Err(sentinel_assertion(
+                "stable and preview normalized body result shapes diverged",
+            ));
+        }
+        if direct_evidence != stable.scenario {
+            return Err(sentinel_assertion(
+                "direct and stdio normalized body result shapes diverged",
+            ));
+        }
+        if stable_read_only != preview_read_only {
+            return Err(sentinel_assertion(
+                "stable and preview read-only body evidence diverged",
+            ));
+        }
+        Ok(ctx.space_id.clone())
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn shared_body_acceptance_futures_keep_only_heap_handles_inline() {
+    let word = std::mem::size_of::<usize>();
+    assert!(std::mem::size_of::<BodyAcceptancePhaseFuture<'static, ()>>() <= 2 * word);
+    assert!(std::mem::size_of::<SharedBodyCallbackFuture>() <= 2 * word);
+}
+
+#[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
@@ -3767,199 +3963,13 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-body-shared-stdio",
         move |ctx| {
-            Box::pin(async move {
-                let parity_page = ctx
-                    .client
-                    .new_object(&ctx.space_id, "page")
-                    .name("Body protocol parity fixture")
-                    .body("Protocol parity body")
-                    .create()
-                    .await?;
-                ctx.register_object(&parity_page.id);
-                let (direct_evidence, direct_descriptors) = {
-                    let direct =
-                        BodyAcceptanceDirect::new(ctx.client.clone(), false).map_err(|_| {
-                            sentinel_assertion("direct body driver construction failed")
-                        })?;
-                    let descriptors = direct.tool_descriptors().map_err(|_| {
-                        sentinel_assertion("direct body descriptors were not serializable")
-                    })?;
-                    let mut direct_driver = DirectBodyDriver { driver: direct };
-                    let evidence = run_body_scenario(&mut direct_driver, &ctx, "direct")
-                        .await
-                        .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?;
-                    (evidence, descriptors)
-                };
-
-                let stable = spawn_disposable_driver(
-                    ctx.as_ref(),
-                    stable_callback_cleanup,
-                    DriverOptions::STANDARD,
-                    Some("body-blocks"),
-                )?;
-                let (stable_descriptors, stable_frames) = {
-                    let mut stable_guard = lock_driver(&stable);
-                    let stable_process = stable_guard
-                        .as_mut()
-                        .ok_or_else(|| sentinel_assertion("stable body child missing"))?;
-                    stable_process.initialize();
-                    let descriptors = stable_process
-                        .body_tool_descriptors_sync()
-                        .map_err(|_| sentinel_assertion("stable body descriptors failed"))?;
-                    let frames =
-                        stable_process.raw_body_parity_frames(&ctx.space_id, &parity_page.id);
-                    (descriptors, frames)
-                };
-                let mut stable_driver = OwnedStdioDriver {
-                    driver: Arc::clone(&stable),
-                };
-                let stable_evidence = run_body_scenario(&mut stable_driver, &ctx, "stable")
-                    .await
-                    .map_err(|_| sentinel_assertion("stable shared body scenario failed"))?;
-                let (_, stable_output) = take_registered_body_driver(&stable)?
-                    .try_finish()
-                    .map_err(|_| sentinel_assertion("stable shared body child did not stop"))?;
-                require_body_diagnostics(
-                    &stable_output.stderr,
-                    BODY_DIAGNOSTIC_SECRET.as_bytes(),
-                    true,
-                )?;
-
-                let preview = spawn_disposable_driver(
-                    ctx.as_ref(),
-                    preview_callback_cleanup,
-                    DriverOptions::PREVIEW_STANDARD,
-                    Some("body-blocks"),
-                )?;
-                let (preview_descriptors, preview_frames) = {
-                    let mut preview_guard = lock_driver(&preview);
-                    let preview_process = preview_guard
-                        .as_mut()
-                        .ok_or_else(|| sentinel_assertion("preview body child missing"))?;
-                    preview_process.initialize();
-                    let descriptors = preview_process
-                        .body_tool_descriptors_sync()
-                        .map_err(|_| sentinel_assertion("preview body descriptors failed"))?;
-                    let frames =
-                        preview_process.raw_body_parity_frames(&ctx.space_id, &parity_page.id);
-                    (descriptors, frames)
-                };
-                let mut preview_driver = OwnedStdioDriver {
-                    driver: Arc::clone(&preview),
-                };
-                let preview_evidence = run_body_scenario(&mut preview_driver, &ctx, "preview")
-                    .await
-                    .map_err(|_| sentinel_assertion("preview shared body scenario failed"))?;
-                let (_, preview_output) = take_registered_body_driver(&preview)?
-                    .try_finish()
-                    .map_err(|_| sentinel_assertion("preview shared body child did not stop"))?;
-                require_body_diagnostics(
-                    &preview_output.stderr,
-                    BODY_DIAGNOSTIC_SECRET.as_bytes(),
-                    true,
-                )?;
-
-                let stable_read_only = spawn_disposable_driver(
-                    ctx.as_ref(),
-                    stable_read_only_callback_cleanup,
-                    DriverOptions::READ_ONLY,
-                    Some("body-blocks"),
-                )?;
-                lock_driver(&stable_read_only)
-                    .as_mut()
-                    .ok_or_else(|| sentinel_assertion("stable read-only body child missing"))?
-                    .initialize();
-                let mut stable_read_only_driver = OwnedStdioDriver {
-                    driver: Arc::clone(&stable_read_only),
-                };
-                let stable_read_only_evidence =
-                    run_body_read_only_scenario(&mut stable_read_only_driver)
-                        .await
-                        .map_err(|_| sentinel_assertion("stable read-only body scenario failed"))?;
-                let (_, stable_read_only_output) = take_registered_body_driver(&stable_read_only)?
-                    .try_finish()
-                    .map_err(|_| sentinel_assertion("stable read-only body child did not stop"))?;
-                require_body_diagnostics(
-                    &stable_read_only_output.stderr,
-                    b"SECRET_UNPARSED_BODY_VALUE",
-                    false,
-                )?;
-
-                let preview_read_only = spawn_disposable_driver(
-                    ctx.as_ref(),
-                    preview_read_only_callback_cleanup,
-                    DriverOptions::PREVIEW_READ_ONLY,
-                    Some("body-blocks"),
-                )?;
-                lock_driver(&preview_read_only)
-                    .as_mut()
-                    .ok_or_else(|| sentinel_assertion("preview read-only body child missing"))?
-                    .initialize();
-                let mut preview_read_only_driver = OwnedStdioDriver {
-                    driver: Arc::clone(&preview_read_only),
-                };
-                let preview_read_only_evidence =
-                    run_body_read_only_scenario(&mut preview_read_only_driver)
-                        .await
-                        .map_err(|_| {
-                            sentinel_assertion("preview read-only body scenario failed")
-                        })?;
-                let (_, preview_read_only_output) =
-                    take_registered_body_driver(&preview_read_only)?
-                        .try_finish()
-                        .map_err(|_| {
-                            sentinel_assertion("preview read-only body child did not stop")
-                        })?;
-                require_body_diagnostics(
-                    &preview_read_only_output.stderr,
-                    b"SECRET_UNPARSED_BODY_VALUE",
-                    false,
-                )?;
-
-                inspect_reviewed_body_server_log(&[
-                    BODY_DIAGNOSTIC_SECRET.as_bytes(),
-                    b"SECRET_UNPARSED_BODY_VALUE",
-                ])?;
-
-                if stable_descriptors != preview_descriptors
-                    || direct_descriptors != stable_descriptors
-                {
-                    return Err(sentinel_assertion(
-                        "direct/stable/preview body descriptors, schemas, or annotations diverged",
-                    ));
-                }
-                if stable_frames != preview_frames
-                    || stable_frames[0]
-                        .pointer("/result/structuredContent/items")
-                        .and_then(Value::as_array)
-                        .is_none()
-                    || stable_frames[1]
-                        .pointer("/result/structuredContent/code")
-                        .and_then(Value::as_str)
-                        != Some("validation")
-                {
-                    return Err(sentinel_assertion(
-                        "stable/preview raw body success or error JSON-RPC frames diverged",
-                    ));
-                }
-
-                if stable_evidence != preview_evidence {
-                    return Err(sentinel_assertion(
-                        "stable and preview normalized body result shapes diverged",
-                    ));
-                }
-                if direct_evidence != stable_evidence {
-                    return Err(sentinel_assertion(
-                        "direct and stdio normalized body result shapes diverged",
-                    ));
-                }
-                if stable_read_only_evidence != preview_read_only_evidence {
-                    return Err(sentinel_assertion(
-                        "stable and preview read-only body evidence diverged",
-                    ));
-                }
-                Ok(ctx.space_id.clone())
-            })
+            run_shared_body_callback(
+                ctx,
+                stable_callback_cleanup,
+                preview_callback_cleanup,
+                stable_read_only_callback_cleanup,
+                preview_read_only_callback_cleanup,
+            )
         },
     ))
     .await

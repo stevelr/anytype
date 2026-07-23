@@ -38,8 +38,12 @@ pub type BodyScenarioFuture<'a> =
     Pin<Box<dyn Future<Output = Result<BodyScenarioEvidence, String>> + 'a>>;
 
 #[test]
-fn body_scenario_future_keeps_only_a_heap_handle_inline() {
+fn body_scenario_futures_keep_only_a_heap_handle_inline() {
     assert!(std::mem::size_of::<BodyScenarioFuture<'static>>() <= 2 * std::mem::size_of::<usize>());
+    assert!(
+        std::mem::size_of::<BodyReadOnlyScenarioFuture<'static>>()
+            <= 2 * std::mem::size_of::<usize>()
+    );
 }
 
 /// Content-free evidence from one read-only body catalog check.
@@ -51,6 +55,10 @@ pub struct BodyReadOnlyEvidence {
     pub body_tools: Vec<String>,
     pub mutation_error_categories: Vec<String>,
 }
+
+/// Heap-owned future for the read-only rich-body acceptance workflow.
+pub type BodyReadOnlyScenarioFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BodyReadOnlyEvidence, String>> + 'a>>;
 
 /// Payload-free production lifecycle counters optionally exposed by a direct
 /// acceptance driver.
@@ -373,7 +381,13 @@ async fn run_body_update_arm(
 /// Proves that read-only mode advertises only body reads and rejects every
 /// direct mutation name before decoding caller arguments.
 #[allow(dead_code)]
-pub async fn run_body_read_only_scenario(
+pub fn run_body_read_only_scenario<'a>(
+    driver: &'a mut impl McpDriver,
+) -> BodyReadOnlyScenarioFuture<'a> {
+    Box::pin(run_body_read_only_scenario_inner(driver))
+}
+
+async fn run_body_read_only_scenario_inner(
     driver: &mut impl McpDriver,
 ) -> Result<BodyReadOnlyEvidence, String> {
     const BODY_TOOLS: [&str; 6] = [
