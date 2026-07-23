@@ -8,7 +8,7 @@
 //! [`BodySnapshot`] tree with exact block identities and exact child order,
 //! read through the gRPC `ObjectShow` view.
 //!
-//! Design contract (see `any-mcp/designs/body-block-model.md`):
+//! Design contract:
 //!
 //! - No `anytype_rpc` protobuf type appears in any public signature; all
 //!   conversions are crate-private.

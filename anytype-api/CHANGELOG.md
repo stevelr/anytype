@@ -12,10 +12,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `ObjectAddDiscussion` repeat-create defect. It dispatches exactly two raw
   RPCs on one cleanup-owned parent, requires the observed second
   `UNKNOWN_ERROR` with no usable ID, then proves the original relation and
-  complete derived identity through a fresh typed read. The companion
-  `DISCUSSION_STATUS.md` evidence package separates that behavior from the
-  malformed persistent read-only fixture and provides payload-free,
-  operator-ready reproductions for both upstream reports.
+  complete derived identity through a fresh typed read. The accompanying
+  evidence separates that behavior from the malformed persistent read-only
+  fixture and provides payload-free, operator-ready reproductions for both
+  upstream reports.
 - Add an opt-in `test-fixtures` feature with a narrow, production-validated
   typed body snapshot constructor for downstream block-count and atomic
   read-restriction contract tests, canonical/malformed table fixtures, and a
@@ -124,6 +124,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Prevent disposable-space safety sweeps from orphaning an allocated recovery
+  plan after a failed inventory. A same-process retry now discards an
+  incomplete plan or resumes the exact completed plan before allocating a new
+  one.
 - Make the ignored numeric/checkbox compatibility matrix operator-reproducible:
   both unfiltered endpoints must first return the exact cleanup-owned cohort;
   semantic mismatches require three stable observations and render only
