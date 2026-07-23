@@ -65,8 +65,12 @@ server filtering after pagination. See the workspace
 [filter status](../FILTER_STATUS.md) for the live compatibility matrix and
 the disposition of the historical upstream limitation. On `anytype-cli` 0.3.6,
 all eleven cleanup-owned object-list cases return HTTP 400; scoped search passes
-six exact-identity cases and fails five bounded semantic checks. The upstream
-object-list issue therefore remains open.
+six exact-identity cases, while number `ne`/`lt`/`lte` and checkbox `eq false`/
+`ne true` each stably return the expected set plus one cleanup-owned fixture.
+The reproducible probe requires unfiltered endpoint controls, three identical
+observations before classifying a mismatch, redacted relation/count output, and
+verified disposable-space absence. The upstream object-list issue therefore
+remains open.
 
 ### Bounded HTTP responses
 

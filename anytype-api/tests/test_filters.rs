@@ -18,26 +18,37 @@
 //! ```bash
 //! source .test-env
 //! ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_filters \
-//!   test_filter_number_checkbox_condition_matrix -- --ignored
+//!   test_filter_number_checkbox_condition_matrix -- \
+//!   --exact --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! The ignored matrix always executes all eleven fixed cases independently on
-//! both endpoints before cleanup. It then reports only the static endpoint and
-//! case labels, a closed failure category, and a validated HTTP status/class
-//! when one was available; request values, URLs, response bodies, and fixture
-//! identities are never retained.
+//! The configured prefix grants case-insensitive deletion authority over every
+//! matching space and must be reserved exclusively for this test. The ignored
+//! matrix first requires both unfiltered endpoints to converge to the complete
+//! four-object cohort, then executes all eleven fixed cases independently on
+//! both endpoints. A semantic mismatch must repeat as the same sorted identity
+//! multiset three times before classification; otherwise it is `unstable`.
+//! After exact space deletion and final cleanup, the test reports static labels,
+//! redacted identity relation/count fields, a closed failure category, and a
+//! validated HTTP status/class when available. Request values, URLs, response
+//! bodies, credentials, names, and fixture identities are never retained.
 //!
 //! On the `anytype-cli` 0.3.6 acceptance server, all eleven object-list cells
 //! return HTTP 400. Scoped search passes number `eq`, `gt`, `gte`, negative
 //! decimal `eq`, checkbox `eq true`, and checkbox `ne false`; its other five
-//! cells fail bounded exact-identity convergence. Keep the test ignored as a
-//! deliberate compatibility probe until those upstream behaviors change.
+//! cells stably return one extra cleanup-owned fixture. The expected test exit
+//! is therefore nonzero, but output is evidence only when all 22 rows and
+//! `cleanup=verified_absent` are present. Keep the test ignored as a deliberate
+//! compatibility probe until those upstream behaviors change.
 
 mod common;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anytype::{
@@ -342,8 +353,97 @@ impl SafeHttpStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdentityRelation {
+    Exact,
+    MissingOnly,
+    ExtraOnly,
+    Mixed,
+    Foreign,
+    Duplicate,
+    Unstable,
+}
+
+impl IdentityRelation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::MissingOnly => "missing_only",
+            Self::ExtraOnly => "extra_only",
+            Self::Mixed => "mixed",
+            Self::Foreign => "foreign",
+            Self::Duplicate => "duplicate",
+            Self::Unstable => "unstable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IdentityObservation {
+    relation: IdentityRelation,
+    expected_count: usize,
+    observed_unique_count: usize,
+    missing_count: usize,
+    unexpected_fixture_count: usize,
+    non_fixture_count: usize,
+    duplicate_count: usize,
+}
+
+impl IdentityObservation {
+    fn classify(expected: &[String], fixtures: &[String], actual: &[String]) -> Self {
+        let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
+        let fixtures = fixtures.iter().cloned().collect::<BTreeSet<_>>();
+        let actual_unique = actual.iter().cloned().collect::<BTreeSet<_>>();
+        let missing_count = expected.difference(&actual_unique).count();
+        let unexpected_fixture_count = actual_unique
+            .iter()
+            .filter(|id| fixtures.contains(*id) && !expected.contains(*id))
+            .count();
+        let non_fixture_count = actual_unique.difference(&fixtures).count();
+        let duplicate_count = actual.len().saturating_sub(actual_unique.len());
+        let relation = if duplicate_count > 0 {
+            IdentityRelation::Duplicate
+        } else if non_fixture_count > 0 {
+            IdentityRelation::Foreign
+        } else {
+            match (missing_count > 0, unexpected_fixture_count > 0) {
+                (false, false) => IdentityRelation::Exact,
+                (true, false) => IdentityRelation::MissingOnly,
+                (false, true) => IdentityRelation::ExtraOnly,
+                (true, true) => IdentityRelation::Mixed,
+            }
+        };
+        Self {
+            relation,
+            expected_count: expected.len(),
+            observed_unique_count: actual_unique.len(),
+            missing_count,
+            unexpected_fixture_count,
+            non_fixture_count,
+            duplicate_count,
+        }
+    }
+
+    const fn exact(expected_count: usize) -> Self {
+        Self {
+            relation: IdentityRelation::Exact,
+            expected_count,
+            observed_unique_count: expected_count,
+            missing_count: 0,
+            unexpected_fixture_count: 0,
+            non_fixture_count: 0,
+            duplicate_count: 0,
+        }
+    }
+
+    const fn unstable(mut self) -> Self {
+        self.relation = IdentityRelation::Unstable;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FilterCaseOutcome {
-    Passed,
+    Observed(IdentityObservation),
     Failed {
         category: DisposableFailureCategory,
         status: Option<SafeHttpStatus>,
@@ -403,10 +503,18 @@ impl FilterCaseInventory {
         Ok(())
     }
 
-    fn failure_count(&self) -> usize {
+    fn deviation_count(&self) -> usize {
         self.outcomes
             .iter()
-            .filter(|outcome| matches!(outcome, Some(FilterCaseOutcome::Failed { .. })))
+            .filter(|outcome| {
+                !matches!(
+                    outcome,
+                    Some(FilterCaseOutcome::Observed(IdentityObservation {
+                        relation: IdentityRelation::Exact,
+                        ..
+                    }))
+                )
+            })
             .count()
     }
 
@@ -416,18 +524,31 @@ impl FilterCaseInventory {
         for endpoint in FilterEndpoint::ALL {
             for case in NumericCheckboxCase::ALL {
                 let line = match self.outcomes[Self::index(endpoint, case)] {
-                    Some(FilterCaseOutcome::Passed) => format!(
-                        "endpoint={} case={} result=pass",
+                    Some(FilterCaseOutcome::Observed(observation)) => format!(
+                        "endpoint={} case={} result={} identity={} expected_count={} observed_unique_count={} missing_count={} unexpected_fixture_count={} non_fixture_count={} duplicate_count={}",
                         endpoint.label(),
-                        case.label()
+                        case.label(),
+                        if observation.relation == IdentityRelation::Exact {
+                            "pass"
+                        } else {
+                            "mismatch"
+                        },
+                        observation.relation.label(),
+                        observation.expected_count,
+                        observation.observed_unique_count,
+                        observation.missing_count,
+                        observation.unexpected_fixture_count,
+                        observation.non_fixture_count,
+                        observation.duplicate_count,
                     ),
                     Some(FilterCaseOutcome::Failed {
                         category,
                         status: Some(status),
                     }) => format!(
-                        "endpoint={} case={} result=fail category={} http_status={} http_class={}",
+                        "endpoint={} case={} result=fail identity=not_observed expected_count={} observed_unique_count=unavailable missing_count=unavailable unexpected_fixture_count=unavailable non_fixture_count=unavailable duplicate_count=unavailable category={} http_status={} http_class={}",
                         endpoint.label(),
                         case.label(),
+                        case.expected_indexes().len(),
                         category,
                         status.code,
                         status.class.label(),
@@ -436,9 +557,10 @@ impl FilterCaseInventory {
                         category,
                         status: None,
                     }) => format!(
-                        "endpoint={} case={} result=fail category={} http_status=unavailable",
+                        "endpoint={} case={} result=fail identity=not_observed expected_count={} observed_unique_count=unavailable missing_count=unavailable unexpected_fixture_count=unavailable non_fixture_count=unavailable duplicate_count=unavailable category={} http_status=unavailable",
                         endpoint.label(),
                         case.label(),
+                        case.expected_indexes().len(),
                         category,
                     ),
                     None => {
@@ -479,10 +601,10 @@ fn safe_http_status(error: &TestError) -> Option<SafeHttpStatus> {
 
 fn closed_filter_case_outcome(
     case: NumericCheckboxCase,
-    result: TestResult<()>,
+    result: TestResult<IdentityObservation>,
 ) -> FilterCaseOutcome {
     match result {
-        Ok(()) => FilterCaseOutcome::Passed,
+        Ok(observation) => FilterCaseOutcome::Observed(observation),
         Err(error) => {
             let status = safe_http_status(&error);
             let category = match disposable_callback_error(case.callback_stage(), error) {
@@ -504,7 +626,13 @@ fn filter_case_inventory_aggregates_in_canonical_order() -> TestResult<()> {
     let mut inventory = FilterCaseInventory::new();
     for endpoint in FilterEndpoint::ALL.into_iter().rev() {
         for case in NumericCheckboxCase::ALL.into_iter().rev() {
-            inventory.record(endpoint, case, FilterCaseOutcome::Passed)?;
+            inventory.record(
+                endpoint,
+                case,
+                FilterCaseOutcome::Observed(IdentityObservation::exact(
+                    case.expected_indexes().len(),
+                )),
+            )?;
         }
     }
 
@@ -513,23 +641,29 @@ fn filter_case_inventory_aggregates_in_canonical_order() -> TestResult<()> {
     assert_eq!(lines.len(), FILTER_INVENTORY_LEN);
     assert_eq!(
         lines.first().copied(),
-        Some("endpoint=object_list case=number eq integer result=pass")
+        Some(
+            "endpoint=object_list case=number eq integer result=pass identity=exact expected_count=1 observed_unique_count=1 missing_count=0 unexpected_fixture_count=0 non_fixture_count=0 duplicate_count=0"
+        )
     );
     assert_eq!(
         lines.get(NumericCheckboxCase::ALL.len()).copied(),
-        Some("endpoint=scoped_search case=number eq integer result=pass")
+        Some(
+            "endpoint=scoped_search case=number eq integer result=pass identity=exact expected_count=1 observed_unique_count=1 missing_count=0 unexpected_fixture_count=0 non_fixture_count=0 duplicate_count=0"
+        )
     );
     assert_eq!(
         lines.last().copied(),
-        Some("endpoint=scoped_search case=checkbox ne false result=pass")
+        Some(
+            "endpoint=scoped_search case=checkbox ne false result=pass identity=exact expected_count=1 observed_unique_count=1 missing_count=0 unexpected_fixture_count=0 non_fixture_count=0 duplicate_count=0"
+        )
     );
-    assert_eq!(inventory.failure_count(), 0);
+    assert_eq!(inventory.deviation_count(), 0);
 
     let duplicate = inventory
         .record(
             FilterEndpoint::ObjectList,
             NumericCheckboxCase::NumberEqualInteger,
-            FilterCaseOutcome::Passed,
+            FilterCaseOutcome::Observed(IdentityObservation::exact(1)),
         )
         .expect_err("duplicate inventory entries must fail closed");
     assert!(matches!(duplicate, TestError::Assertion { .. }));
@@ -573,15 +707,17 @@ fn filter_case_inventory_redacts_failures_and_retains_safe_status() -> TestResul
                 {
                     failed
                 } else {
-                    FilterCaseOutcome::Passed
+                    FilterCaseOutcome::Observed(IdentityObservation::exact(
+                        case.expected_indexes().len(),
+                    ))
                 },
             )?;
         }
     }
     let report = inventory.render()?;
-    assert_eq!(inventory.failure_count(), 1);
+    assert_eq!(inventory.deviation_count(), 1);
     assert!(report.starts_with(
-        "endpoint=object_list case=number eq integer result=fail category=api_error http_status=500 http_class=server_error\n"
+        "endpoint=object_list case=number eq integer result=fail identity=not_observed expected_count=1 observed_unique_count=unavailable missing_count=unavailable unexpected_fixture_count=unavailable non_fixture_count=unavailable duplicate_count=unavailable category=api_error http_status=500 http_class=server_error\n"
     ));
     assert!(!report.contains(SECRET_BODY));
     assert!(!report.contains("secret.invalid"));
@@ -611,6 +747,113 @@ fn filter_case_inventory_discards_non_http_status_codes() {
     );
 }
 
+#[test]
+fn identity_observation_classifies_every_redacted_relation() {
+    let expected = ["expected-a", "expected-b"].map(str::to_owned);
+    let fixtures = ["expected-a", "expected-b", "fixture-c"].map(str::to_owned);
+    let cases = [
+        (
+            vec!["expected-a".to_owned(), "expected-b".to_owned()],
+            IdentityRelation::Exact,
+            [0, 0, 0, 0],
+        ),
+        (
+            vec!["expected-a".to_owned()],
+            IdentityRelation::MissingOnly,
+            [1, 0, 0, 0],
+        ),
+        (
+            vec![
+                "expected-a".to_owned(),
+                "expected-b".to_owned(),
+                "fixture-c".to_owned(),
+            ],
+            IdentityRelation::ExtraOnly,
+            [0, 1, 0, 0],
+        ),
+        (
+            vec!["expected-a".to_owned(), "fixture-c".to_owned()],
+            IdentityRelation::Mixed,
+            [1, 1, 0, 0],
+        ),
+        (
+            vec![
+                "expected-a".to_owned(),
+                "expected-b".to_owned(),
+                "foreign".to_owned(),
+            ],
+            IdentityRelation::Foreign,
+            [0, 0, 1, 0],
+        ),
+        (
+            vec![
+                "expected-a".to_owned(),
+                "expected-b".to_owned(),
+                "expected-b".to_owned(),
+            ],
+            IdentityRelation::Duplicate,
+            [0, 0, 0, 1],
+        ),
+    ];
+
+    for (actual, relation, counts) in cases {
+        let observation = IdentityObservation::classify(&expected, &fixtures, &actual);
+        assert_eq!(observation.relation, relation);
+        assert_eq!(
+            [
+                observation.missing_count,
+                observation.unexpected_fixture_count,
+                observation.non_fixture_count,
+                observation.duplicate_count,
+            ],
+            counts
+        );
+    }
+
+    assert_eq!(
+        IdentityObservation::classify(&expected, &fixtures, &["expected-a".to_owned()])
+            .unstable()
+            .relation,
+        IdentityRelation::Unstable
+    );
+}
+
+#[test]
+fn identity_observation_report_never_renders_fixture_ids() -> TestResult<()> {
+    const SECRET_EXPECTED: &str = "secret-expected-id";
+    const SECRET_FIXTURE: &str = "secret-fixture-id";
+    let observation = IdentityObservation::classify(
+        &[SECRET_EXPECTED.to_owned()],
+        &[SECRET_EXPECTED.to_owned(), SECRET_FIXTURE.to_owned()],
+        &[SECRET_FIXTURE.to_owned()],
+    );
+    assert_eq!(observation.relation, IdentityRelation::Mixed);
+
+    let mut inventory = FilterCaseInventory::new();
+    for endpoint in FilterEndpoint::ALL {
+        for case in NumericCheckboxCase::ALL {
+            inventory.record(
+                endpoint,
+                case,
+                if endpoint == FilterEndpoint::ScopedSearch
+                    && case == NumericCheckboxCase::NumberNotEqual
+                {
+                    FilterCaseOutcome::Observed(observation)
+                } else {
+                    FilterCaseOutcome::Observed(IdentityObservation::exact(
+                        case.expected_indexes().len(),
+                    ))
+                },
+            )?;
+        }
+    }
+    let report = inventory.render()?;
+    assert!(report.contains("identity=mixed"));
+    assert!(!report.contains(SECRET_EXPECTED));
+    assert!(!report.contains(SECRET_FIXTURE));
+    Ok(())
+}
+
 fn sorted_ids(objects: &[Object]) -> Vec<String> {
     let mut ids = objects
         .iter()
@@ -632,62 +875,114 @@ fn expected_ids(objects: &[Object], indexes: &[usize]) -> TestResult<Vec<String>
     Ok(ids)
 }
 
-async fn assert_filter_endpoint_case(
+async fn filter_endpoint_objects(
+    ctx: &TestContext,
+    type_key: &str,
+    endpoint: FilterEndpoint,
+    case: Option<NumericCheckboxCase>,
+) -> TestResult<Vec<Object>> {
+    match endpoint {
+        FilterEndpoint::ObjectList => {
+            let mut request = ctx
+                .client
+                .objects(&ctx.space_id)
+                .filter(Filter::type_in([type_key]))
+                .limit(100);
+            if let Some(case) = case {
+                request = request.filter(case.filter()?);
+            }
+            Ok(request.list().await?.collect_all().await?)
+        }
+        FilterEndpoint::ScopedSearch => {
+            let mut request = ctx
+                .client
+                .search_in(&ctx.space_id)
+                .types([type_key])
+                .limit(100);
+            if let Some(case) = case {
+                request = request.filters(FilterExpression::from(vec![case.filter()?]));
+            }
+            Ok(request.execute().await?.collect_all().await?)
+        }
+    }
+}
+
+async fn await_filter_endpoint_control(
     ctx: &TestContext,
     objects: &[Object],
     type_key: &str,
     endpoint: FilterEndpoint,
-    case: NumericCheckboxCase,
 ) -> TestResult<()> {
-    const MAX_INDEX_ATTEMPTS: usize = 20;
+    const MAX_CONTROL_ATTEMPTS: usize = 20;
 
-    let expected = expected_ids(objects, case.expected_indexes())?;
+    let expected = sorted_ids(objects);
     let mut last_count = 0;
-    for attempt in 1..=MAX_INDEX_ATTEMPTS {
-        let actual = match endpoint {
-            FilterEndpoint::ObjectList => {
-                ctx.client
-                    .objects(&ctx.space_id)
-                    .filter(Filter::type_in([type_key]))
-                    .filter(case.filter()?)
-                    .limit(100)
-                    .list()
-                    .await?
-                    .collect_all()
-                    .await?
-            }
-            FilterEndpoint::ScopedSearch => {
-                ctx.client
-                    .search_in(&ctx.space_id)
-                    .types([type_key])
-                    .filters(FilterExpression::from(vec![case.filter()?]))
-                    .limit(100)
-                    .execute()
-                    .await?
-                    .collect_all()
-                    .await?
-            }
-        };
-
+    for attempt in 1..=MAX_CONTROL_ATTEMPTS {
+        let actual = filter_endpoint_objects(ctx, type_key, endpoint, None).await?;
         let actual_ids = sorted_ids(&actual);
         if actual_ids == expected {
             return Ok(());
         }
         last_count = actual_ids.len();
-        if attempt < MAX_INDEX_ATTEMPTS {
+        if attempt < MAX_CONTROL_ATTEMPTS {
             sleep(Duration::from_millis(250)).await;
         }
     }
 
     Err(TestError::Assertion {
         message: format!(
-            "{} {} did not converge to {} exact cleanup-owned identities: returned {}",
+            "{} unfiltered control did not converge to {} exact cleanup-owned identities: returned {} identities",
             endpoint.label(),
-            case.label(),
             expected.len(),
             last_count,
         ),
     })
+}
+
+async fn observe_filter_endpoint_case(
+    ctx: &TestContext,
+    objects: &[Object],
+    type_key: &str,
+    endpoint: FilterEndpoint,
+    case: NumericCheckboxCase,
+) -> TestResult<IdentityObservation> {
+    const MAX_OBSERVATION_ATTEMPTS: usize = 20;
+    const STABLE_OBSERVATIONS: usize = 3;
+
+    let fixtures = sorted_ids(objects);
+    let expected = expected_ids(objects, case.expected_indexes())?;
+    let mut previous_ids = None;
+    let mut consecutive = 0;
+    let mut last_observation = None;
+
+    for attempt in 1..=MAX_OBSERVATION_ATTEMPTS {
+        let actual = filter_endpoint_objects(ctx, type_key, endpoint, Some(case)).await?;
+        let actual_ids = sorted_ids(&actual);
+        let observation = IdentityObservation::classify(&expected, &fixtures, &actual_ids);
+        if observation.relation == IdentityRelation::Exact {
+            return Ok(observation);
+        }
+
+        if previous_ids.as_ref() == Some(&actual_ids) {
+            consecutive += 1;
+        } else {
+            previous_ids = Some(actual_ids);
+            consecutive = 1;
+        }
+        last_observation = Some(observation);
+        if consecutive >= STABLE_OBSERVATIONS {
+            return Ok(observation);
+        }
+        if attempt < MAX_OBSERVATION_ATTEMPTS {
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    last_observation
+        .map(IdentityObservation::unstable)
+        .ok_or_else(|| TestError::Assertion {
+            message: "filter observation produced no bounded result".to_owned(),
+        })
 }
 
 // =============================================================================
@@ -981,12 +1276,19 @@ async fn test_filter_number_checkbox_condition_matrix() {
                     create_filter_matrix_objects(&ctx).await.map_err(|error| {
                         disposable_callback_error(DisposableCallbackStage::Fixture, error)
                     })?;
+                for endpoint in FilterEndpoint::ALL {
+                    await_filter_endpoint_control(&ctx, &objects, &type_key, endpoint)
+                        .await
+                        .map_err(|error| {
+                            disposable_callback_error(DisposableCallbackStage::Fixture, error)
+                        })?;
+                }
                 let mut inventory = FilterCaseInventory::new();
                 for endpoint in FilterEndpoint::ALL {
                     for case in NumericCheckboxCase::ALL {
                         let outcome = closed_filter_case_outcome(
                             case,
-                            assert_filter_endpoint_case(&ctx, &objects, &type_key, endpoint, case)
+                            observe_filter_endpoint_case(&ctx, &objects, &type_key, endpoint, case)
                                 .await,
                         );
                         inventory.record(endpoint, case, outcome).map_err(|error| {
@@ -1010,15 +1312,16 @@ async fn test_filter_number_checkbox_condition_matrix() {
                 .render()
                 .expect("complete static filter inventory");
             eprintln!("{report}");
+            eprintln!("cleanup=verified_absent");
+            let deviation_count = inventory.deviation_count();
             assert_eq!(
-                inventory.failure_count(),
-                0,
-                "real-server filter matrix contains unsupported endpoint cases:\n{report}",
+                deviation_count, 0,
+                "real-server filter matrix contains {deviation_count} unsupported endpoint cases after verified cleanup",
             );
         }
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
-            eprintln!("numeric/checkbox filter matrix skipped before callback: {reason:?}");
+            panic!("numeric/checkbox filter matrix produced no evidence: {reason:?}");
         }
     }
 }

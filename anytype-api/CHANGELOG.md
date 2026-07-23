@@ -116,6 +116,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Make the ignored numeric/checkbox compatibility matrix operator-reproducible:
+  both unfiltered endpoints must first return the exact cleanup-owned cohort;
+  semantic mismatches require three stable observations and render only
+  redacted identity relations/counts; API failures retain only safe status
+  classes; and the 22-row report is emitted only after verified disposable
+  space absence. Document the exact CLI, Heart, API, command, endpoint matrix,
+  and upstream issue/PR disposition without exposing fixture identities or
+  response bodies.
 - Require verified table-create receipts to contain the complete canonical
   sparse Heart subtree: exact ordered regions, columns, and rows; no cells for
   a no-header table; or one grey-background empty paragraph cell per column
