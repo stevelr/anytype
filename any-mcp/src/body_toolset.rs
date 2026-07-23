@@ -80,6 +80,14 @@ pub const BODY_BLOCK_DELETE: &str = "body_block_delete";
 pub const BODY_BLOCK_MOVE: &str = "body_block_move";
 /// Exact rich-page creation tool name.
 pub const RICH_PAGE_CREATE: &str = "rich_page_create";
+const BODY_TOOL_NAMES: [&str; 6] = [
+    BODY_BLOCK_CREATE,
+    BODY_BLOCK_DELETE,
+    BODY_BLOCK_LIST,
+    BODY_BLOCK_MOVE,
+    BODY_BLOCK_UPDATE,
+    RICH_PAGE_CREATE,
+];
 
 /// Reviewed incremental read-write catalog ceiling.
 pub const BODY_BLOCKS_CATALOG_TOKEN_CEILING: usize = 25_000;
@@ -1610,6 +1618,12 @@ struct ProjectedSnapshot {
     items: Vec<BlockSummary>,
 }
 
+struct ProjectedBodyPage {
+    snapshot: ProjectedSnapshot,
+    items: Vec<BlockSummary>,
+    next_state: Option<EvidenceCursorState>,
+}
+
 fn body_limits() -> BodyLimits {
     BodyLimits {
         max_blocks: MAX_BODY_BLOCKS,
@@ -1640,6 +1654,11 @@ async fn fetch_body(
 }
 
 fn project_snapshot(snapshot: &BodySnapshot) -> Result<ProjectedSnapshot, HandlerError> {
+    // BodySnapshot is bounded at acquisition, but retain the same cap at the
+    // MCP projection boundary so a future alternate source cannot bypass it.
+    if snapshot.len() > MAX_BODY_BLOCKS {
+        return Err(HandlerError::new(ToolError::bounded_result()));
+    }
     let space_id = EntityId::new(snapshot.space_id.clone()).map_err(upstream_domain)?;
     let object_id = EntityId::new(snapshot.object_id.clone()).map_err(upstream_domain)?;
     let root_id = EntityId::new(snapshot.root_id.as_str()).map_err(upstream_domain)?;
@@ -3558,6 +3577,17 @@ impl BodyAcceptanceDirect {
             .collect()
     }
 
+    /// Returns the exact serialized production descriptors for the body
+    /// registry, including schemas and annotations.
+    pub fn tool_descriptors(&self) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+        self.server
+            .tools()
+            .iter()
+            .filter(|tool| BODY_TOOL_NAMES.contains(&tool.name.as_ref()))
+            .map(serde_json::to_value)
+            .collect()
+    }
+
     #[must_use]
     pub fn metrics(&self) -> BodyAcceptanceMetricsSnapshot {
         BodyAcceptanceMetricsSnapshot::capture(&self.handlers)
@@ -3612,14 +3642,15 @@ impl BodyHandlers {
                 let offset = prior.as_ref().map_or(0, |state| state.offset().get());
                 let snapshot =
                     fetch_body(&client, space_id.as_str(), input.object_id.as_str(), rpc).await?;
-                let projected = project_snapshot(&snapshot).map_err(HandlerOperationError::from)?;
-                if projected.space_id != space_id || projected.object_id != input.object_id {
+                let projected =
+                    project_snapshot_page(&snapshot, prior.as_ref(), offset, input.limit.0)
+                        .map_err(HandlerOperationError::from)?;
+                if projected.snapshot.space_id != space_id
+                    || projected.snapshot.object_id != input.object_id
+                {
                     return Err(HandlerError::new(ToolError::upstream()).into());
                 }
-                let (items, next_state) =
-                    select_body_page(&projected, prior.as_ref(), offset, input.limit.0)
-                        .map_err(HandlerOperationError::from)?;
-                let next_cursor = if let Some(next_state) = next_state {
+                let next_cursor = if let Some(next_state) = projected.next_state {
                     Some(
                         cursors
                             .issue_evidence(next_state, binding)
@@ -3629,11 +3660,11 @@ impl BodyHandlers {
                     None
                 };
                 Ok::<_, HandlerOperationError>(BodyBlockListOutput {
-                    space_id: projected.space_id,
-                    object_id: projected.object_id,
-                    root_id: projected.root_id,
-                    snapshot_hash: projected.hash,
-                    items,
+                    space_id: projected.snapshot.space_id,
+                    object_id: projected.snapshot.object_id,
+                    root_id: projected.snapshot.root_id,
+                    snapshot_hash: projected.snapshot.hash,
+                    items: projected.items,
                     next_cursor,
                 })
             },
@@ -3641,6 +3672,21 @@ impl BodyHandlers {
         )
         .await
     }
+}
+
+fn project_snapshot_page(
+    snapshot: &BodySnapshot,
+    prior: Option<&EvidenceCursorState>,
+    offset: u32,
+    limit: u8,
+) -> Result<ProjectedBodyPage, HandlerError> {
+    let projected = project_snapshot(snapshot)?;
+    let (items, next_state) = select_body_page(&projected, prior, offset, limit)?;
+    Ok(ProjectedBodyPage {
+        snapshot: projected,
+        items,
+        next_state,
+    })
 }
 
 fn select_body_page(
@@ -5723,41 +5769,14 @@ impl BodyHandlers {
                 Err(error) => Err(rich_category(&error)),
             },
         };
-        let (final_hash, category) = match body {
-            Ok(hash) => (Some(hash), RichFailureCategory::Conflict),
-            Err(category) => (None, category),
-        };
-        let space_id = match EntityId::new(recovery.candidate.space_id()) {
-            Ok(value) => value,
-            Err(_) => return tool_error(&ToolError::conflict()),
-        };
-        let object_id = match EntityId::new(recovery.candidate.object_id()) {
-            Ok(value) => value,
-            Err(_) => return tool_error(&ToolError::conflict()),
-        };
-        let output = rich_recovered_failure(
-            &space_id,
-            &object_id,
+        complete_pending_rich_recovery(
+            &self.rich_creates,
+            &self.rich_create,
+            &recovery,
             input.blocks.len(),
-            final_hash,
-            category,
-        );
-        let result =
-            finish_rich_result(&self.rich_create, output, CreateDisposition::Terminal).result;
-        if self
-            .rich_creates
-            .complete_pending_candidate(
-                &recovery.key,
-                recovery.fingerprint,
-                &recovery.candidate,
-                result.clone(),
-            )
-            .await
-        {
-            result
-        } else {
-            tool_error(&ToolError::conflict())
-        }
+            body,
+        )
+        .await
     }
 
     async fn replay_rich_create(
@@ -5824,6 +5843,45 @@ impl BodyHandlers {
             return tool_error(&ToolError::conflict());
         }
         CallToolResult::structured(value)
+    }
+}
+
+/// Production terminal reducer for a claimed pending candidate. It converts
+/// one body observation into the cached replay receipt atomically; a stale or
+/// already-completed candidate fails closed without altering the store.
+async fn complete_pending_rich_recovery(
+    store: &IdempotencyStore,
+    contract: &WorkflowTool<RichPageCreateOutput>,
+    recovery: &PendingRichRecovery,
+    total: usize,
+    body: Result<SnapshotHash, RichFailureCategory>,
+) -> CallToolResult {
+    let space_id = match EntityId::new(recovery.candidate.space_id()) {
+        Ok(value) => value,
+        Err(_) => return tool_error(&ToolError::conflict()),
+    };
+    let object_id = match EntityId::new(recovery.candidate.object_id()) {
+        Ok(value) => value,
+        Err(_) => return tool_error(&ToolError::conflict()),
+    };
+    let (final_hash, category) = match body {
+        Ok(hash) => (Some(hash), RichFailureCategory::Conflict),
+        Err(category) => (None, category),
+    };
+    let output = rich_recovered_failure(&space_id, &object_id, total, final_hash, category);
+    let result = finish_rich_result(contract, output, CreateDisposition::Terminal).result;
+    if store
+        .complete_pending_candidate(
+            &recovery.key,
+            recovery.fingerprint,
+            &recovery.candidate,
+            result.clone(),
+        )
+        .await
+    {
+        result
+    } else {
+        tool_error(&ToolError::conflict())
     }
 }
 
@@ -6028,18 +6086,24 @@ async fn execute_rich_create(
         .record_replay_witness(ReplayWitness::RichRootAppendIndex(root_append_baseline))
         .await;
     let mut current = initial;
-    let mut applied = Vec::with_capacity(plan.entries.len());
+    let mut scheduler = RichScheduler::new(plan.entries.len());
     let mut actual_ids = HashMap::<String, BlockId>::new();
     for (index, entry) in plan.entries.iter().enumerate() {
-        if cancellation.is_cancelled() || std::time::Instant::now() >= deadline {
-            let output = rich_cancelled_at_write_boundary(
-                &space_id,
-                &object_id,
-                index,
-                plan.entries.len(),
-                applied,
-                false,
+        if scheduler.next_write_index() != Some(index) {
+            return CreateExecution::new(
+                tool_error(&ToolError::conflict()),
+                CreateDisposition::Terminal,
             );
+        }
+        if cancellation.is_cancelled() || std::time::Instant::now() >= deadline {
+            let Some(output) =
+                scheduler.stop(&space_id, &object_id, false, RichWriteStop::Cancelled, None)
+            else {
+                return CreateExecution::new(
+                    tool_error(&ToolError::conflict()),
+                    CreateDisposition::Terminal,
+                );
+            };
             return finish_rich_result(contract, output, CreateDisposition::Terminal);
         }
         let target = match entry.parent_key.as_ref() {
@@ -6048,15 +6112,21 @@ async fn execute_rich_create(
                 None => {
                     let final_hash =
                         fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
-                    let output = rich_local_failure(
+                    let Some(output) = scheduler.stop(
                         &space_id,
                         &object_id,
-                        index,
-                        plan.entries.len(),
-                        applied,
-                        RichFailureCategory::Conflict,
+                        false,
+                        RichWriteStop::Rejected {
+                            category: RichFailureCategory::Conflict,
+                            definitive: false,
+                        },
                         final_hash,
-                    );
+                    ) else {
+                        return CreateExecution::new(
+                            tool_error(&ToolError::conflict()),
+                            CreateDisposition::Terminal,
+                        );
+                    };
                     return finish_rich_result(contract, output, CreateDisposition::Terminal);
                 }
             },
@@ -6066,15 +6136,21 @@ async fn execute_rich_create(
             Ok(value) => value,
             Err(_) => {
                 let final_hash = fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
-                let output = rich_local_failure(
+                let Some(output) = scheduler.stop(
                     &space_id,
                     &object_id,
-                    index,
-                    plan.entries.len(),
-                    applied,
-                    RichFailureCategory::Validation,
+                    false,
+                    RichWriteStop::Rejected {
+                        category: RichFailureCategory::Validation,
+                        definitive: false,
+                    },
                     final_hash,
-                );
+                ) else {
+                    return CreateExecution::new(
+                        tool_error(&ToolError::conflict()),
+                        CreateDisposition::Terminal,
+                    );
+                };
                 return finish_rich_result(contract, output, CreateDisposition::Terminal);
             }
         };
@@ -6096,14 +6172,21 @@ async fn execute_rich_create(
                 let Some(affected) = receipt.affected.first() else {
                     let final_hash =
                         fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
-                    let output = rich_postwrite_failure(
+                    let Some(output) = scheduler.stop(
                         &space_id,
                         &object_id,
-                        index,
-                        plan.entries.len(),
-                        applied,
+                        true,
+                        RichWriteStop::Rejected {
+                            category: RichFailureCategory::Indeterminate,
+                            definitive: false,
+                        },
                         final_hash,
-                    );
+                    ) else {
+                        return CreateExecution::new(
+                            tool_error(&ToolError::conflict()),
+                            CreateDisposition::Terminal,
+                        );
+                    };
                     return finish_rich_result(contract, output, CreateDisposition::Terminal);
                 };
                 let projected = match project_snapshot(&receipt.snapshot) {
@@ -6111,14 +6194,21 @@ async fn execute_rich_create(
                     Err(_) => {
                         let final_hash =
                             fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
-                        let output = rich_postwrite_failure(
+                        let Some(output) = scheduler.stop(
                             &space_id,
                             &object_id,
-                            index,
-                            plan.entries.len(),
-                            applied,
+                            true,
+                            RichWriteStop::Rejected {
+                                category: RichFailureCategory::Indeterminate,
+                                definitive: false,
+                            },
                             final_hash,
-                        );
+                        ) else {
+                            return CreateExecution::new(
+                                tool_error(&ToolError::conflict()),
+                                CreateDisposition::Terminal,
+                            );
+                        };
                         return finish_rich_result(contract, output, CreateDisposition::Terminal);
                     }
                 };
@@ -6127,14 +6217,21 @@ async fn execute_rich_create(
                     Err(_) => {
                         let final_hash =
                             fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
-                        let output = rich_postwrite_failure(
+                        let Some(output) = scheduler.stop(
                             &space_id,
                             &object_id,
-                            index,
-                            plan.entries.len(),
-                            applied,
+                            true,
+                            RichWriteStop::Rejected {
+                                category: RichFailureCategory::Indeterminate,
+                                definitive: false,
+                            },
                             final_hash,
-                        );
+                        ) else {
+                            return CreateExecution::new(
+                                tool_error(&ToolError::conflict()),
+                                CreateDisposition::Terminal,
+                            );
+                        };
                         return finish_rich_result(contract, output, CreateDisposition::Terminal);
                     }
                 };
@@ -6142,64 +6239,64 @@ async fn execute_rich_create(
                     entry.local_key.as_str().to_owned(),
                     affected.block_id.clone(),
                 );
-                applied.push(RichApplied {
+                if !scheduler.record_verified(RichApplied {
                     index: rich_index(index),
                     local_key: entry.local_key.clone(),
                     block_id,
                     snapshot_hash: projected.hash,
-                });
+                }) {
+                    return CreateExecution::new(
+                        tool_error(&ToolError::conflict()),
+                        CreateDisposition::Terminal,
+                    );
+                }
                 current = receipt.snapshot;
             }
             Some(Err(error)) => {
                 let polled = rpc.metrics().snapshot().write_polls > before_polls;
                 let definitive = polled && mutation_rejection_is_definitive(&error);
                 let final_hash = fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
-                let output = if polled && !definitive {
-                    rich_postwrite_failure(
-                        &space_id,
-                        &object_id,
-                        index,
-                        plan.entries.len(),
-                        applied,
-                        final_hash,
-                    )
-                } else if definitive {
-                    rich_attempted_rejection(
-                        &space_id,
-                        &object_id,
-                        index,
-                        plan.entries.len(),
-                        applied,
-                        rich_category(&error),
-                        final_hash,
-                    )
-                } else {
-                    rich_local_failure(
-                        &space_id,
-                        &object_id,
-                        index,
-                        plan.entries.len(),
-                        applied,
-                        rich_category(&error),
-                        final_hash,
-                    )
+                let Some(output) = scheduler.stop(
+                    &space_id,
+                    &object_id,
+                    polled,
+                    RichWriteStop::Rejected {
+                        category: rich_category(&error),
+                        definitive,
+                    },
+                    final_hash,
+                ) else {
+                    return CreateExecution::new(
+                        tool_error(&ToolError::conflict()),
+                        CreateDisposition::Terminal,
+                    );
                 };
                 return finish_rich_result(contract, output, CreateDisposition::Terminal);
             }
             None => {
                 let polled = rpc.metrics().snapshot().write_polls > before_polls;
-                let output = rich_cancelled_at_write_boundary(
+                let Some(output) = scheduler.stop(
                     &space_id,
                     &object_id,
-                    index,
-                    plan.entries.len(),
-                    applied,
                     polled,
-                );
+                    RichWriteStop::Cancelled,
+                    None,
+                ) else {
+                    return CreateExecution::new(
+                        tool_error(&ToolError::conflict()),
+                        CreateDisposition::Terminal,
+                    );
+                };
                 return finish_rich_result(contract, output, CreateDisposition::Terminal);
             }
         }
     }
+    let Some(applied) = scheduler.into_applied() else {
+        return CreateExecution::new(
+            tool_error(&ToolError::conflict()),
+            CreateDisposition::Terminal,
+        );
+    };
     let final_projected = match project_snapshot(&current) {
         Ok(value) => value,
         Err(_) => {
@@ -6418,6 +6515,7 @@ fn rich_final_drift_failure(
     }
 }
 
+#[cfg(test)]
 fn rich_cancelled_at_write_boundary(
     space_id: &EntityId,
     object_id: &EntityId,
@@ -6426,18 +6524,165 @@ fn rich_cancelled_at_write_boundary(
     applied: Vec<RichApplied>,
     write_polled: bool,
 ) -> RichPageCreateOutput {
-    if write_polled {
-        rich_postwrite_failure(space_id, object_id, index, total, applied, None)
-    } else {
-        rich_local_failure(
+    rich_stopped_write(
+        RichStopContext {
+            space_id,
+            object_id,
+            index,
+            total,
+        },
+        applied,
+        write_polled,
+        RichWriteStop::Cancelled,
+        None,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RichWriteStop {
+    Cancelled,
+    Rejected {
+        category: RichFailureCategory,
+        definitive: bool,
+    },
+}
+
+/// Deterministic production scheduler for the non-transactional rich-plan
+/// prefix. It owns the verified prefix and permanently closes after the first
+/// stopped write, so neither a later entry nor a second stop/reread can be
+/// authorized.
+struct RichScheduler {
+    total: usize,
+    next_index: usize,
+    applied: Vec<RichApplied>,
+    terminal: bool,
+}
+
+impl RichScheduler {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            next_index: 0,
+            applied: Vec::with_capacity(total),
+            terminal: false,
+        }
+    }
+
+    fn next_write_index(&self) -> Option<usize> {
+        (!self.terminal && self.next_index < self.total).then_some(self.next_index)
+    }
+
+    fn record_verified(&mut self, receipt: RichApplied) -> bool {
+        if self.next_write_index() != Some(usize::from(receipt.index)) {
+            return false;
+        }
+        self.applied.push(receipt);
+        self.next_index = self.next_index.saturating_add(1);
+        true
+    }
+
+    fn stop(
+        &mut self,
+        space_id: &EntityId,
+        object_id: &EntityId,
+        write_polled: bool,
+        stop: RichWriteStop,
+        final_snapshot_hash: Option<SnapshotHash>,
+    ) -> Option<RichPageCreateOutput> {
+        let index = self.next_write_index()?;
+        self.terminal = true;
+        Some(rich_stopped_write(
+            RichStopContext {
+                space_id,
+                object_id,
+                index,
+                total: self.total,
+            },
+            std::mem::take(&mut self.applied),
+            write_polled,
+            stop,
+            final_snapshot_hash,
+        ))
+    }
+
+    fn into_applied(self) -> Option<Vec<RichApplied>> {
+        (!self.terminal && self.next_index == self.total).then_some(self.applied)
+    }
+}
+
+/// Terminal scheduler decision for one stopped rich-plan write. Production
+/// calls this at the exact poll boundary, then returns immediately; therefore
+/// no compensation or later plan entry can be scheduled from this state.
+struct RichStopContext<'a> {
+    space_id: &'a EntityId,
+    object_id: &'a EntityId,
+    index: usize,
+    total: usize,
+}
+
+fn rich_stopped_write(
+    context: RichStopContext<'_>,
+    applied: Vec<RichApplied>,
+    write_polled: bool,
+    stop: RichWriteStop,
+    final_snapshot_hash: Option<SnapshotHash>,
+) -> RichPageCreateOutput {
+    let RichStopContext {
+        space_id,
+        object_id,
+        index,
+        total,
+    } = context;
+    match stop {
+        RichWriteStop::Cancelled if write_polled => rich_postwrite_failure(
+            space_id,
+            object_id,
+            index,
+            total,
+            applied,
+            final_snapshot_hash,
+        ),
+        RichWriteStop::Cancelled => rich_local_failure(
             space_id,
             object_id,
             index,
             total,
             applied,
             RichFailureCategory::Upstream,
-            None,
-        )
+            final_snapshot_hash,
+        ),
+        RichWriteStop::Rejected {
+            category: _,
+            definitive: false,
+        } if write_polled => rich_postwrite_failure(
+            space_id,
+            object_id,
+            index,
+            total,
+            applied,
+            final_snapshot_hash,
+        ),
+        RichWriteStop::Rejected {
+            category,
+            definitive: true,
+        } => rich_attempted_rejection(
+            space_id,
+            object_id,
+            index,
+            total,
+            applied,
+            category,
+            final_snapshot_hash,
+        ),
+        RichWriteStop::Rejected { category, .. } => rich_local_failure(
+            space_id,
+            object_id,
+            index,
+            total,
+            applied,
+            category,
+            final_snapshot_hash,
+        ),
     }
 }
 
@@ -6483,7 +6728,12 @@ fn finish_rich_result(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, future::Future, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        future::Future,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use anytype::{
         prelude::{AnytypeClient, ClientConfig},
@@ -8925,6 +9175,11 @@ mod tests {
             "marks":[{"kind":"bold","start":1,"end":2}]
         }));
         assert!(new_block(&split_surrogate).is_err());
+        let split_surrogate_start = parse_block(json!({
+            "kind":"text","style":"paragraph","text":"a😀b",
+            "marks":[{"kind":"bold","start":2,"end":3}]
+        }));
+        assert!(new_block(&split_surrogate_start).is_err());
         let duplicate = parse_block(json!({
             "kind":"text","style":"paragraph","text":"abc",
             "marks":[
@@ -8938,6 +9193,65 @@ mod tests {
             "marks":[{"kind":"emoji","start":0,"end":1,"emoji":""}]
         }));
         assert!(new_block(&empty).is_err());
+    }
+
+    #[test]
+    fn production_projection_enforces_exact_body_block_cap_and_restrictions_atomically() {
+        use anytype::body::test_fixtures::bounded_text_snapshot;
+
+        let exact = bounded_text_snapshot(MAX_BODY_BLOCKS, None).expect("exact-cap fixture");
+        let projected = project_snapshot_page(&exact, None, 0, 8)
+            .expect("exact cap projects and pages completely");
+        assert_eq!(projected.snapshot.items.len(), MAX_BODY_BLOCKS);
+        assert_eq!(projected.items.len(), 8);
+        assert!(projected.next_state.is_some());
+        assert_eq!(
+            projected
+                .snapshot
+                .items
+                .first()
+                .map(|block| block.id.as_str()),
+            Some("fixture-root")
+        );
+        assert_eq!(
+            projected
+                .snapshot
+                .items
+                .last()
+                .map(|block| block.id.as_str()),
+            Some("fixture-text-2042")
+        );
+
+        let over = bounded_text_snapshot(MAX_BODY_BLOCKS + 1, None).expect("one-over fixture");
+        let over_error = project_snapshot_page(&over, None, 0, 8)
+            .err()
+            .expect("one-over projection must fail before paging");
+        assert_eq!(
+            over_error.tool_error().code(),
+            crate::error::ToolErrorCode::BoundedResult
+        );
+
+        let restricted = bounded_text_snapshot(8, Some(7)).expect("restricted fixture");
+        let emitted = project_snapshot_page(&restricted, None, 0, 8)
+            .ok()
+            .map(|page| {
+                json!({
+                    "items":page.items,
+                    "snapshot_hash":page.snapshot.hash,
+                    "next_cursor_state":page.next_state.map(|state| state.boundary_id().to_owned())
+                })
+            });
+        assert!(
+            emitted.is_none(),
+            "restricted reads emit no content/hash/cursor object"
+        );
+        let restricted_error = project_snapshot_page(&restricted, None, 0, 8)
+            .err()
+            .expect("one restricted descendant rejects before content/hash/cursor emission");
+        assert_eq!(
+            restricted_error.tool_error().code(),
+            crate::error::ToolErrorCode::Upstream
+        );
     }
 
     #[test]
@@ -9073,28 +9387,28 @@ mod tests {
         assert!(validate_rich_plan(&parse_rich(exact_materialized)).is_err());
     }
 
+    fn scheduler_with_prefix(total: usize, prefix: usize) -> RichScheduler {
+        let mut scheduler = RichScheduler::new(total);
+        for index in 0..prefix {
+            assert_eq!(scheduler.next_write_index(), Some(index));
+            assert!(scheduler.record_verified(rich_applied(
+                rich_index(index),
+                &format!("local_{index}"),
+                &format!("block_{index}"),
+            )));
+        }
+        scheduler
+    }
+
     #[test]
-    fn rich_cancellation_partitions_are_exact_at_every_write_boundary() {
+    fn rich_production_scheduler_is_terminal_at_every_write_boundary() {
         let space_id = EntityId::new("space").expect("space ID");
         let object_id = EntityId::new("object").expect("object ID");
         for index in 0..MAX_RICH_OPS {
-            let applied = (0..index)
-                .map(|applied_index| RichApplied {
-                    index: rich_index(applied_index),
-                    local_key: LocalKey::new(format!("local_{applied_index}")).expect("local key"),
-                    block_id: EntityId::new(format!("block_{applied_index}")).expect("block ID"),
-                    snapshot_hash: SnapshotHash::new("a".repeat(MAX_SNAPSHOT_HASH_BYTES))
-                        .expect("snapshot hash"),
-                })
-                .collect::<Vec<_>>();
-            let pre_poll = rich_cancelled_at_write_boundary(
-                &space_id,
-                &object_id,
-                index,
-                MAX_RICH_OPS,
-                applied.clone(),
-                false,
-            );
+            let mut pre = scheduler_with_prefix(MAX_RICH_OPS, index);
+            let pre_poll = pre
+                .stop(&space_id, &object_id, false, RichWriteStop::Cancelled, None)
+                .expect("pre-poll terminal transition");
             assert_eq!(pre_poll.status, RichStatus::Partial);
             assert_eq!(pre_poll.applied.len(), index);
             assert_eq!(
@@ -9105,15 +9419,16 @@ mod tests {
                 pre_poll.failed.as_ref().map(|failure| failure.index),
                 Some(rich_index(index))
             );
-
-            let post_poll = rich_cancelled_at_write_boundary(
-                &space_id,
-                &object_id,
-                index,
-                MAX_RICH_OPS,
-                applied,
-                true,
+            assert!(pre.next_write_index().is_none());
+            assert!(
+                pre.stop(&space_id, &object_id, true, RichWriteStop::Cancelled, None,)
+                    .is_none()
             );
+
+            let mut post = scheduler_with_prefix(MAX_RICH_OPS, index);
+            let post_poll = post
+                .stop(&space_id, &object_id, true, RichWriteStop::Cancelled, None)
+                .expect("post-poll terminal transition");
             assert_eq!(post_poll.status, RichStatus::Indeterminate);
             assert_eq!(post_poll.applied.len(), index);
             assert_eq!(
@@ -9126,7 +9441,324 @@ mod tests {
                 post_poll.failed.as_ref().map(|failure| failure.index),
                 Some(rich_index(index))
             );
+            assert!(post.next_write_index().is_none());
         }
+    }
+
+    #[test]
+    fn rich_production_scheduler_classifies_every_category_and_poll_state() {
+        let space_id = EntityId::new("space").expect("space ID");
+        let object_id = EntityId::new("object").expect("object ID");
+        let categories = [
+            RichFailureCategory::Authentication,
+            RichFailureCategory::Validation,
+            RichFailureCategory::NotFound,
+            RichFailureCategory::Conflict,
+            RichFailureCategory::BoundedResult,
+            RichFailureCategory::Upstream,
+        ];
+        for index in 0..MAX_RICH_OPS {
+            for category in categories {
+                for (polled, definitive, status, reported, untouched_start) in [
+                    (false, false, RichStatus::Partial, category, index),
+                    (
+                        true,
+                        false,
+                        RichStatus::Indeterminate,
+                        RichFailureCategory::Indeterminate,
+                        index + 1,
+                    ),
+                    (true, true, RichStatus::Partial, category, index + 1),
+                ] {
+                    let mut scheduler = scheduler_with_prefix(MAX_RICH_OPS, index);
+                    let output = scheduler
+                        .stop(
+                            &space_id,
+                            &object_id,
+                            polled,
+                            RichWriteStop::Rejected {
+                                category,
+                                definitive,
+                            },
+                            None,
+                        )
+                        .expect("one terminal category transition");
+                    assert_eq!(output.status, status);
+                    assert_eq!(output.applied.len(), index);
+                    assert_eq!(
+                        output.failed.as_ref().map(|failure| failure.category),
+                        Some(reported)
+                    );
+                    assert_eq!(
+                        output.not_attempted,
+                        (untouched_start..MAX_RICH_OPS)
+                            .map(rich_index)
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(scheduler.next_write_index().is_none());
+                    assert!(!scheduler.record_verified(rich_applied(
+                        rich_index(index),
+                        "late",
+                        "late-block",
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_candidate_store_exhaustion_and_terminal_replay_are_io_free() {
+        run_large_future(move || async move {
+            let store = IdempotencyStore::new(16);
+            let pending_key = IdempotencyKey::new("pending-rich").expect("pending key");
+            let fingerprint = [7; 32];
+            assert!(matches!(
+                store.pending_candidate(&pending_key, fingerprint).await,
+                PendingCandidateLookup::Absent
+            ));
+            let attempt = match store.begin(pending_key.clone(), fingerprint).await {
+                BeginAttempt::Lead(attempt) => attempt,
+                _ => panic!("original pending request must lead"),
+            };
+            let candidate = attempt
+                .record_pending_candidate("space".to_owned(), "object".to_owned())
+                .await;
+            attempt.progress().mark_dispatched();
+            store
+                .finish(
+                    &pending_key,
+                    &attempt,
+                    CreateExecution::new(
+                        tool_error(&ToolError::mutation_indeterminate()),
+                        CreateDisposition::Indeterminate,
+                    ),
+                )
+                .await;
+            assert!(matches!(
+                store.begin(pending_key.clone(), fingerprint).await,
+                BeginAttempt::Indeterminate
+            ));
+            assert!(matches!(
+                store.begin(pending_key.clone(), [6; 32]).await,
+                BeginAttempt::Conflict
+            ));
+
+            let recovery_polls = Arc::new(AtomicUsize::new(0));
+            let page_create_polls = Arc::new(AtomicUsize::new(0));
+            let body_rpc_metrics = BodyRpcMetrics::default();
+            let unpolled_page_create = observe_first_write_poll(
+                async {},
+                MutationProgress::new(),
+                Arc::clone(&page_create_polls),
+            );
+            drop(unpolled_page_create);
+            let unpolled_body_write =
+                observe_body_dispatch(async {}, body_rpc_metrics.clone(), MutationProgress::new());
+            drop(unpolled_body_write);
+            let polls = Arc::clone(&recovery_polls);
+            let unpolled = observe_pending_candidate_get(&candidate, async move {
+                polls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            });
+            drop(unpolled);
+            assert!(matches!(
+                store.pending_candidate(&pending_key, fingerprint).await,
+                PendingCandidateLookup::Available(_)
+            ));
+            assert_eq!(recovery_polls.load(Ordering::SeqCst), 0);
+            assert_eq!(page_create_polls.load(Ordering::SeqCst), 0);
+            assert_eq!(body_rpc_metrics.snapshot().write_polls, 0);
+            for expected in 1..=3 {
+                assert!(matches!(
+                    store.pending_candidate(&pending_key, fingerprint).await,
+                    PendingCandidateLookup::Available(_)
+                ));
+                let polls = Arc::clone(&recovery_polls);
+                assert!(matches!(
+                    observe_pending_candidate_get(&candidate, async move {
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, ()>(())
+                    })
+                    .await,
+                    Some(Ok(()))
+                ));
+                assert_eq!(recovery_polls.load(Ordering::SeqCst), expected);
+            }
+            assert!(matches!(
+                store.pending_candidate(&pending_key, fingerprint).await,
+                PendingCandidateLookup::Exhausted
+            ));
+            let polls = Arc::clone(&recovery_polls);
+            assert!(
+                observe_pending_candidate_get(&candidate, async move {
+                    polls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(())
+                })
+                .await
+                .is_none()
+            );
+
+            let terminal_key = IdempotencyKey::new("terminal-rich").expect("terminal key");
+            let terminal = match store.begin(terminal_key.clone(), [8; 32]).await {
+                BeginAttempt::Lead(attempt) => attempt,
+                _ => panic!("original terminal request must lead"),
+            };
+            let receipt = CallToolResult::structured(json!({"status":"partial"}));
+            store
+                .finish(
+                    &terminal_key,
+                    &terminal,
+                    CreateExecution::new(receipt.clone(), CreateDisposition::Terminal),
+                )
+                .await;
+            for _ in 0..2 {
+                assert!(matches!(
+                    store.begin(terminal_key.clone(), [8; 32]).await,
+                    BeginAttempt::Cached(ref cached)
+                        if cached.structured_content == receipt.structured_content
+                ));
+            }
+            assert_eq!(
+                recovery_polls.load(Ordering::SeqCst),
+                3,
+                "terminal/exhausted states schedule no recovery GET"
+            );
+            assert_eq!(page_create_polls.load(Ordering::SeqCst), 0);
+            assert_eq!(body_rpc_metrics.snapshot().write_polls, 0);
+
+            let contract = rich_create_tool().expect("rich contract");
+            for (ordinal, category) in [
+                RichFailureCategory::Authentication,
+                RichFailureCategory::Validation,
+                RichFailureCategory::NotFound,
+                RichFailureCategory::Conflict,
+                RichFailureCategory::BoundedResult,
+                RichFailureCategory::Upstream,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let key = IdempotencyKey::new(format!("recover-{ordinal}")).expect("recovery key");
+                let fingerprint = [u8::try_from(ordinal).unwrap_or(u8::MAX); 32];
+                let attempt = match store.begin(key.clone(), fingerprint).await {
+                    BeginAttempt::Lead(attempt) => attempt,
+                    _ => panic!("recovery original must lead"),
+                };
+                let candidate = attempt
+                    .record_pending_candidate("space".to_owned(), format!("object-{ordinal}"))
+                    .await;
+                attempt.progress().mark_dispatched();
+                store
+                    .finish(
+                        &key,
+                        &attempt,
+                        CreateExecution::new(
+                            tool_error(&ToolError::mutation_indeterminate()),
+                            CreateDisposition::Indeterminate,
+                        ),
+                    )
+                    .await;
+                assert!(matches!(
+                    store.begin(key.clone(), fingerprint).await,
+                    BeginAttempt::Indeterminate
+                ));
+                assert!(matches!(
+                    store.begin(key.clone(), [254; 32]).await,
+                    BeginAttempt::Conflict
+                ));
+                assert!(matches!(
+                    store.pending_candidate(&key, fingerprint).await,
+                    PendingCandidateLookup::Available(_)
+                ));
+                let recovery = PendingRichRecovery {
+                    key: key.clone(),
+                    fingerprint,
+                    candidate,
+                    resolved_space: "space".to_owned(),
+                    deadline: std::time::Instant::now() + Duration::from_secs(1),
+                };
+                let result =
+                    complete_pending_rich_recovery(&store, &contract, &recovery, 3, Err(category))
+                        .await;
+                let expected_category =
+                    serde_json::to_value(category).expect("category serialization");
+                assert_eq!(
+                    result
+                        .structured_content
+                        .as_ref()
+                        .and_then(|value| value.pointer("/failed/category")),
+                    Some(&expected_category)
+                );
+                assert!(matches!(
+                    store.begin(key.clone(), fingerprint).await,
+                    BeginAttempt::Cached(ref cached)
+                        if cached.structured_content == result.structured_content
+                ));
+                assert!(matches!(
+                    store.pending_candidate(&key, fingerprint).await,
+                    PendingCandidateLookup::Absent
+                ));
+                assert!(matches!(
+                    store.pending_candidate(&key, [255; 32]).await,
+                    PendingCandidateLookup::Absent
+                ));
+            }
+
+            let key = IdempotencyKey::new("recover-hash").expect("hash recovery key");
+            let fingerprint = [42; 32];
+            let attempt = match store.begin(key.clone(), fingerprint).await {
+                BeginAttempt::Lead(attempt) => attempt,
+                _ => panic!("hash recovery original must lead"),
+            };
+            let candidate = attempt
+                .record_pending_candidate("space".to_owned(), "object-hash".to_owned())
+                .await;
+            attempt.progress().mark_dispatched();
+            store
+                .finish(
+                    &key,
+                    &attempt,
+                    CreateExecution::new(
+                        tool_error(&ToolError::mutation_indeterminate()),
+                        CreateDisposition::Indeterminate,
+                    ),
+                )
+                .await;
+            assert!(matches!(
+                store.begin(key.clone(), fingerprint).await,
+                BeginAttempt::Indeterminate
+            ));
+            assert!(matches!(
+                store.begin(key.clone(), [41; 32]).await,
+                BeginAttempt::Conflict
+            ));
+            let recovery = PendingRichRecovery {
+                key: key.clone(),
+                fingerprint,
+                candidate,
+                resolved_space: "space".to_owned(),
+                deadline: std::time::Instant::now() + Duration::from_secs(1),
+            };
+            let hash =
+                SnapshotHash::new("b".repeat(MAX_SNAPSHOT_HASH_BYTES)).expect("recovery hash");
+            let result =
+                complete_pending_rich_recovery(&store, &contract, &recovery, 3, Ok(hash.clone()))
+                    .await;
+            assert_eq!(
+                result
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.pointer("/final_snapshot_hash"))
+                    .and_then(Value::as_str),
+                Some(hash.as_str())
+            );
+            assert!(matches!(
+                store.begin(key, fingerprint).await,
+                BeginAttempt::Cached(_)
+            ));
+            assert_eq!(page_create_polls.load(Ordering::SeqCst), 0);
+            assert_eq!(body_rpc_metrics.snapshot().write_polls, 0);
+        });
     }
 
     #[test]

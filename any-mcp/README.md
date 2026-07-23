@@ -1247,6 +1247,8 @@ repository root:
 ```sh
 source .test-env
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
+export ANY_MCP_HEADLESS_REDACTED_LOG_FILE=/absolute/path/to/reviewed-redacted-server.log
+test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
 cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
 cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- --ignored --test-threads=1
 ```
@@ -1306,9 +1308,9 @@ than part of the portable hosted-runner matrix. Runners labeled
 `anytype-headless` must provide a running isolated Anytype server and set the
 repository variable `ANY_MCP_HEADLESS_ENV_FILE` to a readable, protected
 environment file with the same endpoint, keystore, and test-space settings as
-`.test-env`. It should also set `ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to a
-runner-produced server log with credentials and content removed; the job keeps
-that protected artifact for seven days on failure. Protect the
+`.test-env`. It must also set `ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to an
+absolute, readable runner-produced server log with credentials and content
+removed; the job keeps that protected artifact for seven days on failure. Protect the
 `anytype-headless` environment so untrusted pull-request code cannot reach the
 self-hosted runner or credentials. The job runs serially on every matching
 MCP/API pull request and main/tag update; branch protection and release

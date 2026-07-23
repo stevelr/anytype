@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add an opt-in `test-fixtures` feature with a narrow, production-validated
+  typed body snapshot constructor for downstream block-count and atomic
+  read-restriction contract tests. The feature is disabled by default, is not
+  enabled by production dependents, and does not make snapshots deserializable.
 - Add a public protobuf-free finite body RPC seam. `BodyRpcConfig` shares one
   absolute deadline across gRPC acquisition, `ObjectShow`, bounded foreground
   and cancellation fallback `ObjectClose`, one-shot writes, and verification.
