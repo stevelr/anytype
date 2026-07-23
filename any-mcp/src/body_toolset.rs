@@ -91,15 +91,15 @@ const BODY_TOOL_NAMES: [&str; 6] = [
 ];
 
 /// Reviewed incremental read-write catalog ceiling.
-pub const BODY_BLOCKS_CATALOG_TOKEN_CEILING: usize = 25_000;
+pub const BODY_BLOCKS_CATALOG_TOKEN_CEILING: usize = 25_108;
 /// Reviewed selected read-write contribution ceiling including status.
-pub const BODY_BLOCKS_SELECTED_TOKEN_CEILING: usize = 25_500;
+pub const BODY_BLOCKS_SELECTED_TOKEN_CEILING: usize = 25_608;
 /// Reviewed incremental read-only catalog ceiling.
 pub const BODY_BLOCKS_READ_ONLY_CATALOG_TOKEN_CEILING: usize = 4_000;
 /// Reviewed selected read-only contribution ceiling including status.
 pub const BODY_BLOCKS_READ_ONLY_SELECTED_TOKEN_CEILING: usize = 4_500;
 /// Reviewed maximum for any one body-block tool contract.
-pub const BODY_BLOCK_TOOL_TOKEN_CEILING: usize = 6_500;
+pub const BODY_BLOCK_TOOL_TOKEN_CEILING: usize = 6_600;
 
 const MAX_BODY_BLOCKS: usize = 2_048;
 const MAX_BODY_DEPTH: usize = 32;
@@ -211,6 +211,7 @@ const SCRIPTED_SCENARIOS: &[&str] = &[
     "rich_page_replay_drift",
     "body_read_only_catalog",
     "body_read_restricted",
+    "body_bookmark_inert_create",
     "body_network_closed",
     "body_protocol_parity",
     "body_redaction_and_budgets",
@@ -1186,6 +1187,11 @@ enum NewBlockInput {
         )]
         #[schemars(schema_with = "optional_color_schema")]
         background_color: Omittable<ColorInput>,
+    },
+    Bookmark {
+        /// Absolute HTTP(S) URL stored without fetching metadata.
+        #[schemars(length(max = MAX_URL_BYTES))]
+        url: String,
     },
     Link {
         /// Linked object ID.
@@ -2713,6 +2719,7 @@ fn new_block(value: &NewBlockInput) -> Result<NewBlock, HandlerError> {
             }
         }
         NewBlockInput::Divider { style, .. } => NewBlock::divider((*style).into()),
+        NewBlockInput::Bookmark { url } => NewBlock::bookmark(url.clone()).map_err(input_error)?,
         NewBlockInput::Link {
             target_object_id,
             card_style,
@@ -2866,6 +2873,7 @@ fn new_block_variable_bytes(value: &NewBlockInput) -> Result<usize, HandlerError
         } => add(background_color
             .as_ref()
             .map_or(0, |value| value.as_str().len()))?,
+        NewBlockInput::Bookmark { url } => add(url.len())?,
         NewBlockInput::Table { .. } => {}
     }
     Ok(total)
@@ -2939,7 +2947,7 @@ fn presentation_horizontal(value: &NewBlockInput) -> Option<&WireHorizontalAlign
         | NewBlockInput::TableOfContents {
             horizontal_align, ..
         } => horizontal_align.as_ref(),
-        NewBlockInput::Table { .. } => None,
+        NewBlockInput::Bookmark { .. } | NewBlockInput::Table { .. } => None,
     }
 }
 
@@ -2951,7 +2959,7 @@ fn presentation_vertical(value: &NewBlockInput) -> Option<&WireVerticalAlign> {
         | NewBlockInput::Relation { vertical_align, .. }
         | NewBlockInput::Embed { vertical_align, .. }
         | NewBlockInput::TableOfContents { vertical_align, .. } => vertical_align.as_ref(),
-        NewBlockInput::Table { .. } => None,
+        NewBlockInput::Bookmark { .. } | NewBlockInput::Table { .. } => None,
     }
 }
 
@@ -2975,7 +2983,7 @@ fn presentation_background(value: &NewBlockInput) -> Option<&ColorInput> {
         | NewBlockInput::TableOfContents {
             background_color, ..
         } => background_color.as_ref(),
-        NewBlockInput::Table { .. } => None,
+        NewBlockInput::Bookmark { .. } | NewBlockInput::Table { .. } => None,
     }
 }
 
@@ -4253,6 +4261,11 @@ fn intended_create_output(
             marks: marks.clone(),
         },
         NewBlockInput::Divider { style, .. } => BlockProjection::Divider { style: *style },
+        NewBlockInput::Bookmark { url } => BlockProjection::Bookmark {
+            url: url.clone(),
+            target_object_id: None,
+            state: WireBookmarkState::Empty,
+        },
         NewBlockInput::Link {
             target_object_id,
             card_style,
@@ -5842,7 +5855,9 @@ fn validate_rich_plan(input: &RichPageCreateInput) -> Result<ValidatedRichPlan, 
 fn rich_entry_cost(value: &NewBlockInput) -> Result<(usize, usize, usize), HandlerError> {
     match value {
         NewBlockInput::Text { text, marks, .. } => Ok((1, text.len(), marks.len())),
-        NewBlockInput::Embed { source, .. } => Ok((1, source.len(), 0)),
+        NewBlockInput::Embed { source, .. } | NewBlockInput::Bookmark { url: source } => {
+            Ok((1, source.len(), 0))
+        }
         NewBlockInput::Table { rows, columns, .. } => {
             // Capacity remains conservatively dense even though Heart
             // initially materializes only header cells.
@@ -5954,6 +5969,11 @@ fn hash_new_block_input(hash: &mut Sha256, value: &NewBlockInput) {
                 vertical_align.as_ref().map(|value| vertical_label(*value)),
             );
             hash_optional_field(hash, background_color.as_ref().map(ColorInput::as_str));
+            None
+        }
+        NewBlockInput::Bookmark { url } => {
+            hash_field(hash, "bookmark");
+            hash_field(hash, url);
             None
         }
         NewBlockInput::Link {
@@ -8122,9 +8142,9 @@ mod tests {
                 }
                 let (compact_success, compact_error, standard_success, standard_error) =
                     match name {
-                        "list" => (157_158, 39_158, 183_635, 65_635),
-                        "primitive" => (119_158, 97_158, 145_635, 123_635),
-                        _ => (135_158, 117_158, 161_635, 143_635),
+                        "list" => (157_266, 39_266, 183_743, 65_743),
+                        "primitive" => (119_266, 97_266, 145_743, 123_743),
+                        _ => (135_266, 117_266, 161_743, 143_743),
                     };
                 assert!(
                     contexts["compact_read_write_success"]
@@ -8346,11 +8366,11 @@ mod tests {
             "read_only_selected_contribution_tokens":tokens(&tokenizer, read_only_value.clone())
                 .saturating_sub(tokens(&tokenizer, base_read_only_value)),
             "compact_composed_total_tokens":compact_tokens,
-            "compact_composed_ceiling_tokens":35_158,
+            "compact_composed_ceiling_tokens":35_266,
             "compact_read_only_total_tokens":compact_read_only_tokens,
             "compact_read_only_ceiling_tokens":12_869,
             "standard_composed_total_tokens":standard_tokens,
-            "standard_composed_ceiling_tokens":61_635,
+            "standard_composed_ceiling_tokens":61_743,
             "standard_read_only_total_tokens":standard_read_only_tokens,
             "standard_read_only_ceiling_tokens":33_380,
             "paired_fixtures":paired_fixtures(
@@ -8978,6 +8998,198 @@ mod tests {
                 assert!(encoded.get("snapshot_hash").is_none());
                 assert!(encoded.get("next_cursor").is_none());
             }
+            "body_bookmark_inert_create" => {
+                let client = client();
+                let before_network = client.http_metrics();
+                let url = "https://192.0.2.1:8443/path?q=stored";
+                let input = parse_block(json!({"kind":"bookmark","url":url}));
+                new_block(&input).expect("inert bookmark constructor");
+                let link_mark = WireMark::Link {
+                    start: 0,
+                    end: 1,
+                    url: "https://example.invalid/link".to_owned(),
+                };
+                input_mark(&link_mark, "x").expect("inert link mark");
+                assert_eq!(
+                    client.http_metrics(),
+                    before_network,
+                    "bookmark and link-mark constructors perform no HTTP work"
+                );
+
+                for (index, rejected) in [
+                    json!({"kind":"bookmark","url":""}),
+                    json!({"kind":"bookmark","url":"ftp://example.invalid/file"}),
+                    json!({"kind":"bookmark","url":"https://user@example.invalid/"}),
+                    json!({"kind":"bookmark","url":"https://example.invalid/#fragment"}),
+                    json!({"kind":"bookmark","url":"https://example.invalid/\n"}),
+                    json!({"kind":"bookmark","url":"relative"}),
+                    json!({"kind":"bookmark","url":null}),
+                    json!({"kind":"bookmark","url":"https://example.invalid/","state":"empty"}),
+                    json!({"kind":"bookmark","url":"https://example.invalid/","target_object_id":"x"}),
+                    json!({"kind":"bookmark","url":"https://example.invalid/","horizontal_align":"left"}),
+                    json!({"kind":"bookmark","url":"https://example.invalid/","fetch":true}),
+                    json!({"kind":"bookmark","url":"https://example.invalid/","metadata":{}}),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if let Ok(block) = serde_json::from_value::<NewBlockInput>(rejected) {
+                        assert!(
+                            new_block(&block).is_err(),
+                            "invalid bookmark case {index} reached a constructor"
+                        );
+                    }
+                }
+                let prefix = "https://example.invalid/";
+                let exact_url = format!("{prefix}{}", "x".repeat(MAX_URL_BYTES - prefix.len()));
+                assert_eq!(exact_url.len(), MAX_URL_BYTES);
+                assert!(
+                    new_block(&parse_block(json!({"kind":"bookmark","url":exact_url}))).is_ok()
+                );
+                let overlong = parse_block(json!({
+                    "kind":"bookmark",
+                    "url":format!("{prefix}{}", "x".repeat(MAX_URL_BYTES - prefix.len() + 1))
+                }));
+                assert!(new_block(&overlong).is_err());
+                let multibyte_overlong = parse_block(json!({
+                    "kind":"bookmark",
+                    "url":format!("{prefix}{}", "😀".repeat(600))
+                }));
+                assert!(new_block(&multibyte_overlong).is_err());
+
+                let before =
+                    projected(vec![summary("root", None, 0, 0, 0, projected_text("root"))]);
+                let created_id = EntityId::new("bookmark").expect("bookmark ID");
+                let after = projected(vec![
+                    summary("root", None, 0, 0, 1, projected_text("root")),
+                    summary(
+                        "bookmark",
+                        Some("root"),
+                        0,
+                        1,
+                        0,
+                        BlockProjection::Bookmark {
+                            url: url.to_owned(),
+                            target_object_id: None,
+                            state: WireBookmarkState::Empty,
+                        },
+                    ),
+                ]);
+                assert!(verify_create_transition(
+                    &before,
+                    &after,
+                    &created_id,
+                    &before.root_id,
+                    WireInsertPosition::LastChild,
+                    &input,
+                ));
+                for defect in ["url", "target", "state"] {
+                    let mut changed = after.clone();
+                    let BlockProjection::Bookmark {
+                        url,
+                        target_object_id,
+                        state,
+                    } = &mut changed.items[1].content
+                    else {
+                        unreachable!("fixture is a bookmark")
+                    };
+                    match defect {
+                        "url" => url.push('x'),
+                        "target" => {
+                            *target_object_id = Some(EntityId::new("resolved").expect("target ID"));
+                        }
+                        "state" => *state = WireBookmarkState::Fetching,
+                        _ => unreachable!("closed defect table"),
+                    }
+                    refresh_projection_hash(&mut changed);
+                    assert!(!verify_create_transition(
+                        &before,
+                        &changed,
+                        &created_id,
+                        &before.root_id,
+                        WireInsertPosition::LastChild,
+                        &input,
+                    ));
+                }
+
+                fn bookmark_arm(value: &Value) -> Option<&Map<String, Value>> {
+                    match value {
+                        Value::Object(object)
+                            if object
+                                .get("properties")
+                                .and_then(Value::as_object)
+                                .and_then(|properties| properties.get("kind"))
+                                .and_then(Value::as_object)
+                                .and_then(|kind| kind.get("const"))
+                                .and_then(Value::as_str)
+                                == Some("bookmark") =>
+                        {
+                            Some(object)
+                        }
+                        Value::Object(object) => object.values().find_map(bookmark_arm),
+                        Value::Array(values) => values.iter().find_map(bookmark_arm),
+                        _ => None,
+                    }
+                }
+                let raw_create =
+                    rmcp::handler::server::tool::schema_for_input::<BodyBlockCreateInput>()
+                        .expect("create input schema");
+                let raw_rich =
+                    rmcp::handler::server::tool::schema_for_input::<RichPageCreateInput>()
+                        .expect("rich input schema");
+                for schema in [
+                    Value::Object(raw_create.as_ref().clone()),
+                    Value::Object(raw_rich.as_ref().clone()),
+                ] {
+                    let arm = bookmark_arm(&schema).expect("bookmark schema arm");
+                    assert_eq!(arm.get("additionalProperties"), Some(&Value::Bool(false)));
+                    let properties = arm["properties"].as_object().expect("bookmark properties");
+                    assert_eq!(
+                        properties
+                            .keys()
+                            .map(String::as_str)
+                            .collect::<HashSet<_>>(),
+                        HashSet::from(["kind", "url"])
+                    );
+                    assert_eq!(properties["url"]["maxLength"], json!(MAX_URL_BYTES));
+                    assert_eq!(
+                        arm["required"]
+                            .as_array()
+                            .expect("bookmark required fields")
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<HashSet<_>>(),
+                        HashSet::from(["kind", "url"])
+                    );
+                }
+                let annotations = serde_json::to_value(
+                    create_tool()
+                        .expect("create contract")
+                        .as_tool()
+                        .annotations
+                        .as_ref()
+                        .expect("create annotations"),
+                )
+                .expect("annotations JSON");
+                assert_eq!(
+                    annotations,
+                    json!({
+                        "readOnlyHint":false,
+                        "destructiveHint":false,
+                        "idempotentHint":false,
+                        "openWorldHint":false
+                    })
+                );
+                assert!(
+                    body_names(&server(
+                        Some(BODY_BLOCKS_TOOLSET_NAME),
+                        ApplicationProfile::Compact,
+                        false
+                    ))
+                    .iter()
+                    .all(|name| name != "BlockBookmarkFetch")
+                );
+            }
             "body_network_closed" => {
                 let client = client();
                 let before = client.http_metrics();
@@ -8986,9 +9198,10 @@ mod tests {
                         .expect("create schema"),
                 )
                 .expect("schema JSON");
-                for forbidden in ["mime", "base64", "host_path", "bookmark"] {
+                for forbidden in ["mime", "base64", "host_path", "BlockBookmarkFetch"] {
                     assert!(!schema.contains(forbidden));
                 }
+                assert!(schema.contains("bookmark"));
                 let youtube = parse_block(json!({
                     "kind":"embed","processor":"youtube","source":"a1_B2-c3D4e"
                 }));
@@ -9131,6 +9344,7 @@ mod tests {
         rich_page_replay_drift,
         body_read_only_catalog,
         body_read_restricted,
+        body_bookmark_inert_create,
         body_network_closed,
         body_protocol_parity,
         body_redaction_and_budgets,
@@ -11002,6 +11216,7 @@ mod tests {
             "rich_page_replay_drift",
             "body_read_only_catalog",
             "body_read_restricted",
+            "body_bookmark_inert_create",
             "body_network_closed",
             "body_protocol_parity",
             "body_redaction_and_budgets",
@@ -11122,9 +11337,17 @@ mod tests {
         );
         assert!(
             serde_json::from_value::<NewBlockInput>(json!({
-                "kind":"bookmark","url":"https://example.invalid"
+                "kind":"bookmark","url":"https://example.invalid","metadata":{}
             }))
             .is_err()
+        );
+        let bookmark = serde_json::from_value::<NewBlockInput>(json!({
+            "kind":"bookmark","url":"https://example.invalid/path?q=1"
+        }))
+        .expect("closed bookmark constructor");
+        assert_eq!(
+            serde_json::to_value(bookmark).expect("serialize bookmark"),
+            json!({"kind":"bookmark","url":"https://example.invalid/path?q=1"})
         );
     }
 
@@ -11300,6 +11523,15 @@ mod tests {
             entry("child", Some("divider"), text_block("Body")),
         ]);
         assert!(validate_rich_plan(&non_text_parent).is_err());
+        let bookmark_parent = parse_rich(vec![
+            entry(
+                "bookmark",
+                None,
+                json!({"kind":"bookmark","url":"https://example.invalid/"}),
+            ),
+            entry("child", Some("bookmark"), text_block("Body")),
+        ]);
+        assert!(validate_rich_plan(&bookmark_parent).is_err());
         let duplicate = parse_rich(vec![
             entry("same", None, text_block("One")),
             entry("same", None, text_block("Two")),
@@ -12031,7 +12263,7 @@ mod tests {
     }
 
     #[test]
-    fn production_token_snapshot_stays_within_reviewed_r4_catalog_ceilings() {
+    fn production_token_snapshot_stays_within_reviewed_r5_catalog_ceilings() {
         let actual = token_snapshot();
         let reviewed: Value =
             serde_json::from_str(TOKEN_BUDGET_SNAPSHOT).expect("body token snapshot");
@@ -12058,9 +12290,9 @@ mod tests {
             "read_only_selected_contribution_tokens",
             BODY_BLOCKS_READ_ONLY_SELECTED_TOKEN_CEILING,
         );
-        within("compact_composed_total_tokens", 35_158);
+        within("compact_composed_total_tokens", 35_266);
         within("compact_read_only_total_tokens", 12_869);
-        within("standard_composed_total_tokens", 61_635);
+        within("standard_composed_total_tokens", 61_743);
         within("standard_read_only_total_tokens", 33_380);
         for tokens in actual["per_tool_tokens"]
             .as_object()

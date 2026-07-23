@@ -16,9 +16,9 @@ use std::{
 
 use anytype::{
     body::{
-        BlockContent, BlockRestrictions, BodyBlock, BodySnapshot, CalloutIcon, DividerStyle,
-        EmbedProcessor, HorizontalAlign, LayoutStyle, LinkCardStyle, LinkDescriptionMode,
-        LinkIconSize, MarkKind, TextStyle, VerticalAlign,
+        BlockContent, BlockRestrictions, BodyBlock, BodySnapshot, BookmarkState, CalloutIcon,
+        DividerStyle, EmbedProcessor, HorizontalAlign, LayoutStyle, LinkCardStyle,
+        LinkDescriptionMode, LinkIconSize, MarkKind, TextStyle, VerticalAlign,
     },
     prelude::{BodyOp, Color, InsertPosition, NewBlock, ObjectLayout, PropertyFormat},
     test_util::{DisposableFailureCategory, TestContext, unique_suffix},
@@ -1413,7 +1413,7 @@ fn verify_supplemental_rich_snapshot(
     ids: &[String],
     target: &str,
 ) -> bool {
-    if ids.len() != 7 || !rich_root_contains_exact_suffix(snapshot, ids) {
+    if ids.len() != 8 || !rich_root_contains_exact_suffix(snapshot, ids) {
         return false;
     }
     let by_id = |index: usize| {
@@ -1453,7 +1453,14 @@ fn verify_supplemental_rich_snapshot(
                     && link.description == LinkDescriptionMode::Added
                     && link.relations == ["tag"]
         )
-        && verify_table_shape(snapshot, &ids[6], 1, 1, false)
+        && matches!(
+            by_id(6),
+            Some(BlockContent::Bookmark(bookmark))
+                if bookmark.url == "https://192.0.2.1:8443/rich-inert?q=stored"
+                    && bookmark.state == BookmarkState::Empty
+                    && bookmark.target_object_id.is_none()
+        )
+        && verify_table_shape(snapshot, &ids[7], 1, 1, false)
 }
 
 /// Runs ordinary body behavior through any direct or protocol driver while an
@@ -1736,6 +1743,58 @@ async fn run_body_scenario_inner(
         return Err("body create replay did not retain one assigned ID".to_owned());
     }
     snapshot_hash = body_string(&replay, "/snapshot_hash", "replay hash")?.to_owned();
+
+    let bookmark_url = "https://192.0.2.1:8443/inert-bookmark?q=stored";
+    let bookmark = call_body_tool_with_metrics(
+        driver,
+        "body_block_create",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
+            "position":"last_child",
+            "block":{"kind":"bookmark","url":bookmark_url},
+            "idempotency_key":format!("body-bookmark-{transport}-{suffix}")
+        }),
+        BodyMetricExpectation::PrimitiveMutation,
+        "inert bookmark create",
+    )
+    .await?;
+    normalized_results.push(normalize_body_result(&bookmark));
+    let bookmark_id = body_string(&bookmark, "/block/id", "bookmark block ID")?.to_owned();
+    if bookmark.pointer("/block/content/kind").and_then(Value::as_str) != Some("bookmark")
+        || bookmark
+            .pointer("/block/content/url")
+            .and_then(Value::as_str)
+            != Some(bookmark_url)
+        || bookmark
+            .pointer("/block/content/state")
+            .and_then(Value::as_str)
+            != Some("empty")
+        || bookmark.pointer("/block/content/target_object_id").is_some()
+    {
+        return Err("bookmark create did not return exact inert state".to_owned());
+    }
+    snapshot_hash = body_string(&bookmark, "/snapshot_hash", "bookmark hash")?.to_owned();
+    let bookmark_snapshot = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &page.id)
+        .fetch()
+        .await
+        .map_err(|_| "independent bookmark read failed".to_owned())?;
+    let bookmark_is_inert = bookmark_snapshot.iter().any(|block| {
+        block.id.as_str() == bookmark_id
+            && matches!(
+                &block.content,
+                BlockContent::Bookmark(content)
+                    if content.url == bookmark_url
+                        && content.state == BookmarkState::Empty
+                        && content.target_object_id.is_none()
+            )
+    });
+    if !bookmark_is_inert {
+        return Err("independent ObjectShow did not preserve inert bookmark state".to_owned());
+    }
 
     let child = call_body_tool_with_metrics(
         driver,
@@ -2123,6 +2182,7 @@ async fn run_body_scenario_inner(
             {"local_key":"toc","block":{"kind":"table_of_contents"}},
             {"local_key":"link_text","block":{"kind":"link","target_object_id":page.id,"card_style":"text","icon_size":"none","description":"none","relations":[]}},
             {"local_key":"link_inline","block":{"kind":"link","target_object_id":page.id,"card_style":"inline","icon_size":"medium","description":"added","relations":["tag"]}},
+            {"local_key":"bookmark","block":{"kind":"bookmark","url":"https://192.0.2.1:8443/rich-inert?q=stored"}},
             {"local_key":"table_plain","block":{"kind":"table","rows":1,"columns":1,"header_row":false}}
         ]
     });
@@ -2133,6 +2193,7 @@ async fn run_body_scenario_inner(
         "toc",
         "link_text",
         "link_inline",
+        "bookmark",
         "table_plain",
     ];
     let before_supplemental_metrics = driver.body_acceptance_metrics();
@@ -4368,7 +4429,7 @@ pub struct OptionalScenarioId {
 impl OptionalScenarioId {
     /// Exact executable scenario inventory owned by the common foundation and
     /// the six linked production descriptors.
-    pub const EXECUTABLE: [Self; 65] = [
+    pub const EXECUTABLE: [Self; 66] = [
         define_fast_with_owner(
             "optional_toolset_status_direct_contract",
             OptionalRegistry::CommonFoundation,
@@ -4466,6 +4527,11 @@ impl OptionalScenarioId {
             "body_read_restricted",
             OptionalFastWorkflow::BodyBlocks,
             BODY_READ_OPERATIONS,
+        ),
+        define_fast(
+            "body_bookmark_inert_create",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_CREATE_OPERATIONS,
         ),
         define_fast(
             "body_network_closed",
@@ -5621,7 +5687,7 @@ mod ownership_tests {
             optional_scenario_inventory(&declarations)
                 .expect("exact typed optional scenario inventory")
                 .len(),
-            65
+            66
         );
 
         let mut duplicate = declarations.clone();

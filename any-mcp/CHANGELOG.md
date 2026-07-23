@@ -8,16 +8,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
-- Document the proposed R5 inert-bookmark body contract before implementation.
-  The closed `{ "kind": "bookmark", "url": string }` constructor is limited to
-  ordinary `BlockCreate`, uses the existing `anytype-api` URL validation, and
-  requires `BookmarkState::Empty` with no target-object readback. Metadata
-  fetching, `BlockBookmarkFetch`, URL import, redirects, and fetch/update
-  controls remain outside both create tools. Production-shaped
-  `o200k_base` measurement records a 108-token read-write catalog increase,
-  revised per-tool/domain/profile ceilings, and request, result, error, frame,
-  and context cells below 200,000 tokens. Current binaries do not accept the
-  constructor until the separate implementation work lands.
+- Add the reviewed R5 inert-bookmark constructor to `body_block_create` and
+  `rich_page_create`. The closed `{ "kind": "bookmark", "url": string }`
+  input maps only to `anytype-api` `NewBlock::bookmark`, dispatches ordinary
+  `BlockCreate`, and requires exact `BookmarkState::Empty` readback with no
+  target object. Metadata fetching, `BlockBookmarkFetch`, URL import,
+  redirects, and fetch/update controls remain absent. Direct, stable-stdio,
+  and preview-stdio real-server coverage independently verifies the stored
+  URL and inert state. The executable `o200k_base` snapshots record a
+  108-token read-write catalog increase, revised per-tool/domain/profile
+  ceilings, and request, result, error, frame, and context cells below 200,000
+  tokens.
 - Add a terminal offline integration matrix for all six production optional
   registries. It locks exact compact/standard read-write and read-only
   inventories, canonical status under reversed selector order, stable/preview
@@ -53,19 +54,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   create idempotency, exact write-dispatch observation, semantic readback,
   digest-bound pagination, and complete/partial/indeterminate rich receipts
   prevent unsafe replay or false success. Read-only mode retains only the list
-  tool; callers cannot provide bookmark fetches, raw URLs, protobufs, or opaque
-  mutations. Direct, protocol, spawned-stdio, schema, token, and disposable
+  tool; callers cannot provide bookmark fetch controls, raw protobufs, or
+  opaque mutations. Direct, protocol, spawned-stdio, schema, token, and disposable
   real-server verification accompany the registry without a mock server;
   deterministic transport faults remain deferred to the P4 fault-injection
-  design. The exact six-tool schema snapshot is 24,286 `o200k_base` tokens,
-  below the independently reviewed 25,000-token domain ceiling. Production
+  design. The exact R5 six-tool schema snapshot is 24,394 `o200k_base` tokens,
+  below the independently reviewed 25,108-token domain ceiling. Production
   gates count canonical request and dual-encoded result tokens, enforce
   complete-frame bytes, reject maximum dense legal values above their
   operation ceilings, and admit exact greatest-under boundary fixtures while
   keeping accepted paired exchanges below the 200K context floor.
-  `body_block_create` is exactly at its reviewed 6,500-token per-tool ceiling;
-  the executable snapshot locks that zero-headroom boundary, so further schema
-  growth requires reduction or an explicit ceiling review. A production
+  `body_block_create` uses 6,554 tokens under its reviewed 6,600-token
+  per-tool ceiling. Further schema growth requires reduction or an explicit
+  ceiling review. A production
   rich-prefix scheduler now owns verified receipts and permanently terminates
   every partial or indeterminate boundary; pending-candidate recovery reduces
   each bounded observation into one cached replay receipt without resuming the

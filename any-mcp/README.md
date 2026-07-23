@@ -195,14 +195,13 @@ Read-only mode retains only `body_block_list`. Acceptance executes that read
 through stable and preview stdio and compares the complete normalized result.
 Domain error parity likewise preserves `isError`, ordered content, exact
 structured code/message/candidates, and its canonical JSON text duplicate.
-The current R4 handlers do not request URL metadata, expose protobufs, or use a
-mock server. The proposed R5 contract adds a closed
-`{ "kind": "bookmark", "url": string }` constructor to
+The R5 handlers do not request URL metadata, expose protobufs, or use a mock
+server. The closed
+`{ "kind": "bookmark", "url": string }` constructor is available to
 `body_block_create` and `rich_page_create`. It permits one ordinary
 `BlockCreate` and requires `BookmarkState::Empty` with no target-object
 readback. It does not add `BlockBookmarkFetch`, metadata, redirect, import, or
-fetch controls. This constructor is design-only until its review and
-implementation tickets are complete.
+fetch controls.
 
 ### Object-tag exclusion policy status
 
@@ -403,12 +402,13 @@ Acceptance-blocked `discussions`, plus proposed `admin`, are not selectable in
 this release. Their names become valid selectors only when a complete,
 independently reviewed production registry is linked.
 
-The `body-blocks` R4 registry provides six workflow tools for stable typed
+The `body-blocks` R5 registry provides six workflow tools for stable typed
 body pages, verified single-block create/update/delete/move, and finite rich
 page construction; read-only mode retains only body listing. All schemas use
 closed nonrecursive variants, fail opaque and read-restricted content closed,
-omit bookmark creation and network fetching, and accept YouTube creation only
-as an exact 11-character video ID normalized to inert canonical document data.
+permit inert bookmark creation without network fetching, and accept YouTube
+creation only as an exact 11-character video ID normalized to inert canonical
+document data.
 Rich
 construction is explicitly non-atomic and returns bounded applied, failed, and
 not-attempted evidence without compensation or automatic write resumption.
@@ -461,9 +461,10 @@ stay exact.
 Independently created pagination fixtures use the same title in every
 transport; typed text is never normalized.
 
-The proposed R5 design widens only the closed create union with the inert
-bookmark shape documented above. Current binaries continue to reject that
-input until the implementation lands.
+R5 widens only the closed create union with the inert bookmark shape documented
+above. Direct, stable-stdio, and preview-stdio acceptance creates it against a
+real server and independently verifies the exact URL, empty state, and absent
+target object.
 
 R4 also fixes emoji and callout payloads at the current 64-byte API ceiling,
 requires both UTF-16 mark endpoints to be `u32` scalar boundaries, and gives
