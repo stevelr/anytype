@@ -725,8 +725,10 @@ Resolution, admission, detached leader work, and verification share one
 absolute invocation deadline; a waiter observes the earlier of its own and the
 leader's deadline. The fixed catalog/result snapshot keeps the actual tool at
 or below its reviewed 2,000-token ceiling. Deterministic process tests drive
-real stdio frames through this exact reviewed production registry. The slice
-exposes no edit, attachment,
+real stdio frames through this exact reviewed production registry. Deadline
+state-machine regressions use virtual time, while deadline-independent cache,
+capacity, and pre-dispatch states are tested without artificial expiry. The
+slice exposes no edit, attachment,
 rich block, reaction, read-state, pin-state, streaming, or gRPC capability.
 
 `chat_message_delete` accepts exact space, chat, and message identities, the

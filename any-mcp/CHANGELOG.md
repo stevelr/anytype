@@ -581,6 +581,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Stabilize the chat-add idempotency deadline regression by separating
+  deadline-independent terminal, capacity, and pre-dispatch state assertions
+  from Tokio virtual-time waiter deadlines. Production still rejects an
+  expired invocation before cached, conflict, or capacity outcomes and waiters
+  still observe the earlier of the leader and caller deadlines.
 - Classify bounded collection-membership evidence failures from `anytype-api`
   as fixed upstream MCP errors and redacted health diagnostics.
 - Classify the bounded and malformed file-response evidence errors introduced
