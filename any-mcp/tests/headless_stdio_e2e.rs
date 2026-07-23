@@ -3881,6 +3881,7 @@ enum BodyFrameParityFailure {
     OutcomeShape,
     ResultShape,
     TextDuplicate,
+    ToolErrorShape,
     ErrorShape,
     ErrorCode,
     ErrorMessage,
@@ -3938,6 +3939,8 @@ fn compare_body_result_frame(
     if preview_result.remove("resultType") != Some(json!("complete")) {
         return Err(BodyFrameParityFailure::PreviewResultType);
     }
+    validate_body_result_semantics(stable)?;
+    validate_body_result_semantics(&normalized_preview)?;
     validate_body_frame_text_duplicate(stable)?;
     validate_body_frame_text_duplicate(&normalized_preview)?;
     let Some(stable_result) = stable.get("result").and_then(Value::as_object) else {
@@ -3951,6 +3954,69 @@ fn compare_body_result_frame(
     }
     if stable != &normalized_preview {
         return Err(BodyFrameParityFailure::Payload);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn validate_body_result_semantics(frame: &Value) -> Result<(), BodyFrameParityFailure> {
+    let result = frame
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or(BodyFrameParityFailure::ResultShape)?;
+    let expected_keys = ["content", "isError", "structuredContent"];
+    if result.len() != expected_keys.len()
+        || !expected_keys.iter().all(|key| result.contains_key(*key))
+    {
+        return Err(BodyFrameParityFailure::ResultShape);
+    }
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .ok_or(BodyFrameParityFailure::ResultShape)?;
+    if !is_error {
+        return Ok(());
+    }
+    let structured = result
+        .get("structuredContent")
+        .and_then(Value::as_object)
+        .ok_or(BodyFrameParityFailure::ToolErrorShape)?;
+    if !(structured.len() == 2 || structured.len() == 3)
+        || !structured.contains_key("code")
+        || !structured.contains_key("message")
+        || (structured.len() == 3 && !structured.contains_key("candidates"))
+        || structured
+            .get("code")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || structured
+            .get("message")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(BodyFrameParityFailure::ToolErrorShape);
+    }
+    if let Some(candidates) = structured.get("candidates") {
+        let candidates = candidates
+            .as_array()
+            .filter(|values| values.len() <= 8)
+            .ok_or(BodyFrameParityFailure::ToolErrorShape)?;
+        if candidates.iter().any(|candidate| {
+            let Some(candidate) = candidate.as_object() else {
+                return true;
+            };
+            candidate.len() != 2
+                || candidate
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                || candidate
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+        }) {
+            return Err(BodyFrameParityFailure::ToolErrorShape);
+        }
     }
     Ok(())
 }
@@ -4453,13 +4519,16 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
         payload_candidate("/items/0/id", json!("different")),
         payload_candidate("/items/0/content/approx_bytes", json!(918)),
         cursor_drift,
-        mutate("/result/isError", json!(true)),
     ] {
         assert_eq!(
             compare_body_protocol_frame(&success, &candidate),
             Err(BodyFrameParityFailure::Payload)
         );
     }
+    assert_eq!(
+        compare_body_protocol_frame(&success, &mutate("/result/isError", json!(true))),
+        Err(BodyFrameParityFailure::ToolErrorShape)
+    );
 
     let error = body_protocol_error_frame(
         4,
@@ -4523,6 +4592,68 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
         &[success, error],
         &[preview_error, preview]
     ));
+
+    let tool_error = body_protocol_test_frame(
+        5,
+        true,
+        json!({
+            "code":"conflict",
+            "message":"The requested state changed. Refresh and retry.",
+            "candidates":[{"id":"candidate-1","name":"Candidate"}]
+        }),
+    );
+    let preview_tool_error = preview_body_protocol_test_frame(&tool_error);
+    assert_eq!(
+        compare_body_protocol_frame(&tool_error, &preview_tool_error),
+        Ok(())
+    );
+    let tool_error_mutate = |path: &str, value: Value| {
+        let mut candidate = preview_tool_error.clone();
+        *candidate
+            .pointer_mut(path)
+            .expect("tool-error mutation path") = value;
+        candidate
+    };
+    for candidate in [
+        tool_error_mutate("/result/isError", json!(false)),
+        tool_error_mutate("/result/structuredContent/code", json!("upstream")),
+        tool_error_mutate("/result/structuredContent/message", json!("different")),
+        tool_error_mutate(
+            "/result/structuredContent/candidates/0/id",
+            json!("candidate-2"),
+        ),
+        tool_error_mutate(
+            "/result/content/0/text",
+            json!("{\"code\":\"conflict\",\"message\":\"noncanonical\"}"),
+        ),
+    ] {
+        assert!(compare_body_protocol_frame(&tool_error, &candidate).is_err());
+    }
+
+    for malformed in [
+        body_protocol_test_frame(5, true, json!({"code":"","message":"message"})),
+        body_protocol_test_frame(5, true, json!({"code":"conflict","message":""})),
+        body_protocol_test_frame(
+            5,
+            true,
+            json!({"code":"conflict","message":"message","extra":true}),
+        ),
+        body_protocol_test_frame(
+            5,
+            true,
+            json!({
+                "code":"conflict",
+                "message":"message",
+                "candidates":[{"id":"","name":"Candidate"}]
+            }),
+        ),
+    ] {
+        let malformed_preview = preview_body_protocol_test_frame(&malformed);
+        assert_eq!(
+            compare_body_protocol_frame(&malformed, &malformed_preview),
+            Err(BodyFrameParityFailure::ToolErrorShape)
+        );
+    }
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -4624,6 +4755,24 @@ mod keystore_tests {
             format!("{REVIEWED_EVENT}\nany-mcp-run-marker={RUN_MARKER}\n").as_bytes(),
         );
         assert!(inspect_log(&valid, Some(RUN_MARKER), true).is_ok());
+        assert!(
+            inspect_reviewed_body_server_log_at(
+                Some(valid.as_os_str().to_owned()),
+                Some(RUN_MARKER),
+                &[b"".as_slice()],
+                |_| true,
+            )
+            .is_ok()
+        );
+        assert!(
+            inspect_reviewed_body_server_log_at(
+                Some(valid.as_os_str().to_owned()),
+                Some(RUN_MARKER),
+                &[b"body_acceptance".as_slice()],
+                |_| true,
+            )
+            .is_err()
+        );
         assert!(inspect_log(&valid, None, true).is_err());
         assert!(inspect_log(&valid, Some(&"a".repeat(63)), true).is_err());
         assert!(inspect_log(&valid, Some(RUN_MARKER), false).is_err());
