@@ -122,6 +122,8 @@ struct ServerState {
     optional_status_contract: Option<WorkflowTool<OptionalToolsetStatusOutput>>,
     linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],
     cursors: Arc<CursorStore>,
+    #[cfg(test)]
+    phase1_dispatch_polls: std::sync::atomic::AtomicUsize,
 }
 
 /// MCP handler backed by one authenticated runtime and one static catalog.
@@ -303,6 +305,8 @@ impl AnyMcpServer {
                 optional_status_contract,
                 linked_optional_registries,
                 cursors,
+                #[cfg(test)]
+                phase1_dispatch_polls: std::sync::atomic::AtomicUsize::new(0),
             }),
         })
     }
@@ -347,29 +351,31 @@ impl AnyMcpServer {
         protocol_version: &'a ProtocolVersion,
         cancellation: &'a tokio_util::sync::CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
-        Box::pin(async move {
-            let name = request.name.as_ref();
-            let selected_by_profile = match self.runtime.profile() {
-                ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
-                ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
-            };
-            let optional_selected = self
-                .state
-                .optional_catalog
-                .registry_for_tool(name)
-                .is_some()
-                || self.state.optional_catalog.is_read_only_mutation(name)
-                || (name == "optional_toolset_status" && self.state.optional_catalog.is_selected());
-            if !selected_by_profile && !optional_selected {
-                return Err(ErrorData::method_not_found::<CallToolRequestMethod>());
-            }
-            if request.task.is_some() {
-                return Err(invalid_arguments());
-            }
-            if self.state.optional_catalog.is_read_only_mutation(name) {
-                return Ok(tool_error(&ToolError::read_only()));
-            }
-            if name == "optional_toolset_status" {
+        let name = request.name.as_ref();
+        let selected_by_profile = match self.runtime.profile() {
+            ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
+            ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
+        };
+        let optional_selected = self
+            .state
+            .optional_catalog
+            .registry_for_tool(name)
+            .is_some()
+            || self.state.optional_catalog.is_read_only_mutation(name)
+            || (name == "optional_toolset_status" && self.state.optional_catalog.is_selected());
+        if !selected_by_profile && !optional_selected {
+            return Box::pin(std::future::ready(Err(ErrorData::method_not_found::<
+                CallToolRequestMethod,
+            >())));
+        }
+        if request.task.is_some() {
+            return Box::pin(std::future::ready(Err(invalid_arguments())));
+        }
+        if self.state.optional_catalog.is_read_only_mutation(name) {
+            return Box::pin(std::future::ready(Ok(tool_error(&ToolError::read_only()))));
+        }
+        if name == "optional_toolset_status" {
+            return Box::pin(async move {
                 let _input = decode_arguments::<OptionalToolsetStatusInput>(request.arguments)?;
                 let contract = self
                     .state
@@ -378,23 +384,35 @@ impl AnyMcpServer {
                     .ok_or_else(|| {
                         ErrorData::internal_error("Optional status contract unavailable.", None)
                     })?;
-                return contract
+                contract
                     .success(self.state.optional_catalog.status())
                     .map_err(|_| {
                         ErrorData::internal_error("Optional status encoding failed.", None)
-                    });
-            }
-            if let Some(registry) = self.state.optional_catalog.registry_for_tool(name) {
-                return registry
-                    .call_tool(
-                        request,
-                        &self.runtime,
-                        &self.state.cursors,
-                        protocol_version,
-                        cancellation,
-                    )
-                    .await;
-            }
+                    })
+            });
+        }
+        if let Some(registry) = self.state.optional_catalog.registry_for_tool(name) {
+            return registry.call_tool(
+                request,
+                &self.runtime,
+                &self.state.cursors,
+                protocol_version,
+                cancellation,
+            );
+        }
+        self.dispatch_phase1_tool(request, cancellation)
+    }
+
+    fn dispatch_phase1_tool<'a>(
+        &'a self,
+        request: CallToolRequestParams,
+        cancellation: &'a tokio_util::sync::CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        Box::pin(async move {
+            #[cfg(test)]
+            self.state
+                .phase1_dispatch_polls
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let arguments = request.arguments;
             match request.name.as_ref() {
                 SERVER_STATUS => {
@@ -503,6 +521,13 @@ impl AnyMcpServer {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn phase1_dispatch_polls(&self) -> usize {
+        self.state
+            .phase1_dispatch_polls
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn list_tools_wire(
         &self,
         request: Option<PaginatedRequestParams>,
@@ -598,10 +623,9 @@ impl ServerHandler for AnyMcpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        // The exhaustive dispatch future contains every typed workflow branch
-        // and is large in debug builds. Keep it off rmcp's Tokio worker stack;
-        // repeated production stdio calls otherwise eventually overflow a
-        // worker even when each individual operation succeeds.
+        // Optional registries are selected before the exhaustive Phase-1
+        // future is constructed, so this erased await contains only the
+        // chosen route's state.
         let protocol_version = context.protocol_version().unwrap_or(PROTOCOL_VERSION);
         Box::pin(self.dispatch_tool_for_protocol(request, &protocol_version, &context.ct)).await
     }

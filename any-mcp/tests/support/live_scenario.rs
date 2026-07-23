@@ -755,7 +755,7 @@ async fn run_body_scenario_inner(
         .call_tool(
             "body_block_list",
             json!({
-                "space":ctx.space_id,"object_id":page.id,"limit":12,"cursor":cursor
+                "space":ctx.space_id,"object_id":page.id,"limit":8,"cursor":cursor
             }),
         )
         .await?;
@@ -763,6 +763,8 @@ async fn run_body_scenario_inner(
     if second["snapshot_hash"] != first["snapshot_hash"] {
         return Err("body pages mixed snapshot hashes".to_owned());
     }
+    let second_cursor =
+        body_string(&second, "/next_cursor", "second continuation cursor")?.to_owned();
     listed_block_ids.extend(
         second["items"]
             .as_array()
@@ -771,13 +773,34 @@ async fn run_body_scenario_inner(
             .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    if listed_block_ids.len() != 20 {
-        return Err(
-            "body terminal page did not consume the exact twelve remaining blocks".to_owned(),
-        );
+    if listed_block_ids.len() != 16 {
+        return Err("body second page did not consume the next eight blocks".to_owned());
     }
-    if second.get("next_cursor").is_some() {
-        return Err("body two-page fixture unexpectedly returned a third cursor".to_owned());
+    let third = driver
+        .call_tool(
+            "body_block_list",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,"limit":8,"cursor":second_cursor
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&third));
+    if third["snapshot_hash"] != first["snapshot_hash"] {
+        return Err("body pages mixed snapshot hashes".to_owned());
+    }
+    listed_block_ids.extend(
+        third["items"]
+            .as_array()
+            .ok_or_else(|| "body third page omitted items".to_owned())?
+            .iter()
+            .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    if listed_block_ids.len() != 20 {
+        return Err("body terminal page did not consume the final four blocks".to_owned());
+    }
+    if third.get("next_cursor").is_some() {
+        return Err("body three-page fixture unexpectedly returned a fourth cursor".to_owned());
     }
     let independent = ctx
         .client
