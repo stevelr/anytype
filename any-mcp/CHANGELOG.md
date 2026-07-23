@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a versioned `skills/any-mcp` agent skill with progressively disclosed
+  capability guidance and schema-checked PKM recipes for documents, files,
+  collections, tags, tasks, chat, and save-link ingestion. It explicitly
+  limits `anyr` fallback use to a best-effort chat listener and rich chat
+  blocks, while documenting that any-mcp exposes neither a background
+  subscription/atomic watermark nor styled chat writes.
 - Add the reviewed R5 inert-bookmark constructor to `body_block_create` and
   `rich_page_create`. The closed `{ "kind": "bookmark", "url": string }`
   input maps only to `anytype-api` `NewBlock::bookmark`, dispatches ordinary

@@ -101,6 +101,9 @@ mod stdio;
 pub mod validation;
 pub mod view_handlers;
 
+#[cfg(test)]
+mod skill_examples;
+
 pub use config::{ApplicationProfile, ProtocolMode, RuntimeConfig};
 pub use optional_toolsets::{OptionalToolsetSelection, ToolsetName};
 pub use runtime::{

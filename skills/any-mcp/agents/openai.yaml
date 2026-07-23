@@ -1,0 +1,4 @@
+interface:
+  display_name: "Anytype MCP"
+  short_description: "Use any-mcp for reliable Anytype workflows"
+  default_prompt: "Use $any-mcp to organize content in Anytype safely."
