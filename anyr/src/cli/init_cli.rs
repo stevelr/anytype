@@ -192,13 +192,19 @@ where
 }
 
 trait CredentialStore {
+    fn snapshot_http(&self) -> Result<HttpCredentials>;
     fn snapshot_grpc(&self) -> Result<GrpcCredentials>;
     fn replace_grpc(&self, credentials: &GrpcCredentials) -> Result<()>;
     fn write_http(&self, credentials: &HttpCredentials) -> Result<()>;
+    fn restore_http(&self, credentials: &HttpCredentials) -> Result<()>;
     fn restore_grpc(&self, credentials: &GrpcCredentials) -> Result<()>;
 }
 
 impl CredentialStore for KeyStore {
+    fn snapshot_http(&self) -> Result<HttpCredentials> {
+        Ok(self.get_http_credentials()?)
+    }
+
     fn snapshot_grpc(&self) -> Result<GrpcCredentials> {
         let credentials = self.get_grpc_credentials()?;
         Ok(GrpcCredentials::new(
@@ -219,6 +225,12 @@ impl CredentialStore for KeyStore {
         Ok(())
     }
 
+    fn restore_http(&self, credentials: &HttpCredentials) -> Result<()> {
+        self.clear_http_credentials()?;
+        self.update_http_credentials(credentials)?;
+        Ok(())
+    }
+
     fn restore_grpc(&self, credentials: &GrpcCredentials) -> Result<()> {
         self.clear_grpc_credentials()?;
         self.update_grpc_credentials(credentials)?;
@@ -231,29 +243,59 @@ fn store_credential_pair(
     grpc: &GrpcCredentials,
     http: &HttpCredentials,
 ) -> Result<()> {
+    let prior_http = keystore
+        .snapshot_http()
+        .map_err(|_| anyhow::anyhow!("failed to snapshot prior HTTP credentials"))?;
     let prior_grpc = keystore
         .snapshot_grpc()
         .map_err(|_| anyhow::anyhow!("failed to snapshot prior gRPC credentials"))?;
     if keystore.replace_grpc(grpc).is_err() {
-        return credential_write_failure(keystore, &prior_grpc, "failed to store gRPC credentials");
+        return credential_write_failure(
+            keystore,
+            &prior_http,
+            &prior_grpc,
+            "failed to store gRPC credentials",
+        );
     }
     if keystore.write_http(http).is_err() {
-        return credential_write_failure(keystore, &prior_grpc, "failed to store HTTP credentials");
+        return credential_write_failure(
+            keystore,
+            &prior_http,
+            &prior_grpc,
+            "failed to store HTTP credentials",
+        );
     }
     Ok(())
 }
 
 fn credential_write_failure(
     keystore: &impl CredentialStore,
+    prior_http: &HttpCredentials,
     prior_grpc: &GrpcCredentials,
     failure: &str,
 ) -> Result<()> {
-    if keystore.restore_grpc(prior_grpc).is_err() {
-        bail!(
-            "{failure}; rollback also failed and the selected keystore may require manual repair"
-        );
+    let http_failed = keystore.restore_http(prior_http).is_err();
+    let grpc_failed = keystore.restore_grpc(prior_grpc).is_err();
+    match (http_failed, grpc_failed) {
+        (false, false) => {
+            bail!("{failure}; prior HTTP and gRPC credentials were restored");
+        }
+        (true, false) => {
+            bail!(
+                "{failure}; HTTP rollback failed, gRPC rollback succeeded, and the selected keystore may require manual repair"
+            );
+        }
+        (false, true) => {
+            bail!(
+                "{failure}; HTTP rollback succeeded, gRPC rollback failed, and the selected keystore may require manual repair"
+            );
+        }
+        (true, true) => {
+            bail!(
+                "{failure}; HTTP and gRPC rollback failed and the selected keystore may require manual repair"
+            );
+        }
     }
-    bail!("{failure}; prior gRPC credentials were restored and HTTP credentials are unchanged")
 }
 
 #[derive(Clone, Copy)]
@@ -510,43 +552,42 @@ mod tests {
     }
 
     #[test]
-    fn init_cli_uses_headless_endpoint_defaults() {
-        let mut cli = Cli::try_parse_from(["anyr", "init-cli"]).expect("parse init-cli");
-        // Isolate this unit from any ambient endpoint environment already
-        // resolved by clap.
-        cli.url = None;
-        cli.grpc = None;
-        apply_init_cli_endpoint_defaults(&mut cli);
-        assert_eq!(cli.url.as_deref(), Some(HEADLESS_HTTP_URL));
-        assert_eq!(cli.grpc.as_deref(), Some(HEADLESS_GRPC_ENDPOINT));
+    fn clap_endpoint_precedence_runs_in_isolated_processes() {
+        assert_endpoint_helper(
+            "defaults",
+            &format!("{HEADLESS_HTTP_URL}|{HEADLESS_GRPC_ENDPOINT}"),
+        );
+        assert_endpoint_helper("environment", "http://env.test:41012|http://env.test:41010");
+        assert_endpoint_helper(
+            "explicit",
+            "http://explicit.test:51012|http://explicit.test:51010",
+        );
     }
 
     #[test]
-    fn init_cli_preserves_resolved_environment_endpoints() {
-        let mut cli = Cli::try_parse_from(["anyr", "init-cli"]).expect("parse init-cli");
-        // Clap resolves ANYTYPE_* values into these fields before `run`; model
-        // that resolved state without mutating process-global test environment.
-        cli.url = Some("http://env.test:41012".to_owned());
-        cli.grpc = Some("http://env.test:41010".to_owned());
+    fn clap_endpoint_helper() {
+        let Ok(mode) = std::env::var("ANYR_INIT_ENDPOINT_HELPER_MODE") else {
+            return;
+        };
+        let args = if mode == "explicit" {
+            vec![
+                "anyr",
+                "--url",
+                "http://explicit.test:51012",
+                "--grpc",
+                "http://explicit.test:51010",
+                "init-cli",
+            ]
+        } else {
+            vec!["anyr", "init-cli"]
+        };
+        let mut cli = Cli::try_parse_from(args).expect("parse isolated init-cli");
         apply_init_cli_endpoint_defaults(&mut cli);
-        assert_eq!(cli.url.as_deref(), Some("http://env.test:41012"));
-        assert_eq!(cli.grpc.as_deref(), Some("http://env.test:41010"));
-    }
-
-    #[test]
-    fn init_cli_preserves_explicit_endpoint_overrides() {
-        let mut cli = Cli::try_parse_from([
-            "anyr",
-            "--url",
-            "http://explicit.test:51012",
-            "--grpc",
-            "http://explicit.test:51010",
-            "init-cli",
-        ])
-        .expect("parse init-cli endpoint overrides");
-        apply_init_cli_endpoint_defaults(&mut cli);
-        assert_eq!(cli.url.as_deref(), Some("http://explicit.test:51012"));
-        assert_eq!(cli.grpc.as_deref(), Some("http://explicit.test:51010"));
+        println!(
+            "ANYR_INIT_ENDPOINTS={}|{}",
+            cli.url.as_deref().expect("resolved HTTP endpoint"),
+            cli.grpc.as_deref().expect("resolved gRPC endpoint")
+        );
     }
 
     #[test]
@@ -794,12 +835,12 @@ esac
         assert!(!error.contains(invite));
         assert!(!error.contains("join-credential"));
         assert_eq!(store.grpc.borrow().account_key(), Some(ACCOUNT_KEY));
-        assert!(store.http_written.get());
+        assert_eq!(store.http_marker.borrow().as_str(), "new-http");
         assert_eq!(store.restore_calls.get(), 0);
     }
 
     #[test]
-    fn failed_http_write_restores_prior_grpc_credentials() {
+    fn mutate_then_error_http_write_restores_both_prior_credentials() {
         let prior = GrpcCredentials::new(
             Some("prior-account-id".to_owned()),
             Some("prior-account-key".to_owned()),
@@ -820,29 +861,38 @@ esac
         assert_eq!(restored.account_key(), Some("prior-account-key"));
         assert_eq!(restored.session_token(), Some("prior-session-token"));
         assert_eq!(store.restore_calls.get(), 1);
-        assert!(!store.http_written.get());
-        assert!(error.contains("prior gRPC credentials were restored"));
+        assert_eq!(store.http_restore_calls.get(), 1);
+        assert_eq!(store.http_marker.borrow().as_str(), "prior-http");
+        assert!(error.contains("prior HTTP and gRPC credentials were restored"));
         assert!(!error.contains(ACCOUNT_KEY));
         assert!(!error.contains(HTTP_TOKEN));
     }
 
     #[test]
-    fn failed_rollback_reports_manual_repair_without_credentials() {
-        let store = FakeCredentialStore::new(GrpcCredentials::from_token("prior-session-token"));
-        store.fail_http.set(true);
-        store.fail_restore.set(true);
-        let error = store_credential_pair(
-            &store,
-            &GrpcCredentials::from_account_key(ACCOUNT_KEY),
-            &HttpCredentials::new(HTTP_TOKEN),
-        )
-        .expect_err("write and rollback must fail")
-        .to_string();
+    fn rollback_reports_each_failed_credential_family_without_secrets() {
+        for (http_rollback_fails, grpc_rollback_fails, expected) in [
+            (true, false, "HTTP rollback failed, gRPC rollback succeeded"),
+            (false, true, "HTTP rollback succeeded, gRPC rollback failed"),
+            (true, true, "HTTP and gRPC rollback failed"),
+        ] {
+            let store =
+                FakeCredentialStore::new(GrpcCredentials::from_token("prior-session-token"));
+            store.fail_http.set(true);
+            store.fail_restore_http.set(http_rollback_fails);
+            store.fail_restore_grpc.set(grpc_rollback_fails);
+            let error = store_credential_pair(
+                &store,
+                &GrpcCredentials::from_account_key(ACCOUNT_KEY),
+                &HttpCredentials::new(HTTP_TOKEN),
+            )
+            .expect_err("write and configured rollback must fail")
+            .to_string();
 
-        assert!(error.contains("rollback also failed"));
-        assert!(error.contains("manual repair"));
-        assert!(!error.contains(ACCOUNT_KEY));
-        assert!(!error.contains(HTTP_TOKEN));
+            assert!(error.contains(expected));
+            assert!(error.contains("manual repair"));
+            assert!(!error.contains(ACCOUNT_KEY));
+            assert!(!error.contains(HTTP_TOKEN));
+        }
     }
 
     #[tokio::test]
@@ -865,7 +915,7 @@ esac
         .to_string();
         assert!(error.contains("credentials stored"));
         assert_eq!(store.grpc.borrow().account_key(), Some(ACCOUNT_KEY));
-        assert!(store.http_written.get());
+        assert_eq!(store.http_marker.borrow().as_str(), "new-http");
         assert_eq!(store.restore_calls.get(), 0);
     }
 
@@ -912,28 +962,39 @@ esac
     }
 
     struct FakeCredentialStore {
+        http_marker: RefCell<String>,
+        snapshotted_http_marker: RefCell<Option<String>>,
         grpc: RefCell<GrpcCredentials>,
         fail_grpc: Cell<bool>,
         fail_http: Cell<bool>,
-        fail_restore: Cell<bool>,
-        http_written: Cell<bool>,
+        fail_restore_http: Cell<bool>,
+        fail_restore_grpc: Cell<bool>,
+        http_restore_calls: Cell<u32>,
         restore_calls: Cell<u32>,
     }
 
     impl FakeCredentialStore {
         fn new(grpc: GrpcCredentials) -> Self {
             Self {
+                http_marker: RefCell::new("prior-http".to_owned()),
+                snapshotted_http_marker: RefCell::new(None),
                 grpc: RefCell::new(grpc),
                 fail_grpc: Cell::new(false),
                 fail_http: Cell::new(false),
-                fail_restore: Cell::new(false),
-                http_written: Cell::new(false),
+                fail_restore_http: Cell::new(false),
+                fail_restore_grpc: Cell::new(false),
+                http_restore_calls: Cell::new(0),
                 restore_calls: Cell::new(0),
             }
         }
     }
 
     impl CredentialStore for FakeCredentialStore {
+        fn snapshot_http(&self) -> Result<HttpCredentials> {
+            *self.snapshotted_http_marker.borrow_mut() = Some(self.http_marker.borrow().to_owned());
+            Ok(HttpCredentials::new("opaque-prior-http-credential"))
+        }
+
         fn snapshot_grpc(&self) -> Result<GrpcCredentials> {
             let credentials = self.grpc.borrow();
             Ok(GrpcCredentials::new(
@@ -956,17 +1017,34 @@ esac
         }
 
         fn write_http(&self, credentials: &HttpCredentials) -> Result<()> {
+            if credentials.has_creds() {
+                *self.http_marker.borrow_mut() = "new-http".to_owned();
+            }
             if self.fail_http.get() {
                 bail!("fixture HTTP write failure");
             }
-            self.http_written.set(credentials.has_creds());
+            Ok(())
+        }
+
+        fn restore_http(&self, _credentials: &HttpCredentials) -> Result<()> {
+            self.http_restore_calls
+                .set(self.http_restore_calls.get() + 1);
+            if self.fail_restore_http.get() {
+                bail!("fixture HTTP rollback failure");
+            }
+            let marker = self
+                .snapshotted_http_marker
+                .borrow()
+                .clone()
+                .context("fixture HTTP snapshot missing")?;
+            *self.http_marker.borrow_mut() = marker;
             Ok(())
         }
 
         fn restore_grpc(&self, credentials: &GrpcCredentials) -> Result<()> {
             self.restore_calls.set(self.restore_calls.get() + 1);
-            if self.fail_restore.get() {
-                bail!("fixture rollback failure");
+            if self.fail_restore_grpc.get() {
+                bail!("fixture gRPC rollback failure");
             }
             *self.grpc.borrow_mut() = GrpcCredentials::new(
                 credentials.account_id().map(str::to_owned),
@@ -975,6 +1053,37 @@ esac
             );
             Ok(())
         }
+    }
+
+    fn assert_endpoint_helper(mode: &str, expected: &str) {
+        let mut command = std::process::Command::new(
+            std::env::current_exe().expect("resolve current test executable"),
+        );
+        command
+            .args([
+                "--exact",
+                "cli::init_cli::tests::clap_endpoint_helper",
+                "--nocapture",
+            ])
+            .env("ANYR_INIT_ENDPOINT_HELPER_MODE", mode)
+            .env_remove("ANYTYPE_URL")
+            .env_remove("ANYTYPE_GRPC_ENDPOINT");
+        if matches!(mode, "environment" | "explicit") {
+            command
+                .env("ANYTYPE_URL", "http://env.test:41012")
+                .env("ANYTYPE_GRPC_ENDPOINT", "http://env.test:41010");
+        }
+        let output = command.output().expect("run isolated clap helper");
+        assert!(
+            output.status.success(),
+            "isolated clap helper failed with {}",
+            output.status
+        );
+        let stdout = String::from_utf8(output.stdout).expect("helper output is UTF-8");
+        assert!(
+            stdout.contains(&format!("ANYR_INIT_ENDPOINTS={expected}")),
+            "isolated helper did not report expected endpoints"
+        );
     }
 
     #[cfg(unix)]

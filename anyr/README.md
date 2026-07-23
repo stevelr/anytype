@@ -464,9 +464,10 @@ The global `--keystore` and `--keystore-service` options (or their environment
 variables) select where `init-cli` stores credentials. See
 [anytype README.md](../anytype-api/README.md#keystore) for more information.
 Because the keystore API cannot atomically replace both credential families,
-`init-cli` replaces gRPC first and preserves a snapshot for rollback if the
-HTTP write fails; this keeps a pre-existing HTTP credential untouched until
-the new gRPC credential is safely stored.
+`init-cli` snapshots both prior credential objects, replaces gRPC first, then
+writes HTTP. If either write fails, it makes independent best-effort attempts
+to restore both snapshots and reports any failed restoration without displaying
+credential values.
 
 ## Logging
 
