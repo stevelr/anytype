@@ -4762,12 +4762,7 @@ fn projected_table_subtree_matches(
 ) -> bool {
     let rows = usize::from(rows);
     let columns = usize::from(columns);
-    let Some(expected_count) = rows
-        .checked_mul(columns)
-        .and_then(|cells| cells.checked_add(rows))
-        .and_then(|value| value.checked_add(columns))
-        .and_then(|value| value.checked_add(3))
-    else {
+    let Some(expected_count) = table_materialized_count(rows, columns, header_row) else {
         return false;
     };
     if new_count != expected_count || created.content != BlockProjection::Table {
@@ -4808,7 +4803,10 @@ fn projected_table_subtree_matches(
                 })
             && cell.align == WireHorizontalAlign::Left
             && cell.vertical_align == WireVerticalAlign::Top
-            && cell.background_color.is_none()
+            && cell
+                .background_color
+                .as_ref()
+                .is_some_and(|color| color.as_str() == "grey")
             && cell.content
                 == (BlockProjection::Text {
                     text: String::new(),
@@ -4829,8 +4827,10 @@ fn projected_table_subtree_matches(
                 == (BlockProjection::TableRow {
                     is_header: header_row && index == 0,
                 })
-                && projected_direct_children(after, &row.id)
-                    .is_some_and(|cells| cells.len() == columns && cells.iter().all(canonical_cell))
+                && projected_direct_children(after, &row.id).is_some_and(|cells| {
+                    cells.len() == if header_row && index == 0 { columns } else { 0 }
+                        && cells.iter().all(canonical_cell)
+                })
         })
 }
 
@@ -4861,6 +4861,14 @@ fn projected_opaque_refresh_content_matches(
         }
         _ => prior.content == current.content,
     }
+}
+
+fn table_materialized_count(rows: usize, columns: usize, header_row: bool) -> Option<usize> {
+    let materialized_cells = if header_row { columns } else { 0 };
+    materialized_cells
+        .checked_add(rows)
+        .and_then(|value| value.checked_add(columns))
+        .and_then(|value| value.checked_add(3))
 }
 
 struct CreateTransitionChecks {
@@ -5836,15 +5844,17 @@ fn rich_entry_cost(value: &NewBlockInput) -> Result<(usize, usize, usize), Handl
         NewBlockInput::Text { text, marks, .. } => Ok((1, text.len(), marks.len())),
         NewBlockInput::Embed { source, .. } => Ok((1, source.len(), 0)),
         NewBlockInput::Table { rows, columns, .. } => {
-            let cells = usize::from(*rows)
+            // Capacity remains conservatively dense even though Heart
+            // initially materializes only header cells.
+            let logical_cells = usize::from(*rows)
                 .checked_mul(usize::from(*columns))
                 .ok_or_else(|| HandlerError::new(ToolError::validation()))?;
-            let materialized = 3usize
+            let logical_cost = 3usize
                 .checked_add(usize::from(*rows))
                 .and_then(|value| value.checked_add(usize::from(*columns)))
-                .and_then(|value| value.checked_add(cells))
+                .and_then(|value| value.checked_add(logical_cells))
                 .ok_or_else(|| HandlerError::new(ToolError::validation()))?;
-            Ok((materialized, 0, 0))
+            Ok((logical_cost, 0, 0))
         }
         _ => Ok((1, 0, 0)),
     }
@@ -6180,7 +6190,9 @@ fn verified_rich_prefix_len(
             header_row,
         } = &entry.block
         {
-            let Ok((materialized_count, _, _)) = rich_entry_cost(&entry.block) else {
+            let Some(materialized_count) =
+                table_materialized_count(usize::from(*rows), usize::from(*columns), *header_row)
+            else {
                 return position;
             };
             if !projected_table_subtree_matches(
@@ -10473,7 +10485,7 @@ mod tests {
     }
 
     #[test]
-    fn create_transition_accepts_only_canonical_materialized_table_subtree() {
+    fn create_transition_accepts_only_canonical_sparse_table_subtree() {
         let before = projected(vec![
             summary("root", None, 0, 0, 1, projected_text("root")),
             summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
@@ -10483,6 +10495,13 @@ mod tests {
         }));
         let created_id = EntityId::new("table").expect("table");
         let root_id = EntityId::new("root").expect("root");
+        let mut first_header_cell = summary("cell-1-1", Some("row-1"), 0, 4, 0, projected_text(""));
+        first_header_cell.background_color =
+            Some(ColorInput::new("grey".to_owned()).expect("header background"));
+        let mut second_header_cell =
+            summary("cell-1-2", Some("row-1"), 1, 4, 0, projected_text(""));
+        second_header_cell.background_color =
+            Some(ColorInput::new("grey".to_owned()).expect("header background"));
         let valid = projected(vec![
             summary("root", None, 0, 0, 2, projected_text("root")),
             summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
@@ -10531,18 +10550,16 @@ mod tests {
                 2,
                 BlockProjection::TableRow { is_header: true },
             ),
-            summary("cell-1-1", Some("row-1"), 0, 4, 0, projected_text("")),
-            summary("cell-1-2", Some("row-1"), 1, 4, 0, projected_text("")),
+            first_header_cell,
+            second_header_cell,
             summary(
                 "row-2",
                 Some("rows"),
                 1,
                 3,
-                2,
+                0,
                 BlockProjection::TableRow { is_header: false },
             ),
-            summary("cell-2-1", Some("row-2"), 0, 4, 0, projected_text("")),
-            summary("cell-2-2", Some("row-2"), 1, 4, 0, projected_text("")),
         ]);
         assert!(verify_create_transition(
             &before,
@@ -10563,12 +10580,12 @@ mod tests {
         let mut missing_cell = valid.clone();
         missing_cell
             .items
-            .retain(|block| block.id.as_str() != "cell-2-2");
+            .retain(|block| block.id.as_str() != "cell-1-2");
         missing_cell
             .items
             .iter_mut()
-            .find(|block| block.id.as_str() == "row-2")
-            .expect("second row")
+            .find(|block| block.id.as_str() == "row-1")
+            .expect("header row")
             .child_count = 1;
         let mut misplaced_region = valid.clone();
         misplaced_region
@@ -10668,11 +10685,11 @@ mod tests {
             .iter_mut()
             .find(|block| block.id.as_str() == "row-2")
             .expect("row")
-            .child_count = 3;
+            .child_count = 1;
         extra_cell.items.push(summary(
-            "cell-2-3",
+            "cell-2-1",
             Some("row-2"),
-            2,
+            0,
             4,
             0,
             projected_text(""),
@@ -10729,6 +10746,30 @@ mod tests {
                 &input,
             ));
         }
+
+        let no_header_input = parse_block(json!({
+            "kind":"table","rows":2,"columns":2,"header_row":false
+        }));
+        let mut no_header = valid.clone();
+        no_header
+            .items
+            .retain(|block| !matches!(block.id.as_str(), "cell-1-1" | "cell-1-2"));
+        let first_row = no_header
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "row-1")
+            .expect("first row");
+        first_row.child_count = 0;
+        first_row.content = BlockProjection::TableRow { is_header: false };
+        refresh_projection_hash(&mut no_header);
+        assert!(verify_create_transition(
+            &before,
+            &no_header,
+            &created_id,
+            &root_id,
+            WireInsertPosition::LastChild,
+            &no_header_input,
+        ));
     }
 
     #[test]
@@ -11331,6 +11372,25 @@ mod tests {
             260
         );
         assert!(validate_rich_plan(&parse_rich(formerly_under_counted)).is_err());
+    }
+
+    #[test]
+    fn rich_table_capacity_budget_is_distinct_from_sparse_materialization() {
+        let header = parse_block(json!({
+            "kind":"table","rows":2,"columns":3,"header_row":true
+        }));
+        let no_header = parse_block(json!({
+            "kind":"table","rows":1,"columns":1,"header_row":false
+        }));
+        assert_eq!(rich_entry_cost(&header).expect("header logical cost").0, 14);
+        assert_eq!(
+            rich_entry_cost(&no_header)
+                .expect("no-header logical cost")
+                .0,
+            6
+        );
+        assert_eq!(table_materialized_count(2, 3, true), Some(11));
+        assert_eq!(table_materialized_count(1, 1, false), Some(5));
     }
 
     fn scheduler_with_prefix(total: usize, prefix: usize) -> RichScheduler {

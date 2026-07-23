@@ -27,6 +27,8 @@ use any_mcp::collection_member_toolset::{
 use anytype::keystore::KeyStore;
 #[cfg(feature = "acceptance-harness")]
 use anytype::test_util::retry_definitive_rate_limit;
+#[cfg(feature = "acceptance-harness")]
+use anytype::test_util::{DisposableCallbackStage, disposable_callback_error};
 use anytype::{
     chats::MessageContent,
     error::AnytypeError,
@@ -47,7 +49,7 @@ mod support;
 use support::live_scenario::BodyDriverMetrics;
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    BODY_DIAGNOSTIC_SECRET, BodyReadOnlyEvidence, BodyScenarioEvidence,
+    BODY_DIAGNOSTIC_SECRET, BodyReadOnlyEvidence, BodyScenarioEvidence, BodyScenarioFailure,
     run_body_read_only_scenario, run_body_scenario,
 };
 use support::{
@@ -4095,6 +4097,17 @@ fn body_protocol_frames_match(stable: &[Value; 2], preview: &[Value; 2]) -> bool
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn body_scenario_callback_error(
+    stage: DisposableCallbackStage,
+    failure: BodyScenarioFailure,
+) -> TestError {
+    TestError::DisposableCallback {
+        stage,
+        category: failure.category(),
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn run_direct_body_phase(
     ctx: &TestContext,
 ) -> BodyAcceptancePhaseFuture<'_, (BodyScenarioEvidence, Vec<Value>)> {
@@ -4107,7 +4120,9 @@ fn run_direct_body_phase(
         let mut direct_driver = DirectBodyDriver { driver: direct };
         let evidence = run_body_scenario(&mut direct_driver, ctx, "direct")
             .await
-            .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?;
+            .map_err(|failure| {
+                body_scenario_callback_error(DisposableCallbackStage::BodyDirect, failure)
+            })?;
         Ok((evidence, descriptors))
     })
 }
@@ -4138,9 +4153,14 @@ fn run_spawned_body_phase<'a>(
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
+        let callback_stage = if options.preview {
+            DisposableCallbackStage::BodyStdioPreview
+        } else {
+            DisposableCallbackStage::BodyStdioStable
+        };
         let scenario = run_body_scenario(&mut driver, ctx, transport)
             .await
-            .map_err(|_| sentinel_assertion("spawned shared body scenario failed"))?;
+            .map_err(|failure| body_scenario_callback_error(callback_stage, failure))?;
         let stale_cursor_frame = {
             let mut guard = lock_driver(&child);
             let process = guard
@@ -4186,9 +4206,19 @@ fn run_spawned_read_only_body_phase<'a>(
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
+        let callback_stage = if options.preview {
+            DisposableCallbackStage::BodyReadOnlyPreview
+        } else {
+            DisposableCallbackStage::BodyReadOnlyStable
+        };
         let evidence = run_body_read_only_scenario(&mut driver, space_id, object_id)
             .await
-            .map_err(|_| sentinel_assertion("read-only body scenario failed"))?;
+            .map_err(|_| {
+                disposable_callback_error(
+                    callback_stage,
+                    sentinel_assertion("read-only body scenario failed"),
+                )
+            })?;
         let (_, output) = take_registered_body_driver(&child)?
             .try_finish()
             .map_err(|_| sentinel_assertion("read-only body child did not stop"))?;

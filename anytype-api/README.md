@@ -655,10 +655,11 @@ That fail-closed anchor policy also applies to a sibling target's parent and
 the existing first child used to encode a first-child insertion. Verified
 table creation proves the canonical ordered columns/rows layout regions,
 direct column and row membership, dimensions, exact first-row header state,
-and one ordered canonical empty paragraph leaf per cell. Missing, extra,
-misplaced, nonempty, nested, structurally typed, or non-default-presentation
-cells fail receipt verification; aggregate descendant counts are never
-accepted as table evidence.
+and Heart's sparse initial cells: no cells without a header, or one ordered
+empty paragraph leaf with grey background per column under the header row
+only. Missing, extra, misplaced, nonempty, nested, structurally typed, or
+noncanonical-presentation cells fail receipt verification; aggregate
+descendant counts are never accepted as table evidence.
 
 ## Cache-independent Space Reads
 

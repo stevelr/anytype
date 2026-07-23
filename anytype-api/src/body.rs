@@ -1027,6 +1027,8 @@ pub mod test_fixtures {
         NonemptyCell,
         /// One cell uses non-default presentation.
         WrongCellPresentation,
+        /// One header cell omits its required grey background.
+        WrongCellBackground,
         /// One cell has a child.
         CellWithChild,
         /// Table regions appear in the wrong order.
@@ -1037,6 +1039,16 @@ pub mod test_fixtures {
     /// with one deliberate semantic shape defect.
     #[must_use]
     pub fn table_snapshot(defect: TableFixtureDefect) -> Option<BodySnapshot> {
+        table_snapshot_with_header(true, defect)
+    }
+
+    /// Builds a valid sparse two-by-two table with or without a header row,
+    /// optionally with one deliberate semantic shape defect.
+    #[must_use]
+    pub fn table_snapshot_with_header(
+        header_row: bool,
+        defect: TableFixtureDefect,
+    ) -> Option<BodySnapshot> {
         let block = |id: &str, children: &[&str], content_value| model::Block {
             id: id.to_owned(),
             fields: None,
@@ -1057,17 +1069,27 @@ pub mod test_fixtures {
                 }),
             )
         };
+        let header_cell = |id: &str, value: &str| {
+            let mut cell = text(id, value);
+            cell.background_color = "grey".to_owned();
+            cell
+        };
         let table_children = if defect == TableFixtureDefect::ReversedRegions {
             ["rows", "columns"]
         } else {
             ["columns", "rows"]
         };
-        let row_two_cells: &[&str] = if defect == TableFixtureDefect::MissingCell {
-            &["r2c1"]
-        } else if defect == TableFixtureDefect::ExtraCell {
-            &["r2c1", "r2c2", "r2c3"]
+        let row_one_cells: &[&str] = if !header_row {
+            &[]
+        } else if defect == TableFixtureDefect::MissingCell {
+            &["r1c1"]
         } else {
-            &["r2c1", "r2c2"]
+            &["r1c1", "r1c2"]
+        };
+        let row_two_cells: &[&str] = if defect == TableFixtureDefect::ExtraCell {
+            &["r2c1"]
+        } else {
+            &[]
         };
         let cell_one_children: &[&str] = if defect == TableFixtureDefect::CellWithChild {
             &["nested"]
@@ -1111,10 +1133,19 @@ pub mod test_fixtures {
             ),
             block(
                 "r1",
-                &["r1c1", "r1c2"],
-                ContentValue::TableRow(content::TableRow { is_header: true }),
+                row_one_cells,
+                ContentValue::TableRow(content::TableRow {
+                    is_header: header_row,
+                }),
             ),
             block(
+                "r2",
+                row_two_cells,
+                ContentValue::TableRow(content::TableRow { is_header: false }),
+            ),
+        ];
+        if header_row {
+            blocks.push(block(
                 "r1c1",
                 cell_one_children,
                 if defect == TableFixtureDefect::WrongCellType {
@@ -1129,20 +1160,16 @@ pub mod test_fixtures {
                         ..Default::default()
                     })
                 },
-            ),
-            text("r1c2", ""),
-            block(
-                "r2",
-                row_two_cells,
-                ContentValue::TableRow(content::TableRow { is_header: false }),
-            ),
-            text("r2c1", ""),
-        ];
-        if defect != TableFixtureDefect::MissingCell {
-            blocks.push(text("r2c2", ""));
+            ));
+            if let Some(cell) = blocks.iter_mut().find(|block| block.id == "r1c1") {
+                cell.background_color = "grey".to_owned();
+            }
+            if defect != TableFixtureDefect::MissingCell {
+                blocks.push(header_cell("r1c2", ""));
+            }
         }
         if defect == TableFixtureDefect::ExtraCell {
-            blocks.push(text("r2c3", ""));
+            blocks.push(text("r2c1", ""));
         }
         if defect == TableFixtureDefect::CellWithChild {
             blocks.push(text("nested", ""));
@@ -1151,6 +1178,11 @@ pub mod test_fixtures {
             && let Some(cell) = blocks.iter_mut().find(|block| block.id == "r1c1")
         {
             cell.align = model::block::Align::Center as i32;
+        }
+        if defect == TableFixtureDefect::WrongCellBackground
+            && let Some(cell) = blocks.iter_mut().find(|block| block.id == "r1c1")
+        {
+            cell.background_color.clear();
         }
         let view = model::ObjectView {
             root_id: "root".to_owned(),

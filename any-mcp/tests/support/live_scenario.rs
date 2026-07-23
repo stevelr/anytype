@@ -20,7 +20,7 @@ use anytype::{
         LinkIconSize, MarkKind, TextStyle, VerticalAlign,
     },
     prelude::{BodyOp, Color, InsertPosition, NewBlock, ObjectLayout, PropertyFormat},
-    test_util::{TestContext, unique_suffix},
+    test_util::{DisposableFailureCategory, TestContext, unique_suffix},
 };
 
 /// Seeded value that must never appear in stderr or protocol errors.
@@ -221,9 +221,62 @@ pub struct BodyScenarioEvidence {
     pub listed_block_count: usize,
 }
 
+/// Closed, payload-free stage for a body acceptance failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyScenarioStage {
+    /// Deterministic fixture construction.
+    Fixture,
+    /// Catalog and exact pagination checks.
+    Pagination,
+    /// Stale continuation rejection.
+    StaleCursor,
+    /// Primitive mutation workflows.
+    Primitive,
+    /// Primary rich-page create.
+    RichPrimaryCreate,
+    /// Primary rich-page independent readback.
+    RichPrimaryReadback,
+    /// Primary rich-page replay.
+    RichPrimaryReplay,
+    /// Rich-page update matrix.
+    RichUpdates,
+    /// Supplemental rich-page variants.
+    RichSupplemental,
+}
+
+/// Payload-free failure returned by the shared body acceptance scenario.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BodyScenarioFailure {
+    stage: BodyScenarioStage,
+}
+
+impl BodyScenarioFailure {
+    /// Returns the closed disposable diagnostic category for this failure.
+    #[must_use]
+    pub const fn category(self) -> DisposableFailureCategory {
+        match self.stage {
+            BodyScenarioStage::Fixture => DisposableFailureCategory::BodyFixture,
+            BodyScenarioStage::Pagination => DisposableFailureCategory::BodyPagination,
+            BodyScenarioStage::StaleCursor => DisposableFailureCategory::BodyStaleCursor,
+            BodyScenarioStage::Primitive => DisposableFailureCategory::BodyPrimitive,
+            BodyScenarioStage::RichPrimaryCreate => {
+                DisposableFailureCategory::BodyRichPrimaryCreate
+            }
+            BodyScenarioStage::RichPrimaryReadback => {
+                DisposableFailureCategory::BodyRichPrimaryReadback
+            }
+            BodyScenarioStage::RichPrimaryReplay => {
+                DisposableFailureCategory::BodyRichPrimaryReplay
+            }
+            BodyScenarioStage::RichUpdates => DisposableFailureCategory::BodyRichUpdates,
+            BodyScenarioStage::RichSupplemental => DisposableFailureCategory::BodyRichSupplemental,
+        }
+    }
+}
+
 /// Heap-owned future for the fixture-heavy rich-body acceptance workflow.
 pub type BodyScenarioFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<BodyScenarioEvidence, String>> + 'a>>;
+    Pin<Box<dyn Future<Output = Result<BodyScenarioEvidence, BodyScenarioFailure>> + 'a>>;
 
 #[test]
 fn body_scenario_futures_keep_only_a_heap_handle_inline() {
@@ -1165,9 +1218,9 @@ fn verify_table_shape(
     let Some(row_region) = snapshot.get(&table.children[1]) else {
         return false;
     };
-    let Some(expected_subtree_count) = rows
-        .checked_mul(columns)
-        .and_then(|cells| cells.checked_add(rows))
+    let materialized_cells = if header_row { columns } else { 0 };
+    let Some(expected_subtree_count) = materialized_cells
+        .checked_add(rows)
         .and_then(|value| value.checked_add(columns))
         .and_then(|value| value.checked_add(3))
     else {
@@ -1207,7 +1260,7 @@ fn verify_table_shape(
                     block.content,
                     BlockContent::TableRow { is_header }
                         if is_header == (header_row && index == 0)
-                ) && block.children.len() == columns
+                ) && block.children.len() == if header_row && index == 0 { columns } else { 0 }
                     && block.children.iter().all(|cell_id| {
                         snapshot
                             .get(cell_id)
@@ -1231,13 +1284,18 @@ fn canonical_empty_table_cell(block: &BodyBlock) -> bool {
     ) && block.children.is_empty()
         && block.align == HorizontalAlign::Left
         && block.vertical_align == VerticalAlign::Top
-        && block.background_color.is_none()
+        && block
+            .background_color
+            .as_ref()
+            .is_some_and(|color| color.as_str() == "grey")
         && block.restrictions == BlockRestrictions::default()
 }
 
 #[test]
 fn independent_table_shape_rejects_every_noncanonical_cell_fixture() {
-    use anytype::body::test_fixtures::{TableFixtureDefect, table_snapshot};
+    use anytype::body::test_fixtures::{
+        TableFixtureDefect, table_snapshot, table_snapshot_with_header,
+    };
 
     let verify = |defect| {
         let snapshot = table_snapshot(defect).expect("valid table fixture graph");
@@ -1256,11 +1314,15 @@ fn independent_table_shape_rejects_every_noncanonical_cell_fixture() {
         TableFixtureDefect::WrongCellType,
         TableFixtureDefect::NonemptyCell,
         TableFixtureDefect::WrongCellPresentation,
+        TableFixtureDefect::WrongCellBackground,
         TableFixtureDefect::CellWithChild,
         TableFixtureDefect::ReversedRegions,
     ] {
         assert!(!verify(defect), "accepted malformed fixture: {defect:?}");
     }
+    let no_header =
+        table_snapshot_with_header(false, TableFixtureDefect::None).expect("no-header fixture");
+    assert!(verify_table_shape(&no_header, "table", 2, 2, false));
 }
 
 fn verify_primary_rich_snapshot(snapshot: &BodySnapshot, ids: &[String], target: &str) -> bool {
@@ -1411,7 +1473,9 @@ async fn run_body_scenario_inner(
     driver: &mut impl McpDriver,
     ctx: &TestContext,
     transport: &str,
-) -> Result<BodyScenarioEvidence, String> {
+) -> Result<BodyScenarioEvidence, BodyScenarioFailure> {
+    let mut stage = BodyScenarioStage::Fixture;
+    let outcome: Result<BodyScenarioEvidence, String> = async {
     let mut normalized_results = Vec::new();
     let suffix = unique_suffix();
     let page = ctx
@@ -1497,6 +1561,7 @@ async fn run_body_scenario_inner(
         );
     }
 
+    stage = BodyScenarioStage::Pagination;
     let tools = driver.list_tools().await?;
     for name in [
         "body_block_list",
@@ -1598,6 +1663,7 @@ async fn run_body_scenario_inner(
         return Err("body pages did not preserve exact DFS order".to_owned());
     }
 
+    stage = BodyScenarioStage::StaleCursor;
     let stale_first = driver
         .call_tool(
             "body_block_list",
@@ -1628,6 +1694,7 @@ async fn run_body_scenario_inner(
     }
     normalized_results.push(stale_error.normalized_result().clone());
 
+    stage = BodyScenarioStage::Primitive;
     let fresh = driver
         .call_tool(
             "body_block_list",
@@ -1837,6 +1904,7 @@ async fn run_body_scenario_inner(
     if !adjacent || !recreated_relation_detected {
         return Err("relation recreation/move was not independently verified".to_owned());
     }
+        stage = BodyScenarioStage::RichPrimaryCreate;
     let rich_input = json!({
         "space":ctx.space_id,"name":format!("Rich {transport} {suffix}"),
         "idempotency_key":format!("rich-{transport}-{suffix}"),
@@ -1895,18 +1963,20 @@ async fn run_body_scenario_inner(
     if rich["status"] != "complete" {
         return Err("rich page workflow did not complete".to_owned());
     }
-    let primary_ids = rich_applied_ids(&rich, &primary_keys)?;
-    let rich_snapshot = ctx
+        let primary_ids = rich_applied_ids(&rich, &primary_keys)?;
+        stage = BodyScenarioStage::RichPrimaryReadback;
+        let rich_snapshot = ctx
         .client
         .blocks()
         .body(&ctx.space_id, &rich_page_id)
         .fetch()
         .await
         .map_err(|_| "independent rich body read failed".to_owned())?;
-    if !verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id) {
-        return Err("independent primary rich ObjectShow verification failed".to_owned());
-    }
-    let before_replay_metrics = driver.body_acceptance_metrics();
+        if !verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id) {
+            return Err("independent primary rich ObjectShow verification failed".to_owned());
+        }
+        stage = BodyScenarioStage::RichPrimaryReplay;
+        let before_replay_metrics = driver.body_acceptance_metrics();
     let rich_replay = driver.call_tool("rich_page_create", rich_input).await?;
     if let (Some(before), Some(after)) = (before_replay_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
@@ -1923,6 +1993,7 @@ async fn run_body_scenario_inner(
     }
     normalized_results.push(normalize_body_result(&rich_replay));
 
+    stage = BodyScenarioStage::RichUpdates;
     let mut rich_snapshot_hash = body_string(
         &rich_replay,
         "/final_snapshot_hash",
@@ -2040,6 +2111,7 @@ async fn run_body_scenario_inner(
         rich_snapshot_hash = next_hash;
     }
 
+    stage = BodyScenarioStage::RichSupplemental;
     let supplemental_input = json!({
         "space":ctx.space_id,"name":format!("Rich variants {transport} {suffix}"),
         "idempotency_key":format!("rich-variants-{transport}-{suffix}"),
@@ -2100,6 +2172,9 @@ async fn run_body_scenario_inner(
         normalized_results,
         listed_block_count: listed_block_ids.len(),
     })
+    }
+    .await;
+    outcome.map_err(|_| BodyScenarioFailure { stage })
 }
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

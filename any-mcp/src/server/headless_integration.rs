@@ -24,8 +24,8 @@ use anytype::{
         SetProperty,
     },
     test_util::{
-        DisposableRun, TestContext, TestError, unique_suffix, with_disposable_space_context,
-        with_test_context,
+        DisposableCallbackStage, DisposableRun, TestContext, TestError, unique_suffix,
+        with_disposable_space_context, with_test_context,
     },
 };
 use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject, ReadResourceRequestParams};
@@ -2289,8 +2289,9 @@ fn headless_direct_body_blocks_runs_shared_scenario() {
                     let mut driver = DirectRouterDriver { server: &server };
                     let evidence = run_body_scenario(&mut driver, ctx.as_ref(), "direct")
                         .await
-                        .map_err(|_| TestError::Assertion {
-                            message: "direct shared body scenario failed".to_owned(),
+                        .map_err(|failure| TestError::DisposableCallback {
+                            stage: DisposableCallbackStage::BodyDirect,
+                            category: failure.category(),
                         })?;
                     if evidence.normalized_results.is_empty()
                         || evidence.listed_block_count != BODY_PAGINATION_ITEM_COUNT
