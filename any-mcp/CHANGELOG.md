@@ -35,6 +35,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   close the acceptance matrix. Ignored body acceptance also fails closed unless
   a reviewed absolute redacted server-log path is configured, and its
   fixture-heavy shared workflow is heap-owned for default-stack execution.
+  The production router returns optional-registry futures before constructing
+  the unrelated Phase-1 aggregate, and the live 20-block pagination proof
+  retains its cursor-bound limit across three exact pages.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection

@@ -6815,6 +6815,26 @@ mod tests {
         AnyMcpServer::new(runtime(selected, profile, read_only)).expect("body-block server")
     }
 
+    #[cfg(feature = "acceptance-harness")]
+    #[tokio::test]
+    async fn acceptance_direct_body_dispatch_bypasses_phase1_on_default_stack() {
+        let direct = BodyAcceptanceDirect::new(client(), false).expect("acceptance driver");
+        let before = direct.server.runtime().client().http_metrics();
+        let result = direct
+            .call(BODY_BLOCK_LIST, json!({"unparsed_secret":true}))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value["code"].as_str()),
+            Some("upstream")
+        );
+        assert_eq!(direct.server.phase1_dispatch_polls(), 0);
+        assert_eq!(direct.server.runtime().client().http_metrics(), before);
+    }
+
     fn run_large_future<F, Fut>(test: F)
     where
         F: FnOnce() -> Fut + Send + 'static,

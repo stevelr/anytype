@@ -641,6 +641,17 @@ async fn optional_toolset_status_direct_contract() {
             "active_toolsets": ["alpha", "beta"]
         }))
     );
+    assert_eq!(selected.phase1_dispatch_polls(), 0);
+    let status_error = selected
+        .dispatch_tool(
+            CallToolRequestParams::new("optional_toolset_status")
+                .with_arguments(json!({"unexpected": true}).as_object().cloned().unwrap()),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("selected malformed status arguments");
+    assert_eq!(status_error, invalid_arguments());
+    assert_eq!(selected.phase1_dispatch_polls(), 0);
 
     let result = selected
         .dispatch_tool(
@@ -651,6 +662,7 @@ async fn optional_toolset_status_direct_contract() {
         .expect("selected alpha dispatch");
     assert_eq!(result.structured_content, Some(json!({"complete": true})));
     assert_eq!(ALPHA_CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(selected.phase1_dispatch_polls(), 0);
 
     let resource = selected
         .read_resource_wire(
@@ -747,6 +759,7 @@ async fn disabled_and_read_only_calls_reject_before_decode_or_handler_work() {
         task_error,
         ErrorData::method_not_found::<CallToolRequestMethod>()
     );
+    assert_eq!(disabled.phase1_dispatch_polls(), 0);
 
     let status_error = AnyMcpServer::new(runtime_with_selection(
         OptionalToolsetSelection::default(),
@@ -777,6 +790,19 @@ async fn disabled_and_read_only_calls_reject_before_decode_or_handler_work() {
         .expect("read-only rejection is a tool error");
     assert_eq!(result.is_error, Some(true));
     assert_eq!(ALPHA_CALLS.load(Ordering::SeqCst), 0);
+    assert_eq!(read_only.phase1_dispatch_polls(), 0);
+
+    let selected = server("alpha", ApplicationProfile::Compact, false);
+    let selected_task_error = selected
+        .dispatch_tool(
+            CallToolRequestParams::new(ALPHA_READ).with_task(TaskMetadata::new()),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("selected optional task metadata is rejected");
+    assert_eq!(selected_task_error, invalid_arguments());
+    assert_eq!(ALPHA_CALLS.load(Ordering::SeqCst), 0);
+    assert_eq!(selected.phase1_dispatch_polls(), 0);
 
     let resource_error = disabled
         .read_resource_wire(
@@ -866,6 +892,8 @@ async fn phase_one_server_status_is_unchanged_by_optional_selection() {
         .await
         .unwrap();
     assert_eq!(selected_result, base_result);
+    assert_eq!(base.phase1_dispatch_polls(), 1);
+    assert_eq!(selected.phase1_dispatch_polls(), 1);
 }
 
 #[test]
