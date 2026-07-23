@@ -3780,8 +3780,13 @@ enum BodyFrameParityFailure {
     EnvelopeVersion,
     EnvelopeId,
     EnvelopeShape,
+    OutcomeShape,
     ResultShape,
     TextDuplicate,
+    ErrorShape,
+    ErrorCode,
+    ErrorMessage,
+    ErrorData,
     Payload,
 }
 
@@ -3794,8 +3799,13 @@ impl BodyFrameParityFailure {
             Self::EnvelopeVersion => "envelope_version",
             Self::EnvelopeId => "envelope_id",
             Self::EnvelopeShape => "envelope_shape",
+            Self::OutcomeShape => "outcome_shape",
             Self::ResultShape => "result_shape",
             Self::TextDuplicate => "text_duplicate",
+            Self::ErrorShape => "error_shape",
+            Self::ErrorCode => "error_code",
+            Self::ErrorMessage => "error_message",
+            Self::ErrorData => "error_data",
             Self::Payload => "payload",
         }
     }
@@ -3820,12 +3830,28 @@ fn body_frame_parity_diagnostic(
         eprintln!(
             "body_semantic_phase=parity event=frame_mismatch frame_index={index} \
              category={} stable_envelope_keys={} preview_envelope_keys={} \
-             stable_result_keys={} preview_result_keys={}",
+             stable_has_jsonrpc={} preview_has_jsonrpc={} stable_has_id={} preview_has_id={} \
+             stable_has_result={} preview_has_result={} stable_has_error={} preview_has_error={} \
+             stable_result_keys={} preview_result_keys={} stable_error_keys={} preview_error_keys={} \
+             error_code_equal={} error_message_equal={} error_data_presence_equal={}",
             failure.category(),
             body_frame_key_count(stable, ""),
             body_frame_key_count(preview, ""),
+            stable.get("jsonrpc").is_some(),
+            preview.get("jsonrpc").is_some(),
+            stable.get("id").is_some(),
+            preview.get("id").is_some(),
+            stable.get("result").is_some(),
+            preview.get("result").is_some(),
+            stable.get("error").is_some(),
+            preview.get("error").is_some(),
             body_frame_key_count(stable, "/result"),
             body_frame_key_count(preview, "/result"),
+            body_frame_key_count(stable, "/error"),
+            body_frame_key_count(preview, "/error"),
+            stable.pointer("/error/code") == preview.pointer("/error/code"),
+            stable.pointer("/error/message") == preview.pointer("/error/message"),
+            stable.pointer("/error/data").is_some() == preview.pointer("/error/data").is_some(),
         );
     }
 }
@@ -3838,43 +3864,86 @@ fn compare_body_protocol_frame(
     if stable.pointer("/result/resultType").is_some() {
         return Err(BodyFrameParityFailure::StableResultType);
     }
+    if stable.get("jsonrpc") != preview.get("jsonrpc") {
+        return Err(BodyFrameParityFailure::EnvelopeVersion);
+    }
+    if stable.get("id") != preview.get("id") {
+        return Err(BodyFrameParityFailure::EnvelopeId);
+    }
+    let Some(stable_object) = stable.as_object() else {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    };
+    let Some(preview_object) = preview.as_object() else {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    };
+    if stable_object.keys().collect::<Vec<_>>() != preview_object.keys().collect::<Vec<_>>() {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    }
+    match (
+        stable.get("result"),
+        stable.get("error"),
+        preview.get("result"),
+        preview.get("error"),
+    ) {
+        (Some(_), None, Some(_), None) => compare_body_result_frame(stable, preview),
+        (None, Some(_), None, Some(_)) => compare_body_error_frame(stable, preview),
+        _ => Err(BodyFrameParityFailure::OutcomeShape),
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn compare_body_result_frame(
+    stable: &Value,
+    preview: &Value,
+) -> Result<(), BodyFrameParityFailure> {
     let mut normalized_preview = preview.clone();
     let Some(preview_result) = normalized_preview
         .get_mut("result")
         .and_then(Value::as_object_mut)
     else {
-        return Err(BodyFrameParityFailure::EnvelopeShape);
+        return Err(BodyFrameParityFailure::ResultShape);
     };
     if preview_result.remove("resultType") != Some(json!("complete")) {
         return Err(BodyFrameParityFailure::PreviewResultType);
     }
     validate_body_frame_text_duplicate(stable)?;
     validate_body_frame_text_duplicate(&normalized_preview)?;
-    if stable.get("jsonrpc") != normalized_preview.get("jsonrpc") {
-        return Err(BodyFrameParityFailure::EnvelopeVersion);
-    }
-    if stable.get("id") != normalized_preview.get("id") {
-        return Err(BodyFrameParityFailure::EnvelopeId);
-    }
-    let Some(stable_object) = stable.as_object() else {
-        return Err(BodyFrameParityFailure::EnvelopeShape);
-    };
-    let Some(preview_object) = normalized_preview.as_object() else {
-        return Err(BodyFrameParityFailure::EnvelopeShape);
-    };
-    if stable_object.keys().collect::<Vec<_>>() != preview_object.keys().collect::<Vec<_>>() {
-        return Err(BodyFrameParityFailure::EnvelopeShape);
-    }
     let Some(stable_result) = stable.get("result").and_then(Value::as_object) else {
-        return Err(BodyFrameParityFailure::EnvelopeShape);
+        return Err(BodyFrameParityFailure::ResultShape);
     };
     let Some(preview_result) = normalized_preview.get("result").and_then(Value::as_object) else {
-        return Err(BodyFrameParityFailure::EnvelopeShape);
+        return Err(BodyFrameParityFailure::ResultShape);
     };
     if stable_result.keys().collect::<Vec<_>>() != preview_result.keys().collect::<Vec<_>>() {
         return Err(BodyFrameParityFailure::ResultShape);
     }
     if stable != &normalized_preview {
+        return Err(BodyFrameParityFailure::Payload);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn compare_body_error_frame(stable: &Value, preview: &Value) -> Result<(), BodyFrameParityFailure> {
+    let Some(stable_error) = stable.get("error").and_then(Value::as_object) else {
+        return Err(BodyFrameParityFailure::ErrorShape);
+    };
+    let Some(preview_error) = preview.get("error").and_then(Value::as_object) else {
+        return Err(BodyFrameParityFailure::ErrorShape);
+    };
+    if stable_error.keys().collect::<Vec<_>>() != preview_error.keys().collect::<Vec<_>>() {
+        return Err(BodyFrameParityFailure::ErrorShape);
+    }
+    if stable_error.get("code") != preview_error.get("code") {
+        return Err(BodyFrameParityFailure::ErrorCode);
+    }
+    if stable_error.get("message") != preview_error.get("message") {
+        return Err(BodyFrameParityFailure::ErrorMessage);
+    }
+    if stable_error.get("data") != preview_error.get("data") {
+        return Err(BodyFrameParityFailure::ErrorData);
+    }
+    if stable != preview {
         return Err(BodyFrameParityFailure::Payload);
     }
     Ok(())
@@ -4164,10 +4233,17 @@ fn run_shared_body_callback(
                 .is_some()
             || stable.frames[0].pointer("/result/isError") != Some(&Value::Bool(false))
             || stable.frames[1]
-                .pointer("/result/structuredContent/code")
+                .pointer("/error/code")
+                .and_then(Value::as_i64)
+                != Some(-32602)
+            || stable.frames[1]
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                != Some("Tool arguments do not match the declared schema.")
+            || stable.frames[1]
+                .pointer("/error/data/code")
                 .and_then(Value::as_str)
                 != Some("validation")
-            || stable.frames[1].pointer("/result/isError") != Some(&Value::Bool(true))
         {
             body_semantic_diagnostic("parity", "stable preview raw frames diverged");
             return Err(sentinel_assertion(
@@ -4234,6 +4310,15 @@ fn preview_body_protocol_test_frame(stable: &Value) -> Value {
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn body_protocol_error_frame(id: u64, code: i64, message: &str, data: Value) -> Value {
+    json!({
+        "jsonrpc":"2.0",
+        "id":id,
+        "error":{"code":code,"message":message,"data":data}
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
 #[test]
 fn body_raw_frame_parity_allows_only_preview_complete_result_type() {
     let success = body_protocol_test_frame(
@@ -4255,13 +4340,14 @@ fn body_raw_frame_parity_allows_only_preview_complete_result_type() {
             }]
         }),
     );
-    let error = body_protocol_test_frame(
+    let error = body_protocol_error_frame(
         4,
-        true,
-        json!({"code":"validation","message":"The request was invalid."}),
+        -32602,
+        "Tool arguments do not match the declared schema.",
+        json!({"code":"validation"}),
     );
     let preview_success = preview_body_protocol_test_frame(&success);
-    let preview_error = preview_body_protocol_test_frame(&error);
+    let preview_error = error.clone();
 
     assert_eq!(
         compare_body_protocol_frame(&success, &preview_success),
@@ -4399,21 +4485,64 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
         );
     }
 
-    let error = body_protocol_test_frame(
+    let error = body_protocol_error_frame(
         4,
-        true,
-        json!({"code":"validation","message":"The request was invalid."}),
+        -32602,
+        "Tool arguments do not match the declared schema.",
+        json!({"code":"validation"}),
     );
-    let preview_error = preview_body_protocol_test_frame(&error);
-    let error_drift = preview_body_protocol_test_frame(&body_protocol_test_frame(
+    let preview_error = error.clone();
+    let error_code_drift = body_protocol_error_frame(
         4,
-        true,
-        json!({"code":"upstream","message":"The request was invalid."}),
-    ));
+        -32603,
+        "Tool arguments do not match the declared schema.",
+        json!({"code":"validation"}),
+    );
     assert_eq!(
-        compare_body_protocol_frame(&error, &error_drift),
-        Err(BodyFrameParityFailure::Payload)
+        compare_body_protocol_frame(&error, &error_code_drift),
+        Err(BodyFrameParityFailure::ErrorCode)
     );
+    let error_message_drift =
+        body_protocol_error_frame(4, -32602, "Invalid params", json!({"code":"validation"}));
+    assert_eq!(
+        compare_body_protocol_frame(&error, &error_message_drift),
+        Err(BodyFrameParityFailure::ErrorMessage)
+    );
+    let error_data_drift = body_protocol_error_frame(
+        4,
+        -32602,
+        "Tool arguments do not match the declared schema.",
+        json!({"code":"upstream"}),
+    );
+    assert_eq!(
+        compare_body_protocol_frame(&error, &error_data_drift),
+        Err(BodyFrameParityFailure::ErrorData)
+    );
+    let mut error_shape_drift = preview_error.clone();
+    error_shape_drift["error"]
+        .as_object_mut()
+        .expect("test error")
+        .insert("extra".to_owned(), json!(true));
+    assert_eq!(
+        compare_body_protocol_frame(&error, &error_shape_drift),
+        Err(BodyFrameParityFailure::ErrorShape)
+    );
+    let mut both_stable = success.clone();
+    both_stable
+        .as_object_mut()
+        .expect("test envelope")
+        .insert("error".to_owned(), error["error"].clone());
+    let both_preview = preview_body_protocol_test_frame(&both_stable);
+    assert_eq!(
+        compare_body_protocol_frame(&both_stable, &both_preview),
+        Err(BodyFrameParityFailure::OutcomeShape)
+    );
+    let neither = json!({"jsonrpc":"2.0","id":3});
+    assert_eq!(
+        compare_body_protocol_frame(&neither, &neither),
+        Err(BodyFrameParityFailure::OutcomeShape)
+    );
+    assert!(compare_body_protocol_frame(&success, &preview_error).is_err());
     assert!(!body_protocol_frames_match(
         &[success, error],
         &[preview_error, preview]
