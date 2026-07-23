@@ -378,6 +378,10 @@ omit bookmark/network fetching, and accept YouTube creation only as an exact
 11-character video ID normalized to inert canonical document data. Rich
 construction is explicitly non-atomic and returns bounded applied, failed, and
 not-attempted evidence without compensation or automatic write resumption.
+Single-block create verification derives the exact parent and sibling index
+from the pre-write snapshot, rejects collateral identity, order, value, and
+structure drift, and permits restriction refresh only on the insertion
+parent. Generated table descendants must form one canonical closed subtree.
 
 The finite `anytype-api` body lifecycle caps decoded Show at
 4,194,304 bytes and every non-Show body gRPC response—including foreground and

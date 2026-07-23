@@ -4608,6 +4608,191 @@ fn projected_identity_set(snapshot: &ProjectedSnapshot) -> Option<HashSet<&str>>
     (ids.len() == snapshot.items.len()).then_some(ids)
 }
 
+struct CreateInsertion<'a> {
+    parent: &'a BlockSummary,
+    sibling_index: u64,
+    dfs_index: usize,
+}
+
+fn projected_subtree_end(items: &[BlockSummary], root_index: usize) -> Option<usize> {
+    let depth = items.get(root_index)?.depth;
+    Some(
+        items
+            .iter()
+            .enumerate()
+            .skip(root_index.checked_add(1)?)
+            .find_map(|(index, block)| (block.depth <= depth).then_some(index))
+            .unwrap_or(items.len()),
+    )
+}
+
+fn create_insertion<'a>(
+    before: &'a ProjectedSnapshot,
+    target_id: &EntityId,
+    position: WireInsertPosition,
+) -> Option<CreateInsertion<'a>> {
+    let target_index = before
+        .items
+        .iter()
+        .position(|block| &block.id == target_id)?;
+    let target = before.items.get(target_index)?;
+    let (parent_id, sibling_index, dfs_index) = match position {
+        WireInsertPosition::Before => (
+            target.parent_id.as_ref()?,
+            target.sibling_index,
+            target_index,
+        ),
+        WireInsertPosition::After => (
+            target.parent_id.as_ref()?,
+            target.sibling_index.checked_add(1)?,
+            projected_subtree_end(&before.items, target_index)?,
+        ),
+        WireInsertPosition::FirstChild => (&target.id, 0, target_index.checked_add(1)?),
+        WireInsertPosition::LastChild => (
+            &target.id,
+            target.child_count,
+            projected_subtree_end(&before.items, target_index)?,
+        ),
+    };
+    let parent = before.items.iter().find(|block| &block.id == parent_id)?;
+    Some(CreateInsertion {
+        parent,
+        sibling_index,
+        dfs_index,
+    })
+}
+
+fn projected_direct_children<'a>(
+    snapshot: &'a ProjectedSnapshot,
+    parent_id: &EntityId,
+) -> Option<Vec<&'a BlockSummary>> {
+    let parent = snapshot.items.iter().find(|block| &block.id == parent_id)?;
+    let mut children = snapshot
+        .items
+        .iter()
+        .filter(|block| block.parent_id.as_ref() == Some(parent_id))
+        .collect::<Vec<_>>();
+    children.sort_by_key(|block| block.sibling_index);
+    (children.len() == usize::try_from(parent.child_count).ok()?
+        && children
+            .iter()
+            .enumerate()
+            .all(|(index, child)| u64::try_from(index).ok() == Some(child.sibling_index)))
+    .then_some(children)
+}
+
+fn projected_created_subtree_is_closed(
+    after: &ProjectedSnapshot,
+    new_items: &[BlockSummary],
+    new_ids: &HashSet<&str>,
+    created_id: &EntityId,
+) -> bool {
+    let structurally_closed = after
+        .items
+        .iter()
+        .filter(|block| new_ids.contains(block.id.as_str()))
+        .all(|block| {
+            let parent_ok = if &block.id == created_id {
+                true
+            } else {
+                block
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|parent| new_ids.contains(parent.as_str()))
+            };
+            let depth_ok = block.parent_id.as_ref().is_some_and(|parent_id| {
+                after
+                    .items
+                    .iter()
+                    .find(|parent| &parent.id == parent_id)
+                    .and_then(|parent| parent.depth.checked_add(1))
+                    == Some(block.depth)
+            });
+            parent_ok && depth_ok && projected_direct_children(after, &block.id).is_some()
+        });
+    let Some(root) = after.items.iter().find(|block| &block.id == created_id) else {
+        return false;
+    };
+    let mut expected_dfs = Vec::with_capacity(new_items.len());
+    let mut stack = vec![root];
+    while let Some(block) = stack.pop() {
+        if expected_dfs.len() >= new_items.len() {
+            return false;
+        }
+        expected_dfs.push(block.id.as_str());
+        let Some(children) = projected_direct_children(after, &block.id) else {
+            return false;
+        };
+        stack.extend(children.into_iter().rev());
+    }
+    structurally_closed
+        && expected_dfs.len() == new_items.len()
+        && expected_dfs
+            .iter()
+            .copied()
+            .eq(new_items.iter().map(|block| block.id.as_str()))
+}
+
+fn projected_table_subtree_matches(
+    after: &ProjectedSnapshot,
+    created: &BlockSummary,
+    rows: u8,
+    columns: u8,
+    header_row: bool,
+    new_count: usize,
+) -> bool {
+    let rows = usize::from(rows);
+    let columns = usize::from(columns);
+    let Some(expected_count) = rows
+        .checked_mul(columns)
+        .and_then(|cells| cells.checked_add(rows))
+        .and_then(|value| value.checked_add(columns))
+        .and_then(|value| value.checked_add(3))
+    else {
+        return false;
+    };
+    if new_count != expected_count || created.content != BlockProjection::Table {
+        return false;
+    }
+    let Some(regions) = projected_direct_children(after, &created.id) else {
+        return false;
+    };
+    let [columns_region, rows_region] = regions.as_slice() else {
+        return false;
+    };
+    if columns_region.content
+        != (BlockProjection::Layout {
+            style: WireLayoutStyle::TableColumns,
+        })
+        || rows_region.content
+            != (BlockProjection::Layout {
+                style: WireLayoutStyle::TableRows,
+            })
+    {
+        return false;
+    }
+    let Some(column_blocks) = projected_direct_children(after, &columns_region.id) else {
+        return false;
+    };
+    let Some(row_blocks) = projected_direct_children(after, &rows_region.id) else {
+        return false;
+    };
+    column_blocks.len() == columns
+        && column_blocks
+            .iter()
+            .all(|block| block.content == BlockProjection::TableColumn && block.child_count == 0)
+        && row_blocks.len() == rows
+        && row_blocks.iter().enumerate().all(|(index, row)| {
+            row.content
+                == (BlockProjection::TableRow {
+                    is_header: header_row && index == 0,
+                })
+                && projected_direct_children(after, &row.id).is_some_and(|cells| {
+                    cells.len() == columns && cells.iter().all(|cell| cell.child_count == 0)
+                })
+        })
+}
+
 fn verify_create_transition(
     before: &ProjectedSnapshot,
     after: &ProjectedSnapshot,
@@ -4619,54 +4804,121 @@ fn verify_create_transition(
     if before.space_id != after.space_id
         || before.object_id != after.object_id
         || before.root_id != after.root_id
-        || before.items.iter().any(|block| &block.id == created_id)
     {
         return false;
     }
-    let Some(created) = after.items.iter().find(|block| &block.id == created_id) else {
+    let (Some(before_ids), Some(after_ids)) = (
+        projected_identity_set(before),
+        projected_identity_set(after),
+    ) else {
         return false;
     };
-    let Some(target) = after.items.iter().find(|block| &block.id == target_id) else {
+    if before_ids.contains(created_id.as_str()) || !after_ids.contains(created_id.as_str()) {
+        return false;
+    }
+    let Some(insertion) = create_insertion(before, target_id, position) else {
+        return false;
+    };
+    let Some(created) = after.items.iter().find(|block| &block.id == created_id) else {
         return false;
     };
     let Ok(intended) = intended_create_output(&after.space_id, &after.object_id, input) else {
         return false;
     };
-    let exact_position = match position {
-        WireInsertPosition::Before => {
-            created.parent_id == target.parent_id
-                && created.sibling_index.checked_add(1) == Some(target.sibling_index)
-        }
-        WireInsertPosition::After => {
-            created.parent_id == target.parent_id
-                && target.sibling_index.checked_add(1) == Some(created.sibling_index)
-        }
-        WireInsertPosition::FirstChild => {
-            created.parent_id.as_ref() == Some(target_id) && created.sibling_index == 0
-        }
-        WireInsertPosition::LastChild => {
-            created.parent_id.as_ref() == Some(target_id)
-                && created.sibling_index.checked_add(1) == Some(target.child_count)
-        }
+    let Some(new_count) = after.items.len().checked_sub(before.items.len()) else {
+        return false;
     };
-    exact_position
+    let Some(new_end) = insertion.dfs_index.checked_add(new_count) else {
+        return false;
+    };
+    let Some(new_items) = after.items.get(insertion.dfs_index..new_end) else {
+        return false;
+    };
+    let prior_order_exact = after
+        .items
+        .get(..insertion.dfs_index)
+        .zip(before.items.get(..insertion.dfs_index))
+        .is_some_and(|(current, prior)| {
+            current
+                .iter()
+                .map(|block| &block.id)
+                .eq(prior.iter().map(|block| &block.id))
+        })
+        && after
+            .items
+            .get(new_end..)
+            .zip(before.items.get(insertion.dfs_index..))
+            .is_some_and(|(current, prior)| {
+                current
+                    .iter()
+                    .map(|block| &block.id)
+                    .eq(prior.iter().map(|block| &block.id))
+            });
+    let new_ids = new_items
+        .iter()
+        .map(|block| block.id.as_str())
+        .collect::<HashSet<_>>();
+    let new_identity_exact = new_count > 0
+        && new_ids.len() == new_count
+        && new_items
+            .first()
+            .is_some_and(|block| &block.id == created_id)
+        && new_ids.iter().all(|id| !before_ids.contains(id));
+    let created_depth = insertion.parent.depth.checked_add(1);
+    let created_exact = created.parent_id.as_ref() == Some(&insertion.parent.id)
+        && created.sibling_index == insertion.sibling_index
+        && Some(created.depth) == created_depth
         && created.content == intended.block.content
         && created.align == intended.block.align
         && created.vertical_align == intended.block.vertical_align
-        && created.background_color == intended.block.background_color
-        && before.items.iter().all(|prior| {
-            after
-                .items
-                .iter()
-                .find(|current| current.id == prior.id)
-                .is_some_and(|current| {
-                    prior.content == current.content
-                        && prior.restrictions == current.restrictions
-                        && prior.align == current.align
-                        && prior.vertical_align == current.vertical_align
-                        && prior.background_color == current.background_color
-                })
-        })
+        && created.background_color == intended.block.background_color;
+    let prior_state_exact = before.items.iter().all(|prior| {
+        after
+            .items
+            .iter()
+            .find(|current| current.id == prior.id)
+            .is_some_and(|current| {
+                let expected_child_count = if prior.id == insertion.parent.id {
+                    prior.child_count.checked_add(1)
+                } else {
+                    Some(prior.child_count)
+                };
+                let expected_sibling_index = if prior.parent_id.as_ref()
+                    == Some(&insertion.parent.id)
+                    && prior.sibling_index >= insertion.sibling_index
+                {
+                    prior.sibling_index.checked_add(1)
+                } else {
+                    Some(prior.sibling_index)
+                };
+                prior.content == current.content
+                    && (prior.id == insertion.parent.id
+                        || prior.restrictions == current.restrictions)
+                    && prior.align == current.align
+                    && prior.vertical_align == current.vertical_align
+                    && prior.background_color == current.background_color
+                    && prior.parent_id == current.parent_id
+                    && prior.depth == current.depth
+                    && expected_child_count == Some(current.child_count)
+                    && expected_sibling_index == Some(current.sibling_index)
+            })
+    });
+    let materialized_shape_exact = match input {
+        NewBlockInput::Table {
+            rows,
+            columns,
+            header_row,
+        } => {
+            projected_table_subtree_matches(after, created, *rows, *columns, *header_row, new_count)
+        }
+        _ => new_count == 1 && created.child_count == 0,
+    };
+    prior_order_exact
+        && new_identity_exact
+        && created_exact
+        && prior_state_exact
+        && projected_created_subtree_is_closed(after, new_items, &new_ids, created_id)
+        && materialized_shape_exact
 }
 
 fn verify_update_transition(
@@ -6951,6 +7203,47 @@ mod tests {
         }
     }
 
+    fn projected_text_insertion(
+        before: &ProjectedSnapshot,
+        target: &EntityId,
+        position: WireInsertPosition,
+        created_id: &str,
+    ) -> ProjectedSnapshot {
+        let insertion = create_insertion(before, target, position).expect("fixture insertion");
+        let parent_id = insertion.parent.id.clone();
+        let parent_depth = insertion.parent.depth;
+        let sibling_index = insertion.sibling_index;
+        let dfs_index = insertion.dfs_index;
+        let mut items = before.items.clone();
+        for block in &mut items {
+            if block.id == parent_id {
+                block.child_count = block
+                    .child_count
+                    .checked_add(1)
+                    .expect("fixture child count");
+            }
+            if block.parent_id.as_ref() == Some(&parent_id) && block.sibling_index >= sibling_index
+            {
+                block.sibling_index = block
+                    .sibling_index
+                    .checked_add(1)
+                    .expect("fixture sibling index");
+            }
+        }
+        items.insert(
+            dfs_index,
+            summary(
+                created_id,
+                Some(parent_id.as_str()),
+                sibling_index,
+                parent_depth.checked_add(1).expect("fixture depth"),
+                0,
+                projected_text("created"),
+            ),
+        );
+        projected(items)
+    }
+
     fn rich_applied(index: u8, key: &str, id: &str) -> RichApplied {
         RichApplied {
             index,
@@ -8842,6 +9135,364 @@ mod tests {
     }
 
     #[test]
+    fn create_transition_enforces_every_exact_insertion_position() {
+        let before = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary("parent", Some("root"), 0, 1, 2, projected_text("parent")),
+            summary("first", Some("parent"), 0, 2, 1, projected_text("first")),
+            summary("nested", Some("first"), 0, 3, 0, projected_text("nested")),
+            summary("second", Some("parent"), 1, 2, 0, projected_text("second")),
+            summary("tail", Some("root"), 1, 1, 0, projected_text("tail")),
+        ]);
+        let input = parse_block(text_block("created"));
+        let cases = [
+            ("second", WireInsertPosition::Before, "parent", 1, 2),
+            ("first", WireInsertPosition::After, "parent", 1, 2),
+            ("parent", WireInsertPosition::FirstChild, "parent", 0, 2),
+            ("parent", WireInsertPosition::LastChild, "parent", 2, 2),
+        ];
+        for (target, position, expected_parent, expected_index, expected_depth) in cases {
+            let target_id = EntityId::new(target).expect("target");
+            let created_id = EntityId::new("created").expect("created");
+            let after = projected_text_insertion(&before, &target_id, position, "created");
+            let created = after
+                .items
+                .iter()
+                .find(|block| block.id == created_id)
+                .expect("created block");
+            assert_eq!(
+                created.parent_id.as_ref().map(EntityId::as_str),
+                Some(expected_parent)
+            );
+            assert_eq!(created.sibling_index, expected_index);
+            assert_eq!(created.depth, expected_depth);
+            assert!(verify_create_transition(
+                &before,
+                &after,
+                &created_id,
+                &target_id,
+                position,
+                &input,
+            ));
+
+            let mut refreshed_parent = after.clone();
+            refreshed_parent
+                .items
+                .iter_mut()
+                .find(|block| block.id.as_str() == expected_parent)
+                .expect("insertion parent")
+                .restrictions
+                .drop_on = true;
+            assert!(verify_create_transition(
+                &before,
+                &refreshed_parent,
+                &created_id,
+                &target_id,
+                position,
+                &input,
+            ));
+        }
+
+        let root_id = EntityId::new("root").expect("root");
+        let root_before = projected(vec![
+            summary("root", None, 0, 0, 1, projected_text("root")),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+        ]);
+        for (position, expected_index) in [
+            (WireInsertPosition::FirstChild, 0),
+            (WireInsertPosition::LastChild, 1),
+        ] {
+            let created_id = EntityId::new("created").expect("created");
+            let mut after = projected_text_insertion(&root_before, &root_id, position, "created");
+            assert_eq!(
+                after
+                    .items
+                    .iter()
+                    .find(|block| block.id == created_id)
+                    .expect("created")
+                    .sibling_index,
+                expected_index
+            );
+            after
+                .items
+                .iter_mut()
+                .find(|block| block.id == root_id)
+                .expect("root")
+                .restrictions
+                .edit = true;
+            assert!(verify_create_transition(
+                &root_before,
+                &after,
+                &created_id,
+                &root_id,
+                position,
+                &input,
+            ));
+        }
+    }
+
+    #[test]
+    fn create_transition_rejects_collateral_structural_and_value_drift() {
+        let before = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary("parent", Some("root"), 0, 1, 2, projected_text("parent")),
+            summary("first", Some("parent"), 0, 2, 1, projected_text("first")),
+            summary("nested", Some("first"), 0, 3, 0, projected_text("nested")),
+            summary("second", Some("parent"), 1, 2, 0, projected_text("second")),
+            summary("tail", Some("root"), 1, 1, 0, projected_text("tail")),
+        ]);
+        let target_id = EntityId::new("first").expect("target");
+        let created_id = EntityId::new("created").expect("created");
+        let input = parse_block(text_block("created"));
+        let valid =
+            projected_text_insertion(&before, &target_id, WireInsertPosition::After, "created");
+        assert!(verify_create_transition(
+            &before,
+            &valid,
+            &created_id,
+            &target_id,
+            WireInsertPosition::After,
+            &input,
+        ));
+
+        let mut unrelated_restriction = valid.clone();
+        unrelated_restriction
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .restrictions
+            .edit = true;
+        let mut identity_drift = valid.clone();
+        identity_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .id = EntityId::new("foreign-tail").expect("foreign identity");
+        let mut content_drift = valid.clone();
+        content_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .content = projected_text("changed");
+        let mut parent_drift = valid.clone();
+        parent_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .parent_id = Some(EntityId::new("parent").expect("parent"));
+        let mut depth_drift = valid.clone();
+        depth_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "tail")
+            .expect("tail")
+            .depth = 2;
+        let mut sibling_drift = valid.clone();
+        sibling_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "second")
+            .expect("second")
+            .sibling_index = 1;
+        let mut child_count_drift = valid.clone();
+        child_count_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "parent")
+            .expect("parent")
+            .child_count = 4;
+        let mut created_content_drift = valid.clone();
+        created_content_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id == created_id)
+            .expect("created")
+            .content = projected_text("wrong");
+        let mut reordered = valid.clone();
+        let created_position = reordered
+            .items
+            .iter()
+            .position(|block| block.id == created_id)
+            .expect("created position");
+        let second_position = reordered
+            .items
+            .iter()
+            .position(|block| block.id.as_str() == "second")
+            .expect("second position");
+        reordered.items.swap(created_position, second_position);
+        let mut foreign_insertion = valid.clone();
+        foreign_insertion
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "root")
+            .expect("root")
+            .child_count = 3;
+        foreign_insertion.items.push(summary(
+            "foreign",
+            Some("root"),
+            2,
+            1,
+            0,
+            projected_text("foreign"),
+        ));
+
+        for invalid in [
+            unrelated_restriction,
+            identity_drift,
+            content_drift,
+            parent_drift,
+            depth_drift,
+            sibling_drift,
+            child_count_drift,
+            created_content_drift,
+            reordered,
+            foreign_insertion,
+        ] {
+            assert!(!verify_create_transition(
+                &before,
+                &invalid,
+                &created_id,
+                &target_id,
+                WireInsertPosition::After,
+                &input,
+            ));
+        }
+    }
+
+    #[test]
+    fn create_transition_accepts_only_canonical_materialized_table_subtree() {
+        let before = projected(vec![
+            summary("root", None, 0, 0, 1, projected_text("root")),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+        ]);
+        let input = parse_block(json!({
+            "kind":"table","rows":2,"columns":2,"header_row":true
+        }));
+        let created_id = EntityId::new("table").expect("table");
+        let root_id = EntityId::new("root").expect("root");
+        let valid = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+            summary("table", Some("root"), 1, 1, 2, BlockProjection::Table),
+            summary(
+                "columns",
+                Some("table"),
+                0,
+                2,
+                2,
+                BlockProjection::Layout {
+                    style: WireLayoutStyle::TableColumns,
+                },
+            ),
+            summary(
+                "column-1",
+                Some("columns"),
+                0,
+                3,
+                0,
+                BlockProjection::TableColumn,
+            ),
+            summary(
+                "column-2",
+                Some("columns"),
+                1,
+                3,
+                0,
+                BlockProjection::TableColumn,
+            ),
+            summary(
+                "rows",
+                Some("table"),
+                1,
+                2,
+                2,
+                BlockProjection::Layout {
+                    style: WireLayoutStyle::TableRows,
+                },
+            ),
+            summary(
+                "row-1",
+                Some("rows"),
+                0,
+                3,
+                2,
+                BlockProjection::TableRow { is_header: true },
+            ),
+            summary("cell-1-1", Some("row-1"), 0, 4, 0, projected_text("")),
+            summary("cell-1-2", Some("row-1"), 1, 4, 0, projected_text("")),
+            summary(
+                "row-2",
+                Some("rows"),
+                1,
+                3,
+                2,
+                BlockProjection::TableRow { is_header: false },
+            ),
+            summary("cell-2-1", Some("row-2"), 0, 4, 0, projected_text("")),
+            summary("cell-2-2", Some("row-2"), 1, 4, 0, projected_text("")),
+        ]);
+        assert!(verify_create_transition(
+            &before,
+            &valid,
+            &created_id,
+            &root_id,
+            WireInsertPosition::LastChild,
+            &input,
+        ));
+
+        let mut wrong_header = valid.clone();
+        wrong_header
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "row-1")
+            .expect("first row")
+            .content = BlockProjection::TableRow { is_header: false };
+        let mut missing_cell = valid.clone();
+        missing_cell
+            .items
+            .retain(|block| block.id.as_str() != "cell-2-2");
+        missing_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "row-2")
+            .expect("second row")
+            .child_count = 1;
+        let mut misplaced_region = valid.clone();
+        misplaced_region
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "rows")
+            .expect("rows region")
+            .parent_id = Some(root_id.clone());
+        let mut reordered = valid.clone();
+        let first_column = reordered
+            .items
+            .iter()
+            .position(|block| block.id.as_str() == "column-1")
+            .expect("first column");
+        let second_column = reordered
+            .items
+            .iter()
+            .position(|block| block.id.as_str() == "column-2")
+            .expect("second column");
+        reordered.items.swap(first_column, second_column);
+        for invalid in [wrong_header, missing_cell, misplaced_region, reordered] {
+            assert!(!verify_create_transition(
+                &before,
+                &invalid,
+                &created_id,
+                &root_id,
+                WireInsertPosition::LastChild,
+                &input,
+            ));
+        }
+    }
+
+    #[test]
     fn body_relation_workflows() {
         let relation_set = (0..MAX_RELATIONS)
             .map(|index| RelationKey::new(format!("r{index}")).expect("relation"))
@@ -9023,6 +9674,22 @@ mod tests {
         assert!(verify_create_transition(
             &before,
             &after,
+            &child_id,
+            &heading_id,
+            WireInsertPosition::LastChild,
+            &block
+        ));
+        let mut refreshed_heading = after.clone();
+        refreshed_heading
+            .items
+            .iter_mut()
+            .find(|candidate| candidate.id == heading_id)
+            .expect("heading")
+            .restrictions
+            .drop_on = true;
+        assert!(verify_create_transition(
+            &before,
+            &refreshed_heading,
             &child_id,
             &heading_id,
             WireInsertPosition::LastChild,

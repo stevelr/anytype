@@ -37,7 +37,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   fixture-heavy shared workflow is heap-owned for default-stack execution.
   The production router returns optional-registry futures before constructing
   the unrelated Phase-1 aggregate, and the live 20-block pagination proof
-  retains its cursor-bound limit across three exact pages.
+  retains its cursor-bound limit across three exact pages. Create readback now
+  proves the pre-derived insertion parent/index, exact prior structure and
+  values, parent-only restriction refresh, and one closed canonical generated
+  table subtree instead of misclassifying legitimate parent refresh as an
+  indeterminate conflict.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection
