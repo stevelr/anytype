@@ -117,9 +117,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Fixed
 
 - Require verified table-create receipts to contain the complete canonical
-  subtree: exact ordered regions, columns, rows, and empty paragraph cells
-  with default presentation and no children. Missing, extra, foreign, nested,
-  or malformed cells no longer satisfy receipt verification.
+  sparse Heart subtree: exact ordered regions, columns, and rows; no cells for
+  a no-header table; or one grey-background empty paragraph cell per column
+  under the first header row only. Missing, extra, foreign, nested, or
+  malformed cells no longer satisfy receipt verification.
 
 - Make disposable-space readiness convergence finite and observable with an
   exact 20-second/50-attempt budget. Readiness now resolves only the exact

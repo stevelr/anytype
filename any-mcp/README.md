@@ -168,9 +168,11 @@ page creation. It uses the typed `anytype-api` body model only. Reads return
 exact block identity, document order, and a canonical snapshot hash; mutations
 require that hash and verify their result. Rich page construction is a finite
 flat plan and reports complete, partial, or indeterminate evidence without
-claiming transactionality. Generated tables count their root, two layout
-regions, rows, columns, and cells against the 256-block plan ceiling; success
-requires the exact canonical ordered subtree and empty paragraph cells.
+claiming transactionality. Generated tables conservatively count their root,
+two layout regions, rows, columns, and logical `rows × columns` capacity
+against the 256-block plan ceiling. Success separately requires Heart's exact
+sparse subtree: no cells without a header, or grey-background empty paragraph
+cells under the first header row only.
 Read-only mode retains only `body_block_list`. Acceptance executes that read
 through stable and preview stdio and compares the complete normalized result.
 Domain error parity likewise preserves `isError`, ordered content, exact
@@ -390,7 +392,7 @@ structure drift, and permits restriction refresh only on the insertion
 parent. When that parent is an opaque page root, its opaque kind and duplicated
 child count remain exact while the protobuf-derived approximate byte count may
 refresh with the child list; all non-parent opaque summaries remain exact.
-Generated table descendants must form one canonical closed subtree.
+Generated table descendants must form one canonical sparse Heart subtree.
 Move verification applies the same derived-summary rule only to its old and
 new structural parents, while requiring exact post-move DFS order and leaving
 every other opaque summary and block value unchanged.

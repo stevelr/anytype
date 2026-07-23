@@ -65,10 +65,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   that exception only to the old and new structural parents and now also
   proves exact post-move DFS order. Delete readback applies it only to the
   removed subtree's direct parent and proves the exact surviving DFS order.
-  Rich table plan accounting includes both generated layout regions, and
-  API/MCP receipt verification requires the exact table, regions, ordered
-  rows/columns/cells, and canonical empty paragraph cell presentation with no
-  missing, extra, foreign, or nested nodes.
+  Rich table plan accounting conservatively includes both layout regions and
+  logical `rows × columns` capacity. API/MCP receipt verification separately
+  requires Heart's exact sparse table, ordered regions/rows/columns, no cells
+  without a header, and grey-background empty paragraph cells under the first
+  header row only, with no missing, extra, foreign, or nested nodes.
   Value-only update readback permits only the opaque page root's derived byte
   summary to refresh while preserving its exact kind, unchanged child count,
   structure, restrictions, and presentation. Every body editor now caps the

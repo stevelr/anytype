@@ -169,6 +169,18 @@ pub enum DisposableReadinessStage {
 pub enum DisposableCallbackStage {
     /// Required property and type fixture construction.
     Fixture,
+    /// Direct-router body acceptance workflow.
+    BodyDirect,
+    /// Stable stdio body acceptance workflow.
+    BodyStdioStable,
+    /// Preview stdio body acceptance workflow.
+    BodyStdioPreview,
+    /// Stable read-only stdio body workflow.
+    BodyReadOnlyStable,
+    /// Preview read-only stdio body workflow.
+    BodyReadOnlyPreview,
+    /// Cross-transport body evidence comparison.
+    BodyParity,
     /// Integer numeric equality.
     NumberEqualInteger,
     /// Numeric inequality.
@@ -267,6 +279,24 @@ pub enum DisposableFailureCategory {
     BodyMutationIndeterminate,
     /// Bounded body RPC lifecycle failed.
     BodyRpcLifecycle,
+    /// Body acceptance fixture construction failed.
+    BodyFixture,
+    /// Body acceptance pagination evidence failed.
+    BodyPagination,
+    /// Body acceptance stale-cursor evidence failed.
+    BodyStaleCursor,
+    /// Body acceptance primitive-mutation evidence failed.
+    BodyPrimitive,
+    /// Body acceptance primary rich-page create failed.
+    BodyRichPrimaryCreate,
+    /// Body acceptance primary rich-page readback failed.
+    BodyRichPrimaryReadback,
+    /// Body acceptance primary rich-page replay failed.
+    BodyRichPrimaryReplay,
+    /// Body acceptance rich-update evidence failed.
+    BodyRichUpdates,
+    /// Body acceptance supplemental rich-page evidence failed.
+    BodyRichSupplemental,
     /// Collection membership evidence was incomplete.
     CollectionMembershipEvidence,
     /// Type-property classification failed.
@@ -343,6 +373,12 @@ closed_diagnostic_display!(DisposableReadinessStage, {
 });
 closed_diagnostic_display!(DisposableCallbackStage, {
     DisposableCallbackStage::Fixture => "fixture",
+    DisposableCallbackStage::BodyDirect => "body_direct",
+    DisposableCallbackStage::BodyStdioStable => "body_stdio_stable",
+    DisposableCallbackStage::BodyStdioPreview => "body_stdio_preview",
+    DisposableCallbackStage::BodyReadOnlyStable => "body_read_only_stable",
+    DisposableCallbackStage::BodyReadOnlyPreview => "body_read_only_preview",
+    DisposableCallbackStage::BodyParity => "body_parity",
     DisposableCallbackStage::NumberEqualInteger => "number_equal_integer",
     DisposableCallbackStage::NumberNotEqual => "number_not_equal",
     DisposableCallbackStage::NumberLess => "number_less",
@@ -385,6 +421,15 @@ closed_diagnostic_display!(DisposableFailureCategory, {
     DisposableFailureCategory::BodyGraph => "body_graph",
     DisposableFailureCategory::BodyMutationIndeterminate => "body_mutation_indeterminate",
     DisposableFailureCategory::BodyRpcLifecycle => "body_rpc_lifecycle",
+    DisposableFailureCategory::BodyFixture => "body_fixture",
+    DisposableFailureCategory::BodyPagination => "body_pagination",
+    DisposableFailureCategory::BodyStaleCursor => "body_stale_cursor",
+    DisposableFailureCategory::BodyPrimitive => "body_primitive",
+    DisposableFailureCategory::BodyRichPrimaryCreate => "body_rich_primary_create",
+    DisposableFailureCategory::BodyRichPrimaryReadback => "body_rich_primary_readback",
+    DisposableFailureCategory::BodyRichPrimaryReplay => "body_rich_primary_replay",
+    DisposableFailureCategory::BodyRichUpdates => "body_rich_updates",
+    DisposableFailureCategory::BodyRichSupplemental => "body_rich_supplemental",
     DisposableFailureCategory::CollectionMembershipEvidence => "collection_membership_evidence",
     DisposableFailureCategory::TypePropertyClassification => "type_property_classification",
     DisposableFailureCategory::AttachedDiscussion => "attached_discussion",

@@ -2991,6 +2991,12 @@ mod tests {
     fn callback_stage_taxonomy_is_closed_and_exact() {
         let stages = [
             DisposableCallbackStage::Fixture,
+            DisposableCallbackStage::BodyDirect,
+            DisposableCallbackStage::BodyStdioStable,
+            DisposableCallbackStage::BodyStdioPreview,
+            DisposableCallbackStage::BodyReadOnlyStable,
+            DisposableCallbackStage::BodyReadOnlyPreview,
+            DisposableCallbackStage::BodyParity,
             DisposableCallbackStage::NumberEqualInteger,
             DisposableCallbackStage::NumberNotEqual,
             DisposableCallbackStage::NumberLess,
@@ -3007,6 +3013,12 @@ mod tests {
             stages.map(DisposableCallbackStage::as_str),
             [
                 "fixture",
+                "body_direct",
+                "body_stdio_stable",
+                "body_stdio_preview",
+                "body_read_only_stable",
+                "body_read_only_preview",
+                "body_parity",
                 "number_equal_integer",
                 "number_not_equal",
                 "number_less",
