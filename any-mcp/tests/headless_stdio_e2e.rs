@@ -4012,6 +4012,9 @@ enum BodyScenarioMismatch {
     ChildCount,
     Restriction,
     Presentation,
+    ContentKind,
+    TextContent,
+    BooleanFlag,
     Status,
     Error,
     Idempotency,
@@ -4036,6 +4039,9 @@ impl BodyScenarioMismatch {
             Self::ChildCount => "child_count",
             Self::Restriction => "restriction",
             Self::Presentation => "presentation",
+            Self::ContentKind => "content_kind",
+            Self::TextContent => "text_content",
+            Self::BooleanFlag => "boolean_flag",
             Self::Status => "status",
             Self::Error => "error",
             Self::Idempotency => "idempotency",
@@ -4064,6 +4070,9 @@ fn body_scenario_field_category(field: Option<&str>) -> BodyScenarioMismatch {
             "align" | "vertical_align" | "background_color" | "style" | "icon" | "processor"
             | "source",
         ) => BodyScenarioMismatch::Presentation,
+        Some("kind") => BodyScenarioMismatch::ContentKind,
+        Some("text") => BodyScenarioMismatch::TextContent,
+        Some("checked" | "is_header") => BodyScenarioMismatch::BooleanFlag,
         Some("status") => BodyScenarioMismatch::Status,
         Some("error_category" | "category" | "message" | "failed" | "not_attempted") => {
             BodyScenarioMismatch::Error
@@ -4750,6 +4759,18 @@ fn body_scenario_diagnostic_reports_only_first_index_and_static_category() {
     assert_eq!(
         first_body_scenario_mismatch(&stable, &result_count_drift),
         Some((None, BodyScenarioMismatch::ResultCount))
+    );
+    let text_stable = BodyScenarioEvidence {
+        normalized_results: vec![json!({"content":{"kind":"text","text":"stable"}})],
+        listed_block_count: 1,
+    };
+    let text_preview = BodyScenarioEvidence {
+        normalized_results: vec![json!({"content":{"kind":"text","text":"preview"}})],
+        listed_block_count: 1,
+    };
+    assert_eq!(
+        first_body_scenario_mismatch(&text_stable, &text_preview),
+        Some((Some(0), BodyScenarioMismatch::TextContent))
     );
 }
 

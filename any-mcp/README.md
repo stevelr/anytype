@@ -424,6 +424,8 @@ content because that summary is the wire block's `encoded_len` and therefore
 includes generated-ID lengths. Opaque kind and child count, typed content,
 presentation, restrictions, ordering, counts, status, errors, and idempotency
 stay exact.
+Independently created pagination fixtures use the same title in every
+transport; typed text is never normalized.
 
 R4 also fixes emoji and callout payloads at the current 64-byte API ceiling,
 requires both UTF-16 mark endpoints to be `u32` scalar boundaries, and gives

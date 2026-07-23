@@ -1119,6 +1119,10 @@ fn body_string<'a>(value: &'a Value, pointer: &str, field: &str) -> Result<&'a s
         .ok_or_else(|| format!("body scenario omitted {field}"))
 }
 
+fn body_scenario_fixture_name() -> String {
+    format!("Body parity fixture {BODY_DIAGNOSTIC_SECRET}")
+}
+
 fn normalize_body_result(value: &Value) -> Value {
     fn normalized(value: &Value, field: Option<&str>) -> Value {
         match value {
@@ -1165,6 +1169,10 @@ fn normalize_body_result(value: &Value) -> Value {
 
 #[test]
 fn body_result_normalization_limits_opaque_byte_volatility_to_unsupported_content() {
+    assert_eq!(
+        body_scenario_fixture_name(),
+        format!("Body parity fixture {BODY_DIAGNOSTIC_SECRET}")
+    );
     let result = |approx_bytes, kind, opaque_kind, child_count| {
         json!({
             "space_id":"space-generated",
@@ -1268,6 +1276,10 @@ fn body_result_normalization_limits_opaque_byte_volatility_to_unsupported_conten
     assert_ne!(
         normalize_body_result(&unrelated(917)),
         normalize_body_result(&unrelated(991))
+    );
+    assert_ne!(
+        normalize_body_result(&json!({"content":{"kind":"text","text":"stable"}})),
+        normalize_body_result(&json!({"content":{"kind":"text","text":"preview"}}))
     );
 }
 
@@ -1501,9 +1513,7 @@ async fn run_body_scenario_inner(
     let page = ctx
         .client
         .new_object(&ctx.space_id, "page")
-        .name(format!(
-            "Body {transport} {suffix} {BODY_DIAGNOSTIC_SECRET}"
-        ))
+        .name(body_scenario_fixture_name())
         .create()
         .await
         .map_err(|_| {
