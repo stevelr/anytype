@@ -3759,6 +3759,13 @@ type BodyAcceptancePhaseFuture<'a, T> = Pin<Box<dyn Future<Output = TestResult<T
 type SharedBodyCallbackFuture = Pin<Box<dyn Future<Output = TestResult<String>>>>;
 
 #[cfg(feature = "acceptance-harness")]
+fn body_semantic_diagnostic(phase: &'static str, event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase={phase} event={event}");
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
 struct SpawnedBodyEvidence {
     scenario: BodyScenarioEvidence,
     descriptors: Vec<Value>,
@@ -3770,15 +3777,23 @@ fn run_direct_body_phase(
     ctx: &TestContext,
 ) -> BodyAcceptancePhaseFuture<'_, (BodyScenarioEvidence, Vec<Value>)> {
     Box::pin(async move {
-        let direct = BodyAcceptanceDirect::new(ctx.client.clone(), false)
-            .map_err(|_| sentinel_assertion("direct body driver construction failed"))?;
-        let descriptors = direct
-            .tool_descriptors()
-            .map_err(|_| sentinel_assertion("direct body descriptors were not serializable"))?;
+        body_semantic_diagnostic("direct", "phase_start");
+        let direct = BodyAcceptanceDirect::new(ctx.client.clone(), false).map_err(|_| {
+            body_semantic_diagnostic("direct", "driver construction failed");
+            sentinel_assertion("direct body driver construction failed")
+        })?;
+        let descriptors = direct.tool_descriptors().map_err(|_| {
+            body_semantic_diagnostic("direct", "descriptor serialization failed");
+            sentinel_assertion("direct body descriptors were not serializable")
+        })?;
         let mut direct_driver = DirectBodyDriver { driver: direct };
         let evidence = run_body_scenario(&mut direct_driver, ctx, "direct")
             .await
-            .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?;
+            .map_err(|_| {
+                body_semantic_diagnostic("direct", "scenario_failed");
+                sentinel_assertion("direct shared body scenario failed")
+            })?;
+        body_semantic_diagnostic("direct", "phase_complete");
         Ok((evidence, descriptors))
     })
 }
@@ -3792,29 +3807,50 @@ fn run_spawned_body_phase<'a>(
     parity_page_id: &'a str,
 ) -> BodyAcceptancePhaseFuture<'a, SpawnedBodyEvidence> {
     Box::pin(async move {
-        let child = spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks"))?;
+        body_semantic_diagnostic(transport, "phase_start");
+        let child =
+            spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks")).map_err(|_| {
+                body_semantic_diagnostic(transport, "child spawn failed");
+                sentinel_assertion("spawned body child failed")
+            })?;
+        body_semantic_diagnostic(transport, "child_spawned");
         let (descriptors, frames) = {
             let mut guard = lock_driver(&child);
-            let process = guard
-                .as_mut()
-                .ok_or_else(|| sentinel_assertion("spawned body child missing"))?;
+            let process = guard.as_mut().ok_or_else(|| {
+                body_semantic_diagnostic(transport, "registered child missing");
+                sentinel_assertion("spawned body child missing")
+            })?;
             process.initialize();
-            let descriptors = process
-                .body_tool_descriptors_sync()
-                .map_err(|_| sentinel_assertion("spawned body descriptors failed"))?;
+            let descriptors = process.body_tool_descriptors_sync().map_err(|_| {
+                body_semantic_diagnostic(transport, "descriptor request failed");
+                sentinel_assertion("spawned body descriptors failed")
+            })?;
             let frames = process.raw_body_parity_frames(&ctx.space_id, parity_page_id);
             (descriptors, frames)
         };
+        body_semantic_diagnostic(transport, "protocol_ready");
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
         let scenario = run_body_scenario(&mut driver, ctx, transport)
             .await
-            .map_err(|_| sentinel_assertion("spawned shared body scenario failed"))?;
+            .map_err(|_| {
+                body_semantic_diagnostic(transport, "scenario_failed");
+                sentinel_assertion("spawned shared body scenario failed")
+            })?;
+        body_semantic_diagnostic(transport, "scenario_complete");
         let (_, output) = take_registered_body_driver(&child)?
             .try_finish()
-            .map_err(|_| sentinel_assertion("spawned shared body child did not stop"))?;
-        require_body_diagnostics(&output.stderr, BODY_DIAGNOSTIC_SECRET.as_bytes(), true)?;
+            .map_err(|_| {
+                body_semantic_diagnostic(transport, "child stop failed");
+                sentinel_assertion("spawned shared body child did not stop")
+            })?;
+        body_semantic_diagnostic(transport, "child_stopped");
+        require_body_diagnostics(&output.stderr, BODY_DIAGNOSTIC_SECRET.as_bytes(), true)
+            .inspect_err(|_| {
+                body_semantic_diagnostic(transport, "child diagnostics failed");
+            })?;
+        body_semantic_diagnostic(transport, "phase_complete");
         Ok(SpawnedBodyEvidence {
             scenario,
             descriptors,
@@ -3824,27 +3860,50 @@ fn run_spawned_body_phase<'a>(
 }
 
 #[cfg(feature = "acceptance-harness")]
-fn run_spawned_read_only_body_phase(
-    ctx: &TestContext,
+fn run_spawned_read_only_body_phase<'a>(
+    ctx: &'a TestContext,
     cleanup: Arc<Mutex<ChildCleanupRecord>>,
     options: DriverOptions,
-) -> BodyAcceptancePhaseFuture<'_, BodyReadOnlyEvidence> {
+    transport: &'static str,
+) -> BodyAcceptancePhaseFuture<'a, BodyReadOnlyEvidence> {
     Box::pin(async move {
-        let child = spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks"))?;
+        body_semantic_diagnostic(transport, "phase_start");
+        let child =
+            spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks")).map_err(|_| {
+                body_semantic_diagnostic(transport, "child spawn failed");
+                sentinel_assertion("read-only body child failed")
+            })?;
+        body_semantic_diagnostic(transport, "child_spawned");
         lock_driver(&child)
             .as_mut()
-            .ok_or_else(|| sentinel_assertion("read-only body child missing"))?
+            .ok_or_else(|| {
+                body_semantic_diagnostic(transport, "registered child missing");
+                sentinel_assertion("read-only body child missing")
+            })?
             .initialize();
+        body_semantic_diagnostic(transport, "protocol_ready");
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
         let evidence = run_body_read_only_scenario(&mut driver)
             .await
-            .map_err(|_| sentinel_assertion("read-only body scenario failed"))?;
+            .map_err(|_| {
+                body_semantic_diagnostic(transport, "scenario_failed");
+                sentinel_assertion("read-only body scenario failed")
+            })?;
+        body_semantic_diagnostic(transport, "scenario_complete");
         let (_, output) = take_registered_body_driver(&child)?
             .try_finish()
-            .map_err(|_| sentinel_assertion("read-only body child did not stop"))?;
-        require_body_diagnostics(&output.stderr, b"SECRET_UNPARSED_BODY_VALUE", false)?;
+            .map_err(|_| {
+                body_semantic_diagnostic(transport, "child stop failed");
+                sentinel_assertion("read-only body child did not stop")
+            })?;
+        body_semantic_diagnostic(transport, "child_stopped");
+        require_body_diagnostics(&output.stderr, b"SECRET_UNPARSED_BODY_VALUE", false)
+            .inspect_err(|_| {
+                body_semantic_diagnostic(transport, "child diagnostics failed");
+            })?;
+        body_semantic_diagnostic(transport, "phase_complete");
         Ok(evidence)
     })
 }
@@ -3858,16 +3917,26 @@ fn run_shared_body_callback(
     preview_read_only_cleanup: Arc<Mutex<ChildCleanupRecord>>,
 ) -> SharedBodyCallbackFuture {
     Box::pin(async move {
+        body_semantic_diagnostic("parity", "callback_start");
         let parity_page = ctx
             .client
             .new_object(&ctx.space_id, "page")
             .name("Body protocol parity fixture")
             .body("Protocol parity body")
             .create()
-            .await?;
+            .await
+            .map_err(|_| {
+                body_semantic_diagnostic("parity", "fixture page creation failed");
+                sentinel_assertion("body parity fixture page creation failed")
+            })?;
         ctx.register_object(&parity_page.id);
+        body_semantic_diagnostic("parity", "fixture_created");
 
-        let (direct_evidence, direct_descriptors) = run_direct_body_phase(&ctx).await?;
+        let (direct_evidence, direct_descriptors) =
+            run_direct_body_phase(&ctx).await.inspect_err(|_| {
+                body_semantic_diagnostic("direct", "phase failed");
+            })?;
+        body_semantic_diagnostic("parity", "direct_complete");
         let stable = run_spawned_body_phase(
             &ctx,
             stable_cleanup,
@@ -3875,7 +3944,11 @@ fn run_shared_body_callback(
             "stable",
             &parity_page.id,
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            body_semantic_diagnostic("stable", "phase failed");
+        })?;
+        body_semantic_diagnostic("parity", "stable_complete");
         let preview = run_spawned_body_phase(
             &ctx,
             preview_cleanup,
@@ -3883,29 +3956,49 @@ fn run_shared_body_callback(
             "preview",
             &parity_page.id,
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            body_semantic_diagnostic("preview", "phase failed");
+        })?;
+        body_semantic_diagnostic("parity", "preview_complete");
         let stable_read_only = run_spawned_read_only_body_phase(
             &ctx,
             stable_read_only_cleanup,
             DriverOptions::READ_ONLY,
+            "stable_read_only",
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            body_semantic_diagnostic("stable_read_only", "phase failed");
+        })?;
+        body_semantic_diagnostic("parity", "stable_read_only_complete");
         let preview_read_only = run_spawned_read_only_body_phase(
             &ctx,
             preview_read_only_cleanup,
             DriverOptions::PREVIEW_READ_ONLY,
+            "preview_read_only",
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            body_semantic_diagnostic("preview_read_only", "phase failed");
+        })?;
+        body_semantic_diagnostic("parity", "preview_read_only_complete");
 
         inspect_reviewed_body_server_log(&[
             BODY_DIAGNOSTIC_SECRET.as_bytes(),
             b"SECRET_UNPARSED_BODY_VALUE",
-        ])?;
+        ])
+        .inspect_err(|_| {
+            body_semantic_diagnostic("server_log", "reviewed log inspection failed");
+        })?;
+        body_semantic_diagnostic("parity", "server_log_checked");
         if stable.descriptors != preview.descriptors || direct_descriptors != stable.descriptors {
+            body_semantic_diagnostic("parity", "direct stable preview descriptors diverged");
             return Err(sentinel_assertion(
                 "direct/stable/preview body descriptors, schemas, or annotations diverged",
             ));
         }
+        body_semantic_diagnostic("parity", "descriptors_match");
         if stable.frames != preview.frames
             || stable.frames[0]
                 .pointer("/result/structuredContent/items")
@@ -3916,25 +4009,34 @@ fn run_shared_body_callback(
                 .and_then(Value::as_str)
                 != Some("validation")
         {
+            body_semantic_diagnostic("parity", "stable preview raw frames diverged");
             return Err(sentinel_assertion(
                 "stable/preview raw body success or error JSON-RPC frames diverged",
             ));
         }
+        body_semantic_diagnostic("parity", "frames_match");
         if stable.scenario != preview.scenario {
+            body_semantic_diagnostic("parity", "stable preview scenario evidence diverged");
             return Err(sentinel_assertion(
                 "stable and preview normalized body result shapes diverged",
             ));
         }
+        body_semantic_diagnostic("parity", "transport_scenarios_match");
         if direct_evidence != stable.scenario {
+            body_semantic_diagnostic("parity", "direct stable scenario evidence diverged");
             return Err(sentinel_assertion(
                 "direct and stdio normalized body result shapes diverged",
             ));
         }
+        body_semantic_diagnostic("parity", "direct_scenario_matches");
         if stable_read_only != preview_read_only {
+            body_semantic_diagnostic("parity", "read-only scenario evidence diverged");
             return Err(sentinel_assertion(
                 "stable and preview read-only body evidence diverged",
             ));
         }
+        body_semantic_diagnostic("parity", "read_only_scenarios_match");
+        body_semantic_diagnostic("parity", "callback_complete");
         Ok(ctx.space_id.clone())
     })
 }
