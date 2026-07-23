@@ -32,9 +32,9 @@ use tonic::Request;
 use crate::{
     Result,
     body::{
-        BlockContent, BlockId, BlockRef, BodyBlock, BodySnapshot, CalloutIcon, ColorToken,
-        DividerStyle, EmbedContent, EmbedProcessor, HorizontalAlign, LayoutStyle, LinkCardStyle,
-        LinkDescriptionMode, LinkIconSize, MAX_BLOCK_ID_BYTES, MAX_BODY_BLOCKS,
+        BlockContent, BlockId, BlockRef, BlockRestrictions, BodyBlock, BodySnapshot, CalloutIcon,
+        ColorToken, DividerStyle, EmbedContent, EmbedProcessor, HorizontalAlign, LayoutStyle,
+        LinkCardStyle, LinkDescriptionMode, LinkIconSize, MAX_BLOCK_ID_BYTES, MAX_BODY_BLOCKS,
         MAX_EMBED_TEXT_BYTES, MAX_LINK_RELATIONS, MAX_MARKS_PER_TEXT, MAX_TABLE_COLUMNS,
         MAX_TABLE_ROWS, MAX_TEXT_BYTES, MarkKind, TextContent, TextMark, TextStyle, VerticalAlign,
         utf16_len,
@@ -1747,6 +1747,18 @@ fn table_shape_matches(snapshot: &BodySnapshot, table_id: &BlockId, expected: &N
     {
         return false;
     }
+    let (Ok(row_count), Ok(column_count)) = (usize::try_from(*rows), usize::try_from(*columns))
+    else {
+        return false;
+    };
+    let Some(expected_subtree_count) = row_count
+        .checked_mul(column_count)
+        .and_then(|cells| cells.checked_add(row_count))
+        .and_then(|value| value.checked_add(column_count))
+        .and_then(|value| value.checked_add(3))
+    else {
+        return false;
+    };
     let columns_match = columns_region.children.iter().all(|id| {
         snapshot.get(id).is_some_and(|block| {
             block.content == BlockContent::TableColumn && block.children.is_empty()
@@ -1758,20 +1770,52 @@ fn table_shape_matches(snapshot: &BodySnapshot, table_id: &BlockId, expected: &N
                 == (BlockContent::TableRow {
                     is_header: *with_header_row && index == 0,
                 })
+                && block.children.len() == *columns as usize
+                && block.children.iter().all(|cell_id| {
+                    snapshot
+                        .get(cell_id)
+                        .is_some_and(canonical_empty_table_cell)
+                })
         })
     });
-    let no_misplaced_structure = snapshot
+    let descendants = snapshot
         .iter()
-        .filter(|block| is_descendant(snapshot, table_id, &block.id))
-        .all(|block| match block.content {
-            BlockContent::TableColumn => columns_region.children.contains(&block.id),
-            BlockContent::TableRow { .. } => rows_region.children.contains(&block.id),
-            BlockContent::Layout(LayoutStyle::TableColumns) => block.id == *columns_region_id,
-            BlockContent::Layout(LayoutStyle::TableRows) => block.id == *rows_region_id,
-            BlockContent::Table => false,
-            _ => true,
-        });
-    columns_match && rows_match && no_misplaced_structure
+        .filter(|block| block.id == *table_id || is_descendant(snapshot, table_id, &block.id))
+        .collect::<Vec<_>>();
+    let no_misplaced_structure = descendants.iter().all(|block| match block.content {
+        BlockContent::TableColumn => columns_region.children.contains(&block.id),
+        BlockContent::TableRow { .. } => rows_region.children.contains(&block.id),
+        BlockContent::Layout(LayoutStyle::TableColumns) => block.id == *columns_region_id,
+        BlockContent::Layout(LayoutStyle::TableRows) => block.id == *rows_region_id,
+        BlockContent::Table => block.id == *table_id,
+        BlockContent::Text(_) => rows_region.children.iter().any(|row_id| {
+            snapshot
+                .get(row_id)
+                .is_some_and(|row| row.children.contains(&block.id))
+        }),
+        _ => false,
+    });
+    descendants.len() == expected_subtree_count
+        && columns_match
+        && rows_match
+        && no_misplaced_structure
+}
+
+fn canonical_empty_table_cell(block: &BodyBlock) -> bool {
+    matches!(
+        &block.content,
+        BlockContent::Text(text)
+            if text.text.is_empty()
+                && text.style == TextStyle::Paragraph
+                && !text.checked
+                && text.color.is_none()
+                && text.icon.is_none()
+                && text.marks.is_empty()
+    ) && block.children.is_empty()
+        && block.align == HorizontalAlign::Left
+        && block.vertical_align == VerticalAlign::Top
+        && block.background_color.is_none()
+        && block.restrictions == BlockRestrictions::default()
 }
 
 fn block_to_proto(block: NewBlock) -> model::Block {
@@ -2193,6 +2237,13 @@ mod tests {
         )
     }
 
+    fn canonical_table_cells() -> Vec<model::Block> {
+        ["r1c1", "r1c2", "r2c1", "r2c2"]
+            .into_iter()
+            .map(|id| text_block(id, ""))
+            .collect()
+    }
+
     fn parent_anchor_snapshot(
         parent_content: model::block::ContentValue,
     ) -> Result<(BodySnapshot, BlockId)> {
@@ -2339,6 +2390,8 @@ mod tests {
 
     #[test]
     fn table_receipt_requires_canonical_direct_region_topology() -> Result<()> {
+        const ROW_CELLS: &[(&str, &[&str])] =
+            &[("r1", &["r1c1", "r1c2"]), ("r2", &["r2c1", "r2c2"])];
         let expected = NewBlock::table(2, 2, true)?;
         let table_id = BlockId::try_from("table".to_owned())
             .map_err(|message| AnytypeError::Validation { message })?;
@@ -2348,10 +2401,82 @@ mod tests {
             &["r1", "r2"],
             &["c1", "c2"],
             &[("r1", true), ("r2", false)],
-            &[],
-            Vec::new(),
+            ROW_CELLS,
+            canonical_table_cells(),
         )?;
         assert!(table_shape_matches(&canonical, &table_id, &expected));
+
+        let missing_cell = table_snapshot(
+            &["columns", "rows"],
+            &["c1", "c2"],
+            &["r1", "r2"],
+            &["c1", "c2"],
+            &[("r1", true), ("r2", false)],
+            &[("r1", &["r1c1", "r1c2"]), ("r2", &["r2c1"])],
+            canonical_table_cells()
+                .into_iter()
+                .filter(|block| block.id != "r2c2")
+                .collect(),
+        )?;
+        assert!(!table_shape_matches(&missing_cell, &table_id, &expected));
+
+        let mut extra_cells = canonical_table_cells();
+        extra_cells.push(text_block("r2c3", ""));
+        let extra_cell = table_snapshot(
+            &["columns", "rows"],
+            &["c1", "c2"],
+            &["r1", "r2"],
+            &["c1", "c2"],
+            &[("r1", true), ("r2", false)],
+            &[("r1", &["r1c1", "r1c2"]), ("r2", &["r2c1", "r2c2", "r2c3"])],
+            extra_cells,
+        )?;
+        assert!(!table_shape_matches(&extra_cell, &table_id, &expected));
+
+        let cell_variant = |replacement: model::Block| -> Result<BodySnapshot> {
+            let mut cells = canonical_table_cells();
+            cells.retain(|block| block.id != "r1c1");
+            cells.push(replacement);
+            table_snapshot(
+                &["columns", "rows"],
+                &["c1", "c2"],
+                &["r1", "r2"],
+                &["c1", "c2"],
+                &[("r1", true), ("r2", false)],
+                ROW_CELLS,
+                cells,
+            )
+        };
+        let wrong_cell_type = cell_variant(block(
+            "r1c1",
+            &[],
+            model::block::ContentValue::TableColumn(model::block::content::TableColumn {}),
+        ))?;
+        let nonempty_cell = cell_variant(text_block("r1c1", "not empty"))?;
+        let mut presented = text_block("r1c1", "");
+        presented.align = model::block::Align::Center as i32;
+        let wrong_cell_presentation = cell_variant(presented)?;
+        for invalid in [wrong_cell_type, nonempty_cell, wrong_cell_presentation] {
+            assert!(!table_shape_matches(&invalid, &table_id, &expected));
+        }
+        let mut nested_cells = canonical_table_cells();
+        nested_cells.retain(|block| block.id != "r1c1");
+        nested_cells.push(block(
+            "r1c1",
+            &["nested"],
+            model::block::ContentValue::Text(model::block::content::Text::default()),
+        ));
+        nested_cells.push(text_block("nested", ""));
+        let cell_with_child = table_snapshot(
+            &["columns", "rows"],
+            &["c1", "c2"],
+            &["r1", "r2"],
+            &["c1", "c2"],
+            &[("r1", true), ("r2", false)],
+            ROW_CELLS,
+            nested_cells,
+        )?;
+        assert!(!table_shape_matches(&cell_with_child, &table_id, &expected));
 
         let reversed_regions = table_snapshot(
             &["rows", "columns"],
@@ -2359,8 +2484,8 @@ mod tests {
             &["r1", "r2"],
             &["c1", "c2"],
             &[("r1", true), ("r2", false)],
-            &[],
-            Vec::new(),
+            ROW_CELLS,
+            canonical_table_cells(),
         )?;
         assert!(!table_shape_matches(
             &reversed_regions,
@@ -2374,8 +2499,8 @@ mod tests {
             &["c1", "c2"],
             &["c1", "c2"],
             &[("r1", true), ("r2", false)],
-            &[],
-            Vec::new(),
+            ROW_CELLS,
+            canonical_table_cells(),
         )?;
         assert!(!table_shape_matches(&swapped_members, &table_id, &expected));
 
@@ -2385,8 +2510,8 @@ mod tests {
             &["r1", "r2"],
             &["c1", "c2"],
             &[("r1", false), ("r2", true)],
-            &[],
-            Vec::new(),
+            ROW_CELLS,
+            canonical_table_cells(),
         )?;
         assert!(!table_shape_matches(
             &misplaced_header,
@@ -2400,15 +2525,19 @@ mod tests {
             &["wrapper", "r2"],
             &["c1", "c2"],
             &[("r1", true), ("r2", false)],
-            &[],
-            vec![block(
-                "wrapper",
-                &["r1"],
-                model::block::ContentValue::Text(model::block::content::Text {
-                    text: "wrapper".to_owned(),
-                    ..Default::default()
-                }),
-            )],
+            ROW_CELLS,
+            {
+                let mut extra = canonical_table_cells();
+                extra.push(block(
+                    "wrapper",
+                    &["r1"],
+                    model::block::ContentValue::Text(model::block::content::Text {
+                        text: "wrapper".to_owned(),
+                        ..Default::default()
+                    }),
+                ));
+                extra
+            },
         )?;
         assert!(!table_shape_matches(&nested_row, &table_id, &expected));
 
@@ -2443,8 +2572,8 @@ mod tests {
             &["r1", "r2"],
             &["c1", "c2"],
             &[("r1", false), ("r2", false)],
-            &[],
-            Vec::new(),
+            ROW_CELLS,
+            canonical_table_cells(),
         )?;
         assert!(table_shape_matches(
             &canonical_no_header,

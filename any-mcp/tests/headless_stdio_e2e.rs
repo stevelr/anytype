@@ -28,6 +28,7 @@ use anytype::test_util::retry_definitive_rate_limit;
 use anytype::{
     chats::MessageContent,
     error::AnytypeError,
+    keystore::KeyStore,
     objects::Icon,
     prelude::{AnytypeClient, ClientConfig, Color, Tag},
     test_util::{
@@ -51,7 +52,7 @@ use support::live_scenario::{
 use support::{
     live_scenario::{
         ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
-        run_chats_registry_scenario, run_live_scenario_on_large_stack,
+        ToolErrorEvidence, run_chats_registry_scenario, run_live_scenario_on_large_stack,
         run_representative_layout_scenario, run_scenario, validate_live_ownership,
     },
     process::{ProcessOutput, ProtocolProcess},
@@ -150,6 +151,7 @@ struct StdioDriver {
     process: ProtocolProcess,
     next_id: u64,
     options: DriverOptions,
+    body_tool_error_frames: Vec<Value>,
     _keystore: Option<TemporaryKeystore>,
 }
 
@@ -402,6 +404,7 @@ impl StdioDriver {
             process,
             next_id: 1,
             options,
+            body_tool_error_frames: Vec::new(),
             _keystore: keystore,
         }
     }
@@ -492,13 +495,17 @@ impl StdioDriver {
         &mut self,
         name: &'static str,
         arguments: Value,
-    ) -> Result<String, String> {
+    ) -> Result<ToolErrorEvidence, String> {
         let response = self.request("tools/call", json!({"name": name, "arguments": arguments}));
-        response
-            .pointer("/result/structuredContent/code")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| response_summary(name, &response))
+        let result = response
+            .get("result")
+            .ok_or_else(|| response_summary(name, &response))?;
+        let evidence = ToolErrorEvidence::from_result(result, self.options.preview)?;
+        #[cfg(feature = "acceptance-harness")]
+        if name == "body_block_list" && evidence.code() == "conflict" {
+            self.body_tool_error_frames.push(response);
+        }
+        Ok(evidence)
     }
 
     fn list_tools_sync(&mut self) -> Result<Vec<String>, String> {
@@ -608,7 +615,7 @@ impl McpDriver for StdioDriver {
         &'a mut self,
         name: &'static str,
         arguments: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>> {
         Box::pin(std::future::ready(
             self.call_tool_error_sync(name, arguments),
         ))
@@ -669,7 +676,7 @@ impl McpDriver for OwnedStdioDriver {
         &'a mut self,
         name: &'static str,
         arguments: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>> {
         let result = self.with_driver(|driver| driver.call_tool_error_sync(name, arguments));
         Box::pin(std::future::ready(result))
     }
@@ -753,18 +760,12 @@ impl McpDriver for DirectBodyDriver {
         &'a mut self,
         name: &'static str,
         arguments: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>> {
         Box::pin(async move {
             let result = self.driver.call(name, arguments).await;
-            if result.is_error != Some(true) {
-                return Err(format!("{name} unexpectedly succeeded"));
-            }
-            result
-                .structured_content
-                .as_ref()
-                .and_then(|value| value["code"].as_str())
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| format!("{name} error omitted code"))
+            let value = serde_json::to_value(result)
+                .map_err(|_| format!("{name} error result was not serializable"))?;
+            ToolErrorEvidence::from_result(&value, false)
         })
     }
 
@@ -971,15 +972,32 @@ fn require_body_diagnostics(
 
 #[cfg(feature = "acceptance-harness")]
 fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
+    let marker = std::env::var("ANY_MCP_HEADLESS_LOG_RUN_MARKER").map_err(|_| {
+        sentinel_assertion("reviewed headless server-log marker was not configured")
+    })?;
+    let service = std::env::var("ANYTYPE_KEYSTORE_SERVICE")
+        .map_err(|_| sentinel_assertion("reviewed log keystore service was absent"))?;
+    let specification = std::env::var("ANYTYPE_KEYSTORE")
+        .map_err(|_| sentinel_assertion("reviewed log keystore was absent"))?;
+    let keystore = KeyStore::new(service, &specification)
+        .map_err(|_| sentinel_assertion("reviewed log keystore could not be opened"))?;
     inspect_reviewed_body_server_log_at(
         std::env::var_os("ANY_MCP_HEADLESS_REDACTED_LOG_FILE"),
+        Some(&marker),
         secrets,
+        |log| {
+            keystore
+                .configured_credentials_absent_from(log)
+                .unwrap_or(false)
+        },
     )
 }
 
 fn inspect_reviewed_body_server_log_at(
     path: Option<OsString>,
+    marker: Option<&str>,
     secrets: &[&[u8]],
+    credentials_absent: impl FnOnce(&[u8]) -> bool,
 ) -> TestResult<()> {
     let Some(path) = path else {
         return Err(sentinel_assertion(
@@ -992,17 +1010,101 @@ fn inspect_reviewed_body_server_log_at(
             "reviewed headless server-log path was not absolute",
         ));
     }
+    let marker = marker
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| sentinel_assertion("reviewed headless server-log marker was invalid"))?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| sentinel_assertion("reviewed headless server log metadata was unreadable"))?;
+    if !metadata.file_type().is_file() {
+        return Err(sentinel_assertion(
+            "reviewed headless server log was not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // SAFETY: `geteuid` has no preconditions and does not dereference
+        // pointers or mutate process state.
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.permissions().mode() & 0o777 != 0o600 || metadata.uid() != effective_uid {
+            return Err(sentinel_assertion(
+                "reviewed headless server log ownership or permissions were unsafe",
+            ));
+        }
+    }
     let log = std::fs::read(path)
         .map_err(|_| sentinel_assertion("reviewed headless server log was unreadable"))?;
-    if log.len() > 524_288
+    if log.is_empty()
+        || log.len() > 524_288
         || std::str::from_utf8(&log).is_err()
         || secrets.iter().any(|secret| contains_bytes(&log, secret))
+        || !credentials_absent(&log)
     {
         return Err(sentinel_assertion(
             "reviewed headless server log violated size/UTF-8/redaction bounds",
         ));
     }
+    let marker_line = format!("any-mcp-run-marker={marker}");
+    let mut marker_count = 0usize;
+    let mut event_count = 0usize;
+    for line in std::str::from_utf8(&log)
+        .map_err(|_| sentinel_assertion("reviewed headless server log was not UTF-8"))?
+        .lines()
+    {
+        if line.is_empty() {
+            continue;
+        } else if line == marker_line {
+            marker_count = marker_count.saturating_add(1);
+        } else if reviewed_server_event_line(line) {
+            event_count = event_count.saturating_add(1);
+        } else {
+            return Err(sentinel_assertion(
+                "reviewed headless server log contained a non-allowlisted line",
+            ));
+        }
+    }
+    if marker_count != 1 || event_count == 0 {
+        return Err(sentinel_assertion(
+            "reviewed headless server log lacked current-run provenance or events",
+        ));
+    }
     Ok(())
+}
+
+fn reviewed_server_event_line(line: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "timestamp",
+        "severity",
+        "component",
+        "category",
+        "fixture_id",
+    ];
+    let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    event.len() >= 2
+        && event.keys().all(|key| KEYS.contains(&key.as_str()))
+        && event
+            .get("severity")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty() && value.len() <= 32)
+        && ["component", "category"].iter().any(|key| {
+            event
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty() && value.len() <= 128)
+        })
+        && event.values().all(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+        })
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -3763,6 +3865,7 @@ struct SpawnedBodyEvidence {
     scenario: BodyScenarioEvidence,
     descriptors: Vec<Value>,
     frames: [Value; 2],
+    stale_cursor_frame: Value,
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -3967,6 +4070,20 @@ fn run_spawned_body_phase<'a>(
         let scenario = run_body_scenario(&mut driver, ctx, transport)
             .await
             .map_err(|_| sentinel_assertion("spawned shared body scenario failed"))?;
+        let stale_cursor_frame = {
+            let mut guard = lock_driver(&child);
+            let process = guard
+                .as_mut()
+                .ok_or_else(|| sentinel_assertion("spawned body child missing after scenario"))?;
+            let [frame] = std::mem::take(&mut process.body_tool_error_frames)
+                .try_into()
+                .map_err(|_| {
+                    sentinel_assertion(
+                        "spawned body scenario did not retain one stale-cursor frame",
+                    )
+                })?;
+            frame
+        };
         let (_, output) = take_registered_body_driver(&child)?
             .try_finish()
             .map_err(|_| sentinel_assertion("spawned shared body child did not stop"))?;
@@ -3975,6 +4092,7 @@ fn run_spawned_body_phase<'a>(
             scenario,
             descriptors,
             frames,
+            stale_cursor_frame,
         })
     })
 }
@@ -3984,6 +4102,8 @@ fn run_spawned_read_only_body_phase<'a>(
     ctx: &'a TestContext,
     cleanup: Arc<Mutex<ChildCleanupRecord>>,
     options: DriverOptions,
+    space_id: &'a str,
+    object_id: &'a str,
 ) -> BodyAcceptancePhaseFuture<'a, BodyReadOnlyEvidence> {
     Box::pin(async move {
         let child = spawn_disposable_driver(ctx, cleanup, options, Some("body-blocks"))
@@ -3995,7 +4115,7 @@ fn run_spawned_read_only_body_phase<'a>(
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
-        let evidence = run_body_read_only_scenario(&mut driver)
+        let evidence = run_body_read_only_scenario(&mut driver, space_id, object_id)
             .await
             .map_err(|_| sentinel_assertion("read-only body scenario failed"))?;
         let (_, output) = take_registered_body_driver(&child)?
@@ -4046,12 +4166,16 @@ fn run_shared_body_callback(
             &ctx,
             stable_read_only_cleanup,
             DriverOptions::READ_ONLY,
+            &ctx.space_id,
+            &parity_page.id,
         )
         .await?;
         let preview_read_only = run_spawned_read_only_body_phase(
             &ctx,
             preview_read_only_cleanup,
             DriverOptions::PREVIEW_READ_ONLY,
+            &ctx.space_id,
+            &parity_page.id,
         )
         .await?;
 
@@ -4065,6 +4189,14 @@ fn run_shared_body_callback(
             ));
         }
         if !body_protocol_frames_match(&stable.frames, &preview.frames)
+            || compare_body_protocol_frame(&stable.stale_cursor_frame, &preview.stale_cursor_frame)
+                .is_err()
+            || stable.stale_cursor_frame.pointer("/result/isError") != Some(&Value::Bool(true))
+            || stable
+                .stale_cursor_frame
+                .pointer("/result/structuredContent/code")
+                .and_then(Value::as_str)
+                != Some("conflict")
             || stable.frames[0]
                 .pointer("/result/structuredContent/items")
                 .and_then(Value::as_array)
@@ -4180,12 +4312,22 @@ fn body_raw_frame_parity_allows_only_preview_complete_result_type() {
     );
     let preview_success = preview_body_protocol_test_frame(&success);
     let preview_error = error.clone();
+    let tool_error = body_protocol_test_frame(
+        5,
+        true,
+        json!({"code":"conflict","message":"The requested state changed. Refresh and retry."}),
+    );
+    let preview_tool_error = preview_body_protocol_test_frame(&tool_error);
 
     assert_eq!(
         compare_body_protocol_frame(&success, &preview_success),
         Ok(())
     );
     assert_eq!(compare_body_protocol_frame(&error, &preview_error), Ok(()));
+    assert_eq!(
+        compare_body_protocol_frame(&tool_error, &preview_tool_error),
+        Ok(())
+    );
     assert!(body_protocol_frames_match(
         &[success, error],
         &[preview_success, preview_error]
@@ -4444,9 +4586,89 @@ mod keystore_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    const RUN_MARKER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const REVIEWED_EVENT: &str = "{\"timestamp\":\"2026-07-23T00:00:00Z\",\"severity\":\"info\",\"component\":\"anytype\",\"category\":\"body_acceptance\"}";
+
+    fn write_reviewed_log(name: &str, contents: &[u8]) -> PathBuf {
+        let path = temporary_path(name);
+        std::fs::write(&path, contents).expect("write reviewed log fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("set private reviewed log permissions");
+        }
+        path
+    }
+
+    fn inspect_log(path: &Path, marker: Option<&str>, credentials_absent: bool) -> TestResult<()> {
+        inspect_reviewed_body_server_log_at(Some(path.as_os_str().to_owned()), marker, &[], |_| {
+            credentials_absent
+        })
+    }
+
     #[test]
     fn body_server_log_inspection_fails_closed_when_path_is_missing() {
-        assert!(inspect_reviewed_body_server_log_at(None, &[]).is_err());
+        assert!(
+            inspect_reviewed_body_server_log_at(None, Some(RUN_MARKER), &[], |_| true).is_err()
+        );
+    }
+
+    #[test]
+    fn body_server_log_requires_private_current_allowlisted_evidence() {
+        let valid = write_reviewed_log(
+            "reviewed-valid.log",
+            format!("{REVIEWED_EVENT}\nany-mcp-run-marker={RUN_MARKER}\n").as_bytes(),
+        );
+        assert!(inspect_log(&valid, Some(RUN_MARKER), true).is_ok());
+        assert!(inspect_log(&valid, None, true).is_err());
+        assert!(inspect_log(&valid, Some(&"a".repeat(63)), true).is_err());
+        assert!(inspect_log(&valid, Some(RUN_MARKER), false).is_err());
+
+        for (name, contents) in [
+            ("reviewed-empty.log", "".to_owned()),
+            ("reviewed-arbitrary.log", "arbitrary\n".to_owned()),
+            ("reviewed-no-marker.log", format!("{REVIEWED_EVENT}\n")),
+            (
+                "reviewed-no-event.log",
+                format!("any-mcp-run-marker={RUN_MARKER}\n"),
+            ),
+            (
+                "reviewed-duplicate-marker.log",
+                format!(
+                    "{REVIEWED_EVENT}\nany-mcp-run-marker={RUN_MARKER}\nany-mcp-run-marker={RUN_MARKER}\n"
+                ),
+            ),
+            (
+                "reviewed-unknown-field.log",
+                format!(
+                    "{{\"severity\":\"info\",\"component\":\"anytype\",\"body\":\"forbidden\"}}\nany-mcp-run-marker={RUN_MARKER}\n"
+                ),
+            ),
+        ] {
+            let path = write_reviewed_log(name, contents.as_bytes());
+            assert!(
+                inspect_log(&path, Some(RUN_MARKER), true).is_err(),
+                "accepted {name}"
+            );
+            let _ = std::fs::remove_file(path);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&valid, std::fs::Permissions::from_mode(0o640))
+                .expect("set unsafe reviewed log permissions");
+            assert!(inspect_log(&valid, Some(RUN_MARKER), true).is_err());
+        }
+        let _ = std::fs::remove_file(valid);
+
+        let directory = temporary_path("reviewed-directory");
+        std::fs::create_dir(&directory).expect("create non-file fixture");
+        assert!(inspect_log(&directory, Some(RUN_MARKER), true).is_err());
+        let _ = std::fs::remove_dir(directory);
     }
 
     fn temporary_path(name: &str) -> PathBuf {

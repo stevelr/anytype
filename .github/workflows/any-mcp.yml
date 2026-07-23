@@ -105,6 +105,18 @@ jobs:
           set -a
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a
+          reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          umask 077
+          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-reviewed-XXXXXX")"
+          reviewed_log="$reviewed_dir/server-events.jsonl"
+          cp -- "$reviewed_source" "$reviewed_log"
+          chmod 0600 "$reviewed_log"
+          run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+          test "${#run_marker}" -eq 64
+          printf '\nany-mcp-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
+          export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
+          export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
+          printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
           cargo run --locked -q -p anyr -- auth status --pretty
           cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1
@@ -116,7 +128,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: any-mcp-headless-server-log
-          path: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
           if-no-files-found: warn
           retention-days: 7
 
@@ -172,6 +184,18 @@ jobs:
           set -a
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a
+          reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          umask 077
+          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-reviewed-XXXXXX")"
+          reviewed_log="$reviewed_dir/server-events.jsonl"
+          cp -- "$reviewed_source" "$reviewed_log"
+          chmod 0600 "$reviewed_log"
+          run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+          test "${#run_marker}" -eq 64
+          printf '\nany-mcp-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
+          export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
+          export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
+          printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
           cargo run --locked -q -p anyr -- auth status --pretty
           cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1
@@ -183,6 +207,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: any-mcp-clean-server-log
-          path: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
           if-no-files-found: warn
           retention-days: 7
