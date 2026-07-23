@@ -41,8 +41,9 @@ use crate::runtime::{RuntimeContext, StartupStatus};
 mod live_scenario;
 
 use live_scenario::{
-    ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId, run_chats_registry_scenario,
-    run_live_scenario_on_large_stack, run_representative_layout_scenario, run_scenario,
+    ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId, run_body_scenario,
+    run_chats_registry_scenario, run_live_scenario_on_large_stack,
+    run_representative_layout_scenario, run_scenario,
 };
 
 fn arguments(value: Value) -> JsonObject {
@@ -158,6 +159,35 @@ async fn live_views_write_server(ctx: &TestContext) -> AnyMcpServer {
         selected,
     );
     AnyMcpServer::new(runtime).expect("production views-write MCP catalog")
+}
+
+async fn live_body_server(ctx: &TestContext) -> AnyMcpServer {
+    ctx.client
+        .ping_http()
+        .await
+        .expect("body suite requires authenticated HTTP");
+    ctx.client
+        .ping_grpc()
+        .await
+        .expect("body suite requires authenticated gRPC");
+    let selected = OptionalToolsetSelection::parse(
+        Some("body-blocks".to_owned()),
+        &production_optional_metadata(),
+    )
+    .expect("complete body-blocks registry");
+    let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+        ctx.client.clone(),
+        2,
+        Duration::from_secs(30),
+        StartupStatus {
+            http_available: true,
+            grpc_available: true,
+        },
+        ApplicationProfile::Standard,
+        false,
+        selected,
+    );
+    AnyMcpServer::new(runtime).expect("production body-blocks MCP catalog")
 }
 
 async fn call(server: &AnyMcpServer, name: &'static str, value: Value) -> CallToolResult {
@@ -2247,6 +2277,46 @@ async fn headless_direct_chats_registry_runs_all_six_workflows() {
     if let DisposableRun::Skipped(reason) = outcome {
         eprintln!("direct chats registry acceptance skipped before callback: {reason:?}");
     }
+}
+
+#[test]
+#[serial_test::serial(disposable_anytype_api)]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+fn headless_direct_body_blocks_runs_shared_scenario() {
+    run_live_scenario_on_large_stack("direct-body-blocks", || async {
+        let callback_ran = Arc::new(AtomicBool::new(false));
+        let callback_flag = Arc::clone(&callback_ran);
+        let outcome = Box::pin(with_disposable_space_context(
+            "any-mcp-direct-body-blocks",
+            move |ctx| {
+                callback_flag.store(true, Ordering::SeqCst);
+                Box::pin(async move {
+                    let server = live_body_server(ctx.as_ref()).await;
+                    let mut driver = DirectRouterDriver { server: &server };
+                    let evidence = run_body_scenario(&mut driver, ctx.as_ref(), "direct")
+                        .await
+                        .map_err(|_| TestError::Assertion {
+                            message: "direct shared body scenario failed".to_owned(),
+                        })?;
+                    if evidence.normalized_results.is_empty() || evidence.listed_block_count != 15 {
+                        return Err(TestError::Assertion {
+                            message: "direct shared body evidence was incomplete".to_owned(),
+                        });
+                    }
+                    Ok(())
+                })
+            },
+        ))
+        .await
+        .expect("cleanup-safe direct shared body scenario");
+        match outcome {
+            DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+            DisposableRun::Skipped(reason) => {
+                assert!(!callback_ran.load(Ordering::SeqCst));
+                eprintln!("direct shared body scenario skipped before callback: {reason:?}");
+            }
+        }
+    });
 }
 
 #[test]

@@ -42,7 +42,7 @@ mod support;
 use support::{
     live_scenario::{
         ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
-        run_chats_registry_scenario, run_live_scenario_on_large_stack,
+        run_body_scenario, run_chats_registry_scenario, run_live_scenario_on_large_stack,
         run_representative_layout_scenario, run_scenario, validate_live_ownership,
     },
     process::{ProcessOutput, ProtocolProcess},
@@ -3528,6 +3528,82 @@ async fn headless_body_blocks_direct_stable_preview_and_object_show() {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("body-block acceptance skipped before callback: {reason:?}");
         }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_body_blocks_shared_stable_and_preview_scenarios() {
+    let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let stable_callback_cleanup = Arc::clone(&stable_cleanup);
+    let preview_callback_cleanup = Arc::clone(&preview_cleanup);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-body-shared-stdio",
+        move |ctx| {
+            Box::pin(async move {
+                let stable = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    stable_callback_cleanup,
+                    DriverOptions::STANDARD,
+                    Some("body-blocks"),
+                )?;
+                lock_driver(&stable)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("stable body child missing"))?
+                    .initialize();
+                let mut stable_driver = OwnedStdioDriver {
+                    driver: Arc::clone(&stable),
+                };
+                let stable_evidence = run_body_scenario(&mut stable_driver, &ctx, "stable")
+                    .await
+                    .map_err(|_| sentinel_assertion("stable shared body scenario failed"))?;
+                take_registered_body_driver(&stable)?
+                    .try_finish()
+                    .map_err(|_| sentinel_assertion("stable shared body child did not stop"))?;
+
+                let preview = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    preview_callback_cleanup,
+                    DriverOptions::PREVIEW_STANDARD,
+                    Some("body-blocks"),
+                )?;
+                lock_driver(&preview)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("preview body child missing"))?
+                    .initialize();
+                let mut preview_driver = OwnedStdioDriver {
+                    driver: Arc::clone(&preview),
+                };
+                let preview_evidence = run_body_scenario(&mut preview_driver, &ctx, "preview")
+                    .await
+                    .map_err(|_| sentinel_assertion("preview shared body scenario failed"))?;
+                take_registered_body_driver(&preview)?
+                    .try_finish()
+                    .map_err(|_| sentinel_assertion("preview shared body child did not stop"))?;
+
+                if stable_evidence != preview_evidence {
+                    return Err(sentinel_assertion(
+                        "stable and preview normalized body result shapes diverged",
+                    ));
+                }
+                Ok(ctx.space_id.clone())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe shared stable/preview body scenario");
+    if let DisposableRun::Completed(space_id) = outcome {
+        assert_eq!(
+            *stable_cleanup.lock().expect("stable cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+        assert_eq!(
+            *preview_cleanup.lock().expect("preview cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+        assert_fresh_space_absence(&space_id).await;
     }
 }
 

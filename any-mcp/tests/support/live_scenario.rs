@@ -13,10 +13,586 @@ use std::{
 };
 
 use anytype::{
-    body::{BlockContent, BodySnapshot, MarkKind},
-    prelude::{Color, ObjectLayout, PropertyFormat},
+    body::{
+        BlockContent, BodySnapshot, CalloutIcon, DividerStyle, EmbedProcessor, HorizontalAlign,
+        LayoutStyle, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind, TextStyle,
+        VerticalAlign,
+    },
+    prelude::{Color, InsertPosition, NewBlock, ObjectLayout, PropertyFormat},
     test_util::{TestContext, unique_suffix},
 };
+
+/// Content-free evidence from one transport-neutral rich-body workflow.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BodyScenarioEvidence {
+    pub normalized_results: Vec<Value>,
+    pub listed_block_count: usize,
+}
+
+fn body_string<'a>(value: &'a Value, pointer: &str, field: &str) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("body scenario omitted {field}"))
+}
+
+fn normalize_body_result(value: &Value) -> Value {
+    fn normalized(value: &Value, field: Option<&str>) -> Value {
+        match value {
+            Value::Object(object) => Value::Object(
+                object
+                    .iter()
+                    .map(|(key, value)| (key.clone(), normalized(value, Some(key))))
+                    .collect(),
+            ),
+            Value::Array(values) => Value::Array(
+                values
+                    .iter()
+                    .map(|value| normalized(value, field))
+                    .collect(),
+            ),
+            Value::String(_) => match field {
+                Some(
+                    "id" | "space_id" | "object_id" | "root_id" | "parent_id" | "block_id"
+                    | "target_object_id",
+                ) => {
+                    json!("<id>")
+                }
+                Some("snapshot_hash" | "final_snapshot_hash") => json!("<snapshot-hash>"),
+                Some("next_cursor") => json!("<cursor>"),
+                _ => value.clone(),
+            },
+            _ => value.clone(),
+        }
+    }
+    normalized(value, None)
+}
+
+fn rich_applied_ids(result: &Value, local_keys: &[&str]) -> Result<Vec<String>, String> {
+    let applied = result["applied"]
+        .as_array()
+        .ok_or_else(|| "rich result omitted applied receipts".to_owned())?;
+    if applied.len() != local_keys.len() {
+        return Err("rich result returned the wrong applied-receipt count".to_owned());
+    }
+    applied
+        .iter()
+        .zip(local_keys)
+        .enumerate()
+        .map(|(index, (receipt, expected_key))| {
+            if receipt["index"].as_u64() != Some(index as u64)
+                || receipt["local_key"].as_str() != Some(expected_key)
+            {
+                return Err("rich result reordered applied receipts".to_owned());
+            }
+            body_string(receipt, "/block_id", "rich block ID").map(str::to_owned)
+        })
+        .collect()
+}
+
+fn rich_root_contains_exact_suffix(snapshot: &BodySnapshot, ids: &[String]) -> bool {
+    let children = snapshot
+        .children(&snapshot.root_id)
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<Vec<_>>();
+    children
+        .windows(ids.len())
+        .any(|window| window.iter().copied().eq(ids.iter().map(String::as_str)))
+}
+
+fn verify_table_shape(
+    snapshot: &BodySnapshot,
+    table_id: &str,
+    rows: usize,
+    columns: usize,
+    header_row: bool,
+) -> bool {
+    let Some(table) = snapshot.iter().find(|block| block.id.as_str() == table_id) else {
+        return false;
+    };
+    if !matches!(table.content, BlockContent::Table) || table.children.len() != 2 {
+        return false;
+    }
+    let Some(column_region) = snapshot.get(&table.children[0]) else {
+        return false;
+    };
+    let Some(row_region) = snapshot.get(&table.children[1]) else {
+        return false;
+    };
+    matches!(
+        column_region.content,
+        BlockContent::Layout(LayoutStyle::TableColumns)
+    ) && column_region.children.len() == columns
+        && column_region.children.iter().all(|id| {
+            snapshot
+                .get(id)
+                .is_some_and(|block| matches!(block.content, BlockContent::TableColumn))
+        })
+        && matches!(
+            row_region.content,
+            BlockContent::Layout(LayoutStyle::TableRows)
+        )
+        && row_region.children.len() == rows
+        && row_region.children.iter().enumerate().all(|(index, id)| {
+            snapshot.get(id).is_some_and(|block| {
+                matches!(
+                    block.content,
+                    BlockContent::TableRow { is_header }
+                        if is_header == (header_row && index == 0)
+                )
+            })
+        })
+}
+
+fn verify_primary_rich_snapshot(snapshot: &BodySnapshot, ids: &[String], target: &str) -> bool {
+    let expected_text = [
+        (TextStyle::Paragraph, "Paragraph", false),
+        (TextStyle::Header1, "Heading 1", false),
+        (TextStyle::Header2, "Heading 2", false),
+        (TextStyle::Header3, "Heading 3", false),
+        (TextStyle::Quote, "Quote", false),
+        (TextStyle::Code, "let answer = 42;", false),
+        (TextStyle::Bulleted, "Bulleted", false),
+        (TextStyle::Numbered, "Numbered", false),
+        (TextStyle::Checkbox, "Checked", true),
+        (TextStyle::Toggle, "Toggle", false),
+        (TextStyle::Callout, "Callout", false),
+    ];
+    if ids.len() != 16 || !rich_root_contains_exact_suffix(snapshot, ids) {
+        return false;
+    }
+    for (index, (style, text, checked)) in expected_text.into_iter().enumerate() {
+        let Some(block) = snapshot
+            .iter()
+            .find(|block| block.id.as_str() == ids[index])
+        else {
+            return false;
+        };
+        let BlockContent::Text(content) = &block.content else {
+            return false;
+        };
+        if content.style != style || content.text != text || content.checked != checked {
+            return false;
+        }
+        if index == 0
+            && (content.color.as_ref().map(|color| color.as_str()) != Some("blue")
+                || block.align != HorizontalAlign::Center
+                || block.vertical_align != VerticalAlign::Middle
+                || block.background_color.as_ref().map(|color| color.as_str()) != Some("grey"))
+        {
+            return false;
+        }
+        if index == 10
+            && !matches!(content.icon, Some(CalloutIcon::Emoji(ref emoji)) if emoji == "💡")
+        {
+            return false;
+        }
+    }
+    let by_id = |index: usize| {
+        snapshot
+            .iter()
+            .find(|block| block.id.as_str() == ids[index])
+            .map(|block| &block.content)
+    };
+    matches!(by_id(11), Some(BlockContent::Divider(DividerStyle::Dots)))
+        && matches!(by_id(12), Some(BlockContent::Relation(relation)) if relation.key == "tag")
+        && snapshot
+            .iter()
+            .find(|block| block.id.as_str() == ids[12])
+            .is_some_and(|block| block.align == HorizontalAlign::Justify)
+        && matches!(
+            by_id(13),
+            Some(BlockContent::Link(link))
+                if link.target_object_id == target
+                    && link.card_style == LinkCardStyle::Card
+                    && link.icon_size == LinkIconSize::Small
+                    && link.description == LinkDescriptionMode::Content
+                    && link.relations == ["tag"]
+        )
+        && matches!(
+            by_id(14),
+            Some(BlockContent::Embed(embed))
+                if embed.processor == EmbedProcessor::Mermaid
+                    && embed.text == "graph TD; A-->B"
+        )
+        && snapshot
+            .iter()
+            .find(|block| block.id.as_str() == ids[13])
+            .is_some_and(|block| {
+                block.align == HorizontalAlign::Right
+                    && block.vertical_align == VerticalAlign::Bottom
+                    && block.background_color.as_ref().map(|color| color.as_str()) == Some("yellow")
+            })
+        && verify_table_shape(snapshot, &ids[15], 2, 3, true)
+}
+
+fn verify_supplemental_rich_snapshot(
+    snapshot: &BodySnapshot,
+    ids: &[String],
+    target: &str,
+) -> bool {
+    if ids.len() != 7 || !rich_root_contains_exact_suffix(snapshot, ids) {
+        return false;
+    }
+    let by_id = |index: usize| {
+        snapshot
+            .iter()
+            .find(|block| block.id.as_str() == ids[index])
+            .map(|block| &block.content)
+    };
+    matches!(by_id(0), Some(BlockContent::Divider(DividerStyle::Line)))
+        && matches!(
+            by_id(1),
+            Some(BlockContent::Embed(embed))
+                if embed.processor == EmbedProcessor::Latex && embed.text == "x^2 + y^2"
+        )
+        && matches!(
+            by_id(2),
+            Some(BlockContent::Embed(embed))
+                if embed.processor == EmbedProcessor::Youtube
+                    && embed.text == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
+        && matches!(by_id(3), Some(BlockContent::TableOfContents))
+        && matches!(
+            by_id(4),
+            Some(BlockContent::Link(link))
+                if link.target_object_id == target
+                    && link.card_style == LinkCardStyle::Text
+                    && link.icon_size == LinkIconSize::None
+                    && link.description == LinkDescriptionMode::None
+                    && link.relations.is_empty()
+        )
+        && matches!(
+            by_id(5),
+            Some(BlockContent::Link(link))
+                if link.target_object_id == target
+                    && link.card_style == LinkCardStyle::Inline
+                    && link.icon_size == LinkIconSize::Medium
+                    && link.description == LinkDescriptionMode::Added
+                    && link.relations == ["tag"]
+        )
+        && verify_table_shape(snapshot, &ids[6], 1, 1, false)
+}
+
+/// Runs ordinary body behavior through any direct or protocol driver while an
+/// independent `anytype-api` client owns and verifies every live fixture.
+pub async fn run_body_scenario(
+    driver: &mut impl McpDriver,
+    ctx: &TestContext,
+    transport: &str,
+) -> Result<BodyScenarioEvidence, String> {
+    let mut normalized_results = Vec::new();
+    let suffix = unique_suffix();
+    let markdown = (0..14)
+        .map(|index| format!("Paragraph {index}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let page = ctx
+        .client
+        .new_object(&ctx.space_id, "page")
+        .name(format!("Body {transport} {suffix}"))
+        .body(markdown)
+        .create()
+        .await
+        .map_err(|_| "body fixture page create failed".to_owned())?;
+    ctx.register_object(&page.id);
+
+    let tools = driver.list_tools().await?;
+    for name in [
+        "body_block_list",
+        "body_block_create",
+        "body_block_update",
+        "body_block_delete",
+        "body_block_move",
+        "rich_page_create",
+    ] {
+        if !tools.iter().any(|candidate| candidate == name) {
+            return Err(format!("{transport} catalog omitted {name}"));
+        }
+    }
+
+    let first = driver
+        .call_tool(
+            "body_block_list",
+            json!({"space":ctx.space_id,"object_id":page.id,"limit":8}),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&first));
+    let root_id = body_string(&first, "/root_id", "root ID")?.to_owned();
+    body_string(&first, "/snapshot_hash", "snapshot hash")?;
+    let cursor = body_string(&first, "/next_cursor", "continuation cursor")?.to_owned();
+    let mut listed_block_ids = first["items"]
+        .as_array()
+        .ok_or_else(|| "body first page omitted items".to_owned())?
+        .iter()
+        .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    let second = driver
+        .call_tool(
+            "body_block_list",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,"limit":12,"cursor":cursor
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&second));
+    if second["snapshot_hash"] != first["snapshot_hash"] {
+        return Err("body pages mixed snapshot hashes".to_owned());
+    }
+    listed_block_ids.extend(
+        second["items"]
+            .as_array()
+            .ok_or_else(|| "body second page omitted items".to_owned())?
+            .iter()
+            .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    if second.get("next_cursor").is_some() {
+        return Err("body two-page fixture unexpectedly returned a third cursor".to_owned());
+    }
+    let independent = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &page.id)
+        .fetch()
+        .await
+        .map_err(|_| "independent body read failed".to_owned())?;
+    let independent_ids = independent
+        .iter()
+        .map(|block| block.id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    if listed_block_ids != independent_ids {
+        return Err("body pages did not preserve exact DFS order".to_owned());
+    }
+
+    let stale_first = driver
+        .call_tool(
+            "body_block_list",
+            json!({"space":ctx.space_id,"object_id":page.id,"limit":8}),
+        )
+        .await?;
+    let stale_cursor = body_string(&stale_first, "/next_cursor", "stale cursor")?.to_owned();
+    independent
+        .edit(&ctx.client)
+        .create(
+            NewBlock::paragraph("independent revision")
+                .map_err(|_| "independent revision constructor failed".to_owned())?,
+            &independent.root_id,
+            InsertPosition::LastChild,
+        )
+        .await
+        .map_err(|_| "independent revision write failed".to_owned())?;
+    let stale_error = driver
+        .call_tool_error(
+            "body_block_list",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,"limit":8,"cursor":stale_cursor
+            }),
+        )
+        .await?;
+    if !stale_error.contains("conflict") {
+        return Err("body continuation did not reject revision drift".to_owned());
+    }
+    normalized_results.push(json!({"error_category":"conflict"}));
+
+    let fresh = driver
+        .call_tool(
+            "body_block_list",
+            json!({"space":ctx.space_id,"object_id":page.id,"limit":8}),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&fresh));
+    let mut snapshot_hash = body_string(&fresh, "/snapshot_hash", "fresh hash")?.to_owned();
+    let create_input = json!({
+        "space":ctx.space_id,"object_id":page.id,
+        "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
+        "position":"last_child",
+        "block":{"kind":"text","style":"paragraph","text":"created block","marks":[]},
+        "idempotency_key":format!("body-{transport}-{suffix}")
+    });
+    let created = driver
+        .call_tool("body_block_create", create_input.clone())
+        .await?;
+    normalized_results.push(normalize_body_result(&created));
+    let created_block_id = body_string(&created, "/block/id", "created block ID")?.to_owned();
+    let replay = driver.call_tool("body_block_create", create_input).await?;
+    normalized_results.push(normalize_body_result(&replay));
+    if replay["block"]["id"] != created["block"]["id"]
+        || replay["idempotency"]["key_reused"] != true
+    {
+        return Err("body create replay did not retain one assigned ID".to_owned());
+    }
+    snapshot_hash = body_string(&replay, "/snapshot_hash", "replay hash")?.to_owned();
+
+    let updated = driver
+        .call_tool(
+            "body_block_update",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"block_id":created_block_id,
+                "change":{"kind":"set_text","text":"updated block","marks":[]}
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&updated));
+    snapshot_hash = body_string(&updated, "/snapshot_hash", "update hash")?.to_owned();
+    let child = driver
+        .call_tool(
+            "body_block_create",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"target_block_id":created_block_id,
+                "position":"last_child",
+                "block":{"kind":"text","style":"paragraph","text":"targeted child","marks":[]},
+                "idempotency_key":format!("body-child-{transport}-{suffix}")
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&child));
+    let child_id = body_string(&child, "/block/id", "child ID")?.to_owned();
+    snapshot_hash = body_string(&child, "/snapshot_hash", "child hash")?.to_owned();
+    let moved = driver
+        .call_tool(
+            "body_block_move",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
+                "target_block_id":created_block_id,"position":"after"
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&moved));
+    snapshot_hash = body_string(&moved, "/snapshot_hash", "move hash")?.to_owned();
+    let deleted = driver
+        .call_tool(
+            "body_block_delete",
+            json!({
+                "space":ctx.space_id,"object_id":page.id,
+                "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
+                "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
+            }),
+        )
+        .await?;
+    normalized_results.push(normalize_body_result(&deleted));
+
+    let rich_input = json!({
+        "space":ctx.space_id,"name":format!("Rich {transport} {suffix}"),
+        "idempotency_key":format!("rich-{transport}-{suffix}"),
+        "blocks":[
+            {"local_key":"paragraph","block":{"kind":"text","style":"paragraph","text":"Paragraph","marks":[],"text_color":"blue","horizontal_align":"center","vertical_align":"middle","background_color":"grey"}},
+            {"local_key":"heading1","block":{"kind":"text","style":"heading_1","text":"Heading 1","marks":[]}},
+            {"local_key":"heading2","block":{"kind":"text","style":"heading_2","text":"Heading 2","marks":[]}},
+            {"local_key":"heading3","block":{"kind":"text","style":"heading_3","text":"Heading 3","marks":[]}},
+            {"local_key":"quote","block":{"kind":"text","style":"quote","text":"Quote","marks":[]}},
+            {"local_key":"code","block":{"kind":"text","style":"code","text":"let answer = 42;","marks":[]}},
+            {"local_key":"bulleted","block":{"kind":"text","style":"bulleted","text":"Bulleted","marks":[]}},
+            {"local_key":"numbered","block":{"kind":"text","style":"numbered","text":"Numbered","marks":[]}},
+            {"local_key":"checkbox","block":{"kind":"text","style":"checkbox","text":"Checked","checked":true,"marks":[]}},
+            {"local_key":"toggle","block":{"kind":"text","style":"toggle","text":"Toggle","marks":[]}},
+            {"local_key":"callout","block":{"kind":"text","style":"callout","text":"Callout","icon":{"kind":"emoji","emoji":"💡"},"marks":[]}},
+            {"local_key":"divider","block":{"kind":"divider","style":"dots"}},
+            {"local_key":"relation","block":{"kind":"relation","key":"tag","horizontal_align":"justify"}},
+            {"local_key":"link","block":{"kind":"link","target_object_id":page.id,"card_style":"card","icon_size":"small","description":"content","relations":["tag"],"horizontal_align":"right","vertical_align":"bottom","background_color":"yellow"}},
+            {"local_key":"mermaid","block":{"kind":"embed","processor":"mermaid","source":"graph TD; A-->B"}},
+            {"local_key":"table","block":{"kind":"table","rows":2,"columns":3,"header_row":true}}
+        ]
+    });
+    let primary_keys = [
+        "paragraph",
+        "heading1",
+        "heading2",
+        "heading3",
+        "quote",
+        "code",
+        "bulleted",
+        "numbered",
+        "checkbox",
+        "toggle",
+        "callout",
+        "divider",
+        "relation",
+        "link",
+        "mermaid",
+        "table",
+    ];
+    let rich = driver
+        .call_tool("rich_page_create", rich_input.clone())
+        .await?;
+    let rich_page_id = body_string(&rich, "/object_id", "rich page ID")?.to_owned();
+    ctx.register_object(&rich_page_id);
+    normalized_results.push(normalize_body_result(&rich));
+    if rich["status"] != "complete" {
+        return Err("rich page workflow did not complete".to_owned());
+    }
+    let primary_ids = rich_applied_ids(&rich, &primary_keys)?;
+    let rich_snapshot = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &rich_page_id)
+        .fetch()
+        .await
+        .map_err(|_| "independent rich body read failed".to_owned())?;
+    if !verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id) {
+        return Err("independent primary rich ObjectShow verification failed".to_owned());
+    }
+    let rich_replay = driver.call_tool("rich_page_create", rich_input).await?;
+    if rich_replay["object_id"] != rich["object_id"]
+        || rich_replay["idempotency"]["key_reused"] != true
+    {
+        return Err("rich page replay did not retain one exact page".to_owned());
+    }
+    normalized_results.push(normalize_body_result(&rich_replay));
+
+    let supplemental_input = json!({
+        "space":ctx.space_id,"name":format!("Rich variants {transport} {suffix}"),
+        "idempotency_key":format!("rich-variants-{transport}-{suffix}"),
+        "blocks":[
+            {"local_key":"line","block":{"kind":"divider","style":"line"}},
+            {"local_key":"latex","block":{"kind":"embed","processor":"latex","source":"x^2 + y^2"}},
+            {"local_key":"youtube","block":{"kind":"embed","processor":"youtube","source":"dQw4w9WgXcQ"}},
+            {"local_key":"toc","block":{"kind":"table_of_contents"}},
+            {"local_key":"link_text","block":{"kind":"link","target_object_id":page.id,"card_style":"text","icon_size":"none","description":"none","relations":[]}},
+            {"local_key":"link_inline","block":{"kind":"link","target_object_id":page.id,"card_style":"inline","icon_size":"medium","description":"added","relations":["tag"]}},
+            {"local_key":"table_plain","block":{"kind":"table","rows":1,"columns":1,"header_row":false}}
+        ]
+    });
+    let supplemental_keys = [
+        "line",
+        "latex",
+        "youtube",
+        "toc",
+        "link_text",
+        "link_inline",
+        "table_plain",
+    ];
+    let supplemental = driver
+        .call_tool("rich_page_create", supplemental_input)
+        .await?;
+    let supplemental_page_id =
+        body_string(&supplemental, "/object_id", "supplemental rich page ID")?.to_owned();
+    ctx.register_object(&supplemental_page_id);
+    normalized_results.push(normalize_body_result(&supplemental));
+    if supplemental["status"] != "complete" {
+        return Err("supplemental rich workflow did not complete".to_owned());
+    }
+    let supplemental_ids = rich_applied_ids(&supplemental, &supplemental_keys)?;
+    let supplemental_snapshot = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, &supplemental_page_id)
+        .fetch()
+        .await
+        .map_err(|_| "independent supplemental rich body read failed".to_owned())?;
+    if !verify_supplemental_rich_snapshot(&supplemental_snapshot, &supplemental_ids, &page.id) {
+        return Err("independent supplemental rich ObjectShow verification failed".to_owned());
+    }
+
+    Ok(BodyScenarioEvidence {
+        normalized_results,
+        listed_block_count: listed_block_ids.len(),
+    })
+}
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 

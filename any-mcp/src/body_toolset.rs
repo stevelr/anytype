@@ -6836,9 +6836,9 @@ mod tests {
                 assert!(select_body_page(&after, Some(&prior), 1, 8).is_err());
             }
             "body_limits_fail_closed" => {
-                assert!(MAX_LIST_LIMIT <= 12);
-                assert!(MAX_BODY_BLOCKS <= 2_048);
-                assert!(MAX_TABLE_CELLS < MAX_TABLE_ROWS * MAX_TABLE_COLUMNS);
+                const { assert!(MAX_LIST_LIMIT <= 12) };
+                const { assert!(MAX_BODY_BLOCKS <= 2_048) };
+                const { assert!(MAX_TABLE_CELLS < MAX_TABLE_ROWS * MAX_TABLE_COLUMNS) };
                 assert!(
                     validate_body_result_bounds(&list_result_with_tail(7_656), LIST_FRAME_BOUNDS)
                         .is_err()
@@ -6942,7 +6942,7 @@ mod tests {
                 assert_eq!(arms.len(), 14);
                 let decoded = arms
                     .into_iter()
-                    .map(|arm| serde_json::from_value::<BlockChangeInput>(arm))
+                    .map(serde_json::from_value::<BlockChangeInput>)
                     .collect::<Result<Vec<_>, _>>()
                     .expect("all closed update arms");
                 let mut paragraph =
@@ -7172,7 +7172,7 @@ mod tests {
                 let encoded =
                     serde_json::to_string(&tool_error(&ToolError::upstream())).expect("error JSON");
                 assert!(!encoded.contains(secret));
-                assert!(MAX_BODY_REQUEST_FRAME_BYTES < MAX_BODY_SUCCESS_FRAME_BYTES);
+                const { assert!(MAX_BODY_REQUEST_FRAME_BYTES < MAX_BODY_SUCCESS_FRAME_BYTES) };
             }
             other => panic!("unowned body scenario {other}"),
         }
