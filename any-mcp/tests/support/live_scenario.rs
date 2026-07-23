@@ -572,20 +572,36 @@ async fn call_body_tool_with_metrics(
 ) -> Result<Value, String> {
     body_metric_call_marker(label, "call_start");
     let before = driver.body_acceptance_metrics();
-    let result = driver
-        .call_tool(name, arguments)
-        .await
-        .inspect_err(|error| {
+    let call_result = driver.call_tool(name, arguments).await;
+    match &call_result {
+        Ok(_) => body_metric_call_marker(label, "call_returned"),
+        Err(error) => {
             body_metric_call_marker(label, "driver_error");
             body_metric_error_diagnostic(label, body_driver_error_category(error));
-        })?;
-    body_metric_call_marker(label, "call_returned");
+        }
+    }
     let after = driver.body_acceptance_metrics();
     body_metric_availability_diagnostic(label, before.is_some(), after.is_some());
-    if let (Some(before), Some(after)) = (before, after) {
-        let observed = body_metrics_delta(before, after).inspect_err(|_| {
-            body_metric_call_marker(label, "delta_underflow");
-        })?;
+    let delta = if let (Some(before), Some(after)) = (before, after) {
+        let delta = body_metrics_delta(before, after);
+        match &delta {
+            Ok(observed) => body_metric_vector_diagnostic(label, "delta", *observed),
+            Err(_) => body_metric_call_marker(label, "delta_underflow"),
+        }
+        Some(delta)
+    } else {
+        body_metric_call_marker(label, "metrics_unavailable");
+        None
+    };
+    let result = match call_result {
+        Ok(result) => result,
+        Err(error) => {
+            body_metric_call_marker(label, "driver_error_returned");
+            return Err(error);
+        }
+    };
+    if let Some(delta) = delta {
+        let observed = delta?;
         if observed != expected {
             body_metric_call_marker(label, "metrics_mismatch");
             body_metric_vector_diagnostic(label, "observed", observed);
@@ -593,8 +609,6 @@ async fn call_body_tool_with_metrics(
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
         body_metric_call_marker(label, "metrics_match");
-    } else {
-        body_metric_call_marker(label, "metrics_unavailable");
     }
     body_metric_call_marker(label, "complete");
     Ok(result)
