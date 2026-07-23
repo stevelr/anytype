@@ -25,7 +25,7 @@ use anytype::{
     },
     test_util::{
         DisposableCallbackStage, DisposableRun, TestContext, TestError, unique_suffix,
-        with_disposable_space_context, with_test_context,
+        with_disposable_space_context,
     },
 };
 use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject, ReadResourceRequestParams};
@@ -195,8 +195,8 @@ async fn live_body_server(ctx: &TestContext) -> AnyMcpServer {
 }
 
 async fn call(server: &AnyMcpServer, name: &'static str, value: Value) -> CallToolResult {
-    // Poll the aggregate debug dispatch from its own runtime task so the
-    // fixture-heavy caller stack unwinds before the selected handler runs.
+    // Poll the selected route from its own runtime task so the fixture-heavy
+    // caller stack unwinds before the handler runs.
     let server = server.clone();
     tokio::spawn(async move {
         let cancellation = CancellationToken::new();
@@ -1056,6 +1056,7 @@ async fn headless_shared_filters_conform_and_preserve_server_pagination() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
     let callback_ran = Arc::new(AtomicBool::new(false));
@@ -1690,280 +1691,330 @@ async fn headless_view_body_and_resource_routes_are_complete_and_bound() {
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_mutations_are_visible_idempotent_and_conflict_safe() {
-    Box::pin(with_test_context(|ctx| {
-        Box::pin(async move {
-            let server = live_server(ctx.as_ref()).await;
-            let suffix = unique_suffix();
-            let created_name = format!("MCP routed mutation {suffix}");
-            let create_arguments = json!({
-                "space": ctx.space_id.as_str(),
-                "type": "page",
-                "name": created_name,
-                "idempotency_key": format!("mcp-live-{suffix}")
-            });
-            let created_a = success(&server, OBJECT_CREATE, create_arguments.clone()).await;
-            let object_id = created_a["object"]["id"]
-                .as_str()
-                .expect("created object id")
-                .to_owned();
-            ctx.register_object(&object_id);
-            let replay = success(&server, OBJECT_CREATE, create_arguments).await;
-            assert_eq!(replay["object"]["id"], object_id);
-            let visible = ctx
-                .client
-                .object(&ctx.space_id, &object_id)
-                .get()
-                .await
-                .expect("read routed create");
-            assert_eq!(visible.name.as_deref(), Some(created_name.as_str()));
-
-            let initial = success(
-                &server,
-                OBJECT_GET,
-                json!({
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-routed-mutations",
+        |ctx| {
+            Box::pin(async move {
+                let server = live_server(ctx.as_ref()).await;
+                let suffix = unique_suffix();
+                let created_name = format!("MCP routed mutation {suffix}");
+                let create_arguments = json!({
                     "space": ctx.space_id.as_str(),
-                    "object_id": object_id.as_str(),
-                    "body": {"max_chars": 100}
-                }),
-            )
-            .await;
-            let initial_hash = initial["body"]["sha256"].as_str().unwrap().to_owned();
-            let updated_name = format!("MCP routed updated {suffix}");
-            let updated = success(
-                &server,
-                OBJECT_UPDATE,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": object_id.as_str(),
-                    "name": updated_name,
-                    "expected_body_sha256": initial_hash
-                }),
-            )
-            .await;
-            let beta_hash = updated["body_sha256"].as_str().unwrap().to_owned();
-            let visible = ctx
-                .client
-                .object(&ctx.space_id, &object_id)
-                .get()
-                .await
-                .expect("read routed update");
-            assert_eq!(visible.name.as_deref(), Some(updated_name.as_str()));
-
-            ctx.client
-                .update_object(&ctx.space_id, &object_id)
-                .body("gamma concurrent body")
-                .ensure_available()
-                .update()
-                .await
-                .expect("intervening concurrent writer");
-            let stale = failure(
-                &server,
-                OBJECT_EDIT,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": object_id.as_str(),
-                    "edits": [{"old_text": "gamma", "new_text": "stale-write"}],
-                    "expected_body_sha256": beta_hash
-                }),
-            )
-            .await;
-            assert_eq!(stale["code"], "conflict");
-            let concurrent_body = read_body(ctx.as_ref(), &object_id).await;
-            assert!(concurrent_body.contains("gamma concurrent body"));
-
-            let current = success(
-                &server,
-                OBJECT_GET,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": object_id.as_str(),
-                    "body": {"max_chars": 100}
-                }),
-            )
-            .await;
-            let gamma_hash = current["body"]["sha256"].as_str().unwrap().to_owned();
-            let count_conflict = failure(
-                &server,
-                OBJECT_EDIT,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": object_id.as_str(),
-                    "edits": [{
-                        "old_text": "absent fragment",
-                        "new_text": "must not write",
-                        "expected_matches": 1
-                    }],
-                    "expected_body_sha256": gamma_hash
-                }),
-            )
-            .await;
-            assert_eq!(count_conflict["code"], "conflict");
-            assert_eq!(read_body(ctx.as_ref(), &object_id).await, concurrent_body);
-
-            let edited = success(
-                &server,
-                OBJECT_EDIT,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": object_id.as_str(),
-                    "edits": [{"old_text": "gamma", "new_text": "delta"}],
-                    "expected_body_sha256": current["body"]["sha256"]
-                }),
-            )
-            .await;
-            assert!(edited["body_sha256"].is_string());
-            assert!(
-                read_body(ctx.as_ref(), &object_id)
+                    "type": "page",
+                    "name": created_name,
+                    "idempotency_key": format!("mcp-live-{suffix}")
+                });
+                let created_a = success(&server, OBJECT_CREATE, create_arguments.clone()).await;
+                let object_id = created_a["object"]["id"]
+                    .as_str()
+                    .expect("created object id")
+                    .to_owned();
+                ctx.register_object(&object_id);
+                let replay = success(&server, OBJECT_CREATE, create_arguments).await;
+                assert_eq!(replay["object"]["id"], object_id);
+                let visible = ctx
+                    .client
+                    .object(&ctx.space_id, &object_id)
+                    .get()
                     .await
-                    .contains("delta concurrent body")
-            );
-            Ok(())
-        })
-    }))
+                    .expect("read routed create");
+                assert_eq!(visible.name.as_deref(), Some(created_name.as_str()));
+
+                let initial = success(
+                    &server,
+                    OBJECT_GET,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object_id.as_str(),
+                        "body": {"max_chars": 100}
+                    }),
+                )
+                .await;
+                let initial_hash = initial["body"]["sha256"].as_str().unwrap().to_owned();
+                let updated_name = format!("MCP routed updated {suffix}");
+                let updated = success(
+                    &server,
+                    OBJECT_UPDATE,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object_id.as_str(),
+                        "name": updated_name,
+                        "expected_body_sha256": initial_hash
+                    }),
+                )
+                .await;
+                let beta_hash = updated["body_sha256"].as_str().unwrap().to_owned();
+                let visible = ctx
+                    .client
+                    .object(&ctx.space_id, &object_id)
+                    .get()
+                    .await
+                    .expect("read routed update");
+                assert_eq!(visible.name.as_deref(), Some(updated_name.as_str()));
+
+                ctx.client
+                    .update_object(&ctx.space_id, &object_id)
+                    .body("gamma concurrent body")
+                    .ensure_available()
+                    .update()
+                    .await
+                    .expect("intervening concurrent writer");
+                let stale = failure(
+                    &server,
+                    OBJECT_EDIT,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object_id.as_str(),
+                        "edits": [{"old_text": "gamma", "new_text": "stale-write"}],
+                        "expected_body_sha256": beta_hash
+                    }),
+                )
+                .await;
+                assert_eq!(stale["code"], "conflict");
+                let concurrent_body = read_body(ctx.as_ref(), &object_id).await;
+                assert!(concurrent_body.contains("gamma concurrent body"));
+
+                let current = success(
+                    &server,
+                    OBJECT_GET,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object_id.as_str(),
+                        "body": {"max_chars": 100}
+                    }),
+                )
+                .await;
+                let gamma_hash = current["body"]["sha256"].as_str().unwrap().to_owned();
+                let count_conflict = failure(
+                    &server,
+                    OBJECT_EDIT,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object_id.as_str(),
+                        "edits": [{
+                            "old_text": "absent fragment",
+                            "new_text": "must not write",
+                            "expected_matches": 1
+                        }],
+                        "expected_body_sha256": gamma_hash
+                    }),
+                )
+                .await;
+                assert_eq!(count_conflict["code"], "conflict");
+                assert_eq!(read_body(ctx.as_ref(), &object_id).await, concurrent_body);
+
+                let edited = success(
+                    &server,
+                    OBJECT_EDIT,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object_id.as_str(),
+                        "edits": [{"old_text": "gamma", "new_text": "delta"}],
+                        "expected_body_sha256": current["body"]["sha256"]
+                    }),
+                )
+                .await;
+                assert!(edited["body_sha256"].is_string());
+                assert!(
+                    read_body(ctx.as_ref(), &object_id)
+                        .await
+                        .contains("delta concurrent body")
+                );
+                Ok(())
+            })
+        },
+    ))
     .await
     .expect("cleanup-safe live mutation suite");
+    match outcome {
+        DisposableRun::Completed(()) => {}
+        DisposableRun::Skipped(reason) => {
+            panic!("disposable routed-mutation suite skipped before callback: {reason:?}")
+        }
+    }
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_archive_applies_and_returns_verified_success() {
-    Box::pin(with_test_context(|ctx| {
-        Box::pin(async move {
-            let server = live_server(ctx.as_ref()).await;
-            let object = create_object(
-                ctx.as_ref(),
-                "page",
-                &format!("MCP archive diagnostic {}", unique_suffix()),
-                "",
-            )
-            .await;
-            let type_id = object
-                .r#type
-                .as_ref()
-                .expect("archive diagnostic type")
-                .id
-                .clone();
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-archive",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let server = live_server(ctx.as_ref()).await;
+                let suffix = unique_suffix();
+                let type_key = format!("mcp_archive_diagnostic_{suffix}");
+                let type_ = ctx
+                    .client
+                    .new_type(&ctx.space_id, format!("MCP archive diagnostic {suffix}"))
+                    .key(&type_key)
+                    .ensure_available()
+                    .create()
+                    .await
+                    .expect("create cleanup-owned archive type");
+                ctx.register_type(&type_.id);
+                let object = create_object(
+                    ctx.as_ref(),
+                    &type_key,
+                    &format!("MCP archive diagnostic object {suffix}"),
+                    "",
+                )
+                .await;
+                let type_id = object
+                    .r#type
+                    .as_ref()
+                    .expect("archive diagnostic type")
+                    .id
+                    .clone();
+                assert_eq!(type_id, type_.id);
 
-            let retries_before = ctx.client.http_metrics().retries;
-            let archived = success(
-                &server,
-                OBJECT_ARCHIVE,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "object_id": object.id.as_str()
-                }),
-            )
-            .await;
-            assert_eq!(archived["id"], object.id);
-            assert_eq!(archived["archived"], true);
-            assert_eq!(
-                archived["resource_uri"],
-                format!("anytype://spaces/{}/objects/{}", ctx.space_id, object.id)
-            );
-            assert_eq!(
-                ctx.client.http_metrics().retries,
-                retries_before,
-                "object_archive must not replay DELETE in HTTP middleware"
-            );
+                let retries_before = ctx.client.http_metrics().retries;
+                let archived = success(
+                    &server,
+                    OBJECT_ARCHIVE,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": object.id.as_str()
+                    }),
+                )
+                .await;
+                assert_eq!(archived["id"], object.id);
+                assert_eq!(archived["archived"], true);
+                assert_eq!(
+                    archived["resource_uri"],
+                    format!("anytype://spaces/{}/objects/{}", ctx.space_id, object.id)
+                );
+                assert_eq!(
+                    ctx.client.http_metrics().retries,
+                    retries_before,
+                    "object_archive must not replay DELETE in HTTP middleware"
+                );
 
-            assert_archive_evidence(ctx.as_ref(), &object.id, &type_id).await;
-            Ok(())
-        })
-    }))
+                assert_archive_evidence(ctx.as_ref(), &object.id, &type_id).await;
+                Ok(())
+            })
+        },
+    ))
     .await
     .expect("cleanup-safe live archive workflow");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("disposable archive suite skipped before callback: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_create_body_canonicalization_is_verified_once() {
-    Box::pin(with_test_context(|ctx| {
-        Box::pin(async move {
-            let server = live_server(ctx.as_ref()).await;
-            let suffix = unique_suffix();
-            let name = format!("MCP create-body canonical {suffix}");
-            let requested_body = "alpha stable body";
-            let key = format!("mcp-body-canonical-{suffix}");
-            let before = ctx.client.http_metrics();
-            let result = call(
-                &server,
-                OBJECT_CREATE,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "type": "page",
-                    "name": name,
-                    "body_markdown": requested_body,
-                    "idempotency_key": key
-                }),
-            )
-            .await;
-            assert_eq!(result.is_error, Some(false), "create failed: {result:?}");
-            let object_id = result
-                .structured_content
-                .as_ref()
-                .and_then(|output| output["object"]["id"].as_str())
-                .expect("created object id")
-                .to_owned();
-            ctx.register_object(&object_id);
-            let after_first = ctx.client.http_metrics();
-            assert_eq!(after_first.total_requests - before.total_requests, 3);
-            assert_eq!(after_first.retries - before.retries, 0);
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-create-body",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let server = live_server(ctx.as_ref()).await;
+                let suffix = unique_suffix();
+                let name = format!("MCP create-body canonical {suffix}");
+                let requested_body = "alpha stable body";
+                let key = format!("mcp-body-canonical-{suffix}");
+                let before = ctx.client.http_metrics();
+                let result = call(
+                    &server,
+                    OBJECT_CREATE,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "type": "page",
+                        "name": name,
+                        "body_markdown": requested_body,
+                        "idempotency_key": key
+                    }),
+                )
+                .await;
+                assert_eq!(result.is_error, Some(false), "create failed: {result:?}");
+                let object_id = result
+                    .structured_content
+                    .as_ref()
+                    .and_then(|output| output["object"]["id"].as_str())
+                    .expect("created object id")
+                    .to_owned();
+                ctx.register_object(&object_id);
+                let after_first = ctx.client.http_metrics();
+                assert_eq!(after_first.total_requests - before.total_requests, 3);
+                assert_eq!(after_first.retries - before.retries, 0);
 
-            let cached = call(
-                &server,
-                OBJECT_CREATE,
-                json!({
-                    "space": ctx.space_id.as_str(),
-                    "type": "page",
-                    "name": name,
-                    "body_markdown": "alpha stable body   \n",
-                    "idempotency_key": key
-                }),
-            )
-            .await;
-            assert_eq!(cached, result);
-            assert_eq!(ctx.client.http_metrics(), after_first);
+                let cached = call(
+                    &server,
+                    OBJECT_CREATE,
+                    json!({
+                        "space": ctx.space_id.as_str(),
+                        "type": "page",
+                        "name": name,
+                        "body_markdown": "alpha stable body   \n",
+                        "idempotency_key": key
+                    }),
+                )
+                .await;
+                assert_eq!(cached, result);
+                assert_eq!(ctx.client.http_metrics(), after_first);
 
-            let output = result.structured_content.expect("create-body success body");
-            assert_eq!(output["object"]["id"].as_str(), Some(object_id.as_str()));
-            let created = ctx
-                .client
-                .object(&ctx.space_id, &object_id)
-                .get()
-                .await
-                .expect("read canonical created object");
-            assert_eq!(created.name.as_deref(), Some(name.as_str()));
-            let type_id = created
-                .r#type
-                .as_ref()
-                .expect("create canonical type")
-                .id
-                .clone();
-            let stored_body = created.markdown.expect("canonical created body");
-            assert_eq!(stored_body, "alpha stable body   \n");
-            assert_ne!(stored_body, requested_body);
+                let output = result.structured_content.expect("create-body success body");
+                assert_eq!(output["object"]["id"].as_str(), Some(object_id.as_str()));
+                let created = ctx
+                    .client
+                    .object(&ctx.space_id, &object_id)
+                    .get()
+                    .await
+                    .expect("read canonical created object");
+                assert_eq!(created.name.as_deref(), Some(name.as_str()));
+                let type_id = created
+                    .r#type
+                    .as_ref()
+                    .expect("create canonical type")
+                    .id
+                    .clone();
+                let stored_body = created.markdown.expect("canonical created body");
+                assert_eq!(stored_body, "alpha stable body   \n");
+                assert_ne!(stored_body, requested_body);
 
-            ctx.client
-                .object(&ctx.space_id, &object_id)
-                .delete()
-                .await
-                .expect("archive canonical create fixture");
-            assert_archive_evidence(ctx.as_ref(), &object_id, &type_id).await;
-            Ok(())
-        })
-    }))
+                ctx.client
+                    .object(&ctx.space_id, &object_id)
+                    .delete()
+                    .await
+                    .expect("archive canonical create fixture");
+                assert_archive_evidence(ctx.as_ref(), &object_id, &type_id).await;
+                Ok(())
+            })
+        },
+    ))
     .await
     .expect("cleanup-safe any-uvg representative");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("disposable create-body suite skipped before callback: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_exact_edit_accepts_a_converged_arbitrary_body() {
-    Box::pin(with_test_context(|ctx| {
+    let outcome = Box::pin(with_disposable_space_context("any-mcp-exact-edit", |ctx| {
         Box::pin(async move {
-            let server = live_server(ctx.as_ref()).await;
             let suffix = unique_suffix();
             let object = create_object(
                 ctx.as_ref(),
@@ -1979,6 +2030,7 @@ async fn headless_exact_edit_accepts_a_converged_arbitrary_body() {
                 .update()
                 .await
                 .expect("set arbitrary exact-edit fixture body");
+            let server = live_server(ctx.as_ref()).await;
 
             let mut observed = success(
                 &server,
@@ -2041,6 +2093,12 @@ async fn headless_exact_edit_accepts_a_converged_arbitrary_body() {
     }))
     .await
     .expect("cleanup-safe arbitrary exact-edit sentinel");
+    match outcome {
+        DisposableRun::Completed(()) => {}
+        DisposableRun::Skipped(reason) => {
+            panic!("disposable exact-edit suite skipped before callback: {reason:?}")
+        }
+    }
 }
 
 #[test]
@@ -2473,41 +2531,53 @@ fn headless_direct_ordinary_tools_cover_representative_layouts() {
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_direct_compact_read_sentinel() {
-    Box::pin(with_test_context(|ctx| {
-        Box::pin(async move {
-            let object =
-                create_object(ctx.as_ref(), "page", "MCP compact sentinel", "sentinel").await;
-            let server = live_server_with(ctx.as_ref(), ApplicationProfile::Compact, false).await;
-            let mut driver = DirectRouterDriver { server: &server };
-            assert_eq!(
-                driver.list_tools().await.expect("compact catalog"),
-                [
-                    "object_edit",
-                    "object_get",
-                    "object_search",
-                    "server_status"
-                ]
-            );
-            driver
-                .call_tool(
-                    "object_get",
-                    json!({"space": ctx.space_id, "object_id": object.id}),
-                )
-                .await
-                .expect("compact real-headless read");
-            Ok(())
-        })
-    }))
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-compact-read",
+        |ctx| {
+            Box::pin(async move {
+                let object =
+                    create_object(ctx.as_ref(), "page", "MCP compact sentinel", "sentinel").await;
+                let server =
+                    live_server_with(ctx.as_ref(), ApplicationProfile::Compact, false).await;
+                let mut driver = DirectRouterDriver { server: &server };
+                assert_eq!(
+                    driver.list_tools().await.expect("compact catalog"),
+                    [
+                        "object_edit",
+                        "object_get",
+                        "object_search",
+                        "server_status"
+                    ]
+                );
+                driver
+                    .call_tool(
+                        "object_get",
+                        json!({"space": ctx.space_id, "object_id": object.id}),
+                    )
+                    .await
+                    .expect("compact real-headless read");
+                Ok(())
+            })
+        },
+    ))
     .await
     .expect("cleanup-safe compact sentinel");
+    match outcome {
+        DisposableRun::Completed(()) => {}
+        DisposableRun::Skipped(reason) => {
+            panic!("disposable compact-read suite skipped before callback: {reason:?}")
+        }
+    }
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_direct_read_only_sentinel() {
-    Box::pin(with_test_context(|ctx| {
+    let outcome = Box::pin(with_disposable_space_context("any-mcp-read-only", |ctx| {
         Box::pin(async move {
             let object =
                 create_object(ctx.as_ref(), "page", "MCP read-only sentinel", "sentinel").await;
@@ -2538,4 +2608,10 @@ async fn headless_direct_read_only_sentinel() {
     }))
     .await
     .expect("cleanup-safe read-only sentinel");
+    match outcome {
+        DisposableRun::Completed(()) => {}
+        DisposableRun::Skipped(reason) => {
+            panic!("disposable read-only suite skipped before callback: {reason:?}")
+        }
+    }
 }

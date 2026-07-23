@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add an ignored, prefix-authorized real-server probe for the upstream
+  `ObjectAddDiscussion` repeat-create defect. It dispatches exactly two raw
+  RPCs on one cleanup-owned parent, requires the observed second
+  `UNKNOWN_ERROR` with no usable ID, then proves the original relation and
+  complete derived identity through a fresh typed read. The companion
+  `DISCUSSION_STATUS.md` evidence package separates that behavior from the
+  malformed persistent read-only fixture and provides payload-free,
+  operator-ready reproductions for both upstream reports.
 - Add an opt-in `test-fixtures` feature with a narrow, production-validated
   typed body snapshot constructor for downstream block-count and atomic
   read-restriction contract tests, canonical/malformed table fixtures, and a

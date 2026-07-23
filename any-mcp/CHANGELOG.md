@@ -8,6 +8,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Complete the terminal v1 acceptance matrix with 27 ignored library
+  real-headless cases, all using prefix-authorized disposable spaces, and 21
+  ignored spawned-stdio cases. The files workflow now proves native
+  `text/plain` charset, image, and audio media types alongside binary ranges
+  and hashes. An independent recursive audit covers every all-selected
+  optional input/output schema across compact/standard and read-write/read-only
+  catalogs, including closed `minProperties`/`maxProperties` constraints.
+  Portable CI pins Rust 1.96, while protected Linux jobs run both complete
+  inventories and reject invalid disposable admission or any reported skip.
 - Add a versioned `skills/any-mcp` agent skill with progressively disclosed
   capability guidance and schema-checked PKM recipes for documents, files,
   collections, tags, tasks, chat, and save-link ingestion. It explicitly
@@ -587,6 +596,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Heap-own fixture-heavy production-router dispatch futures so the complete
+  direct live matrix runs on Rust's default test-thread stack without overflow.
+  Protected headless jobs now export the dedicated disposable-process gate,
+  require the exact 1..485-character ASCII prefix grammar, and cannot report
+  success when a live callback was skipped.
 - Stabilize the chat-add idempotency deadline regression by separating
   deadline-independent terminal, capacity, and pre-dispatch state assertions
   from Tokio virtual-time waiter deadlines. Production still rejects an

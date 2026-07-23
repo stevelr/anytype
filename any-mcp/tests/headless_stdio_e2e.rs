@@ -36,7 +36,7 @@ use anytype::{
     prelude::{AnytypeClient, ClientConfig, Color, Tag},
     test_util::{
         DisposableRun, TestContext, TestError, TestResult, unique_suffix,
-        with_disposable_space_context, with_test_context,
+        with_disposable_space_context,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -365,13 +365,6 @@ fn valid_modifier_key(value: &str) -> bool {
 }
 
 impl TemporaryKeystore {
-    fn isolate_environment() -> Result<(Option<Self>, Option<String>), String> {
-        let Some(specification) = std::env::var("ANYTYPE_KEYSTORE").ok() else {
-            return Ok((None, None));
-        };
-        Self::isolate_specification(&specification)
-    }
-
     fn isolate_specification(
         specification: &str,
     ) -> Result<(Option<Self>, Option<String>), String> {
@@ -474,27 +467,6 @@ fn configure_stdio_command(command: &mut Command, options: DriverOptions, toolse
 }
 
 impl StdioDriver {
-    fn start(options: DriverOptions) -> Self {
-        Self::start_with_toolsets(options, None)
-    }
-
-    fn start_with_toolsets(options: DriverOptions, toolsets: Option<&str>) -> Self {
-        let mut driver = Self::spawn_with_toolsets_uninitialized(options, toolsets);
-        driver.initialize();
-        driver
-    }
-
-    fn spawn_with_toolsets_uninitialized(options: DriverOptions, toolsets: Option<&str>) -> Self {
-        let (keystore, isolated_specification) = TemporaryKeystore::isolate_environment()
-            .unwrap_or_else(|error| panic!("isolate live-test keystore: {error}"));
-        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
-        configure_stdio_command(&mut command, options, toolsets);
-        if let Some(specification) = isolated_specification {
-            command.env("ANYTYPE_KEYSTORE", specification);
-        }
-        Self::spawn(command, options, keystore)
-    }
-
     fn spawn(
         command: Command,
         options: DriverOptions,
@@ -1871,69 +1843,102 @@ async fn run_disposable_stdio_lifecycle_sentinel(mode: DisposableSentinelMode) {
 }
 
 async fn run_spawned_baseline(scenario: ScenarioId, options: DriverOptions) {
-    let mut driver = StdioDriver::start(options);
-    if options.preview {
-        let tools = driver.list_tools().await.expect("preview compact catalog");
-        validate_preview_compact_catalog(&tools).expect("exact preview compact catalog identity");
-    } else if options.profile == "standard" && !options.read_only {
-        let tools = driver.list_tools().await.expect("standard catalog");
-        let borrowed = tools.iter().map(String::as_str).collect::<Vec<_>>();
-        validate_live_ownership(
-            &borrowed,
-            &[
-                "resources/list",
-                "resources/read",
-                "resources/templates/list",
-            ],
-        )
-        .expect("spawned catalog has complete executable ownership");
-    }
     let record = Arc::new(Mutex::new(CaseRecord::default()));
-    let captured = record.clone();
-    let cleanup = Box::pin(with_test_context(move |ctx| {
-        Box::pin(async move {
-            ctx.client
-                .ping_http()
-                .await
-                .map_err(anytype::test_util::TestError::from)?;
-            ctx.client
-                .ping_grpc()
-                .await
-                .map_err(anytype::test_util::TestError::from)?;
-            let mut evidence = ScenarioEvidence::new(scenario);
-            let result = AssertUnwindSafe(run_scenario(
-                scenario,
-                &mut driver,
-                ctx.as_ref(),
-                &mut evidence,
-            ))
-            .catch_unwind()
-            .await;
-            *captured.lock().expect("case record lock") =
-                complete_case(driver, evidence, result, options);
-            Ok(())
-        })
-    }))
+    let captured = Arc::clone(&record);
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let child_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let callback_cleanup = Arc::clone(&child_cleanup);
+    let cleanup = Box::pin(with_disposable_space_context(
+        "any-mcp-stdio-preview-baseline",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let driver =
+                    spawn_disposable_driver(ctx.as_ref(), callback_cleanup, options, None)?;
+                lock_driver(&driver)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("registered baseline child disappeared"))?
+                    .initialize();
+                let mut owned = OwnedStdioDriver {
+                    driver: Arc::clone(&driver),
+                };
+                if options.preview {
+                    let tools = owned
+                        .list_tools()
+                        .await
+                        .map_err(|_| sentinel_assertion("preview compact catalog failed"))?;
+                    validate_preview_compact_catalog(&tools)
+                        .map_err(|_| sentinel_assertion("preview compact catalog mismatch"))?;
+                } else if options.profile == "standard" && !options.read_only {
+                    let tools = owned
+                        .list_tools()
+                        .await
+                        .map_err(|_| sentinel_assertion("standard catalog failed"))?;
+                    let borrowed = tools.iter().map(String::as_str).collect::<Vec<_>>();
+                    validate_live_ownership(
+                        &borrowed,
+                        &[
+                            "resources/list",
+                            "resources/read",
+                            "resources/templates/list",
+                        ],
+                    )
+                    .map_err(|_| sentinel_assertion("spawned catalog ownership mismatch"))?;
+                }
+                let mut evidence = ScenarioEvidence::new(scenario);
+                let result = AssertUnwindSafe(run_scenario(
+                    scenario,
+                    &mut owned,
+                    ctx.as_ref(),
+                    &mut evidence,
+                ))
+                .catch_unwind()
+                .await;
+                drop(owned);
+                let driver = lock_driver(&driver)
+                    .take()
+                    .ok_or_else(|| sentinel_assertion("registered baseline child disappeared"))?;
+                *captured.lock().expect("case record lock") =
+                    complete_case(driver, evidence, result, options);
+                Ok(())
+            })
+        },
+    ))
     .await;
     let cleanup_status = if cleanup.is_ok() { "success" } else { "failed" };
-    let record = record.lock().expect("case record lock");
-    if let Some(error) = &record.error {
-        panic!(
-            "scenario={} fixtures={:?} {} error={} requests={} results={} tool_errors={} stdout_bytes={} cleanup={}\ntranscript:\n{}\nstderr_metrics={}",
-            record.scenario,
-            record.fixture_ids,
-            record.protocol,
-            error,
-            record.request_count,
-            record.result_count,
-            record.tool_error_count,
-            record.stdout_bytes,
-            cleanup_status,
-            record.transcript,
-            record.stderr.summary()
-        );
+    {
+        let record = record.lock().expect("case record lock");
+        if let Some(error) = &record.error {
+            panic!(
+                "scenario={} fixtures={:?} {} error={} requests={} results={} tool_errors={} stdout_bytes={} cleanup={}\ntranscript:\n{}\nstderr_metrics={}",
+                record.scenario,
+                record.fixture_ids,
+                record.protocol,
+                error,
+                record.request_count,
+                record.result_count,
+                record.tool_error_count,
+                record.stdout_bytes,
+                cleanup_status,
+                record.transcript,
+                record.stderr.summary()
+            );
+        }
     }
-    cleanup.expect("cleanup-safe spawned baseline scenario");
+    match cleanup.expect("cleanup-safe spawned baseline scenario") {
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *child_cleanup.lock().expect("baseline child cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+        }
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            panic!("required disposable spawned baseline was skipped: {reason:?}");
+        }
+    }
 }
 
 macro_rules! spawned_baseline_test {
@@ -4667,104 +4672,115 @@ async fn headless_stdio_disposable_panic_cleanup_sentinel() {
 }
 
 async fn run_spawned_read_sentinel(options: DriverOptions) {
-    let mut driver = StdioDriver::start(options);
     let record = Arc::new(Mutex::new(CaseRecord::default()));
-    let captured = record.clone();
-    let cleanup = Box::pin(with_test_context(move |ctx| {
-        Box::pin(async move {
-            let mut evidence = ScenarioEvidence::new(ScenarioId::Documents);
-            let result = AssertUnwindSafe(async {
+    let captured = Arc::clone(&record);
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let child_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let callback_cleanup = Arc::clone(&child_cleanup);
+    let cleanup = Box::pin(with_disposable_space_context(
+        "any-mcp-stdio-read-sentinel",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
                 let name = format!("MCP profile sentinel {}", unique_suffix());
-                evidence.sensitive(&name);
                 let object = ctx
                     .client
                     .new_object(&ctx.space_id, "page")
-                    .name(name)
+                    .name(&name)
                     .ensure_available()
                     .create()
-                    .await
-                    .map_err(|_| "create profile sentinel fixture".to_owned())?;
-                ctx.register_object(&object.id);
-                evidence.fixture(&object.id);
-                let tools = driver.list_tools().await?;
-                if options.profile == "compact" && !tools.iter().any(|name| name == "object_get") {
-                    return Err("compact catalog omitted object_get".to_owned());
-                }
-                if options.read_only && tools.iter().any(|name| name == "object_edit") {
-                    return Err("read-only catalog retained object_edit".to_owned());
-                }
-                driver
-                    .call_tool(
-                        "object_get",
-                        json!({"space": ctx.space_id, "object_id": object.id}),
-                    )
                     .await?;
-                Ok::<(), String>(())
+                ctx.register_object(&object.id);
+                let mut evidence = ScenarioEvidence::new(ScenarioId::Documents);
+                evidence.sensitive(&name);
+                evidence.fixture(&object.id);
+                let driver =
+                    spawn_disposable_driver(ctx.as_ref(), callback_cleanup, options, None)?;
+                lock_driver(&driver)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("registered read child disappeared"))?
+                    .initialize();
+                let mut owned = OwnedStdioDriver {
+                    driver: Arc::clone(&driver),
+                };
+                let result = AssertUnwindSafe(async {
+                    let tools = owned.list_tools().await?;
+                    if options.profile == "compact"
+                        && !tools.iter().any(|name| name == "object_get")
+                    {
+                        return Err("compact catalog omitted object_get".to_owned());
+                    }
+                    if options.read_only && tools.iter().any(|name| name == "object_edit") {
+                        return Err("read-only catalog retained object_edit".to_owned());
+                    }
+                    owned
+                        .call_tool(
+                            "object_get",
+                            json!({"space": ctx.space_id, "object_id": object.id}),
+                        )
+                        .await?;
+                    Ok::<(), String>(())
+                })
+                .catch_unwind()
+                .await;
+                drop(owned);
+                let driver = lock_driver(&driver)
+                    .take()
+                    .ok_or_else(|| sentinel_assertion("registered read child disappeared"))?;
+                let mut completed = complete_case(driver, evidence, result, options);
+                completed.scenario = format!("{}_read_sentinel", options.profile);
+                *captured.lock().expect("sentinel case record lock") = completed;
+                Ok(())
             })
-            .catch_unwind()
-            .await;
-            let (error, transcript, output) = match result {
-                Ok(result) => {
-                    let (transcript, output) = driver.finish();
-                    (result.err(), transcript, output)
-                }
-                Err(_) => {
-                    let (transcript, output, category) = driver.finish_after_panic();
-                    (
-                        Some(format!("process_category={category}")),
-                        transcript,
-                        output,
-                    )
-                }
-            };
-            let (request_count, result_count, tool_error_count) = process_metrics(&transcript);
-            let stderr = stderr_metrics(&output.stderr);
-            let fixture_ids = std::mem::take(&mut evidence.fixture_ids);
-            *captured.lock().expect("sentinel case record lock") = CaseRecord {
-                error: error.map(|error| evidence.sanitize(&error)),
-                scenario: format!("{}_read_sentinel", options.profile),
-                fixture_ids,
-                protocol: options.metadata(),
-                transcript,
-                stderr,
-                stdout_bytes: output.stdout.len(),
-                request_count,
-                result_count,
-                tool_error_count,
-            };
-            Ok(())
-        })
-    }))
+        },
+    ))
     .await;
     let cleanup_status = if cleanup.is_ok() { "success" } else { "failed" };
-    let record = record.lock().expect("sentinel case record lock");
-    if let Some(error) = &record.error {
-        panic!(
-            "scenario={} fixtures={:?} {} error={} requests={} results={} tool_errors={} stdout_bytes={} cleanup={}\ntranscript:\n{}\nstderr_metrics={}",
-            record.scenario,
-            record.fixture_ids,
-            record.protocol,
-            error,
-            record.request_count,
-            record.result_count,
-            record.tool_error_count,
-            record.stdout_bytes,
-            cleanup_status,
-            record.transcript,
-            record.stderr.summary()
-        );
+    {
+        let record = record.lock().expect("sentinel case record lock");
+        if let Some(error) = &record.error {
+            panic!(
+                "scenario={} fixtures={:?} {} error={} requests={} results={} tool_errors={} stdout_bytes={} cleanup={}\ntranscript:\n{}\nstderr_metrics={}",
+                record.scenario,
+                record.fixture_ids,
+                record.protocol,
+                error,
+                record.request_count,
+                record.result_count,
+                record.tool_error_count,
+                record.stdout_bytes,
+                cleanup_status,
+                record.transcript,
+                record.stderr.summary()
+            );
+        }
     }
-    cleanup.expect("cleanup-safe spawned read sentinel");
+    match cleanup.expect("cleanup-safe spawned read sentinel") {
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *child_cleanup.lock().expect("read child cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+        }
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            panic!("required disposable spawned read sentinel was skipped: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_compact_sentinel() {
     run_spawned_read_sentinel(DriverOptions::COMPACT).await;
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_read_only_sentinel() {
     run_spawned_read_sentinel(DriverOptions::READ_ONLY).await;
 }
@@ -6078,7 +6094,8 @@ fn terminal_optional_real_workflow_gate_rejects_missing_disposable_environment()
 }
 
 #[tokio::test]
-#[ignore = "requires source .test-env and an authenticated headless Anytype server"]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_preview_sentinel() {
     run_spawned_baseline(ScenarioId::Documents, DriverOptions::PREVIEW).await;
 }
