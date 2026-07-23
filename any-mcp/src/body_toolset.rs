@@ -4807,6 +4807,115 @@ fn projected_table_subtree_matches(
         })
 }
 
+fn projected_create_prior_content_matches(
+    prior: &BlockSummary,
+    current: &BlockSummary,
+    insertion_parent: bool,
+) -> bool {
+    if !insertion_parent {
+        return prior.content == current.content;
+    }
+    match (&prior.content, &current.content) {
+        (
+            BlockProjection::Unsupported {
+                opaque_kind: prior_kind,
+                child_count: prior_opaque_children,
+                ..
+            },
+            BlockProjection::Unsupported {
+                opaque_kind: current_kind,
+                child_count: current_opaque_children,
+                ..
+            },
+        ) => {
+            prior_kind == current_kind
+                && *prior_opaque_children == prior.child_count
+                && *current_opaque_children == current.child_count
+        }
+        _ => prior.content == current.content,
+    }
+}
+
+struct CreateTransitionDiagnostics {
+    prior_order_exact: bool,
+    new_identity_exact: bool,
+    created_parent_exact: bool,
+    created_index_exact: bool,
+    created_depth_exact: bool,
+    created_content_exact: bool,
+    created_presentation_exact: bool,
+    prior_content_exact: bool,
+    parent_content_equal: bool,
+    parent_opaque_kind_exact: bool,
+    parent_opaque_children_exact: bool,
+    parent_opaque_approx_equal: bool,
+    prior_restrictions_exact: bool,
+    parent_restrictions_equal: bool,
+    prior_presentation_exact: bool,
+    parent_presentation_exact: bool,
+    prior_structure_exact: bool,
+    subtree_closed: bool,
+    materialized_shape_exact: bool,
+}
+
+impl CreateTransitionDiagnostics {
+    fn emit(&self) {
+        if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "body_semantic_phase=verifier event=create_transition \
+                 prior_order={} new_identity={} created_parent={} created_index={} \
+                 created_depth={} created_content={} created_presentation={} \
+                 prior_content={} parent_content_equal={} parent_opaque_kind={} \
+                 parent_opaque_children={} parent_opaque_approx_equal={} \
+                 prior_restrictions={} parent_restrictions_equal={} \
+                 prior_presentation={} parent_presentation={} prior_structure={} \
+                 subtree_closed={} materialized_shape={}",
+                self.prior_order_exact,
+                self.new_identity_exact,
+                self.created_parent_exact,
+                self.created_index_exact,
+                self.created_depth_exact,
+                self.created_content_exact,
+                self.created_presentation_exact,
+                self.prior_content_exact,
+                self.parent_content_equal,
+                self.parent_opaque_kind_exact,
+                self.parent_opaque_children_exact,
+                self.parent_opaque_approx_equal,
+                self.prior_restrictions_exact,
+                self.parent_restrictions_equal,
+                self.prior_presentation_exact,
+                self.parent_presentation_exact,
+                self.prior_structure_exact,
+                self.subtree_closed,
+                self.materialized_shape_exact,
+            );
+        }
+    }
+
+    fn verified(&self) -> bool {
+        self.prior_order_exact
+            && self.new_identity_exact
+            && self.created_parent_exact
+            && self.created_index_exact
+            && self.created_depth_exact
+            && self.created_content_exact
+            && self.created_presentation_exact
+            && self.prior_content_exact
+            && self.prior_restrictions_exact
+            && self.prior_presentation_exact
+            && self.prior_structure_exact
+            && self.subtree_closed
+            && self.materialized_shape_exact
+    }
+}
+
+fn create_transition_stage_diagnostic(event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=verifier event={event}");
+    }
+}
+
 fn verify_create_transition(
     before: &ProjectedSnapshot,
     after: &ProjectedSnapshot,
@@ -4819,33 +4928,42 @@ fn verify_create_transition(
         || before.object_id != after.object_id
         || before.root_id != after.root_id
     {
+        create_transition_stage_diagnostic("create_scope_mismatch");
         return false;
     }
     let (Some(before_ids), Some(after_ids)) = (
         projected_identity_set(before),
         projected_identity_set(after),
     ) else {
+        create_transition_stage_diagnostic("create_identity_set_invalid");
         return false;
     };
     if before_ids.contains(created_id.as_str()) || !after_ids.contains(created_id.as_str()) {
+        create_transition_stage_diagnostic("create_identity_membership_invalid");
         return false;
     }
     let Some(insertion) = create_insertion(before, target_id, position) else {
+        create_transition_stage_diagnostic("create_insertion_invalid");
         return false;
     };
     let Some(created) = after.items.iter().find(|block| &block.id == created_id) else {
+        create_transition_stage_diagnostic("create_assigned_block_missing");
         return false;
     };
     let Ok(intended) = intended_create_output(&after.space_id, &after.object_id, input) else {
+        create_transition_stage_diagnostic("create_intended_projection_invalid");
         return false;
     };
     let Some(new_count) = after.items.len().checked_sub(before.items.len()) else {
+        create_transition_stage_diagnostic("create_block_count_invalid");
         return false;
     };
     let Some(new_end) = insertion.dfs_index.checked_add(new_count) else {
+        create_transition_stage_diagnostic("create_subtree_end_overflow");
         return false;
     };
     let Some(new_items) = after.items.get(insertion.dfs_index..new_end) else {
+        create_transition_stage_diagnostic("create_subtree_slice_invalid");
         return false;
     };
     let prior_order_exact = after
@@ -4879,44 +4997,94 @@ fn verify_create_transition(
             .is_some_and(|block| &block.id == created_id)
         && new_ids.iter().all(|id| !before_ids.contains(id));
     let created_depth = insertion.parent.depth.checked_add(1);
-    let created_exact = created.parent_id.as_ref() == Some(&insertion.parent.id)
-        && created.sibling_index == insertion.sibling_index
-        && Some(created.depth) == created_depth
-        && created.content == intended.block.content
-        && created.align == intended.block.align
+    let created_parent_exact = created.parent_id.as_ref() == Some(&insertion.parent.id);
+    let created_index_exact = created.sibling_index == insertion.sibling_index;
+    let created_depth_exact = Some(created.depth) == created_depth;
+    let created_content_exact = created.content == intended.block.content;
+    let created_presentation_exact = created.align == intended.block.align
         && created.vertical_align == intended.block.vertical_align
         && created.background_color == intended.block.background_color;
-    let prior_state_exact = before.items.iter().all(|prior| {
+    let prior_pairs = before.items.iter().filter_map(|prior| {
         after
             .items
             .iter()
             .find(|current| current.id == prior.id)
-            .is_some_and(|current| {
-                let expected_child_count = if prior.id == insertion.parent.id {
-                    prior.child_count.checked_add(1)
-                } else {
-                    Some(prior.child_count)
-                };
-                let expected_sibling_index = if prior.parent_id.as_ref()
-                    == Some(&insertion.parent.id)
-                    && prior.sibling_index >= insertion.sibling_index
-                {
-                    prior.sibling_index.checked_add(1)
-                } else {
-                    Some(prior.sibling_index)
-                };
-                prior.content == current.content
-                    && (prior.id == insertion.parent.id
-                        || prior.restrictions == current.restrictions)
-                    && prior.align == current.align
-                    && prior.vertical_align == current.vertical_align
-                    && prior.background_color == current.background_color
-                    && prior.parent_id == current.parent_id
-                    && prior.depth == current.depth
-                    && expected_child_count == Some(current.child_count)
-                    && expected_sibling_index == Some(current.sibling_index)
-            })
+            .map(|current| (prior, current))
     });
+    let prior_pairs = prior_pairs.collect::<Vec<_>>();
+    let all_prior_present = prior_pairs.len() == before.items.len();
+    let insertion_parent_pair = prior_pairs
+        .iter()
+        .find(|(prior, _)| prior.id == insertion.parent.id);
+    let parent_content_equal =
+        insertion_parent_pair.is_some_and(|(prior, current)| prior.content == current.content);
+    let (parent_opaque_kind_exact, parent_opaque_children_exact, parent_opaque_approx_equal) =
+        insertion_parent_pair.map_or((false, false, false), |(prior, current)| {
+            match (&prior.content, &current.content) {
+                (
+                    BlockProjection::Unsupported {
+                        opaque_kind: prior_kind,
+                        child_count: prior_children,
+                        approx_bytes: prior_bytes,
+                    },
+                    BlockProjection::Unsupported {
+                        opaque_kind: current_kind,
+                        child_count: current_children,
+                        approx_bytes: current_bytes,
+                    },
+                ) => (
+                    prior_kind == current_kind,
+                    *prior_children == prior.child_count
+                        && *current_children == current.child_count,
+                    prior_bytes == current_bytes,
+                ),
+                (BlockProjection::Unsupported { .. }, _)
+                | (_, BlockProjection::Unsupported { .. }) => (false, false, false),
+                _ => (true, true, true),
+            }
+        });
+    let prior_content_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            projected_create_prior_content_matches(prior, current, prior.id == insertion.parent.id)
+        });
+    let prior_restrictions_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            prior.id == insertion.parent.id || prior.restrictions == current.restrictions
+        });
+    let parent_restrictions_equal = insertion_parent_pair
+        .is_some_and(|(prior, current)| prior.restrictions == current.restrictions);
+    let prior_presentation_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            prior.align == current.align
+                && prior.vertical_align == current.vertical_align
+                && prior.background_color == current.background_color
+        });
+    let parent_presentation_exact = insertion_parent_pair.is_some_and(|(prior, current)| {
+        prior.align == current.align
+            && prior.vertical_align == current.vertical_align
+            && prior.background_color == current.background_color
+    });
+    let prior_structure_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            let expected_child_count = if prior.id == insertion.parent.id {
+                prior.child_count.checked_add(1)
+            } else {
+                Some(prior.child_count)
+            };
+            let expected_sibling_index = if prior.parent_id.as_ref() == Some(&insertion.parent.id)
+                && prior.sibling_index >= insertion.sibling_index
+            {
+                prior.sibling_index.checked_add(1)
+            } else {
+                Some(prior.sibling_index)
+            };
+            prior.parent_id == current.parent_id
+                && prior.depth == current.depth
+                && expected_child_count == Some(current.child_count)
+                && expected_sibling_index == Some(current.sibling_index)
+        });
+    let subtree_closed =
+        projected_created_subtree_is_closed(after, new_items, &new_ids, created_id);
     let materialized_shape_exact = match input {
         NewBlockInput::Table {
             rows,
@@ -4927,12 +5095,29 @@ fn verify_create_transition(
         }
         _ => new_count == 1 && created.child_count == 0,
     };
-    prior_order_exact
-        && new_identity_exact
-        && created_exact
-        && prior_state_exact
-        && projected_created_subtree_is_closed(after, new_items, &new_ids, created_id)
-        && materialized_shape_exact
+    let diagnostics = CreateTransitionDiagnostics {
+        prior_order_exact,
+        new_identity_exact,
+        created_parent_exact,
+        created_index_exact,
+        created_depth_exact,
+        created_content_exact,
+        created_presentation_exact,
+        prior_content_exact,
+        parent_content_equal,
+        parent_opaque_kind_exact,
+        parent_opaque_children_exact,
+        parent_opaque_approx_equal,
+        prior_restrictions_exact,
+        parent_restrictions_equal,
+        prior_presentation_exact,
+        parent_presentation_exact,
+        prior_structure_exact,
+        subtree_closed,
+        materialized_shape_exact,
+    };
+    diagnostics.emit();
+    diagnostics.verified()
 }
 
 fn verify_update_transition(
@@ -9271,6 +9456,90 @@ mod tests {
     }
 
     #[test]
+    fn create_transition_accepts_only_the_parent_opaque_summary_refresh() {
+        let opaque = |kind: &str, child_count, approx_bytes| BlockProjection::Unsupported {
+            opaque_kind: OpaqueKind::new(kind.to_owned()).expect("opaque kind"),
+            child_count,
+            approx_bytes,
+        };
+        let before = projected(vec![
+            summary("root", None, 0, 0, 2, opaque("smartblock", 2, 128)),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+            summary("opaque", Some("root"), 1, 1, 0, opaque("dataview", 0, 9)),
+        ]);
+        let input = parse_block(text_block("created"));
+        let root_id = EntityId::new("root").expect("root");
+        let created_id = EntityId::new("created").expect("created");
+        let valid = projected(vec![
+            summary("root", None, 0, 0, 3, opaque("smartblock", 3, 196)),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+            summary("opaque", Some("root"), 1, 1, 0, opaque("dataview", 0, 9)),
+            summary("created", Some("root"), 2, 1, 0, projected_text("created")),
+        ]);
+        assert!(verify_create_transition(
+            &before,
+            &valid,
+            &created_id,
+            &root_id,
+            WireInsertPosition::LastChild,
+            &input,
+        ));
+
+        let mut volatile_opaque_size = valid.clone();
+        volatile_opaque_size.items[0].content = opaque("smartblock", 3, 1);
+        assert!(verify_create_transition(
+            &before,
+            &volatile_opaque_size,
+            &created_id,
+            &root_id,
+            WireInsertPosition::LastChild,
+            &input,
+        ));
+
+        let mut wrong_kind = valid.clone();
+        wrong_kind.items[0].content = opaque("dataview", 3, 196);
+        let mut wrong_nested_count = valid.clone();
+        wrong_nested_count.items[0].content = opaque("smartblock", 2, 196);
+        let mut unrelated_opaque_drift = valid.clone();
+        unrelated_opaque_drift.items[2].content = opaque("dataview", 0, 10);
+        let mut typed_replacement = valid.clone();
+        typed_replacement.items[0].content = projected_text("root");
+        let mut parent_presentation_drift = valid.clone();
+        parent_presentation_drift.items[0].align = WireHorizontalAlign::Center;
+        let mut reordered = valid.clone();
+        reordered.items.swap(2, 3);
+        let mut foreign = valid.clone();
+        foreign.items[0].child_count = 4;
+        foreign.items[0].content = opaque("smartblock", 4, 240);
+        foreign.items.push(summary(
+            "foreign",
+            Some("root"),
+            3,
+            1,
+            0,
+            projected_text("foreign"),
+        ));
+        for invalid in [
+            wrong_kind,
+            wrong_nested_count,
+            unrelated_opaque_drift,
+            typed_replacement,
+            parent_presentation_drift,
+            reordered,
+            foreign,
+        ] {
+            assert!(!verify_create_transition(
+                &before,
+                &invalid,
+                &created_id,
+                &root_id,
+                WireInsertPosition::LastChild,
+                &input,
+            ));
+        }
+    }
+
+    #[test]
     fn create_transition_rejects_collateral_structural_and_value_drift() {
         let before = projected(vec![
             summary("root", None, 0, 0, 2, projected_text("root")),
@@ -9315,6 +9584,13 @@ mod tests {
             .find(|block| block.id.as_str() == "tail")
             .expect("tail")
             .content = projected_text("changed");
+        let mut insertion_parent_content_drift = valid.clone();
+        insertion_parent_content_drift
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "parent")
+            .expect("insertion parent")
+            .content = projected_text("changed parent");
         let mut alignment_drift = valid.clone();
         alignment_drift
             .items
@@ -9458,6 +9734,7 @@ mod tests {
             unrelated_restriction,
             identity_drift,
             content_drift,
+            insertion_parent_content_drift,
             alignment_drift,
             vertical_alignment_drift,
             background_drift,

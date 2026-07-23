@@ -381,7 +381,10 @@ not-attempted evidence without compensation or automatic write resumption.
 Single-block create verification derives the exact parent and sibling index
 from the pre-write snapshot, rejects collateral identity, order, value, and
 structure drift, and permits restriction refresh only on the insertion
-parent. Generated table descendants must form one canonical closed subtree.
+parent. When that parent is an opaque page root, its opaque kind and duplicated
+child count remain exact while the protobuf-derived approximate byte count may
+refresh with the child list; all non-parent opaque summaries remain exact.
+Generated table descendants must form one canonical closed subtree.
 
 The finite `anytype-api` body lifecycle caps decoded Show at
 4,194,304 bytes and every non-Show body gRPC response—including foreground and
