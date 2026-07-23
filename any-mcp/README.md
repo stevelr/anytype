@@ -6,6 +6,13 @@ A workflow-oriented Model Context Protocol server for Anytype.
 
 **Status: Pre-release, under active development. Only tested on Linux and MacOS.**
 
+Agents can use the versioned [`any-mcp` skill](../skills/any-mcp/SKILL.md) for
+safe tool selection and tested PKM recipes, including Markdown capture, file
+and collection organization, tagging, tasks, chat, and save-link ingestion.
+The skill documents the narrow `anyr` fallbacks for rich chat blocks and chat
+listeners that are not currently exposed by any-mcp, without claiming the
+listener workaround provides a durable or atomic watermark.
+
 This is not intended to replace [anytype-mcp, the official MCP server](https://github.com/anyproto/anytype-mcp)
 which wraps the OpenAPI. They are complementary.
 

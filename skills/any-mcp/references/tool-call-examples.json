@@ -1,0 +1,225 @@
+{
+  "examples": [
+    {
+      "workflow": "create_markdown_document",
+      "step": "create_page",
+      "tool": "object_create",
+      "arguments": {
+        "space": "Work",
+        "type": "Page",
+        "name": "Project kickoff",
+        "body_markdown": "# Project kickoff\n\n## Decisions\n\n- Use the verified workflow.\n",
+        "idempotency_key": "kickoff-page-v1"
+      }
+    },
+    {
+      "workflow": "upload_image_to_collection",
+      "step": "upload",
+      "tool": "file_upload",
+      "arguments": {
+        "space": "Work",
+        "name": "diagram.png",
+        "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "media_type": "image/png",
+        "idempotency_key": "diagram-upload-v1"
+      }
+    },
+    {
+      "workflow": "upload_image_to_collection",
+      "step": "add_membership",
+      "tool": "collection_member_add",
+      "arguments": {
+        "space": "Work",
+        "collection_id": "collection-id",
+        "object_id": "file-id"
+      }
+    },
+    {
+      "workflow": "tag_page",
+      "step": "find_tag",
+      "tool": "tag_list",
+      "arguments": {
+        "space": "Work",
+        "property": "tag",
+        "limit": 20
+      }
+    },
+    {
+      "workflow": "tag_page",
+      "step": "assign_tag",
+      "tool": "object_update",
+      "arguments": {
+        "space": "Work",
+        "object_id": "page-id",
+        "properties": [
+          {
+            "format": "multi_select",
+            "key": "tag",
+            "multi_select": ["read-later-tag-id"]
+          }
+        ]
+      }
+    },
+    {
+      "workflow": "replace_single_select_tag_authorized",
+      "step": "assign_tag",
+      "tool": "object_update",
+      "arguments": {
+        "space": "Work",
+        "object_id": "page-id",
+        "properties": [
+          {
+            "format": "select",
+            "key": "status",
+            "select": "important-tag-id"
+          }
+        ]
+      }
+    },
+    {
+      "workflow": "plain_chat",
+      "step": "reply",
+      "tool": "chat_message_add",
+      "arguments": {
+        "space": "Work",
+        "chat_id": "chat-id",
+        "text": "Saved: anytype://spaces/space-id/objects/page-id",
+        "reply_to_message_id": "message-id",
+        "idempotency_key": "plain-chat-reply-v1"
+      }
+    },
+    {
+      "workflow": "task_list",
+      "step": "create_task",
+      "tool": "object_create",
+      "arguments": {
+        "space": "Work",
+        "type": "Task",
+        "name": "Review project plan",
+        "properties": [
+          {
+            "format": "checkbox",
+            "key": "done",
+            "checkbox": false
+          }
+        ],
+        "idempotency_key": "review-task-v1"
+      }
+    },
+    {
+      "workflow": "task_list",
+      "step": "add_to_list",
+      "tool": "collection_member_add",
+      "arguments": {
+        "space": "Work",
+        "collection_id": "task-list-id",
+        "object_id": "task-id"
+      }
+    },
+    {
+      "workflow": "task_list",
+      "step": "complete",
+      "tool": "object_update",
+      "arguments": {
+        "space": "Work",
+        "object_id": "task-id",
+        "properties": [
+          {
+            "format": "checkbox",
+            "key": "done",
+            "checkbox": true
+          }
+        ]
+      }
+    },
+    {
+      "workflow": "save_links",
+      "step": "reread_trigger",
+      "tool": "chat_message_list",
+      "arguments": {
+        "space": "Work",
+        "chat_id": "save-links-chat-id",
+        "limit": 12
+      }
+    },
+    {
+      "workflow": "save_links",
+      "step": "read_full_message",
+      "tool": "chat_message_get",
+      "arguments": {
+        "space": "Work",
+        "chat_id": "save-links-chat-id",
+        "message_id": "source-message-id"
+      }
+    },
+    {
+      "workflow": "save_links",
+      "step": "create_extracted_page",
+      "tool": "object_create",
+      "arguments": {
+        "space": "Work",
+        "type": "Page",
+        "name": "Example article",
+        "body_markdown": "# Example article\n\nSource: https://example.com/article\n\nCapture ID: example-capture-id\n\nExtracted text.\n",
+        "idempotency_key": "save-link-message-url-v1"
+      }
+    },
+    {
+      "workflow": "save_links",
+      "step": "assign_read_later",
+      "tool": "object_update",
+      "arguments": {
+        "space": "Work",
+        "object_id": "saved-page-id",
+        "properties": [
+          {
+            "format": "multi_select",
+            "key": "tag",
+            "multi_select": ["read-later-tag-id"]
+          }
+        ]
+      }
+    },
+    {
+      "workflow": "save_links",
+      "step": "reply_with_page_link",
+      "tool": "chat_message_add",
+      "arguments": {
+        "space": "Work",
+        "chat_id": "save-links-chat-id",
+        "text": "Saved [capture-a1b2c3d4]: anytype://spaces/space-id/objects/saved-page-id",
+        "reply_to_message_id": "source-message-id",
+        "idempotency_key": "save-link-reply-v1"
+      }
+    },
+    {
+      "workflow": "save_links",
+      "step": "recover_indeterminate_reply",
+      "tool": "chat_message_search",
+      "arguments": {
+        "space": "Work",
+        "chat_id": "save-links-chat-id",
+        "query": "capture-a1b2c3d4",
+        "limit": 12
+      }
+    }
+  ],
+  "rich_chat_blocks": [
+    {
+      "type": "text",
+      "content": {
+        "text": "Saved for later",
+        "style": "header2",
+        "marks": [],
+        "checked": false
+      }
+    },
+    {
+      "type": "link",
+      "content": {
+        "target_object_id": "saved-page-id",
+        "kind": "object"
+      }
+    }
+  ]
+}
