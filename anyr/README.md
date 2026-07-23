@@ -292,7 +292,7 @@ anyr property update "Work" Status --key task_status
 **Update a type's property list**
 
 ```sh
-# merge a property into the current list (read/merge)
+# merge a property into the exact non-featured list (requires HTTP and gRPC)
 anyr type update "Work" Task --add-property Status
 
 # replace the complete non-featured property list (KEY:FORMAT:NAME, repeatable)
@@ -302,6 +302,13 @@ anyr type update "Work" Task --set-property status:select:Status --set-property 
 anyr type update "Work" Task --clear-properties
 # (--add-property, --set-property, and --clear-properties are mutually exclusive)
 ```
+
+`--add-property` reads Anytype's source-backed featured and recommended
+property lists, then resubmits only the non-featured recommended list plus the
+requested additions. Repeated keys are de-duplicated deterministically, keeping
+the existing property first. The REST definition and gRPC source lists are not
+an atomic snapshot, so a concurrent type edit can make the command fail closed;
+retry the complete command after the other edit settles.
 
 If you have a list or grid formatted view, you can use `view objects` to list the view items by specifying the space name, list, and view.
 

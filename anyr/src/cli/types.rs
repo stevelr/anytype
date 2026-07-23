@@ -1,22 +1,17 @@
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
-use anytype::validation::looks_like_object_id;
+use anytype::{
+    properties::Property,
+    types::{CreateTypeProperty, TypePropertyClassification},
+    validation::looks_like_object_id,
+};
 
 use crate::{
     cli::{AppContext, pagination_limit, pagination_offset, resolve_icon_exists},
     filter::{parse_filters, parse_type_property},
     output::OutputFormat,
 };
-
-const EXCLUDED_TYPE_RELATION_KEYS: [&str; 6] = [
-    "type",
-    "tag",
-    "backlinks",
-    "last_modified_date",
-    "last_modified_by",
-    "last_opened_date",
-];
 
 #[allow(clippy::too_many_lines)]
 pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
@@ -130,23 +125,7 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
                     request = request.properties(properties);
                 }
                 TypePropertyMode::Merge(add_properties) => {
-                    let current_type = ctx.client.get_type(&space_id, &type_id).get().await?;
-                    let mut seen_keys = HashSet::new();
-                    let mut all_properties = Vec::new();
-
-                    for prop in &current_type.properties {
-                        if EXCLUDED_TYPE_RELATION_KEYS.contains(&prop.key.as_str()) {
-                            continue;
-                        }
-                        if seen_keys.insert(prop.key.clone()) {
-                            all_properties.push(anytype::types::CreateTypeProperty {
-                                name: prop.name.clone(),
-                                key: prop.key.clone(),
-                                format: prop.format(),
-                            });
-                        }
-                    }
-
+                    let mut additions = Vec::with_capacity(add_properties.len());
                     for prop_ref in add_properties {
                         let prop = if looks_like_object_id(&prop_ref) {
                             ctx.client.property(&space_id, &prop_ref).get().await?
@@ -158,16 +137,18 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
                             }
                             matches.remove(0)
                         };
-                        if seen_keys.insert(prop.key.clone()) {
-                            all_properties.push(anytype::types::CreateTypeProperty {
-                                name: prop.name.clone(),
-                                key: prop.key.clone(),
-                                format: prop.format(),
-                            });
-                        }
+                        additions.push(prop);
                     }
+                    // Classify as late as possible so the read/merge snapshot is
+                    // close to the single replacement request.
+                    let classification = ctx
+                        .client
+                        .get_type(&space_id, &type_id)
+                        .classify_properties()
+                        .await?;
 
-                    request = request.properties(all_properties);
+                    request = request
+                        .properties(merge_replaceable_properties(&classification, &additions));
                 }
             }
 
@@ -181,6 +162,35 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             ctx.output.emit_json(&item)
         }
     }
+}
+
+/// Merges resolved additions into the exact source-classified replaceable list.
+///
+/// The first property for each key wins, preserving the server's source order
+/// followed by the caller's argument order.
+fn merge_replaceable_properties(
+    classification: &TypePropertyClassification,
+    additions: &[Property],
+) -> Vec<CreateTypeProperty> {
+    let mut seen_keys = HashSet::new();
+    let mut merged = Vec::with_capacity(
+        classification
+            .replaceable()
+            .len()
+            .saturating_add(additions.len()),
+    );
+
+    for property in classification.replaceable().iter().chain(additions) {
+        if seen_keys.insert(property.key.clone()) {
+            merged.push(CreateTypeProperty {
+                name: property.name.clone(),
+                key: property.key.clone(),
+                format: property.format(),
+            });
+        }
+    }
+
+    merged
 }
 
 /// How `type update` should mutate the type's non-featured property list.
@@ -227,9 +237,20 @@ fn type_property_mode(
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use serde_json::json;
 
-    use super::{TypePropertyMode, type_property_mode};
+    use super::{TypePropertyMode, merge_replaceable_properties, type_property_mode};
     use crate::cli::{Cli, Commands, TypeCommands};
+
+    fn property(id: &str, key: &str, name: &str) -> anytype::properties::Property {
+        serde_json::from_value(json!({
+            "id": id,
+            "key": key,
+            "name": name,
+            "format": "text"
+        }))
+        .expect("valid property fixture")
+    }
 
     fn type_command(args: &[&str]) -> Result<TypeCommands, clap::Error> {
         let cli = Cli::try_parse_from(args)?;
@@ -277,6 +298,42 @@ mod tests {
             TypePropertyMode::Merge(refs) => assert_eq!(refs, vec!["Status".to_string()]),
             _ => panic!("expected merge mode"),
         }
+    }
+
+    #[test]
+    fn merge_uses_source_classification_and_first_key_order() {
+        let classification = anytype::types::TypePropertyClassification {
+            featured_ids: vec!["featured".to_string()],
+            featured: vec![property(
+                "featured",
+                "ordinary_looking",
+                "Featured Property",
+            )],
+            recommended: vec![
+                property("recommended-tag", "tag", "Recommended Tag"),
+                property("current", "current", "Current Property"),
+            ],
+        };
+        let additions = vec![
+            property("duplicate-tag", "tag", "Duplicate Tag"),
+            property("new", "new", "New Property"),
+            property("duplicate-new", "new", "Duplicate New"),
+        ];
+
+        let merged = merge_replaceable_properties(&classification, &additions);
+        let keys_and_names = merged
+            .iter()
+            .map(|property| (property.key.as_str(), property.name.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys_and_names,
+            vec![
+                ("tag", "Recommended Tag"),
+                ("current", "Current Property"),
+                ("new", "New Property"),
+            ]
+        );
     }
 
     #[test]
@@ -343,5 +400,102 @@ mod tests {
             "--clear-properties",
         ])
         .expect("clear alone parses");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a real Anytype server and disposable-space environment"]
+    async fn live_add_property_preserves_exact_replaceable_set() {
+        use anytype::{
+            properties::PropertyFormat,
+            test_util::{
+                DisposableRun, TestError, retry_definitive_rate_limit, unique_suffix,
+                with_disposable_space_context,
+            },
+        };
+
+        let run = with_disposable_space_context("anyr-type-add-property", |ctx| {
+            Box::pin(async move {
+                let suffix = unique_suffix();
+                let initial_key = format!("anyr_initial_{suffix}");
+                let added_key = format!("anyr_added_{suffix}");
+                let typ = retry_definitive_rate_limit("anyr type fixture", || async {
+                    ctx.client
+                        .new_type(&ctx.space_id, "Anyr Property Merge")
+                        .key(format!("anyr_property_merge_{suffix}"))
+                        .property("Initial Property", &initial_key, PropertyFormat::Text)
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_type(&typ.id);
+
+                let added = retry_definitive_rate_limit("anyr property fixture", || async {
+                    ctx.client
+                        .new_property(&ctx.space_id, "Added Property", PropertyFormat::Number)
+                        .key(&added_key)
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_property(&added.id);
+
+                let before = ctx
+                    .client
+                    .get_type(&ctx.space_id, &typ.id)
+                    .classify_properties()
+                    .await?;
+                let expected_featured_ids = before.featured_ids;
+
+                let app = crate::cli::AppContext {
+                    client: ctx.client.clone(),
+                    output: crate::output::Output::new(crate::output::OutputFormat::Quiet, None),
+                    date_format: "%Y-%m-%d".to_string(),
+                };
+                let args = crate::cli::TypeArgs {
+                    command: crate::cli::TypeCommands::Update {
+                        space: ctx.space_id.clone(),
+                        type_id: typ.id.clone(),
+                        key: None,
+                        name: None,
+                        plural: None,
+                        icon_emoji: None,
+                        layout: None,
+                        add_properties: vec![added.id.clone(), added.id.clone()],
+                        set_properties: Vec::new(),
+                        clear_properties: false,
+                    },
+                };
+                super::handle(&app, args)
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "anyr type add-property handler failed".to_string(),
+                    })?;
+
+                let after = ctx
+                    .client
+                    .get_type(&ctx.space_id, &typ.id)
+                    .classify_properties()
+                    .await?;
+                assert_eq!(after.featured_ids, expected_featured_ids);
+                assert_eq!(
+                    after
+                        .replaceable()
+                        .iter()
+                        .map(|property| property.key.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![initial_key.as_str(), added_key.as_str()]
+                );
+                Ok::<(), TestError>(())
+            })
+        })
+        .await
+        .expect("disposable-space property merge run");
+
+        match run {
+            DisposableRun::Completed(()) => {}
+            DisposableRun::Skipped(reason) => {
+                eprintln!("disposable type property merge skipped: {reason:?}");
+            }
+        }
     }
 }
