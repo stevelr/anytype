@@ -1,7 +1,7 @@
 {
   "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-  "compact_composed_ceiling_tokens": 35158,
-  "compact_composed_total_tokens": 34200,
+  "compact_composed_ceiling_tokens": 35266,
+  "compact_composed_total_tokens": 34308,
   "compact_read_only_ceiling_tokens": 12869,
   "compact_read_only_total_tokens": 12379,
   "paired_fixtures": {
@@ -9,12 +9,12 @@
       "context_tokens": {
         "compact_read_only_error": 13014,
         "compact_read_only_success": 132933,
-        "compact_read_write_error": 34835,
-        "compact_read_write_success": 154754,
+        "compact_read_write_error": 34943,
+        "compact_read_write_success": 154862,
         "standard_read_only_error": 33525,
         "standard_read_only_success": 153444,
-        "standard_read_write_error": 61312,
-        "standard_read_write_success": 181231
+        "standard_read_write_error": 61420,
+        "standard_read_write_success": 181339
       },
       "error": {
         "bytes": 331,
@@ -39,12 +39,12 @@
       "context_tokens": {
         "compact_read_only_error": null,
         "compact_read_only_success": null,
-        "compact_read_write_error": 46276,
-        "compact_read_write_success": 70176,
+        "compact_read_write_error": 46384,
+        "compact_read_write_success": 70284,
         "standard_read_only_error": null,
         "standard_read_only_success": null,
-        "standard_read_write_error": 72753,
-        "standard_read_write_success": 96653
+        "standard_read_write_error": 72861,
+        "standard_read_write_success": 96761
       },
       "error": {
         "bytes": 331,
@@ -86,12 +86,12 @@
       "context_tokens": {
         "compact_read_only_error": null,
         "compact_read_only_success": null,
-        "compact_read_write_error": 114257,
-        "compact_read_write_success": 116808,
+        "compact_read_write_error": 114365,
+        "compact_read_write_success": 116916,
         "standard_read_only_error": null,
         "standard_read_only_success": null,
-        "standard_read_write_error": 140734,
-        "standard_read_write_success": 143285
+        "standard_read_write_error": 140842,
+        "standard_read_write_success": 143393
       },
       "error": {
         "bytes": 331,
@@ -118,28 +118,28 @@
       "tokens": 165
     }
   },
-  "per_tool_ceiling_tokens": 6500,
+  "per_tool_ceiling_tokens": 6600,
   "per_tool_tokens": {
-    "body_block_create": 6500,
+    "body_block_create": 6554,
     "body_block_delete": 601,
     "body_block_list": 3754,
     "body_block_move": 3691,
     "body_block_update": 5872,
-    "rich_page_create": 3868
+    "rich_page_create": 3922
   },
   "read_only_catalog_sha256": "dfb9ebfc01b52d93e5486536c531e93f27384ea2e952539033f34fb9c3c673c2",
   "read_only_domain_ceiling_tokens": 4000,
   "read_only_domain_tokens": 3754,
   "read_only_selected_contribution_ceiling_tokens": 4500,
   "read_only_selected_contribution_tokens": 4010,
-  "read_write_domain_ceiling_tokens": 25000,
-  "read_write_domain_tokens": 24286,
+  "read_write_domain_ceiling_tokens": 25108,
+  "read_write_domain_tokens": 24394,
   "selected": ["body-blocks"],
-  "selected_catalog_sha256": "c6c13a1d1bf82fb491f4ff28af5f1ff0d1ac943e38c10ca55f976bff98f8529f",
-  "selected_contribution_ceiling_tokens": 25500,
-  "selected_contribution_tokens": 24542,
-  "standard_composed_ceiling_tokens": 61635,
-  "standard_composed_total_tokens": 60677,
+  "selected_catalog_sha256": "c390d227a016a64af12425b9cd458ee7e9bdadd0b64db6e1f784348e99df7347",
+  "selected_contribution_ceiling_tokens": 25608,
+  "selected_contribution_tokens": 24650,
+  "standard_composed_ceiling_tokens": 61743,
+  "standard_composed_total_tokens": 60785,
   "standard_read_only_ceiling_tokens": 33380,
   "standard_read_only_total_tokens": 32890,
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"

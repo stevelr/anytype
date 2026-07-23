@@ -2149,7 +2149,7 @@ fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
                 .map(|scenario| OptionalScenarioDeclaration::real_headless(registry_id, scenario)),
         );
     }
-    assert_eq!(scenario_declarations.len(), 65);
+    assert_eq!(scenario_declarations.len(), 66);
     live_scenario::validate_optional_live_ownership(
         &optional_tool_refs,
         &optional_resource_families,
