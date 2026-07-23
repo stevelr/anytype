@@ -8,6 +8,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Document the proposed R5 inert-bookmark body contract before implementation.
+  The closed `{ "kind": "bookmark", "url": string }` constructor is limited to
+  ordinary `BlockCreate`, uses the existing `anytype-api` URL validation, and
+  requires `BookmarkState::Empty` with no target-object readback. Metadata
+  fetching, `BlockBookmarkFetch`, URL import, redirects, and fetch/update
+  controls remain outside both create tools. Production-shaped
+  `o200k_base` measurement records a 108-token read-write catalog increase,
+  revised per-tool/domain/profile ceilings, and request, result, error, frame,
+  and context cells below 200,000 tokens. Current binaries do not accept the
+  constructor until the separate implementation work lands.
 - Add a terminal offline integration matrix for all six production optional
   registries. It locks exact compact/standard read-write and read-only
   inventories, canonical status under reversed selector order, stable/preview
