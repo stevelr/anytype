@@ -24,11 +24,12 @@ use any_mcp::collection_member_toolset::{
     AcceptanceMetricsSnapshot, AcceptanceMutationMode, ViewsWriteAcceptanceDirect,
 };
 #[cfg(feature = "acceptance-harness")]
+use anytype::keystore::KeyStore;
+#[cfg(feature = "acceptance-harness")]
 use anytype::test_util::retry_definitive_rate_limit;
 use anytype::{
     chats::MessageContent,
     error::AnytypeError,
-    keystore::KeyStore,
     objects::Icon,
     prelude::{AnytypeClient, ClientConfig, Color, Tag},
     test_util::{
@@ -151,6 +152,7 @@ struct StdioDriver {
     process: ProtocolProcess,
     next_id: u64,
     options: DriverOptions,
+    #[cfg(feature = "acceptance-harness")]
     body_tool_error_frames: Vec<Value>,
     _keystore: Option<TemporaryKeystore>,
 }
@@ -404,6 +406,7 @@ impl StdioDriver {
             process,
             next_id: 1,
             options,
+            #[cfg(feature = "acceptance-harness")]
             body_tool_error_frames: Vec::new(),
             _keystore: keystore,
         }
