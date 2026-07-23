@@ -38,6 +38,9 @@
           };
 
           devShells.default = pkgs.mkShell {
+            nativeBuildInputs = [
+              pkgs.jq
+            ];
             buildInputs = with pkgs; [
               pkg-config
               protobuf
