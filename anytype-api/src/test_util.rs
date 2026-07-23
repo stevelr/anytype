@@ -179,6 +179,8 @@ pub enum DisposableCallbackStage {
     BodyReadOnlyStable,
     /// Preview read-only stdio body workflow.
     BodyReadOnlyPreview,
+    /// Reviewed server-log evidence for the body workflow.
+    BodyReviewedLog,
     /// Cross-transport body evidence comparison.
     BodyParity,
     /// Integer numeric equality.
@@ -378,6 +380,7 @@ closed_diagnostic_display!(DisposableCallbackStage, {
     DisposableCallbackStage::BodyStdioPreview => "body_stdio_preview",
     DisposableCallbackStage::BodyReadOnlyStable => "body_read_only_stable",
     DisposableCallbackStage::BodyReadOnlyPreview => "body_read_only_preview",
+    DisposableCallbackStage::BodyReviewedLog => "body_reviewed_log",
     DisposableCallbackStage::BodyParity => "body_parity",
     DisposableCallbackStage::NumberEqualInteger => "number_equal_integer",
     DisposableCallbackStage::NumberNotEqual => "number_not_equal",
