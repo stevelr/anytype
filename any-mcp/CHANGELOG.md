@@ -8,6 +8,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Document the security-reviewed roadmap contract for a future default-off
+  artifact data plane. The planned surface uses explicitly selected TOML
+  configuration, separate import/export roots, optional space restrictions,
+  loopback opaque-handle staging, create-new-only local exports, finite limits,
+  explicit writable-space opt-in, capability-based mounted-root admission, and
+  reversible platform-native root and operation paths without lossy Unicode
+  conversion. Status-only read-only behavior remains planned. Remote mounts
+  retain availability risks outside application cancellation. No artifact
+  registry or configuration option is implemented or selectable yet.
 - Complete the terminal v1 acceptance matrix with 27 ignored library
   real-headless cases, all using prefix-authorized disposable spaces, and 21
   ignored spawned-stdio cases. The files workflow now proves native

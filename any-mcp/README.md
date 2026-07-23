@@ -108,6 +108,28 @@ stable and preview protocol revisions tested with Codex, Claude Code, and MCP
 Inspector. Client registration is separate from Anytype login: create and
 store credentials with `anyr` or Anytype before starting the MCP host.
 
+## Artifact data-plane roadmap
+
+A future default-off `artifacts` registry is under security review. It is
+planned to move file and document payloads through authorized local roots or a
+loopback staging service while MCP carries only logical locations, opaque
+handles, hashes, sizes, and small receipts.
+
+The planned startup policy uses an optional TOML file selected explicitly by
+`--config` or `ANY_MCP_CONFIG`, with no automatic discovery. It separates
+import and export roots, permits optional Anytype space restrictions, applies
+finite transfer and validator limits, and makes local exports create-new only.
+Selected MVP configs would have to declare writable space access explicitly so
+future access controls can default to read-only. Mounted roots would be
+admitted by required filesystem behavior instead of a filesystem-type label;
+remote mounts may still hang outside application cancellation. Root and local
+operation paths would preserve platform-native path values without requiring
+UTF-8 or lossy conversion. Read-only mode would expose status metadata without
+activating root, staging, or validator authority.
+
+This registry and its configuration options are not implemented or selectable
+yet. Existing inline file tools and their limits remain unchanged.
+
 ## Phase 1 foundations
 
 The crate provides an authenticated stdio runtime, a complete static Phase 1
