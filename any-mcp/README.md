@@ -169,6 +169,93 @@ selection can authenticate or perform I/O, its effective
 `ANYTYPE_RATE_LIMIT_MAX_RETRIES` value must be in `1..=5`; empty-selection
 Phase 1 startup retains the existing `anytype-api` behavior.
 
+### Artifact policy file
+
+The optional artifact policy file reserves filesystem and space authority for
+the artifact workflow roadmap without adding ambient path access. Generate an
+owner-only starter file in the current directory, then validate it without
+starting Anytype:
+
+```sh
+any-mcp config init
+any-mcp config check
+```
+
+Both commands accept `-c FILE` or `--config FILE`. Initialization uses
+create-new behavior and never overwrites an existing file. Server startup
+accepts `-c ABSOLUTE_PATH`, `--config ABSOLUTE_PATH`, or `ANY_MCP_CONFIG`; the
+command-line value wins. The server does not search for a default filename,
+and it starts with built-in defaults when no selector is present. Print the
+installed executable and package version with `any-mcp -V` or
+`any-mcp --version`.
+
+An explicitly selected file must be an owner-controlled regular UTF-8 file no
+larger than 256 KiB. The schema is closed and versioned. Unknown fields,
+unsupported versions, unsafe file permissions, linked config files, duplicate
+logical names, and invalid limits fail before protocol output. Selected MVP
+files must declare `spaces.read_only = false` so a future read-only space
+default cannot silently reinterpret an older writable configuration.
+
+```toml
+schema_version = 1
+
+[spaces]
+read_only = false
+allowed = [{ name = "Personal" }]
+
+[limits]
+artifact_bytes = 268435456
+transfer_chunk_bytes = 8388608
+staging_total_bytes = 1073741824
+
+[[roots.import]]
+id = "inbox"
+path = "/absolute/operator-owned/import"
+
+[[roots.export]]
+id = "outbox"
+path = "/absolute/operator-owned/export"
+```
+
+Import roots grant existing-file reads. Export roots grant create-new writes,
+with no overwrite mode. Tools use only the logical root ID plus a validated
+relative path. Root IDs accept Unicode letters, decimal digits, and combining
+marks plus ASCII `-` and `_`; they are trimmed at Pattern_White_Space
+boundaries and normalized to NFC. Invisible default-ignorable characters are
+rejected.
+
+Ordinary `path` values are UTF-8. A native OS path that is not valid UTF-8 can
+use one canonical unpadded base64url representation:
+
+```toml
+path_native = { encoding = "unix-bytes-base64url", value = "L2..." }
+```
+
+Windows uses `windows-wtf16le-base64url`. The parser decodes these values
+directly into native OS strings and applies component, traversal, prefix, and
+length checks without lossy Unicode conversion. Root activation retains
+directory handles and intersects static policy with MCP client roots; client
+roots can only narrow authority. Unix file walks reject symlinks, nested mount
+redirection, unsafe permissions, hard-linked imports, traversal, over-limit
+files, and export collisions.
+
+Space policy is active independently of the future artifact registry. An
+omitted `spaces.allowed` permits every space that the configured Anytype
+account can otherwise access. An explicit empty array permits none. ID entries
+are validated directly; name entries resolve once during authenticated
+startup, and the resulting canonical ID set stays fixed for the process.
+Every ordinary space resolver checks that set before constructing a domain
+request. Exact-ID document resources perform the same check before HTTP.
+`space_list` filters disallowed rows before output and, under a restricted
+policy, scans at most 10 upstream pages and the configured
+`limits.discovery_rows` ceiling. Its opaque cursor is issued only when another
+permitted row was observed, so disallowed identities, totals, and continuation
+hints do not enter the result.
+
+The `artifacts` registry and its transfer tools remain roadmap work. Until that
+registry is linked, the server validates and retains this policy but does not
+open roots, bind staging, or inspect validator executables.
+
 The offline production integration matrix composes all six linked registries
 together in compact and standard, read-write and read-only configurations. It
 locks their exact catalogs and canonical status, stable/preview contract
@@ -1190,6 +1277,9 @@ runtime and advertises their static capability alongside the tool catalog.
 
 ## Source layout
 
+- `src/artifact_config.rs`: selected TOML schema, native paths, and limits.
+- `src/artifact_roots.rs`: retained root capabilities and client narrowing.
+- `src/space_policy.rs`: frozen canonical Anytype-space authorization.
 - `src/config.rs` — validated environment and operational limits.
 - `src/logging.rs` — stderr-only tracing setup.
 - `src/runtime.rs` — authenticated client, controls, and stdio lifecycle.

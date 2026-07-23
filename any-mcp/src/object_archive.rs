@@ -268,6 +268,7 @@ where
     }
 
     let client = runtime.client().clone();
+    let verifier_client = client.raw_clone();
     let verification = archive_verification_config(
         client
             .get_config()
@@ -300,7 +301,7 @@ where
             Ok(_) | Err(_) => {}
         }
 
-        verify(client, verification, identity.clone())
+        verify(verifier_client, verification, identity.clone())
             .await
             .map_err(|_| HandlerError::new(ToolError::mutation_indeterminate()))?;
         Ok::<_, HandlerOperationError>(archive_output(&identity))
@@ -969,7 +970,7 @@ mod tests {
         .await;
 
         assert_eq!(result.is_error, Some(true));
-        assert_eq!(result_code(&result), "upstream");
+        assert_eq!(result_code(&result), "authentication");
         let requests = server.await.expect("resolver fixture task");
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with("GET /v1/spaces?"));

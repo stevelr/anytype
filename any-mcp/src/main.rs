@@ -6,6 +6,36 @@
 const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 fn main() {
+    let command = match any_mcp::ProcessCommand::parse(std::env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("any-mcp: {error}");
+            std::process::exit(1);
+        }
+    };
+    match command {
+        any_mcp::ProcessCommand::Version => {
+            println!("{}", any_mcp::version_line());
+        }
+        any_mcp::ProcessCommand::ConfigInit(path) => {
+            if let Err(error) = any_mcp::init_config(&path) {
+                eprintln!("any-mcp: {error}");
+                std::process::exit(1);
+            }
+            println!("Created any-mcp configuration.");
+        }
+        any_mcp::ProcessCommand::ConfigCheck(path) => {
+            if let Err(error) = any_mcp::check_config(&path) {
+                eprintln!("any-mcp: {error}");
+                std::process::exit(1);
+            }
+            println!("any-mcp configuration is valid.");
+        }
+        any_mcp::ProcessCommand::Serve(arguments) => start_server(arguments),
+    }
+}
+
+fn start_server(arguments: Vec<std::ffi::OsString>) {
     if let Err(error) = any_mcp::logging::init() {
         eprintln!("any-mcp: diagnostic setup failed: {error}");
         std::process::exit(1);
@@ -17,7 +47,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(error) = runtime.block_on(run()) {
+    if let Err(error) = runtime.block_on(run(arguments)) {
         tracing::error!(reason = %error, "any-mcp startup or service failure");
         std::process::exit(1);
     }
@@ -30,8 +60,8 @@ fn production_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = any_mcp::RuntimeConfig::from_env()?;
+async fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = any_mcp::RuntimeConfig::from_process_args(arguments)?;
     let protocol_mode = config.protocol_mode;
     let runtime = any_mcp::RuntimeContext::start(&config).await?;
     tracing::info!(

@@ -1764,7 +1764,7 @@ mod tests {
     async fn direct_and_stdio_catalog_schemas_are_byte_identical() {
         let handlers = SchemaPropertyHandlers::new().expect("schema parity handlers");
         let direct_server = server(
-            no_io_runtime(false).client().clone(),
+            no_io_runtime(false).client().raw_clone(),
             false,
             handlers.clone(),
         );
@@ -1773,7 +1773,7 @@ mod tests {
         ))
         .expect("direct tools value");
         let stdio = preview_stdio_tools(server(
-            no_io_runtime(false).client().clone(),
+            no_io_runtime(false).client().raw_clone(),
             false,
             handlers,
         ))

@@ -12,7 +12,7 @@ use std::{borrow::Cow, fmt, future::Future, pin::Pin, time::Instant};
 use anytype::{
     chats::{ChatMessage, ChatTimestampField, canonical_chat_timestamp},
     error::AnytypeError,
-    prelude::{AnytypeClient, VerifyConfig},
+    prelude::VerifyConfig,
 };
 use rmcp::{
     model::{CallToolRequestMethod, CallToolRequestParams, CallToolResult, ErrorData},
@@ -36,6 +36,7 @@ use crate::{
     runtime::{OperationContext, RuntimeContext},
     schema::SchemaContractError,
     server::decode_arguments,
+    space_policy::PolicyClient,
 };
 
 /// Exact verified chat-message-delete tool name.
@@ -287,7 +288,7 @@ type DeleteFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AnytypeError>> + 
 type ReadFuture<'a> = Pin<Box<dyn Future<Output = Result<ChatMessage, AnytypeError>> + Send + 'a>>;
 
 async fn execute_delete(
-    client: AnytypeClient,
+    client: PolicyClient,
     input: ChatMessageDeleteInput,
     progress: MutationProgress,
     deadline: Instant,
@@ -1329,7 +1330,7 @@ mod tests {
                             .await
                             .expect("child authenticated startup");
                         crate::stdio::serve_stdio(
-                            server(started.client().clone(), false),
+                            server(started.client().raw_clone(), false),
                             ProtocolMode::Experimental20260728,
                         )
                         .await

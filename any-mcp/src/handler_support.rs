@@ -702,6 +702,36 @@ pub fn finish_page<T: JsonSchema>(
     Page::new(items, next_cursor).map_err(|_| HandlerError::new(ToolError::bounded_result()))
 }
 
+/// Builds a page whose continuation was derived by a bounded policy-aware
+/// upstream scan.
+///
+/// `next_offset` identifies the first permitted upstream row not returned in
+/// `items`. The caller has already hidden disallowed rows and ignored upstream
+/// totals, so cursor presence reveals only another permitted result.
+pub(crate) fn finish_filtered_page<T: JsonSchema>(
+    cursors: &CursorStore,
+    request: PageRequest,
+    items: Vec<T>,
+    next_offset: Option<u32>,
+) -> Result<Page<T>, HandlerError> {
+    if items.len() > usize::from(request.limit.get()) || items.len() > MAX_PAGE_LIMIT as usize {
+        return Err(HandlerError::new(ToolError::bounded_result()));
+    }
+    let next_cursor = next_offset
+        .map(|offset| {
+            if offset <= request.offset.get() {
+                return Err(HandlerError::new(ToolError::upstream()));
+            }
+            let offset = PageOffset::new(offset)
+                .map_err(|_| HandlerError::new(ToolError::bounded_result()))?;
+            cursors
+                .issue(offset, request.binding)
+                .map_err(HandlerError::from)
+        })
+        .transpose()?;
+    Page::new(items, next_cursor).map_err(|_| HandlerError::new(ToolError::bounded_result()))
+}
+
 #[derive(Debug)]
 struct CursorBinding<'a> {
     tool: &'static str,

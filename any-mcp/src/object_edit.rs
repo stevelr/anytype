@@ -1161,7 +1161,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert_eq!(result_code(&result), "upstream");
+        assert_eq!(result_code(&result), "authentication");
         let requests = server.await.expect("unsafe resolver fixture");
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with("GET "));

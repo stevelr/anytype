@@ -126,6 +126,15 @@ impl AnytypeResources {
     ) -> Result<ObjectResourceRead, ErrorData> {
         let (uri, space_id, object_id) = ObjectResourceUri::parse(&request.uri)
             .map_err(|_| resource_error(ToolError::validation(), INVALID_URI_MESSAGE))?;
+        if self
+            .runtime
+            .space_authority()
+            .authorize_id(&space_id)
+            .is_err()
+        {
+            let error = ToolError::authentication();
+            return Err(resource_error(error.clone(), error.message()));
+        }
         let client = self.runtime.client();
         let response_limit = client.get_config().response_limits.document_bytes;
         let expected_uri = uri.clone();
@@ -347,6 +356,7 @@ mod tests {
     use crate::{
         domain::{DisplayName, ObjectId, ObjectSummary, SpaceId, TypeKey},
         runtime::StartupStatus,
+        space_policy::{SpaceAuthority, SpacePolicy},
     };
 
     const SPACE_ID: &str =
@@ -460,6 +470,28 @@ mod tests {
                 http_available: true,
                 grpc_available: false,
             },
+        )
+    }
+
+    fn runtime_with_space_policy(base_url: String, policy: SpacePolicy) -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some(base_url),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("resource-policy-test".to_owned()),
+            app_name: "resource-policy-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("resource fixture client");
+        client.set_api_key(HttpCredentials::new("fixture-secret-token"));
+        RuntimeContext::from_parts_with_space_authority(
+            client,
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+            SpaceAuthority::from_policy_for_tests(policy),
         )
     }
 
@@ -720,6 +752,20 @@ mod tests {
             assert_eq!(error_code(&error), "validation");
             assert!(no_request.await.expect("no-request fixture"));
         }
+    }
+
+    #[tokio::test]
+    async fn exact_resource_id_is_policy_checked_before_http() {
+        let (base_url, no_request) = no_request_fixture().await;
+        let handlers =
+            AnytypeResources::new(runtime_with_space_policy(base_url, SpacePolicy::None));
+        let error = handlers
+            .read_resource(request(RESOURCE_URI), &CancellationToken::new())
+            .await
+            .expect_err("space policy");
+
+        assert_eq!(error_code(&error), "authentication");
+        assert!(no_request.await.expect("no-request fixture"));
     }
 
     #[tokio::test]

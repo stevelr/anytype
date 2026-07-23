@@ -5,7 +5,7 @@
 
 //! Environment-backed runtime configuration.
 
-use std::{fmt, time::Duration};
+use std::{ffi::OsString, fmt, time::Duration};
 
 use anytype::prelude::{
     ClientConfig, MAX_DOCUMENT_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseLimits,
@@ -13,10 +13,13 @@ use anytype::prelude::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::optional_toolsets::{
-    OPTIONAL_TOOLSETS_ENV, OptionalRetryPolicyError, OptionalSelectorError,
-    OptionalToolsetMetadata, OptionalToolsetSelection, admit_optional_retry_policy,
-    production_optional_metadata,
+use crate::{
+    artifact_config::{ArtifactConfig, CONFIG_ENV, ConfigSelector},
+    optional_toolsets::{
+        OPTIONAL_TOOLSETS_ENV, OptionalRetryPolicyError, OptionalSelectorError,
+        OptionalToolsetMetadata, OptionalToolsetSelection, admit_optional_retry_policy,
+        production_optional_metadata,
+    },
 };
 
 const DEFAULT_KEYSTORE_SERVICE: &str = "anyr";
@@ -103,6 +106,8 @@ pub struct RuntimeConfig {
     pub json_response_bytes: u64,
     /// Maximum bytes buffered for a document/object JSON response.
     pub document_response_bytes: u64,
+    /// Strict artifact and space policy selected at process startup.
+    pub artifact: ArtifactConfig,
     anytype_url: Option<String>,
     grpc_endpoint: Option<String>,
     keystore: Option<String>,
@@ -121,6 +126,8 @@ impl RuntimeConfig {
     /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`, and `ANY_MCP_TOOLSETS`. A nonempty
     /// optional selection also admits the effective
     /// `ANYTYPE_RATE_LIMIT_MAX_RETRIES` policy before client construction.
+    /// `ANY_MCP_CONFIG` explicitly selects the strict artifact/space TOML
+    /// policy; no file is discovered when it is absent.
     ///
     /// # Errors
     ///
@@ -128,11 +135,37 @@ impl RuntimeConfig {
     /// violates an exact protocol/profile/read-only switch grammar, is
     /// non-numeric or zero, or exceeds its defensive maximum.
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_lookup(|name| match std::env::var(name) {
+        Self::from_process_args(std::iter::empty())
+    }
+
+    /// Loads environment configuration plus explicit process arguments.
+    ///
+    /// `arguments` contains arguments after the executable name. It accepts
+    /// only `-c ABSOLUTE_PATH` or `--config ABSOLUTE_PATH`; command-line
+    /// selection takes precedence over `ANY_MCP_CONFIG`, and no conventional
+    /// filename is discovered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when argument, environment, or selected TOML
+    /// configuration is invalid.
+    pub fn from_process_args<I>(arguments: I) -> Result<Self, ConfigError>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
+        let selector =
+            ConfigSelector::from_args_and_env_lookup(arguments, || std::env::var_os(CONFIG_ENV))
+                .map_err(|error| ConfigError::fixed(error.to_string()))?;
+        let artifact = selector
+            .load()
+            .map_err(|error| ConfigError::fixed(error.to_string()))?;
+        let mut config = Self::from_lookup(|name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)),
             Err(std::env::VarError::NotPresent) => Ok(None),
             Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::non_unicode(name)),
-        })
+        })?;
+        config.artifact = artifact;
+        Ok(config)
     }
 
     /// Loads environment configuration against a test-owned optional registry
@@ -141,14 +174,22 @@ impl RuntimeConfig {
     pub(crate) fn from_env_with_optional_metadata(
         optional_metadata: &[OptionalToolsetMetadata],
     ) -> Result<Self, ConfigError> {
-        Self::from_lookup_with_optional_metadata(
+        let selector =
+            ConfigSelector::from_args_and_env(Vec::<OsString>::new(), std::env::var_os(CONFIG_ENV))
+                .map_err(|error| ConfigError::fixed(error.to_string()))?;
+        let artifact = selector
+            .load()
+            .map_err(|error| ConfigError::fixed(error.to_string()))?;
+        let mut config = Self::from_lookup_with_optional_metadata(
             |name| match std::env::var(name) {
                 Ok(value) => Ok(Some(value)),
                 Err(std::env::VarError::NotPresent) => Ok(None),
                 Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::non_unicode(name)),
             },
             optional_metadata,
-        )
+        )?;
+        config.artifact = artifact;
+        Ok(config)
     }
 
     /// Builds the `anytype-api` configuration without copying credentials into
@@ -256,6 +297,7 @@ impl RuntimeConfig {
             startup_timeout: Duration::from_secs(startup_timeout_secs),
             json_response_bytes,
             document_response_bytes,
+            artifact: ArtifactConfig::default(),
             anytype_url: non_empty(lookup("ANYTYPE_URL")?),
             grpc_endpoint: non_empty(lookup("ANYTYPE_GRPC_ENDPOINT")?),
             keystore: non_empty(lookup("ANYTYPE_KEYSTORE")?),

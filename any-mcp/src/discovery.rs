@@ -34,8 +34,8 @@ use crate::{
     error::ToolError,
     filters::{McpListFilter, prepare_flat_filters},
     handler_support::{
-        HandlerError, PageRequest, UpstreamPagination, begin_page, execute_handler, finish_page,
-        validate_page_binding_size,
+        HandlerError, PageRequest, UpstreamPagination, begin_page, execute_handler,
+        finish_filtered_page, finish_page, validate_page_binding_size,
     },
     object_output::{ProjectedColor, object_summary},
     pagination::{Page, PageLimit},
@@ -43,6 +43,7 @@ use crate::{
     result::tool_error,
     runtime::{OperationContext, RuntimeContext},
     schema::SchemaContractError,
+    space_policy::SpacePolicy,
     validation::{BoundedList, Omittable, ValidationError, optional_non_null_schema},
 };
 
@@ -583,7 +584,35 @@ impl DiscoveryHandlers {
             Ok(request) => request,
             Err(error) => return tool_error(error.tool_error()),
         };
+        if matches!(
+            self.runtime.space_authority().policy(),
+            SpacePolicy::AllReadWrite
+        ) {
+            let client = self.runtime.client().clone();
+            let cursors = self.cursors.clone();
+            return execute_handler(
+                &self.runtime,
+                &contract,
+                OperationContext::new("space_list"),
+                cancellation,
+                async move {
+                    client
+                        .spaces()
+                        .filters(prepared.upstream)
+                        .limit(u32::from(input.limit.get()))
+                        .offset(request.offset().get())
+                        .list()
+                        .await
+                },
+                move |page| async move {
+                    finish_api_page(&cursors, request, page, convert_space_summary)
+                },
+            )
+            .await;
+        }
         let client = self.runtime.client().clone();
+        let authority = self.runtime.space_authority().clone();
+        let discovery_rows = self.runtime.artifact_config().limits.discovery_rows;
         let cursors = self.cursors.clone();
         execute_handler(
             &self.runtime,
@@ -591,16 +620,91 @@ impl DiscoveryHandlers {
             OperationContext::new("space_list"),
             cancellation,
             async move {
-                client
-                    .spaces()
-                    .filters(prepared.upstream)
-                    .limit(u32::from(input.limit.get()))
-                    .offset(request.offset().get())
-                    .list()
-                    .await
+                if matches!(authority.policy(), SpacePolicy::None) {
+                    return Ok(FilteredSpacePage {
+                        items: Vec::new(),
+                        next_offset: None,
+                    });
+                }
+                let desired = usize::from(input.limit.get());
+                let mut offset = request.offset().get();
+                let mut scanned = 0usize;
+                let mut items = Vec::with_capacity(desired);
+                for _ in 0..10 {
+                    let remaining = discovery_rows.saturating_sub(scanned);
+                    if remaining == 0 {
+                        return Err(discovery_scan_limit(discovery_rows));
+                    }
+                    let batch = remaining.min(100);
+                    let batch =
+                        u32::try_from(batch).map_err(|_| discovery_scan_limit(discovery_rows))?;
+                    let filters = prepare_flat_filters(&input.filters)
+                        .map_err(|_| AnytypeError::Other {
+                            message: "invalid prepared space filter".to_owned(),
+                        })?
+                        .upstream;
+                    let page = client
+                        .spaces()
+                        .filters(filters)
+                        .limit(batch)
+                        .offset(offset)
+                        .list()
+                        .await?;
+                    if page.pagination.offset != offset
+                        || page.pagination.limit != batch
+                        || page.items.len() > usize::try_from(batch).unwrap_or(usize::MAX)
+                    {
+                        return Err(AnytypeError::Other {
+                            message: "invalid space pagination evidence".to_owned(),
+                        });
+                    }
+                    for (index, space) in page.items.iter().enumerate() {
+                        scanned = scanned
+                            .checked_add(1)
+                            .ok_or_else(|| discovery_scan_limit(discovery_rows))?;
+                        let identifier =
+                            SpaceId::new(space.id.clone()).map_err(|_| AnytypeError::Other {
+                                message: "invalid space identity evidence".to_owned(),
+                            })?;
+                        if authority.is_allowed(&identifier) {
+                            if items.len() == desired {
+                                let index = u32::try_from(index)
+                                    .map_err(|_| discovery_scan_limit(discovery_rows))?;
+                                let next_offset = offset
+                                    .checked_add(index)
+                                    .ok_or_else(|| discovery_scan_limit(discovery_rows))?;
+                                return Ok(FilteredSpacePage {
+                                    items,
+                                    next_offset: Some(next_offset),
+                                });
+                            }
+                            items.push(space.clone());
+                        }
+                    }
+                    if !page.pagination.has_more {
+                        return Ok(FilteredSpacePage {
+                            items,
+                            next_offset: None,
+                        });
+                    }
+                    offset = offset
+                        .checked_add(batch)
+                        .ok_or_else(|| discovery_scan_limit(discovery_rows))?;
+                }
+                Err(discovery_scan_limit(discovery_rows))
             },
             move |page| async move {
-                finish_api_page(&cursors, request, page, convert_space_summary)
+                let items = page
+                    .items
+                    .iter()
+                    .map(convert_space_summary)
+                    .map(|result| {
+                        result.and_then(|item| {
+                            item.ok_or_else(|| HandlerError::new(ToolError::upstream()))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                finish_filtered_page(&cursors, request, items, page.next_offset)
             },
         )
         .await
@@ -970,6 +1074,18 @@ struct TemplatePageParams<'a> {
     filters: Option<&'a Value>,
 }
 
+struct FilteredSpacePage {
+    items: Vec<Space>,
+    next_offset: Option<u32>,
+}
+
+fn discovery_scan_limit(limit: usize) -> AnytypeError {
+    AnytypeError::ResponseTooLarge {
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+        declared: None,
+    }
+}
+
 struct PropertyPageSource {
     items: Vec<PropertyPageItem>,
     pagination: PaginationMeta,
@@ -1178,6 +1294,7 @@ mod tests {
         handler_support::finish_page,
         runtime::StartupStatus,
         schema::{input_schema, output_schema},
+        space_policy::SpaceAuthority,
     };
 
     const SPACE_ID: &str =
@@ -1500,6 +1617,36 @@ mod tests {
                 http_available: true,
                 grpc_available: false,
             },
+        )
+    }
+
+    fn runtime_with_space_policy(
+        endpoint: &str,
+        identifiers: impl IntoIterator<Item = &'static str>,
+    ) -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some(endpoint.to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("discovery-policy-test".to_owned()),
+            app_name: "discovery-policy-test".to_owned(),
+            disable_cache: true,
+            ..ClientConfig::default()
+        })
+        .expect("policy client");
+        client.set_api_key(HttpCredentials::new("fixture-token"));
+        let identifiers = identifiers
+            .into_iter()
+            .map(|identifier| SpaceId::new(identifier).expect("space ID"))
+            .collect();
+        RuntimeContext::from_parts_with_space_authority(
+            client,
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+            SpaceAuthority::from_policy_for_tests(SpacePolicy::OnlyReadWrite(identifiers)),
         )
     }
 
@@ -1923,6 +2070,82 @@ mod tests {
         assert_eq!(second.is_error, Some(false));
         let second_value = second.structured_content.as_ref().unwrap();
         assert_eq!(second_value["items"].as_array().unwrap().len(), 1);
+        assert!(second_value.get("next_cursor").is_none());
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn restricted_space_list_scans_without_leaking_disallowed_rows_or_counts() {
+        let fixture = HttpFixture::start(vec![
+            ExpectedRequest::json(
+                "/v1/spaces",
+                &[],
+                paged(
+                    vec![
+                        json!({"id":SPACE_ID,"name":"Hidden","object":"space"}),
+                        json!({"id":ID_A,"name":"Allowed A","object":"space"}),
+                        json!({"id":ID_C,"name":"Allowed C","object":"chat"}),
+                        json!({"id":ID_D,"name":"Allowed D","object":"one_to_one"}),
+                    ],
+                    0,
+                    100,
+                    4,
+                ),
+            ),
+            ExpectedRequest::json(
+                "/v1/spaces",
+                &[("offset", "3")],
+                paged(
+                    vec![json!({"id":ID_D,"name":"Allowed D","object":"one_to_one"})],
+                    3,
+                    100,
+                    4,
+                ),
+            ),
+        ])
+        .await;
+        let handlers = DiscoveryHandlers::with_new_cursor_store(runtime_with_space_policy(
+            &fixture.endpoint,
+            [ID_A, ID_C, ID_D],
+        ))
+        .expect("handlers");
+        let cancellation = CancellationToken::new();
+        let first = handlers
+            .space_list(
+                SpaceListInput {
+                    filters: Omittable::Missing,
+                    limit: PageLimit::new(2).expect("limit"),
+                    cursor: None,
+                },
+                &cancellation,
+            )
+            .await;
+        assert_eq!(first.is_error, Some(false));
+        let first_value = first.structured_content.expect("first result");
+        let items = first_value["items"].as_array().expect("items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], ID_A);
+        assert_eq!(items[1]["id"], ID_C);
+        assert!(
+            !first_value.to_string().contains(SPACE_ID),
+            "disallowed identity must not enter the result"
+        );
+        let cursor = serde_json::from_value::<CursorToken>(first_value["next_cursor"].clone())
+            .expect("continuation");
+
+        let second = handlers
+            .space_list(
+                SpaceListInput {
+                    filters: Omittable::Missing,
+                    limit: PageLimit::new(2).expect("limit"),
+                    cursor: Some(cursor),
+                },
+                &cancellation,
+            )
+            .await;
+        assert_eq!(second.is_error, Some(false));
+        let second_value = second.structured_content.expect("second result");
+        assert_eq!(second_value["items"][0]["id"], ID_D);
         assert!(second_value.get("next_cursor").is_none());
         fixture.finish().await;
     }

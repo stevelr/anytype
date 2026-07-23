@@ -31,6 +31,7 @@ fs2 = "0.4.3"
 futures = "0.3.33"
 getrandom = "0.4.3"
 httpdate = "1.0.3"
+icu_properties = "2.2.0"
 keyring-core = { version = "1.0.0", features = ["sample"] }
 libc = "0.2.183"
 mime = "0.3.17"
@@ -53,10 +54,13 @@ strum = { version = "0.28.0", features = ["derive"] }
 test-log = { version = "0.2.21", features = ["log", "trace"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = "0.7.19"
+toml = "0.9.12"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+unicode-general-category = "1.1.0"
+unicode-normalization = "0.1.25"
 url = "2.5.8"
 zeroize = { version = "1.9.0", features = ["derive"] }
 

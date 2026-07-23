@@ -41,6 +41,8 @@ base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
 httpdate.workspace = true
+icu_properties.workspace = true
+libc.workspace = true
 mime.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
@@ -50,15 +52,17 @@ sha2.workspace = true
 tiktoken-rs = "0.12.0"
 tokio.workspace = true
 tokio-util.workspace = true
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+unicode-general-category.workspace = true
+unicode-normalization.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 anytype = { workspace = true, features = ["test-fixtures"] }
 futures-util = "0.3.33"
 jsonschema = { version = "0.48.2", default-features = false }
-libc.workspace = true
 reqwest.workspace = true
 serial_test = "3.5.0"
 tokio = { workspace = true, features = ["test-util"] }

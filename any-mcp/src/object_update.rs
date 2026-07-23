@@ -1168,7 +1168,7 @@ mod tests {
             }],
             "pagination": {"has_more":false,"limit":100,"offset":0,"total":1}
         });
-        for (input, reply) in [
+        for (input, reply, expected_code) in [
             (
                 input(json!({
                     "space":"Workspace",
@@ -1176,6 +1176,7 @@ mod tests {
                     "name":"Changed"
                 })),
                 unsafe_space,
+                "authentication",
             ),
             (
                 input(json!({
@@ -1185,6 +1186,7 @@ mod tests {
                     "type":"Task"
                 })),
                 unsafe_type,
+                "upstream",
             ),
         ] {
             let (base_url, server) = fixture(vec![FixtureReply::json(reply)]).await;
@@ -1197,7 +1199,7 @@ mod tests {
             )
             .await;
             assert_eq!(result.is_error, Some(true));
-            assert_eq!(result_code(&result), "upstream");
+            assert_eq!(result_code(&result), expected_code);
             let requests = server.await.expect("unsafe resolver fixture");
             assert_eq!(requests.len(), 1);
             assert!(requests[0].starts_with("GET "));

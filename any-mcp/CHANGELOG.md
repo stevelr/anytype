@@ -8,6 +8,34 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add `any-mcp config init` to create an owner-only, valid starter policy with
+  create-new semantics, and `any-mcp config check` to apply normal secure-file
+  and schema validation without starting Anytype. Both accept `-c FILE` or
+  `--config FILE`. Add `-V` and `--version` for the executable and Cargo
+  package version, and accept `-c ABSOLUTE_PATH` as the server selector alias.
+- Add the startup artifact policy foundation. `--config ABSOLUTE_PATH` takes
+  precedence over `ANY_MCP_CONFIG`, with no filename discovery and safe
+  no-file defaults. Selected owner-controlled TOML files use a closed version
+  1 schema for deliberate writable space policy, separate import/read and
+  export/create roots, staging and validator declarations, and bounded
+  artifact, transfer, quota, TTL, cleanup, receipt, Markdown, and process
+  limits. Logical root IDs support normalized Unicode letters, decimal digits,
+  and combining marks while rejecting invisible characters. Physical roots
+  and operation paths support native Unix bytes or Windows WTF-16 through
+  canonical unpadded base64url. Activated roots retain directory handles,
+  enforce create-new exports and no-follow import walks on Unix, and allow MCP
+  client roots only to narrow static policy. The future `artifacts` registry
+  remains unlinked, so configured roots, staging, and validators perform no
+  activation I/O in the current catalog.
+- Enforce selected Anytype space policy through one frozen startup authority.
+  Omitted and explicit-empty allowlists remain distinct; configured names
+  resolve once to canonical IDs, and post-resolution aliases or duplicates
+  fail closed. The runtime's policy-aware client checks every ordinary
+  `resolve_space_id` result before domain I/O, while exact-ID document
+  resources check the same authority before HTTP. Restricted `space_list`
+  scans under finite page and row ceilings, removes disallowed and malformed
+  evidence before result construction, ignores upstream totals, and issues a
+  cursor only after observing another permitted row.
 - Complete the terminal v1 acceptance matrix with 27 ignored library
   real-headless cases, all using prefix-authorized disposable spaces, and 21
   ignored spawned-stdio cases. The files workflow now proves native

@@ -40,9 +40,10 @@
 //! # Startup and safety
 //!
 //! [`RuntimeConfig::from_env`] validates exact protocol, profile, read-only,
-//! timeout, concurrency, response-budget, and optional-registry settings
-//! without echoing invalid values. [`RuntimeContext::start`] loads existing Anytype credentials and
-//! performs bounded authenticated health checks. HTTP is always required;
+//! timeout, concurrency, response-budget, optional-registry, and selected TOML
+//! policy settings without echoing invalid values. [`RuntimeContext::start`]
+//! loads existing Anytype credentials, performs bounded authenticated health
+//! checks, and freezes canonical configured space authority. HTTP is always required;
 //! standard read-write also requires gRPC for verified archive readback, while
 //! compact and read-only selections may run HTTP-only unless `schema` or
 //! `views-write` is selected, because their bounded type classification or
@@ -59,6 +60,8 @@
 //! The crate README contains current host registration, complete tool semantics,
 //! protocol compatibility, token baselines, and operational guidance.
 
+pub mod artifact_config;
+pub mod artifact_roots;
 pub mod body_toolset;
 pub mod chat_add_toolset;
 pub mod chat_delete_toolset;
@@ -86,6 +89,7 @@ pub mod object_read;
 pub mod object_update;
 pub mod optional_toolsets;
 pub mod pagination;
+pub mod process_command;
 pub mod protocol;
 pub mod resources;
 pub mod result;
@@ -97,6 +101,7 @@ pub mod schema_tag_toolset;
 pub mod schema_toolset;
 pub mod schema_type_toolset;
 pub mod server;
+pub mod space_policy;
 mod stdio;
 pub mod validation;
 pub mod view_handlers;
@@ -104,10 +109,25 @@ pub mod view_handlers;
 #[cfg(test)]
 mod skill_examples;
 
+pub use artifact_config::{
+    AbsoluteNativePath, ArtifactConfig, ArtifactConfigError, ArtifactLimits, ConfigSelector,
+    LogicalRootId, RelativeNativePath, SpaceConfig, SpaceReference, StagingConfig, ValidatorConfig,
+    ValidatorDriver,
+};
+pub use artifact_roots::{
+    AnchoredImport, EffectiveRootRegistry, ROOTS_REQUIRED_GUIDANCE, RootAccessError,
+    RootCapabilityKind, RootRegistry,
+};
 pub use config::{ApplicationProfile, ProtocolMode, RuntimeConfig};
 pub use optional_toolsets::{OptionalToolsetSelection, ToolsetName};
+pub use process_command::{
+    ProcessCommand, ProcessCommandError, check_config, init_config, version_line,
+};
 pub use runtime::{
     OperationContext, RuntimeContext, RuntimeError, ServeError, StartupError, StartupStatus,
     serve_stdio,
 };
 pub use server::{AnyMcpServer, ServerBuildError};
+pub use space_policy::{
+    ConfigurationGeneration, PolicyClient, SpaceAuthority, SpacePolicy, SpacePolicyError,
+};

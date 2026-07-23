@@ -25,9 +25,11 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    artifact_config::ArtifactConfig,
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
     optional_toolsets::OptionalToolsetSelection,
     server::AnyMcpServer,
+    space_policy::{PolicyClient, SpaceAuthority},
 };
 
 /// Availability established once during authenticated startup.
@@ -47,7 +49,7 @@ pub struct StartupStatus {
 #[derive(Clone)]
 pub struct RuntimeContext {
     identity: Arc<()>,
-    client: Arc<AnytypeClient>,
+    client: PolicyClient,
     permits: Arc<Semaphore>,
     shutdown: CancellationToken,
     next_correlation_id: Arc<AtomicU64>,
@@ -56,6 +58,17 @@ pub struct RuntimeContext {
     profile: ApplicationProfile,
     read_only: bool,
     optional_toolsets: OptionalToolsetSelection,
+    artifact_config: Arc<ArtifactConfig>,
+}
+
+struct RuntimeParts {
+    max_concurrency: usize,
+    request_timeout: Duration,
+    startup_status: StartupStatus,
+    profile: ApplicationProfile,
+    read_only: bool,
+    optional_toolsets: OptionalToolsetSelection,
+    space_authority: SpaceAuthority,
 }
 
 impl fmt::Debug for RuntimeContext {
@@ -70,6 +83,7 @@ impl fmt::Debug for RuntimeContext {
                 "optional_toolset_count",
                 &self.optional_toolsets.names().len(),
             )
+            .field("artifact_config", &self.artifact_config)
             .finish_non_exhaustive()
     }
 }
@@ -104,21 +118,35 @@ impl RuntimeContext {
         )
         .await?;
 
-        Ok(Self::from_parts_with_profile_and_optional_toolsets(
+        let authority = SpaceAuthority::initialize(&client, &config.artifact.spaces)
+            .await
+            .map_err(|_| StartupError::SpacePolicy)?;
+        let mut runtime = Self::from_parts_with_authority(
             client,
-            config.max_concurrency,
-            config.request_timeout,
-            startup_status,
-            config.profile,
-            config.read_only,
-            config.optional_toolsets.clone(),
-        ))
+            RuntimeParts {
+                max_concurrency: config.max_concurrency,
+                request_timeout: config.request_timeout,
+                startup_status,
+                profile: config.profile,
+                read_only: config.read_only,
+                optional_toolsets: config.optional_toolsets.clone(),
+                space_authority: authority,
+            },
+        );
+        runtime.artifact_config = Arc::new(config.artifact.clone());
+        Ok(runtime)
     }
 
     /// Returns the one long-lived Anytype client.
     #[must_use]
-    pub fn client(&self) -> &AnytypeClient {
-        self.client.as_ref()
+    pub const fn client(&self) -> &PolicyClient {
+        &self.client
+    }
+
+    /// Returns the frozen central Anytype-space authorization gate.
+    #[must_use]
+    pub fn space_authority(&self) -> &SpaceAuthority {
+        self.client.space_authority()
     }
 
     /// Returns the process-local identity shared by clones of this runtime.
@@ -154,6 +182,12 @@ impl RuntimeContext {
     #[must_use]
     pub const fn optional_toolsets(&self) -> &OptionalToolsetSelection {
         &self.optional_toolsets
+    }
+
+    /// Returns the immutable startup artifact and space policy.
+    #[must_use]
+    pub fn artifact_config(&self) -> &ArtifactConfig {
+        self.artifact_config.as_ref()
     }
 
     /// Starts process shutdown, rejects new work, and cancels running or
@@ -349,6 +383,28 @@ impl RuntimeContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn from_parts_with_space_authority(
+        client: AnytypeClient,
+        max_concurrency: usize,
+        request_timeout: Duration,
+        startup_status: StartupStatus,
+        space_authority: SpaceAuthority,
+    ) -> Self {
+        Self::from_parts_with_authority(
+            client,
+            RuntimeParts {
+                max_concurrency,
+                request_timeout,
+                startup_status,
+                profile: ApplicationProfile::Standard,
+                read_only: false,
+                optional_toolsets: OptionalToolsetSelection::default(),
+                space_authority,
+            },
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_parts_with_read_only(
         client: AnytypeClient,
         max_concurrency: usize,
@@ -386,6 +442,7 @@ impl RuntimeContext {
         )
     }
 
+    #[cfg(any(test, feature = "acceptance-harness"))]
     pub(crate) fn from_parts_with_profile_and_optional_toolsets(
         client: AnytypeClient,
         max_concurrency: usize,
@@ -395,17 +452,33 @@ impl RuntimeContext {
         read_only: bool,
         optional_toolsets: OptionalToolsetSelection,
     ) -> Self {
+        Self::from_parts_with_authority(
+            client,
+            RuntimeParts {
+                max_concurrency,
+                request_timeout,
+                startup_status,
+                profile,
+                read_only,
+                optional_toolsets,
+                space_authority: SpaceAuthority::allow_all_for_fixtures(),
+            },
+        )
+    }
+
+    fn from_parts_with_authority(client: AnytypeClient, parts: RuntimeParts) -> Self {
         Self {
             identity: Arc::new(()),
-            client: Arc::new(client),
-            permits: Arc::new(Semaphore::new(max_concurrency)),
+            client: PolicyClient::new(client, parts.space_authority),
+            permits: Arc::new(Semaphore::new(parts.max_concurrency)),
             shutdown: CancellationToken::new(),
             next_correlation_id: Arc::new(AtomicU64::new(1)),
-            request_timeout,
-            startup_status,
-            profile,
-            read_only,
-            optional_toolsets,
+            request_timeout: parts.request_timeout,
+            startup_status: parts.startup_status,
+            profile: parts.profile,
+            read_only: parts.read_only,
+            optional_toolsets: parts.optional_toolsets,
+            artifact_config: Arc::new(ArtifactConfig::default()),
         }
     }
 }
@@ -743,6 +816,8 @@ pub enum StartupError {
     GrpcUnavailable,
     /// The authenticated gRPC ping exceeded its deadline.
     GrpcTimeout,
+    /// Configured Anytype space authority could not be frozen safely.
+    SpacePolicy,
 }
 
 impl fmt::Display for StartupError {
@@ -764,6 +839,9 @@ impl fmt::Display for StartupError {
             Self::HttpTimeout => formatter.write_str("authenticated Anytype HTTP ping timed out"),
             Self::GrpcUnavailable => formatter.write_str("authenticated Anytype gRPC ping failed"),
             Self::GrpcTimeout => formatter.write_str("authenticated Anytype gRPC ping timed out"),
+            Self::SpacePolicy => {
+                formatter.write_str("unable to initialize configured Anytype space policy")
+            }
         }
     }
 }
