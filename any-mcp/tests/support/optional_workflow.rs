@@ -6,6 +6,7 @@
 /// Closed identity of each production optional registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptionalRegistry {
+    CommonFoundation,
     BodyBlocks,
     Chats,
     Files,
@@ -15,7 +16,9 @@ pub enum OptionalRegistry {
 }
 
 impl OptionalRegistry {
-    /// Every production optional registry.
+    /// Every selectable production optional registry.
+    ///
+    /// The common foundation is an owner, not a selectable descriptor.
     #[allow(dead_code)] // Shared support targets do not all enumerate runners.
     pub const ALL: [Self; 6] = [
         Self::BodyBlocks,
@@ -43,6 +46,7 @@ impl OptionalRegistry {
     /// Exact production descriptor name.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::CommonFoundation => "common-foundation",
             Self::BodyBlocks => "body-blocks",
             Self::Chats => "chats",
             Self::Files => "files",
@@ -172,15 +176,11 @@ impl OptionalOperation {
         }
     }
 
-    /// Production registry that advertises this operation.
-    ///
-    /// The common status operation is assigned to `members`, whose fast and
-    /// real workflows provide its executable evidence.
+    /// Normative owner of this optional operation.
     pub const fn registry(self) -> OptionalRegistry {
         match self {
-            Self::OptionalToolsetStatus | Self::MemberList | Self::MemberGet => {
-                OptionalRegistry::Members
-            }
+            Self::OptionalToolsetStatus => OptionalRegistry::CommonFoundation,
+            Self::MemberList | Self::MemberGet => OptionalRegistry::Members,
             Self::BodyBlockList
             | Self::BodyBlockCreate
             | Self::BodyBlockUpdate
@@ -307,8 +307,11 @@ impl OptionalFastWorkflow {
         Self::ViewsWrite,
     ];
 
-    /// Registry whose production routing this workflow executes.
-    pub const fn registry(self) -> OptionalRegistry {
+    /// Registry whose production routing carries this workflow.
+    ///
+    /// Common status evidence currently executes through the members carrier,
+    /// without transferring ownership to the members descriptor.
+    pub const fn carrier_registry(self) -> OptionalRegistry {
         match self {
             Self::OptionalStatus | Self::Members => OptionalRegistry::Members,
             Self::BodyBlocks => OptionalRegistry::BodyBlocks,
@@ -342,8 +345,8 @@ impl OptionalRealWorkflow {
         Self::ViewsWrite,
     ];
 
-    /// Registry whose spawned production routing this workflow executes.
-    pub const fn registry(self) -> OptionalRegistry {
+    /// Registry whose spawned production routing carries this workflow.
+    pub const fn carrier_registry(self) -> OptionalRegistry {
         match self {
             Self::BodyBlocks => OptionalRegistry::BodyBlocks,
             Self::Chats => OptionalRegistry::Chats,

@@ -2119,12 +2119,12 @@ fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
 
     let mut scenario_declarations = vec![
         OptionalScenarioDeclaration::fast(
-            OptionalRegistry::Members,
-            "optional_toolset_status_direct_contract",
+            OptionalRegistry::CommonFoundation,
+            "common_optional_status",
         ),
-        OptionalScenarioDeclaration::fast(
-            OptionalRegistry::Members,
-            "optional_toolset_status_stdio_contract",
+        OptionalScenarioDeclaration::real_headless(
+            OptionalRegistry::CommonFoundation,
+            "common_optional_status_headless",
         ),
     ];
     for registry in production_optional_registries() {

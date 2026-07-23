@@ -6015,7 +6015,7 @@ fn optional_real_workflow_registration_is_exact() {
     let registered = OPTIONAL_REAL_WORKFLOWS.map(|registration| registration.workflow);
     assert_eq!(registered, OptionalRealWorkflow::ALL);
     assert_eq!(
-        registered.map(OptionalRealWorkflow::registry),
+        registered.map(OptionalRealWorkflow::carrier_registry),
         OptionalRegistry::ALL
     );
     assert_eq!(
@@ -6039,7 +6039,10 @@ fn optional_real_workflow_registration_is_exact() {
             "real operation owner lacks a registered executable workflow"
         );
         assert!(owner.scenario.covers(owner.operation));
-        assert_eq!(owner.scenario.registry(), workflow.registry());
+        assert_eq!(
+            owner.scenario.workflow().carrier_registry(),
+            workflow.carrier_registry()
+        );
         assert_eq!(owner.scenario.registry(), owner.operation.registry());
     }
     for workflow in OptionalRealWorkflow::ALL {
