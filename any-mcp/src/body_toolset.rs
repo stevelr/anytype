@@ -4392,16 +4392,33 @@ impl BodyHandlers {
                     .snapshot
                     .edit(&client)
                     .rpc_config(prepared.rpc.clone());
-                let receipt = observe_body_dispatch(
+                update_transition_stage_diagnostic("update_dispatch_ready");
+                let receipt = match observe_body_dispatch(
                     editor.update(&block_id, change),
                     metrics,
                     operation_progress,
                 )
-                .await?;
+                .await
+                {
+                    Ok(receipt) => {
+                        update_transition_stage_diagnostic("update_api_receipt");
+                        receipt
+                    }
+                    Err(error) => {
+                        update_api_error_diagnostic(
+                            &error,
+                            &before,
+                            &input.block_id,
+                            &projected_change,
+                        );
+                        return Err(HandlerOperationError::from(error));
+                    }
+                };
                 Ok::<_, HandlerOperationError>((receipt, input.block_id, projected_change, before))
             },
             |(receipt, block_id, change, before)| async move {
                 let after = project_snapshot(&receipt.snapshot)?;
+                update_transition_stage_diagnostic("update_projection_ready");
                 if !verify_update_transition(&before, &after, &block_id, &change) {
                     return Err(HandlerError::new(ToolError::mutation_indeterminate()));
                 }
@@ -4807,7 +4824,7 @@ fn projected_table_subtree_matches(
         })
 }
 
-fn projected_structural_parent_content_matches(
+fn projected_opaque_refresh_content_matches(
     prior: &BlockSummary,
     current: &BlockSummary,
     insertion_parent: bool,
@@ -5045,7 +5062,7 @@ fn verify_create_transition(
         });
     let prior_content_exact = all_prior_present
         && prior_pairs.iter().all(|(prior, current)| {
-            projected_structural_parent_content_matches(
+            projected_opaque_refresh_content_matches(
                 prior,
                 current,
                 prior.id == insertion.parent.id,
@@ -5124,38 +5141,220 @@ fn verify_create_transition(
     diagnostics.verified()
 }
 
-fn verify_update_transition(
+struct UpdateTransitionDiagnostics {
+    dfs_order_exact: bool,
+    target_content_exact: bool,
+    target_restrictions_exact: bool,
+    target_presentation_exact: bool,
+    target_structure_exact: bool,
+    prior_content_exact: bool,
+    prior_restrictions_exact: bool,
+    prior_presentation_exact: bool,
+    prior_structure_exact: bool,
+    root: StructuralParentDiagnostics,
+}
+
+impl UpdateTransitionDiagnostics {
+    fn emit(&self, event: &'static str) {
+        if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "body_semantic_phase=verifier event={event} \
+                 dfs_order={} target_content={} target_restrictions={} \
+                 target_presentation={} target_structure={} prior_content={} \
+                 prior_restrictions={} prior_presentation={} prior_structure={} \
+                 root_content_equal={} root_opaque_kind={} root_opaque_children={} \
+                 root_opaque_approx_equal={} root_restrictions_equal={} \
+                 root_presentation={}",
+                self.dfs_order_exact,
+                self.target_content_exact,
+                self.target_restrictions_exact,
+                self.target_presentation_exact,
+                self.target_structure_exact,
+                self.prior_content_exact,
+                self.prior_restrictions_exact,
+                self.prior_presentation_exact,
+                self.prior_structure_exact,
+                self.root.content_equal,
+                self.root.opaque_kind_exact,
+                self.root.opaque_children_exact,
+                self.root.opaque_approx_equal,
+                self.root.restrictions_equal,
+                self.root.presentation_exact,
+            );
+        }
+    }
+
+    fn verified(&self) -> bool {
+        self.dfs_order_exact
+            && self.target_content_exact
+            && self.target_restrictions_exact
+            && self.target_presentation_exact
+            && self.target_structure_exact
+            && self.prior_content_exact
+            && self.prior_restrictions_exact
+            && self.prior_presentation_exact
+            && self.prior_structure_exact
+    }
+}
+
+fn update_transition_stage_diagnostic(event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=verifier event={event}");
+    }
+}
+
+fn update_api_error_diagnostic(
+    error: &AnytypeError,
+    before: &ProjectedSnapshot,
+    block_id: &EntityId,
+    change: &BlockChangeInput,
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_none() {
+        return;
+    }
+    let category = match error {
+        AnytypeError::BodyMutationIndeterminate { .. } => "mutation_indeterminate",
+        AnytypeError::BodyRpcLifecycle { .. } => "rpc_lifecycle",
+        AnytypeError::BodyGraph { .. } => "body_graph",
+        AnytypeError::Validation { .. } => "validation",
+        AnytypeError::Unauthorized => "authentication",
+        AnytypeError::Forbidden => "permission",
+        AnytypeError::Grpc { .. } => "grpc",
+        AnytypeError::GrpcUnavailable { .. } => "grpc_unavailable",
+        _ => "other",
+    };
+    eprintln!("body_semantic_phase=verifier event=update_api_error category={category}");
+    if let AnytypeError::BodyMutationIndeterminate {
+        attempts, observed, ..
+    } = error
+    {
+        eprintln!(
+            "body_semantic_phase=verifier event=update_api_observation \
+             attempts={attempts} observed={}",
+            observed.is_some()
+        );
+        if let Some(observed) = observed {
+            match project_snapshot(observed) {
+                Ok(after) => {
+                    let _ = verify_update_transition_with_event(
+                        before,
+                        &after,
+                        block_id,
+                        change,
+                        "update_observed_transition",
+                    );
+                }
+                Err(_) => update_transition_stage_diagnostic("update_observed_projection_invalid"),
+            }
+        }
+    }
+}
+
+fn verify_update_transition_with_event(
     before: &ProjectedSnapshot,
     after: &ProjectedSnapshot,
     block_id: &EntityId,
     change: &BlockChangeInput,
+    event: &'static str,
 ) -> bool {
     if before.space_id != after.space_id
         || before.object_id != after.object_id
         || before.root_id != after.root_id
         || projected_identity_set(before) != projected_identity_set(after)
     {
-        move_transition_stage_diagnostic("move_scope_or_identity_mismatch");
+        update_transition_stage_diagnostic("update_scope_or_identity_mismatch");
         return false;
     }
     let Some(prior) = before.items.iter().find(|block| &block.id == block_id) else {
+        update_transition_stage_diagnostic("update_target_before_missing");
         return false;
     };
     let Some(current) = after.items.iter().find(|block| &block.id == block_id) else {
+        update_transition_stage_diagnostic("update_target_after_missing");
         return false;
     };
     let mut expected = prior.clone();
-    if apply_projected_change(&mut expected, change).is_err() || &expected != current {
+    if apply_projected_change(&mut expected, change).is_err() {
+        update_transition_stage_diagnostic("update_projection_invalid");
         return false;
     }
-    before.items.iter().all(|prior| {
-        prior.id == *block_id
-            || after
+    let target_content_exact = expected.content == current.content;
+    let target_restrictions_exact = expected.restrictions == current.restrictions;
+    let target_presentation_exact = expected.align == current.align
+        && expected.vertical_align == current.vertical_align
+        && expected.background_color == current.background_color;
+    let target_structure_exact = expected.id == current.id
+        && expected.parent_id == current.parent_id
+        && expected.sibling_index == current.sibling_index
+        && expected.depth == current.depth
+        && expected.child_count == current.child_count;
+    let prior_pairs = before
+        .items
+        .iter()
+        .filter(|prior| prior.id != *block_id)
+        .filter_map(|prior| {
+            after
                 .items
                 .iter()
                 .find(|current| current.id == prior.id)
-                .is_some_and(|current| current == prior)
-    })
+                .map(|current| (prior, current))
+        })
+        .collect::<Vec<_>>();
+    let all_prior_present = prior_pairs.len() == before.items.len().saturating_sub(1);
+    let prior_content_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            projected_opaque_refresh_content_matches(prior, current, prior.id == before.root_id)
+        });
+    let prior_restrictions_exact = all_prior_present
+        && prior_pairs
+            .iter()
+            .all(|(prior, current)| prior.restrictions == current.restrictions);
+    let prior_presentation_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            prior.align == current.align
+                && prior.vertical_align == current.vertical_align
+                && prior.background_color == current.background_color
+        });
+    let prior_structure_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            prior.id == current.id
+                && prior.parent_id == current.parent_id
+                && prior.sibling_index == current.sibling_index
+                && prior.depth == current.depth
+                && prior.child_count == current.child_count
+        });
+    let dfs_order_exact = before
+        .items
+        .iter()
+        .map(|block| &block.id)
+        .eq(after.items.iter().map(|block| &block.id));
+    let root_pair = prior_pairs
+        .iter()
+        .find(|(prior, _)| prior.id == before.root_id)
+        .map(|(prior, current)| (*prior, *current));
+    let diagnostics = UpdateTransitionDiagnostics {
+        dfs_order_exact,
+        target_content_exact,
+        target_restrictions_exact,
+        target_presentation_exact,
+        target_structure_exact,
+        prior_content_exact,
+        prior_restrictions_exact,
+        prior_presentation_exact,
+        prior_structure_exact,
+        root: structural_parent_diagnostics(root_pair),
+    };
+    diagnostics.emit(event);
+    diagnostics.verified()
+}
+
+fn verify_update_transition(
+    before: &ProjectedSnapshot,
+    after: &ProjectedSnapshot,
+    block_id: &EntityId,
+    change: &BlockChangeInput,
+) -> bool {
+    verify_update_transition_with_event(before, after, block_id, change, "update_transition")
 }
 
 struct DeleteTransitionDiagnostics {
@@ -5272,7 +5471,7 @@ fn verify_delete_transition(
     let all_survivors_present = prior_pairs.len() == after.items.len();
     let prior_content_exact = all_survivors_present
         && prior_pairs.iter().all(|(prior, current)| {
-            projected_structural_parent_content_matches(prior, current, &prior.id == removed_parent)
+            projected_opaque_refresh_content_matches(prior, current, &prior.id == removed_parent)
         });
     let prior_restrictions_exact = all_survivors_present
         && prior_pairs
@@ -5611,7 +5810,7 @@ fn verify_move_transition(
     let affected_parent = |id: &EntityId| id.as_str() == old_parent || id.as_str() == new_parent;
     let prior_content_exact = all_prior_present
         && prior_pairs.iter().all(|(prior, current)| {
-            projected_structural_parent_content_matches(prior, current, affected_parent(&prior.id))
+            projected_opaque_refresh_content_matches(prior, current, affected_parent(&prior.id))
         });
     let prior_restrictions_exact = all_prior_present
         && prior_pairs
@@ -9463,6 +9662,161 @@ mod tests {
                 &change
             ));
         }
+    }
+
+    #[test]
+    fn update_transition_accepts_only_root_opaque_size_refresh() {
+        let mut target = summary(
+            "target",
+            Some("root"),
+            0,
+            1,
+            0,
+            BlockProjection::Text {
+                text: "Paragraph".to_owned(),
+                style: WireTextStyle::Paragraph,
+                checked: false,
+                color: Some(ColorInput::new("blue".to_owned()).expect("color")),
+                icon: None,
+                marks: Vec::new(),
+            },
+        );
+        target.align = WireHorizontalAlign::Center;
+        target.vertical_align = WireVerticalAlign::Middle;
+        target.background_color = Some(ColorInput::new("grey".to_owned()).expect("background"));
+        let before = projected(vec![
+            summary(
+                "root",
+                None,
+                0,
+                0,
+                2,
+                projected_opaque("smartblock", 2, 180),
+            ),
+            target.clone(),
+            summary(
+                "opaque",
+                Some("root"),
+                1,
+                1,
+                0,
+                projected_opaque("dataview", 0, 9),
+            ),
+        ]);
+        let change = serde_json::from_value::<BlockChangeInput>(json!({
+            "kind":"set_text","text":"matrix text",
+            "marks":[{"kind":"bold","start":0,"end":6}]
+        }))
+        .expect("change");
+        let mut updated = target;
+        apply_projected_change(&mut updated, &change).expect("projected change");
+        let after = projected(vec![
+            summary(
+                "root",
+                None,
+                0,
+                0,
+                2,
+                projected_opaque("smartblock", 2, 181),
+            ),
+            updated,
+            summary(
+                "opaque",
+                Some("root"),
+                1,
+                1,
+                0,
+                projected_opaque("dataview", 0, 9),
+            ),
+        ]);
+        let target_id = EntityId::new("target").expect("target");
+        assert!(verify_update_transition(
+            &before, &after, &target_id, &change,
+        ));
+
+        let mut volatile_root_size = after.clone();
+        volatile_root_size.items[0].content = projected_opaque("smartblock", 2, 1);
+        assert!(verify_update_transition(
+            &before,
+            &volatile_root_size,
+            &target_id,
+            &change,
+        ));
+
+        let mut wrong_root_kind = after.clone();
+        wrong_root_kind.items[0].content = projected_opaque("dataview", 2, 181);
+        let mut wrong_root_nested_count = after.clone();
+        wrong_root_nested_count.items[0].content = projected_opaque("smartblock", 1, 181);
+        let mut wrong_root_outer_count = after.clone();
+        wrong_root_outer_count.items[0].child_count = 1;
+        wrong_root_outer_count.items[0].content = projected_opaque("smartblock", 1, 181);
+        let mut root_typed_transition = after.clone();
+        root_typed_transition.items[0].content = projected_text("root");
+        let mut unrelated_opaque_drift = after.clone();
+        unrelated_opaque_drift.items[2].content = projected_opaque("dataview", 0, 10);
+        let mut unrelated_restriction_drift = after.clone();
+        unrelated_restriction_drift.items[2].restrictions.edit = true;
+        let mut unrelated_presentation_drift = after.clone();
+        unrelated_presentation_drift.items[2].align = WireHorizontalAlign::Center;
+        let mut target_content_drift = after.clone();
+        target_content_drift.items[1].content = projected_text("wrong");
+        let mut target_restriction_drift = after.clone();
+        target_restriction_drift.items[1].restrictions.edit = true;
+        let mut target_presentation_drift = after.clone();
+        target_presentation_drift.items[1].background_color =
+            Some(ColorInput::new("red".to_owned()).expect("background"));
+        let mut target_parent_drift = after.clone();
+        target_parent_drift.items[1].parent_id = Some(EntityId::new("opaque").expect("opaque"));
+        let mut target_index_drift = after.clone();
+        target_index_drift.items[1].sibling_index = 1;
+        let mut target_depth_drift = after.clone();
+        target_depth_drift.items[1].depth = 2;
+        let mut target_child_count_drift = after.clone();
+        target_child_count_drift.items[1].child_count = 1;
+        let mut reordered = after.clone();
+        reordered.items.swap(1, 2);
+        let mut foreign_identity = after.clone();
+        foreign_identity.items[2].id = EntityId::new("foreign").expect("foreign");
+        for invalid in [
+            wrong_root_kind,
+            wrong_root_nested_count,
+            wrong_root_outer_count,
+            root_typed_transition,
+            unrelated_opaque_drift,
+            unrelated_restriction_drift,
+            unrelated_presentation_drift,
+            target_content_drift,
+            target_restriction_drift,
+            target_presentation_drift,
+            target_parent_drift,
+            target_index_drift,
+            target_depth_drift,
+            target_child_count_drift,
+            reordered,
+            foreign_identity,
+        ] {
+            assert!(!verify_update_transition(
+                &before, &invalid, &target_id, &change,
+            ));
+        }
+
+        let mut typed_before = before.clone();
+        typed_before.items[0].content = projected_text("root");
+        let mut typed_after = after.clone();
+        typed_after.items[0].content = projected_text("root");
+        assert!(verify_update_transition(
+            &typed_before,
+            &typed_after,
+            &target_id,
+            &change,
+        ));
+        typed_after.items[0].content = projected_text("changed root");
+        assert!(!verify_update_transition(
+            &typed_before,
+            &typed_after,
+            &target_id,
+            &change,
+        ));
     }
 
     #[test]

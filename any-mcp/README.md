@@ -391,6 +391,10 @@ every other opaque summary and block value unchanged.
 Delete verification applies it only to the removed subtree's direct parent,
 proves the exact filtered DFS order and sibling shifts, and keeps every
 surviving non-parent value exact.
+For a value-only update, only the opaque page root's protobuf-derived byte
+summary may refresh; its kind, duplicated unchanged child count, structure,
+restrictions, and presentation remain exact, as do every non-root block except
+the one explicitly updated field.
 
 The finite `anytype-api` body lifecycle caps decoded Show at
 4,194,304 bytes and every non-Show body gRPC response—including foreground and

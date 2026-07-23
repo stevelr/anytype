@@ -47,6 +47,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   that exception only to the old and new structural parents and now also
   proves exact post-move DFS order. Delete readback applies it only to the
   removed subtree's direct parent and proves the exact surviving DFS order.
+  Value-only update readback permits only the opaque page root's derived byte
+  summary to refresh while preserving its exact kind, unchanged child count,
+  structure, restrictions, and presentation.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection
