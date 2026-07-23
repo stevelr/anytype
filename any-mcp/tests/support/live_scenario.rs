@@ -59,6 +59,32 @@ fn body_scenario_update(index: usize, result: &'static str) {
     }
 }
 
+fn body_scenario_update_stage(event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=scenario event={event}");
+    }
+}
+
+fn body_scenario_update_error(error: &str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_none() {
+        return;
+    }
+    let category = [
+        "mutation_indeterminate",
+        "conflict",
+        "validation",
+        "authentication",
+        "permission",
+        "not_found",
+        "bounded_result",
+        "upstream",
+    ]
+    .into_iter()
+    .find(|category| error.contains(category))
+    .unwrap_or("other");
+    eprintln!("body_semantic_phase=scenario event=update_call_error category={category}");
+}
+
 fn body_fixture_count(event: &'static str, count: usize) {
     if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
         eprintln!("body_semantic_phase=fixture event={event} count={count}");
@@ -763,28 +789,63 @@ fn exact_update_snapshot_transition(
     block_id: &str,
     expectation: BodyUpdateExpectation,
 ) -> bool {
-    if before.space_id != after.space_id
-        || before.object_id != after.object_id
-        || before.root_id != after.root_id
-        || before.len() != after.len()
-    {
+    let scope_exact = before.space_id == after.space_id
+        && before.object_id == after.object_id
+        && before.root_id == after.root_id
+        && before.len() == after.len();
+    if !scope_exact {
+        body_scenario_update_stage("update_independent_scope_mismatch");
         return false;
     }
     let before_ids = before.iter().map(|block| &block.id).collect::<Vec<_>>();
     let after_ids = after.iter().map(|block| &block.id).collect::<Vec<_>>();
-    if before_ids != after_ids {
+    let dfs_order_exact = before_ids == after_ids;
+    if !dfs_order_exact {
+        body_scenario_update_stage("update_independent_dfs_mismatch");
         return false;
     }
-    before.iter().all(|prior| {
+    let mut target_exact = false;
+    let mut root_content_equal = false;
+    let mut root_opaque_semantics_exact = false;
+    let mut nonroot_exact = true;
+    for prior in before.iter() {
         let Some(fresh) = after.get(&prior.id) else {
+            body_scenario_update_stage("update_independent_block_missing");
             return false;
         };
         if prior.id.as_str() == block_id {
-            update_target_changed_exactly(prior, fresh, expectation)
-        } else {
-            fresh == prior
+            target_exact = update_target_changed_exactly(prior, fresh, expectation);
+        } else if prior.id == before.root_id {
+            root_content_equal = fresh.content == prior.content;
+            let mut restored = fresh.clone();
+            root_opaque_semantics_exact = match (&prior.content, &mut restored.content) {
+                (
+                    BlockContent::Unsupported(prior_opaque),
+                    BlockContent::Unsupported(fresh_opaque),
+                ) => {
+                    fresh_opaque.summary.approx_bytes = prior_opaque.summary.approx_bytes;
+                    restored == *prior
+                }
+                _ => fresh == prior,
+            };
+        } else if fresh != prior {
+            nonroot_exact = false;
         }
-    })
+    }
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=scenario event=update_independent_transition \
+             scope={} dfs_order={} target={} root_content_equal={} \
+             root_opaque_semantics={} nonroot_exact={}",
+            scope_exact,
+            dfs_order_exact,
+            target_exact,
+            root_content_equal,
+            root_opaque_semantics_exact,
+            nonroot_exact,
+        );
+    }
+    target_exact && root_opaque_semantics_exact && nonroot_exact
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -805,8 +866,9 @@ async fn run_body_update_arm(
         .fetch()
         .await
         .map_err(|_| format!("{label} independent before read failed"))?;
+    body_scenario_update_stage("update_independent_before_ready");
     let before_metrics = driver.body_acceptance_metrics();
-    let result = driver
+    let result = match driver
         .call_tool(
             "body_block_update",
             json!({
@@ -817,12 +879,24 @@ async fn run_body_update_arm(
                 "change":change
             }),
         )
-        .await?;
+        .await
+    {
+        Ok(result) => {
+            body_scenario_update_stage("update_call_succeeded");
+            result
+        }
+        Err(error) => {
+            body_scenario_update_error(&error);
+            return Err(error);
+        }
+    };
     if let (Some(before), Some(after)) = (before_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
         if observed != expected_primitive_metrics() {
+            body_scenario_update_stage("update_metrics_mismatch");
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
+        body_scenario_update_stage("update_metrics_exact");
     }
     let after = ctx
         .client
@@ -831,11 +905,14 @@ async fn run_body_update_arm(
         .fetch()
         .await
         .map_err(|_| format!("{label} independent after read failed"))?;
+    body_scenario_update_stage("update_independent_after_ready");
     if !exact_update_snapshot_transition(&before, &after, block_id, expectation) {
+        body_scenario_update_stage("update_independent_transition_failed");
         return Err(format!(
             "{label} changed more or less than its one exact typed field"
         ));
     }
+    body_scenario_update_stage("update_independent_transition_exact");
     let next_hash = body_string(&result, "/snapshot_hash", "update snapshot hash")?.to_owned();
     Ok((normalize_body_result(&result), next_hash))
 }
