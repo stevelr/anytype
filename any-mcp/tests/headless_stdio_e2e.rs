@@ -3773,6 +3773,161 @@ struct SpawnedBodyEvidence {
 }
 
 #[cfg(feature = "acceptance-harness")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyFrameParityFailure {
+    StableResultType,
+    PreviewResultType,
+    EnvelopeVersion,
+    EnvelopeId,
+    EnvelopeShape,
+    ResultShape,
+    TextDuplicate,
+    Payload,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl BodyFrameParityFailure {
+    const fn category(self) -> &'static str {
+        match self {
+            Self::StableResultType => "stable_result_type",
+            Self::PreviewResultType => "preview_result_type",
+            Self::EnvelopeVersion => "envelope_version",
+            Self::EnvelopeId => "envelope_id",
+            Self::EnvelopeShape => "envelope_shape",
+            Self::ResultShape => "result_shape",
+            Self::TextDuplicate => "text_duplicate",
+            Self::Payload => "payload",
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn body_frame_key_count(value: &Value, pointer: &str) -> usize {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_object)
+        .map_or(0, serde_json::Map::len)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn body_frame_parity_diagnostic(
+    index: usize,
+    failure: BodyFrameParityFailure,
+    stable: &Value,
+    preview: &Value,
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=parity event=frame_mismatch frame_index={index} \
+             category={} stable_envelope_keys={} preview_envelope_keys={} \
+             stable_result_keys={} preview_result_keys={}",
+            failure.category(),
+            body_frame_key_count(stable, ""),
+            body_frame_key_count(preview, ""),
+            body_frame_key_count(stable, "/result"),
+            body_frame_key_count(preview, "/result"),
+        );
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn compare_body_protocol_frame(
+    stable: &Value,
+    preview: &Value,
+) -> Result<(), BodyFrameParityFailure> {
+    if stable.pointer("/result/resultType").is_some() {
+        return Err(BodyFrameParityFailure::StableResultType);
+    }
+    let mut normalized_preview = preview.clone();
+    let Some(preview_result) = normalized_preview
+        .get_mut("result")
+        .and_then(Value::as_object_mut)
+    else {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    };
+    if preview_result.remove("resultType") != Some(json!("complete")) {
+        return Err(BodyFrameParityFailure::PreviewResultType);
+    }
+    validate_body_frame_text_duplicate(stable)?;
+    validate_body_frame_text_duplicate(&normalized_preview)?;
+    if stable.get("jsonrpc") != normalized_preview.get("jsonrpc") {
+        return Err(BodyFrameParityFailure::EnvelopeVersion);
+    }
+    if stable.get("id") != normalized_preview.get("id") {
+        return Err(BodyFrameParityFailure::EnvelopeId);
+    }
+    let Some(stable_object) = stable.as_object() else {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    };
+    let Some(preview_object) = normalized_preview.as_object() else {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    };
+    if stable_object.keys().collect::<Vec<_>>() != preview_object.keys().collect::<Vec<_>>() {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    }
+    let Some(stable_result) = stable.get("result").and_then(Value::as_object) else {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    };
+    let Some(preview_result) = normalized_preview.get("result").and_then(Value::as_object) else {
+        return Err(BodyFrameParityFailure::EnvelopeShape);
+    };
+    if stable_result.keys().collect::<Vec<_>>() != preview_result.keys().collect::<Vec<_>>() {
+        return Err(BodyFrameParityFailure::ResultShape);
+    }
+    if stable != &normalized_preview {
+        return Err(BodyFrameParityFailure::Payload);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn validate_body_frame_text_duplicate(frame: &Value) -> Result<(), BodyFrameParityFailure> {
+    let result = frame
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or(BodyFrameParityFailure::EnvelopeShape)?;
+    let structured = result
+        .get("structuredContent")
+        .ok_or(BodyFrameParityFailure::TextDuplicate)?;
+    let content = result
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or(BodyFrameParityFailure::TextDuplicate)?;
+    let [item] = content.as_slice() else {
+        return Err(BodyFrameParityFailure::TextDuplicate);
+    };
+    let item = item
+        .as_object()
+        .ok_or(BodyFrameParityFailure::TextDuplicate)?;
+    if item.len() != 2 || item.get("type") != Some(&json!("text")) {
+        return Err(BodyFrameParityFailure::TextDuplicate);
+    }
+    let text = item
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or(BodyFrameParityFailure::TextDuplicate)?;
+    let duplicate: Value =
+        serde_json::from_str(text).map_err(|_| BodyFrameParityFailure::TextDuplicate)?;
+    let canonical =
+        serde_json::to_string(structured).map_err(|_| BodyFrameParityFailure::TextDuplicate)?;
+    if duplicate != *structured || text != canonical {
+        return Err(BodyFrameParityFailure::TextDuplicate);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn body_protocol_frames_match(stable: &[Value; 2], preview: &[Value; 2]) -> bool {
+    for (index, (stable_frame, preview_frame)) in stable.iter().zip(preview).enumerate() {
+        if let Err(failure) = compare_body_protocol_frame(stable_frame, preview_frame) {
+            body_frame_parity_diagnostic(index, failure, stable_frame, preview_frame);
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn run_direct_body_phase(
     ctx: &TestContext,
 ) -> BodyAcceptancePhaseFuture<'_, (BodyScenarioEvidence, Vec<Value>)> {
@@ -3999,15 +4154,20 @@ fn run_shared_body_callback(
             ));
         }
         body_semantic_diagnostic("parity", "descriptors_match");
-        if stable.frames != preview.frames
+        if !body_protocol_frames_match(&stable.frames, &preview.frames)
             || stable.frames[0]
                 .pointer("/result/structuredContent/items")
                 .and_then(Value::as_array)
                 .is_none()
+            || stable.frames[0]
+                .pointer("/result/structuredContent/next_cursor")
+                .is_some()
+            || stable.frames[0].pointer("/result/isError") != Some(&Value::Bool(false))
             || stable.frames[1]
                 .pointer("/result/structuredContent/code")
                 .and_then(Value::as_str)
                 != Some("validation")
+            || stable.frames[1].pointer("/result/isError") != Some(&Value::Bool(true))
         {
             body_semantic_diagnostic("parity", "stable preview raw frames diverged");
             return Err(sentinel_assertion(
@@ -4047,6 +4207,217 @@ fn shared_body_acceptance_futures_keep_only_heap_handles_inline() {
     let word = std::mem::size_of::<usize>();
     assert!(std::mem::size_of::<BodyAcceptancePhaseFuture<'static, ()>>() <= 2 * word);
     assert!(std::mem::size_of::<SharedBodyCallbackFuture>() <= 2 * word);
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn body_protocol_test_frame(id: u64, is_error: bool, structured: Value) -> Value {
+    let text = serde_json::to_string(&structured).expect("test structured result");
+    json!({
+        "jsonrpc":"2.0",
+        "id":id,
+        "result":{
+            "content":[{"type":"text","text":text}],
+            "structuredContent":structured,
+            "isError":is_error
+        }
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn preview_body_protocol_test_frame(stable: &Value) -> Value {
+    let mut preview = stable.clone();
+    preview["result"]
+        .as_object_mut()
+        .expect("test result")
+        .insert("resultType".to_owned(), json!("complete"));
+    preview
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn body_raw_frame_parity_allows_only_preview_complete_result_type() {
+    let success = body_protocol_test_frame(
+        3,
+        false,
+        json!({
+            "space_id":"space-exact",
+            "object_id":"object-exact",
+            "root_id":"root-exact",
+            "snapshot_hash":"hash-exact",
+            "items":[{
+                "id":"root-exact",
+                "content":{
+                    "kind":"unsupported",
+                    "opaque_kind":"page",
+                    "child_count":1,
+                    "approx_bytes":917
+                }
+            }]
+        }),
+    );
+    let error = body_protocol_test_frame(
+        4,
+        true,
+        json!({"code":"validation","message":"The request was invalid."}),
+    );
+    let preview_success = preview_body_protocol_test_frame(&success);
+    let preview_error = preview_body_protocol_test_frame(&error);
+
+    assert_eq!(
+        compare_body_protocol_frame(&success, &preview_success),
+        Ok(())
+    );
+    assert_eq!(compare_body_protocol_frame(&error, &preview_error), Ok(()));
+    assert!(body_protocol_frames_match(
+        &[success, error],
+        &[preview_success, preview_error]
+    ));
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
+    let success = body_protocol_test_frame(
+        3,
+        false,
+        json!({
+            "space_id":"space-exact",
+            "object_id":"object-exact",
+            "root_id":"root-exact",
+            "snapshot_hash":"hash-exact",
+            "items":[{
+                "id":"root-exact",
+                "content":{
+                    "kind":"unsupported",
+                    "opaque_kind":"page",
+                    "child_count":1,
+                    "approx_bytes":917
+                }
+            }]
+        }),
+    );
+    let preview = preview_body_protocol_test_frame(&success);
+    let mutate = |path: &str, value: Value| {
+        let mut candidate = preview.clone();
+        *candidate.pointer_mut(path).expect("test mutation path") = value;
+        candidate
+    };
+    let payload_candidate = |path: &str, value: Value| {
+        let mut structured = success["result"]["structuredContent"].clone();
+        *structured.pointer_mut(path).expect("test payload path") = value;
+        preview_body_protocol_test_frame(&body_protocol_test_frame(3, false, structured))
+    };
+
+    let mut missing_type = preview.clone();
+    missing_type["result"]
+        .as_object_mut()
+        .expect("test result")
+        .remove("resultType");
+    assert_eq!(
+        compare_body_protocol_frame(&success, &missing_type),
+        Err(BodyFrameParityFailure::PreviewResultType)
+    );
+    for value in [json!("partial"), Value::Null] {
+        assert_eq!(
+            compare_body_protocol_frame(&success, &mutate("/result/resultType", value)),
+            Err(BodyFrameParityFailure::PreviewResultType)
+        );
+    }
+
+    let mut stable_with_type = success.clone();
+    stable_with_type["result"]
+        .as_object_mut()
+        .expect("test result")
+        .insert("resultType".to_owned(), json!("complete"));
+    assert_eq!(
+        compare_body_protocol_frame(&stable_with_type, &preview),
+        Err(BodyFrameParityFailure::StableResultType)
+    );
+    assert_eq!(
+        compare_body_protocol_frame(&success, &mutate("/id", json!(9))),
+        Err(BodyFrameParityFailure::EnvelopeId)
+    );
+    assert_eq!(
+        compare_body_protocol_frame(&success, &mutate("/jsonrpc", json!("1.0"))),
+        Err(BodyFrameParityFailure::EnvelopeVersion)
+    );
+
+    let mut envelope_drift = preview.clone();
+    envelope_drift
+        .as_object_mut()
+        .expect("test envelope")
+        .insert("extra".to_owned(), json!(true));
+    assert_eq!(
+        compare_body_protocol_frame(&success, &envelope_drift),
+        Err(BodyFrameParityFailure::EnvelopeShape)
+    );
+    let mut result_drift = preview.clone();
+    result_drift["result"]
+        .as_object_mut()
+        .expect("test result")
+        .insert("extra".to_owned(), json!(true));
+    assert_eq!(
+        compare_body_protocol_frame(&success, &result_drift),
+        Err(BodyFrameParityFailure::ResultShape)
+    );
+
+    let invalid_duplicate = mutate(
+        "/result/content/0/text",
+        json!("{\"snapshot_hash\":\"different\"}"),
+    );
+    assert_eq!(
+        compare_body_protocol_frame(&success, &invalid_duplicate),
+        Err(BodyFrameParityFailure::TextDuplicate)
+    );
+    let mut invalid_stable_duplicate = success.clone();
+    invalid_stable_duplicate["result"]["content"][0]["text"] = json!("{}");
+    let invalid_preview_duplicate = preview_body_protocol_test_frame(&invalid_stable_duplicate);
+    assert_eq!(
+        compare_body_protocol_frame(&invalid_stable_duplicate, &invalid_preview_duplicate),
+        Err(BodyFrameParityFailure::TextDuplicate)
+    );
+    let mut cursor_structured = success["result"]["structuredContent"].clone();
+    cursor_structured
+        .as_object_mut()
+        .expect("test structured result")
+        .insert("next_cursor".to_owned(), json!("cursor-must-remain-exact"));
+    let cursor_drift =
+        preview_body_protocol_test_frame(&body_protocol_test_frame(3, false, cursor_structured));
+
+    for candidate in [
+        payload_candidate("/snapshot_hash", json!("different")),
+        payload_candidate("/object_id", json!("different")),
+        payload_candidate("/root_id", json!("different")),
+        payload_candidate("/items/0/id", json!("different")),
+        payload_candidate("/items/0/content/approx_bytes", json!(918)),
+        cursor_drift,
+        mutate("/result/isError", json!(true)),
+    ] {
+        assert_eq!(
+            compare_body_protocol_frame(&success, &candidate),
+            Err(BodyFrameParityFailure::Payload)
+        );
+    }
+
+    let error = body_protocol_test_frame(
+        4,
+        true,
+        json!({"code":"validation","message":"The request was invalid."}),
+    );
+    let preview_error = preview_body_protocol_test_frame(&error);
+    let error_drift = preview_body_protocol_test_frame(&body_protocol_test_frame(
+        4,
+        true,
+        json!({"code":"upstream","message":"The request was invalid."}),
+    ));
+    assert_eq!(
+        compare_body_protocol_frame(&error, &error_drift),
+        Err(BodyFrameParityFailure::Payload)
+    );
+    assert!(!body_protocol_frames_match(
+        &[success, error],
+        &[preview_error, preview]
+    ));
 }
 
 #[cfg(feature = "acceptance-harness")]
