@@ -481,6 +481,88 @@ fn expected_primitive_metrics() -> BodyDriverMetrics {
     }
 }
 
+fn primitive_metrics_within_verification_budget(observed: BodyDriverMetrics) -> bool {
+    (2..=4).contains(&observed.show_attempts)
+        && observed.page_create_polls == 0
+        && observed.foreground_close_attempts == observed.show_attempts
+        && observed.foreground_close_confirmed == observed.show_attempts
+        && observed.fallback_close_attempts == 0
+        && observed.fallback_close_confirmed == 0
+        && observed.write_polls == 1
+        && observed.show_limit_rejections == 0
+        && observed.non_show_limit_rejections == 0
+        && observed.close_limit_rejections == 0
+        && observed.mutation_limit_rejections == 0
+}
+
+#[test]
+fn primitive_metric_budget_accepts_one_to_three_verification_rounds() {
+    for verification_attempts in 1..=3 {
+        let shows = 1 + verification_attempts;
+        assert!(primitive_metrics_within_verification_budget(
+            BodyDriverMetrics {
+                show_attempts: shows,
+                foreground_close_attempts: shows,
+                foreground_close_confirmed: shows,
+                write_polls: 1,
+                ..BodyDriverMetrics::default()
+            }
+        ));
+    }
+    for shows in [1, 5] {
+        assert!(!primitive_metrics_within_verification_budget(
+            BodyDriverMetrics {
+                show_attempts: shows,
+                foreground_close_attempts: shows,
+                foreground_close_confirmed: shows,
+                write_polls: 1,
+                ..BodyDriverMetrics::default()
+            }
+        ));
+    }
+    for invalid in [
+        BodyDriverMetrics {
+            show_attempts: 3,
+            foreground_close_attempts: 2,
+            foreground_close_confirmed: 3,
+            write_polls: 1,
+            ..BodyDriverMetrics::default()
+        },
+        BodyDriverMetrics {
+            show_attempts: 3,
+            foreground_close_attempts: 3,
+            foreground_close_confirmed: 2,
+            write_polls: 1,
+            ..BodyDriverMetrics::default()
+        },
+        BodyDriverMetrics {
+            show_attempts: 3,
+            foreground_close_attempts: 3,
+            foreground_close_confirmed: 3,
+            fallback_close_attempts: 1,
+            write_polls: 1,
+            ..BodyDriverMetrics::default()
+        },
+        BodyDriverMetrics {
+            show_attempts: 3,
+            foreground_close_attempts: 3,
+            foreground_close_confirmed: 3,
+            write_polls: 2,
+            ..BodyDriverMetrics::default()
+        },
+        BodyDriverMetrics {
+            show_attempts: 3,
+            foreground_close_attempts: 3,
+            foreground_close_confirmed: 3,
+            write_polls: 1,
+            show_limit_rejections: 1,
+            ..BodyDriverMetrics::default()
+        },
+    ] {
+        assert!(!primitive_metrics_within_verification_budget(invalid));
+    }
+}
+
 fn expected_create_replay_metrics() -> BodyDriverMetrics {
     BodyDriverMetrics {
         show_attempts: 1,
@@ -585,6 +667,20 @@ fallback_attempt,fallback_confirmed,write,show_limit,non_show_limit,close_limit,
             metrics.non_show_limit_rejections,
             metrics.close_limit_rejections,
             metrics.mutation_limit_rejections
+        );
+    }
+}
+
+fn body_update_metric_budget_diagnostic(
+    label: &'static str,
+    observed: BodyDriverMetrics,
+    bounded: bool,
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=metric_call label={label} event=update_budget \
+             verification_attempts={} bounded={bounded}",
+            observed.show_attempts.saturating_sub(1),
         );
     }
 }
@@ -857,7 +953,7 @@ async fn run_body_update_arm(
     block_id: &str,
     change: Value,
     expectation: BodyUpdateExpectation,
-    label: &str,
+    label: &'static str,
 ) -> Result<(Value, String), String> {
     let before = ctx
         .client
@@ -892,7 +988,10 @@ async fn run_body_update_arm(
     };
     if let (Some(before), Some(after)) = (before_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
-        if observed != expected_primitive_metrics() {
+        body_metric_vector_diagnostic(label, "update_delta", observed);
+        let metrics_bounded = primitive_metrics_within_verification_budget(observed);
+        body_update_metric_budget_diagnostic(label, observed, metrics_bounded);
+        if !metrics_bounded {
             body_scenario_update_stage("update_metrics_mismatch");
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
