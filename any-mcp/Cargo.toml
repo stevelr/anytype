@@ -61,3 +61,4 @@ jsonschema = { version = "0.48.2", default-features = false }
 libc.workspace = true
 reqwest.workspace = true
 serial_test = "3.5.0"
+tokio = { workspace = true, features = ["test-util"] }

@@ -1071,18 +1071,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deadline_terminal_capacity_and_reply_predispatch_states_are_locked() {
+    async fn terminal_capacity_and_reply_predispatch_states_are_locked() {
         let key = IdempotencyKey::new("terminal-key").unwrap();
         let fingerprint = [7; 32];
         let store = IdempotencyStore::new(1);
-        let leader_deadline = Instant::now() + Duration::from_millis(100);
-        let BeginAttempt::Lead(attempt) = store
-            .begin_until(leader_deadline, key.clone(), fingerprint)
-            .await
-        else {
+        let BeginAttempt::Lead(attempt) = store.begin(key.clone(), fingerprint).await else {
             panic!("first key must lead");
         };
-        assert_eq!(attempt.deadline(), Some(leader_deadline));
+        assert_eq!(attempt.deadline(), None);
         store
             .finish(
                 &key,
@@ -1094,16 +1090,12 @@ mod tests {
             )
             .await;
         assert!(matches!(
-            store.begin_until(leader_deadline, key, fingerprint).await,
+            store.begin(key, fingerprint).await,
             BeginAttempt::Cached(result) if result.is_error == Some(true)
         ));
         assert!(matches!(
             store
-                .begin_until(
-                    leader_deadline,
-                    IdempotencyKey::new("capacity-key").unwrap(),
-                    [8; 32],
-                )
+                .begin(IdempotencyKey::new("capacity-key").unwrap(), [8; 32])
                 .await,
             BeginAttempt::Full
         ));
@@ -1116,9 +1108,8 @@ mod tests {
 
         let release_store = IdempotencyStore::new(1);
         let reply_key = IdempotencyKey::new("reply-key").unwrap();
-        let BeginAttempt::Lead(reply_attempt) = release_store
-            .begin_until(leader_deadline, reply_key.clone(), [9; 32])
-            .await
+        let BeginAttempt::Lead(reply_attempt) =
+            release_store.begin(reply_key.clone(), [9; 32]).await
         else {
             panic!("reply preflight must lead");
         };
@@ -1133,43 +1124,53 @@ mod tests {
             )
             .await;
         assert!(matches!(
-            release_store
-                .begin_until(leader_deadline, reply_key, [9; 32])
-                .await,
+            release_store.begin(reply_key, [9; 32]).await,
             BeginAttempt::Lead(_)
         ));
+    }
 
+    #[tokio::test(start_paused = true)]
+    async fn deadline_waits_use_earlier_leader_or_invocation_deadline() {
         let wait_store = IdempotencyStore::new(1);
         let wait_key = IdempotencyKey::new("wait-key").unwrap();
-        let leader_deadline = Instant::now() + Duration::from_millis(80);
+        let leader_started = tokio::time::Instant::now();
+        let leader_deadline = (leader_started + Duration::from_secs(3_600)).into_std();
         let BeginAttempt::Lead(leader) = wait_store
             .begin_until(leader_deadline, wait_key.clone(), [10; 32])
             .await
         else {
             panic!("deadline leader");
         };
+        assert_eq!(leader.deadline(), Some(leader_deadline));
         let BeginAttempt::Wait(waiter) = wait_store
-            .begin_until(Instant::now() + Duration::from_secs(1), wait_key, [10; 32])
+            .begin_until(
+                (leader_started + Duration::from_secs(7_200)).into_std(),
+                wait_key,
+                [10; 32],
+            )
             .await
         else {
             panic!("same key must wait");
         };
         assert!(Arc::ptr_eq(&leader, &waiter));
-        let started = Instant::now();
         let result = wait_for_attempt_until(
             waiter,
             &CancellationToken::new(),
-            Instant::now() + Duration::from_secs(1),
+            (leader_started + Duration::from_secs(7_200)).into_std(),
         )
         .await;
         assert_eq!(result.structured_content.unwrap()["code"], "upstream");
-        assert!(started.elapsed() < Duration::from_millis(300));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            leader_started + Duration::from_secs(3_600)
+        );
 
         let earlier_store = IdempotencyStore::new(1);
         let earlier_key = IdempotencyKey::new("earlier-caller").unwrap();
+        let caller_started = tokio::time::Instant::now();
         let BeginAttempt::Lead(earlier) = earlier_store
             .begin_until(
-                Instant::now() + Duration::from_secs(1),
+                (caller_started + Duration::from_secs(7_200)).into_std(),
                 earlier_key,
                 [11; 32],
             )
@@ -1177,24 +1178,52 @@ mod tests {
         else {
             panic!("earlier caller leader");
         };
-        let started = Instant::now();
-        let _ = wait_for_attempt_until(
+        let result = wait_for_attempt_until(
             earlier,
             &CancellationToken::new(),
-            Instant::now() + Duration::from_millis(30),
+            (caller_started + Duration::from_secs(1_800)).into_std(),
         )
         .await;
-        assert!(started.elapsed() < Duration::from_millis(200));
-        assert!(matches!(
-            earlier_store
-                .begin_until(
-                    Instant::now(),
-                    IdempotencyKey::new("expired-key").unwrap(),
-                    [12; 32],
-                )
-                .await,
-            BeginAttempt::Expired
-        ));
+        assert_eq!(result.structured_content.unwrap()["code"], "upstream");
+        assert_eq!(
+            tokio::time::Instant::now(),
+            caller_started + Duration::from_secs(1_800)
+        );
+
+        let expired_store = IdempotencyStore::new(1);
+        let expired_key = IdempotencyKey::new("expired-key").unwrap();
+        let expired_fingerprint = [12; 32];
+        let BeginAttempt::Lead(expired_attempt) = expired_store
+            .begin(expired_key.clone(), expired_fingerprint)
+            .await
+        else {
+            panic!("expired-order fixture must lead");
+        };
+        expired_store
+            .finish(
+                &expired_key,
+                &expired_attempt,
+                CreateExecution::new(
+                    tool_error(&ToolError::authentication()),
+                    CreateDisposition::Terminal,
+                ),
+            )
+            .await;
+        let expired_deadline = Instant::now()
+            .checked_sub(Duration::from_nanos(1))
+            .expect("test process has a monotonic-clock history");
+        for (key, fingerprint) in [
+            (expired_key.clone(), expired_fingerprint),
+            (expired_key, [13; 32]),
+            (IdempotencyKey::new("expired-capacity").unwrap(), [14; 32]),
+        ] {
+            assert!(matches!(
+                expired_store
+                    .begin_until(expired_deadline, key, fingerprint)
+                    .await,
+                BeginAttempt::Expired
+            ));
+        }
     }
 
     #[tokio::test]
