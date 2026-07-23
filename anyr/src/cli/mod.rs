@@ -21,6 +21,7 @@ pub mod auth;
 pub mod chat;
 pub mod common;
 pub mod file;
+pub mod init_cli;
 pub mod list;
 pub mod member;
 pub mod object;
@@ -94,6 +95,13 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Initialize credentials from a running Anytype CLI server
+    InitCli {
+        /// Join a space with this invitation link after credentials are stored
+        #[arg(long, value_name = "INVITE_LINK")]
+        join: Option<String>,
+    },
+
     /// Authentication commands
     Auth(AuthArgs),
 
@@ -1608,6 +1616,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.command {
+        Commands::InitCli { join } => init_cli::handle(&ctx, join.as_deref()).await,
         Commands::Auth(args) => auth::handle(&ctx, args).await,
         Commands::Chat(args) => chat::handle(&ctx, args).await,
         Commands::Space(args) => space::handle(&ctx, args).await,

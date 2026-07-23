@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- `anyr init-cli [--join INVITE_LINK]` initializes the selected keystore from
+  a running headless Anytype CLI. It invokes the executable selected by
+  `ANYTYPE_CLI_BIN` (default `anytype`), stores both HTTP and gRPC credentials
+  without displaying them, and can optionally join a space afterward.
 - `anyr chat --transport auto|rest|grpc` selects the transport policy for chat
   operations (default `auto`). `rest` rejects operations that only gRPC can
   serve (for example cross-space list, chat text search, rich `get`, `unread`,
