@@ -117,6 +117,24 @@ fn body_fixture_shape_diagnostic(
     let blocks = snapshot.iter().collect::<Vec<_>>();
     let suffix = blocks.get(initial_blocks.len()..);
     let prefix_ok = body_initial_full_prefix_unchanged(&blocks, initial_blocks);
+    let prefix_ids_ok = blocks.len() >= initial_blocks.len()
+        && blocks
+            .iter()
+            .zip(initial_blocks)
+            .all(|(actual, expected)| actual.id == expected.id);
+    let root_nonchild_state_ok =
+        blocks
+            .first()
+            .zip(initial_blocks.first())
+            .is_some_and(|(actual, expected)| {
+                body_block_state_except_children_matches(actual, expected)
+            });
+    let nonroot_full_state_ok = blocks.len() >= initial_blocks.len()
+        && blocks
+            .iter()
+            .skip(1)
+            .zip(initial_blocks.iter().skip(1))
+            .all(|(actual, expected)| *actual == expected);
     let root_children_prefix_ok = body_initial_root_children_preserved(snapshot, initial_blocks);
     let suffix_count_ok = suffix.is_some_and(|items| {
         items.len() == created_ids.len() && items.len() == expected_suffix.len()
@@ -151,6 +169,8 @@ fn body_fixture_shape_diagnostic(
             .eq(created_ids.iter().rev().map(String::as_str));
     eprintln!(
         "body_semantic_phase=fixture event=shape total={} expected={} prefix_ok={prefix_ok} \
+         prefix_ids_ok={prefix_ids_ok} root_nonchild_state_ok={root_nonchild_state_ok} \
+         nonroot_full_state_ok={nonroot_full_state_ok} \
          root_children_prefix_ok={root_children_prefix_ok} suffix_count_ok={suffix_count_ok} \
          suffix_ids_ok={suffix_ids_ok} suffix_content_ok={suffix_content_ok} \
          direct_root_ok={direct_root_ok}",
