@@ -2120,7 +2120,11 @@ fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
     let mut scenario_declarations = vec![
         OptionalScenarioDeclaration::fast(
             OptionalRegistry::CommonFoundation,
-            "common_optional_status",
+            "optional_toolset_status_direct_contract",
+        ),
+        OptionalScenarioDeclaration::fast(
+            OptionalRegistry::CommonFoundation,
+            "optional_toolset_status_stdio_contract",
         ),
         OptionalScenarioDeclaration::real_headless(
             OptionalRegistry::CommonFoundation,
@@ -2145,7 +2149,7 @@ fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
                 .map(|scenario| OptionalScenarioDeclaration::real_headless(registry_id, scenario)),
         );
     }
-    assert_eq!(scenario_declarations.len(), 64);
+    assert_eq!(scenario_declarations.len(), 65);
     live_scenario::validate_optional_live_ownership(
         &optional_tool_refs,
         &optional_resource_families,

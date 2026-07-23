@@ -4368,9 +4368,15 @@ pub struct OptionalScenarioId {
 impl OptionalScenarioId {
     /// Exact executable scenario inventory owned by the common foundation and
     /// the six linked production descriptors.
-    pub const EXECUTABLE: [Self; 64] = [
+    pub const EXECUTABLE: [Self; 65] = [
         define_fast_with_owner(
-            "common_optional_status",
+            "optional_toolset_status_direct_contract",
+            OptionalRegistry::CommonFoundation,
+            OptionalFastWorkflow::OptionalStatus,
+            STATUS_OPERATIONS,
+        ),
+        define_fast_with_owner(
+            "optional_toolset_status_stdio_contract",
             OptionalRegistry::CommonFoundation,
             OptionalFastWorkflow::OptionalStatus,
             STATUS_OPERATIONS,
@@ -4838,7 +4844,7 @@ const fn optional_owner(
 pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 62] = &[
     optional_owner(
         OptionalOperation::OptionalToolsetStatus,
-        optional_fast("common_optional_status"),
+        optional_fast("optional_toolset_status_direct_contract"),
     ),
     optional_owner(
         OptionalOperation::OptionalToolsetStatus,
@@ -5615,7 +5621,7 @@ mod ownership_tests {
             optional_scenario_inventory(&declarations)
                 .expect("exact typed optional scenario inventory")
                 .len(),
-            64
+            65
         );
 
         let mut duplicate = declarations.clone();
@@ -5728,7 +5734,11 @@ mod ownership_tests {
 
     #[test]
     fn optional_inventory_rejects_common_status_declared_by_members() {
-        for name in ["common_optional_status", "common_optional_status_headless"] {
+        for name in [
+            "optional_toolset_status_direct_contract",
+            "optional_toolset_status_stdio_contract",
+            "common_optional_status_headless",
+        ] {
             let mut declarations = OptionalScenarioId::EXECUTABLE
                 .iter()
                 .map(|scenario| OptionalScenarioDeclaration {
@@ -5750,6 +5760,45 @@ mod ownership_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn common_status_inventory_preserves_canonical_fast_ids_and_headless_evidence() {
+        let common = OptionalScenarioId::EXECUTABLE
+            .iter()
+            .filter(|scenario| scenario.registry() == OptionalRegistry::CommonFoundation)
+            .map(|scenario| {
+                (
+                    scenario.as_str(),
+                    scenario.tier(),
+                    scenario.workflow().carrier_registry(),
+                    scenario.covers(OptionalOperation::OptionalToolsetStatus),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            common,
+            vec![
+                (
+                    "optional_toolset_status_direct_contract",
+                    OptionalEvidenceTier::Fast,
+                    OptionalRegistry::Members,
+                    true,
+                ),
+                (
+                    "optional_toolset_status_stdio_contract",
+                    OptionalEvidenceTier::Fast,
+                    OptionalRegistry::Members,
+                    true,
+                ),
+                (
+                    "common_optional_status_headless",
+                    OptionalEvidenceTier::RealHeadless,
+                    OptionalRegistry::Members,
+                    true,
+                ),
+            ]
+        );
     }
 
     #[test]
