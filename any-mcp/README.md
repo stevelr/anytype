@@ -385,6 +385,9 @@ parent. When that parent is an opaque page root, its opaque kind and duplicated
 child count remain exact while the protobuf-derived approximate byte count may
 refresh with the child list; all non-parent opaque summaries remain exact.
 Generated table descendants must form one canonical closed subtree.
+Move verification applies the same derived-summary rule only to its old and
+new structural parents, while requiring exact post-move DFS order and leaving
+every other opaque summary and block value unchanged.
 
 The finite `anytype-api` body lifecycle caps decoded Show at
 4,194,304 bytes and every non-Show body gRPC response—including foreground and
