@@ -43,7 +43,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   table subtree instead of misclassifying legitimate parent refresh as an
   indeterminate conflict. Opaque page roots now retain their exact kind and
   structural child count while allowing only the insertion parent's
-  protobuf-derived approximate byte summary to refresh.
+  protobuf-derived approximate byte summary to refresh. Move readback applies
+  that exception only to the old and new structural parents and now also
+  proves exact post-move DFS order.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection

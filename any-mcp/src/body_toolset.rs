@@ -4807,7 +4807,7 @@ fn projected_table_subtree_matches(
         })
 }
 
-fn projected_create_prior_content_matches(
+fn projected_structural_parent_content_matches(
     prior: &BlockSummary,
     current: &BlockSummary,
     insertion_parent: bool,
@@ -5045,7 +5045,11 @@ fn verify_create_transition(
         });
     let prior_content_exact = all_prior_present
         && prior_pairs.iter().all(|(prior, current)| {
-            projected_create_prior_content_matches(prior, current, prior.id == insertion.parent.id)
+            projected_structural_parent_content_matches(
+                prior,
+                current,
+                prior.id == insertion.parent.id,
+            )
         });
     let prior_restrictions_exact = all_prior_present
         && prior_pairs.iter().all(|(prior, current)| {
@@ -5131,6 +5135,7 @@ fn verify_update_transition(
         || before.root_id != after.root_id
         || projected_identity_set(before) != projected_identity_set(after)
     {
+        move_transition_stage_diagnostic("move_scope_or_identity_mismatch");
         return false;
     }
     let Some(prior) = before.items.iter().find(|block| &block.id == block_id) else {
@@ -5222,6 +5227,120 @@ fn verify_delete_transition(
         })
 }
 
+struct MoveParentDiagnostics {
+    content_equal: bool,
+    opaque_kind_exact: bool,
+    opaque_children_exact: bool,
+    opaque_approx_equal: bool,
+    restrictions_equal: bool,
+    presentation_exact: bool,
+}
+
+fn move_parent_diagnostics(prior: Option<(&BlockSummary, &BlockSummary)>) -> MoveParentDiagnostics {
+    let Some((prior, current)) = prior else {
+        return MoveParentDiagnostics {
+            content_equal: false,
+            opaque_kind_exact: false,
+            opaque_children_exact: false,
+            opaque_approx_equal: false,
+            restrictions_equal: false,
+            presentation_exact: false,
+        };
+    };
+    let (opaque_kind_exact, opaque_children_exact, opaque_approx_equal) =
+        match (&prior.content, &current.content) {
+            (
+                BlockProjection::Unsupported {
+                    opaque_kind: prior_kind,
+                    child_count: prior_children,
+                    approx_bytes: prior_bytes,
+                },
+                BlockProjection::Unsupported {
+                    opaque_kind: current_kind,
+                    child_count: current_children,
+                    approx_bytes: current_bytes,
+                },
+            ) => (
+                prior_kind == current_kind,
+                *prior_children == prior.child_count && *current_children == current.child_count,
+                prior_bytes == current_bytes,
+            ),
+            (BlockProjection::Unsupported { .. }, _) | (_, BlockProjection::Unsupported { .. }) => {
+                (false, false, false)
+            }
+            _ => (true, true, true),
+        };
+    MoveParentDiagnostics {
+        content_equal: prior.content == current.content,
+        opaque_kind_exact,
+        opaque_children_exact,
+        opaque_approx_equal,
+        restrictions_equal: prior.restrictions == current.restrictions,
+        presentation_exact: prior.align == current.align
+            && prior.vertical_align == current.vertical_align
+            && prior.background_color == current.background_color,
+    }
+}
+
+struct MoveTransitionDiagnostics {
+    dfs_order_exact: bool,
+    prior_content_exact: bool,
+    prior_restrictions_exact: bool,
+    prior_presentation_exact: bool,
+    prior_structure_exact: bool,
+    old_parent: MoveParentDiagnostics,
+    new_parent: MoveParentDiagnostics,
+}
+
+impl MoveTransitionDiagnostics {
+    fn emit(&self) {
+        if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "body_semantic_phase=verifier event=move_transition \
+                 dfs_order={} prior_content={} prior_restrictions={} \
+                 prior_presentation={} prior_structure={} \
+                 old_parent_content_equal={} old_parent_opaque_kind={} \
+                 old_parent_opaque_children={} old_parent_opaque_approx_equal={} \
+                 old_parent_restrictions_equal={} old_parent_presentation={} \
+                 new_parent_content_equal={} new_parent_opaque_kind={} \
+                 new_parent_opaque_children={} new_parent_opaque_approx_equal={} \
+                 new_parent_restrictions_equal={} new_parent_presentation={}",
+                self.dfs_order_exact,
+                self.prior_content_exact,
+                self.prior_restrictions_exact,
+                self.prior_presentation_exact,
+                self.prior_structure_exact,
+                self.old_parent.content_equal,
+                self.old_parent.opaque_kind_exact,
+                self.old_parent.opaque_children_exact,
+                self.old_parent.opaque_approx_equal,
+                self.old_parent.restrictions_equal,
+                self.old_parent.presentation_exact,
+                self.new_parent.content_equal,
+                self.new_parent.opaque_kind_exact,
+                self.new_parent.opaque_children_exact,
+                self.new_parent.opaque_approx_equal,
+                self.new_parent.restrictions_equal,
+                self.new_parent.presentation_exact,
+            );
+        }
+    }
+
+    fn verified(&self) -> bool {
+        self.dfs_order_exact
+            && self.prior_content_exact
+            && self.prior_restrictions_exact
+            && self.prior_presentation_exact
+            && self.prior_structure_exact
+    }
+}
+
+fn move_transition_stage_diagnostic(event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=verifier event={event}");
+    }
+}
+
 fn verify_move_transition(
     before: &ProjectedSnapshot,
     after: &ProjectedSnapshot,
@@ -5238,9 +5357,11 @@ fn verify_move_transition(
     }
     let subtree_ids = subtree.iter().map(BlockId::as_str).collect::<HashSet<_>>();
     let Some(moved_root_id) = subtree.first().map(BlockId::as_str) else {
+        move_transition_stage_diagnostic("move_subtree_empty");
         return false;
     };
     if subtree_ids.len() != subtree.len() || subtree_ids.contains(target_id.as_str()) {
+        move_transition_stage_diagnostic("move_subtree_invalid");
         return false;
     }
     let mut children = HashMap::<String, Vec<(u64, String)>>::new();
@@ -5250,14 +5371,17 @@ fn verify_move_transition(
     for block in &before.items {
         if block.id == before.root_id {
             if block.parent_id.is_some() {
+                move_transition_stage_diagnostic("move_before_root_parent_invalid");
                 return false;
             }
             continue;
         }
         let Some(parent) = block.parent_id.as_ref() else {
+            move_transition_stage_diagnostic("move_before_parent_missing");
             return false;
         };
         let Some(siblings) = children.get_mut(parent.as_str()) else {
+            move_transition_stage_diagnostic("move_before_parent_unknown");
             return false;
         };
         siblings.push((block.sibling_index, block.id.as_str().to_owned()));
@@ -5270,6 +5394,7 @@ fn verify_move_transition(
             .enumerate()
             .any(|(index, (actual, _))| u64::try_from(index).ok() != Some(*actual))
         {
+            move_transition_stage_diagnostic("move_before_sibling_indices_invalid");
             return false;
         }
         ordered_children.insert(parent, siblings.into_iter().map(|(_, id)| id).collect());
@@ -5279,24 +5404,30 @@ fn verify_move_transition(
         .iter()
         .find(|block| block.id.as_str() == moved_root_id)
     else {
+        move_transition_stage_diagnostic("move_source_missing");
         return false;
     };
     let Some(old_parent) = before_moved.parent_id.as_ref().map(EntityId::as_str) else {
+        move_transition_stage_diagnostic("move_old_parent_missing");
         return false;
     };
     let Some(old_siblings) = ordered_children.get_mut(old_parent) else {
+        move_transition_stage_diagnostic("move_old_parent_unknown");
         return false;
     };
     let Some(old_position) = old_siblings.iter().position(|id| id == moved_root_id) else {
+        move_transition_stage_diagnostic("move_source_position_missing");
         return false;
     };
     old_siblings.remove(old_position);
     let Some(before_target) = before.items.iter().find(|block| &block.id == target_id) else {
+        move_transition_stage_diagnostic("move_target_missing");
         return false;
     };
     let new_parent = match position {
         WireInsertPosition::Before | WireInsertPosition::After => {
             let Some(parent) = before_target.parent_id.as_ref() else {
+                move_transition_stage_diagnostic("move_target_parent_missing");
                 return false;
             };
             parent.as_str().to_owned()
@@ -5306,12 +5437,14 @@ fn verify_move_transition(
         }
     };
     let Some(new_siblings) = ordered_children.get_mut(&new_parent) else {
+        move_transition_stage_diagnostic("move_new_parent_unknown");
         return false;
     };
     let insertion = match position {
         WireInsertPosition::Before | WireInsertPosition::After => {
             let Some(target_position) = new_siblings.iter().position(|id| id == target_id.as_str())
             else {
+                move_transition_stage_diagnostic("move_target_position_missing");
                 return false;
             };
             if position == WireInsertPosition::After {
@@ -5324,54 +5457,106 @@ fn verify_move_transition(
         WireInsertPosition::LastChild => new_siblings.len(),
     };
     if insertion > new_siblings.len() {
+        move_transition_stage_diagnostic("move_insertion_invalid");
         return false;
     }
     new_siblings.insert(insertion, moved_root_id.to_owned());
 
     let mut expected = HashMap::<String, (Option<String>, u64, u64, u64)>::new();
+    let mut expected_dfs = Vec::with_capacity(before.items.len());
     let mut stack = vec![(before.root_id.as_str().to_owned(), None, 0_u64, 0_u64)];
     while let Some((id, parent, sibling_index, depth)) = stack.pop() {
         if expected.contains_key(&id) {
+            move_transition_stage_diagnostic("move_expected_cycle");
             return false;
         }
         let Some(children) = ordered_children.get(&id) else {
+            move_transition_stage_diagnostic("move_expected_parent_unknown");
             return false;
         };
         let Ok(child_count) = u64::try_from(children.len()) else {
+            move_transition_stage_diagnostic("move_expected_child_count_invalid");
             return false;
         };
+        expected_dfs.push(id.clone());
         expected.insert(id.clone(), (parent, sibling_index, depth, child_count));
         let Some(child_depth) = depth.checked_add(1) else {
+            move_transition_stage_diagnostic("move_expected_depth_overflow");
             return false;
         };
         for (index, child) in children.iter().enumerate().rev() {
             let Ok(index) = u64::try_from(index) else {
+                move_transition_stage_diagnostic("move_expected_sibling_index_invalid");
                 return false;
             };
             stack.push((child.clone(), Some(id.clone()), index, child_depth));
         }
     }
-    expected.len() == before.items.len()
-        && after.items.iter().all(|current| {
-            let Some(prior) = before.items.iter().find(|prior| prior.id == current.id) else {
-                return false;
-            };
-            let Some((parent, sibling_index, depth, child_count)) =
-                expected.get(current.id.as_str())
-            else {
-                return false;
-            };
-            prior.id == current.id
-                && prior.restrictions == current.restrictions
-                && prior.align == current.align
+    if expected.len() != before.items.len() {
+        move_transition_stage_diagnostic("move_expected_tree_incomplete");
+        return false;
+    }
+    let prior_pairs = before
+        .items
+        .iter()
+        .filter_map(|prior| {
+            after
+                .items
+                .iter()
+                .find(|current| current.id == prior.id)
+                .map(|current| (prior, current))
+        })
+        .collect::<Vec<_>>();
+    let all_prior_present = prior_pairs.len() == before.items.len();
+    let affected_parent = |id: &EntityId| id.as_str() == old_parent || id.as_str() == new_parent;
+    let prior_content_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            projected_structural_parent_content_matches(prior, current, affected_parent(&prior.id))
+        });
+    let prior_restrictions_exact = all_prior_present
+        && prior_pairs
+            .iter()
+            .all(|(prior, current)| prior.restrictions == current.restrictions);
+    let prior_presentation_exact = all_prior_present
+        && prior_pairs.iter().all(|(prior, current)| {
+            prior.align == current.align
                 && prior.vertical_align == current.vertical_align
                 && prior.background_color == current.background_color
-                && prior.content == current.content
-                && current.parent_id.as_ref().map(EntityId::as_str) == parent.as_deref()
-                && current.sibling_index == *sibling_index
-                && current.depth == *depth
-                && current.child_count == *child_count
-        })
+        });
+    let prior_structure_exact = all_prior_present
+        && prior_pairs.iter().all(|(_, current)| {
+            expected.get(current.id.as_str()).is_some_and(
+                |(parent, sibling_index, depth, child_count)| {
+                    current.parent_id.as_ref().map(EntityId::as_str) == parent.as_deref()
+                        && current.sibling_index == *sibling_index
+                        && current.depth == *depth
+                        && current.child_count == *child_count
+                },
+            )
+        });
+    let dfs_order_exact = expected_dfs
+        .iter()
+        .map(String::as_str)
+        .eq(after.items.iter().map(|block| block.id.as_str()));
+    let old_parent_pair = prior_pairs
+        .iter()
+        .find(|(prior, _)| prior.id.as_str() == old_parent)
+        .map(|(prior, current)| (*prior, *current));
+    let new_parent_pair = prior_pairs
+        .iter()
+        .find(|(prior, _)| prior.id.as_str() == new_parent)
+        .map(|(prior, current)| (*prior, *current));
+    let diagnostics = MoveTransitionDiagnostics {
+        dfs_order_exact,
+        prior_content_exact,
+        prior_restrictions_exact,
+        prior_presentation_exact,
+        prior_structure_exact,
+        old_parent: move_parent_diagnostics(old_parent_pair),
+        new_parent: move_parent_diagnostics(new_parent_pair),
+    };
+    diagnostics.emit();
+    diagnostics.verified()
 }
 
 fn body_create_fingerprint(input: &BodyBlockCreateInput, resolved_space: &str) -> [u8; 32] {
@@ -7366,6 +7551,14 @@ mod tests {
         }
     }
 
+    fn projected_opaque(kind: &str, child_count: u64, approx_bytes: u64) -> BlockProjection {
+        BlockProjection::Unsupported {
+            opaque_kind: OpaqueKind::new(kind.to_owned()).expect("opaque kind"),
+            child_count,
+            approx_bytes,
+        }
+    }
+
     fn summary(
         id: &str,
         parent: Option<&str>,
@@ -9328,6 +9521,214 @@ mod tests {
             &subtree,
             &target,
             WireInsertPosition::After,
+        ));
+    }
+
+    #[test]
+    fn move_transition_accepts_only_affected_opaque_parent_summaries() {
+        let before = projected(vec![
+            summary(
+                "root",
+                None,
+                0,
+                0,
+                3,
+                projected_opaque("smartblock", 3, 180),
+            ),
+            summary("created", Some("root"), 0, 1, 0, projected_text("created")),
+            summary("heading", Some("root"), 1, 1, 1, projected_text("heading")),
+            summary("moved", Some("heading"), 0, 2, 0, projected_text("moved")),
+            summary(
+                "opaque",
+                Some("root"),
+                2,
+                1,
+                0,
+                projected_opaque("dataview", 0, 9),
+            ),
+        ]);
+        let after = projected(vec![
+            summary(
+                "root",
+                None,
+                0,
+                0,
+                4,
+                projected_opaque("smartblock", 4, 244),
+            ),
+            summary("created", Some("root"), 0, 1, 0, projected_text("created")),
+            summary("moved", Some("root"), 1, 1, 0, projected_text("moved")),
+            summary("heading", Some("root"), 2, 1, 0, projected_text("heading")),
+            summary(
+                "opaque",
+                Some("root"),
+                3,
+                1,
+                0,
+                projected_opaque("dataview", 0, 9),
+            ),
+        ]);
+        let subtree = [BlockId::try_from("moved".to_owned()).expect("moved")];
+        let target = EntityId::new("created").expect("target");
+        assert!(verify_move_transition(
+            &before,
+            &after,
+            &subtree,
+            &target,
+            WireInsertPosition::After,
+        ));
+
+        let mut volatile_root_size = after.clone();
+        volatile_root_size.items[0].content = projected_opaque("smartblock", 4, 1);
+        assert!(verify_move_transition(
+            &before,
+            &volatile_root_size,
+            &subtree,
+            &target,
+            WireInsertPosition::After,
+        ));
+
+        let mut wrong_root_kind = after.clone();
+        wrong_root_kind.items[0].content = projected_opaque("dataview", 4, 244);
+        let mut wrong_root_count = after.clone();
+        wrong_root_count.items[0].content = projected_opaque("smartblock", 3, 244);
+        let mut inconsistent_prior_opaque_count = before.clone();
+        inconsistent_prior_opaque_count.items[0].content = projected_opaque("smartblock", 2, 180);
+        let mut unsupported_to_typed = after.clone();
+        unsupported_to_typed.items[0].content = projected_text("root");
+        let mut old_parent_outer_count = after.clone();
+        old_parent_outer_count.items[3].child_count = 1;
+        let mut new_parent_outer_count = after.clone();
+        new_parent_outer_count.items[0].child_count = 3;
+        new_parent_outer_count.items[0].content = projected_opaque("smartblock", 3, 244);
+        let mut moved_parent = after.clone();
+        moved_parent.items[2].parent_id = Some(EntityId::new("heading").expect("heading"));
+        let mut moved_sibling = after.clone();
+        moved_sibling.items[2].sibling_index = 2;
+        let mut moved_depth = after.clone();
+        moved_depth.items[2].depth = 2;
+        let mut unrelated_opaque_drift = after.clone();
+        unrelated_opaque_drift.items[4].content = projected_opaque("dataview", 0, 10);
+        let mut unrelated_restriction_drift = after.clone();
+        unrelated_restriction_drift.items[1].restrictions.edit = true;
+        let mut old_parent_content_drift = after.clone();
+        old_parent_content_drift.items[3].content = projected_text("changed heading");
+        let mut new_parent_presentation_drift = after.clone();
+        new_parent_presentation_drift.items[0].vertical_align = WireVerticalAlign::Middle;
+        let mut moved_content_drift = after.clone();
+        moved_content_drift.items[2].content = projected_text("changed moved block");
+        let mut reordered_vector = after.clone();
+        reordered_vector.items.swap(2, 3);
+        let mut foreign_identity = after.clone();
+        foreign_identity.items[4].id = EntityId::new("foreign").expect("foreign");
+        for invalid in [
+            wrong_root_kind,
+            wrong_root_count,
+            unsupported_to_typed,
+            old_parent_outer_count,
+            new_parent_outer_count,
+            moved_parent,
+            moved_sibling,
+            moved_depth,
+            unrelated_opaque_drift,
+            unrelated_restriction_drift,
+            old_parent_content_drift,
+            new_parent_presentation_drift,
+            moved_content_drift,
+            reordered_vector,
+            foreign_identity,
+        ] {
+            assert!(!verify_move_transition(
+                &before,
+                &invalid,
+                &subtree,
+                &target,
+                WireInsertPosition::After,
+            ));
+        }
+        assert!(!verify_move_transition(
+            &inconsistent_prior_opaque_count,
+            &after,
+            &subtree,
+            &target,
+            WireInsertPosition::After,
+        ));
+
+        let same_parent_before = projected(vec![
+            summary(
+                "root",
+                None,
+                0,
+                0,
+                3,
+                projected_opaque("smartblock", 3, 180),
+            ),
+            summary("moved", Some("root"), 0, 1, 0, projected_text("moved")),
+            summary("target", Some("root"), 1, 1, 0, projected_text("target")),
+            summary("tail", Some("root"), 2, 1, 0, projected_text("tail")),
+        ]);
+        let same_parent_after = projected(vec![
+            summary("root", None, 0, 0, 3, projected_opaque("smartblock", 3, 7)),
+            summary("target", Some("root"), 0, 1, 0, projected_text("target")),
+            summary("moved", Some("root"), 1, 1, 0, projected_text("moved")),
+            summary("tail", Some("root"), 2, 1, 0, projected_text("tail")),
+        ]);
+        let same_parent_target = EntityId::new("target").expect("target");
+        assert!(verify_move_transition(
+            &same_parent_before,
+            &same_parent_after,
+            &subtree,
+            &same_parent_target,
+            WireInsertPosition::After,
+        ));
+
+        let old_opaque_before = projected(vec![
+            summary(
+                "root",
+                None,
+                0,
+                0,
+                3,
+                projected_opaque("smartblock", 3, 180),
+            ),
+            summary("heading", Some("root"), 0, 1, 0, projected_text("heading")),
+            summary("moved", Some("root"), 1, 1, 0, projected_text("moved")),
+            summary(
+                "opaque",
+                Some("root"),
+                2,
+                1,
+                0,
+                projected_opaque("dataview", 0, 9),
+            ),
+        ]);
+        let old_opaque_after = projected(vec![
+            summary(
+                "root",
+                None,
+                0,
+                0,
+                2,
+                projected_opaque("smartblock", 2, 116),
+            ),
+            summary("heading", Some("root"), 0, 1, 1, projected_text("heading")),
+            summary("moved", Some("heading"), 0, 2, 0, projected_text("moved")),
+            summary(
+                "opaque",
+                Some("root"),
+                1,
+                1,
+                0,
+                projected_opaque("dataview", 0, 9),
+            ),
+        ]);
+        let heading = EntityId::new("heading").expect("heading");
+        assert!(verify_move_transition(
+            &old_opaque_before,
+            &old_opaque_after,
+            &subtree,
+            &heading,
+            WireInsertPosition::LastChild,
         ));
     }
 
