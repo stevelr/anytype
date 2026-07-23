@@ -14,9 +14,9 @@ use std::{
 
 use anytype::{
     body::{
-        BlockContent, BodySnapshot, CalloutIcon, DividerStyle, EmbedProcessor, HorizontalAlign,
-        LayoutStyle, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind, TextStyle,
-        VerticalAlign,
+        BlockContent, BodyBlock, BodySnapshot, CalloutIcon, DividerStyle, EmbedProcessor,
+        HorizontalAlign, LayoutStyle, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind,
+        TextStyle, VerticalAlign,
     },
     prelude::{Color, InsertPosition, NewBlock, ObjectLayout, PropertyFormat},
     test_util::{TestContext, unique_suffix},
@@ -95,6 +95,242 @@ fn expected_rich_metrics(page_create_polls: usize, blocks: usize) -> BodyDriverM
         write_polls: blocks,
         ..BodyDriverMetrics::default()
     }
+}
+
+fn expected_update_metrics() -> BodyDriverMetrics {
+    BodyDriverMetrics {
+        show_attempts: 2,
+        foreground_close_attempts: 2,
+        foreground_close_confirmed: 2,
+        write_polls: 1,
+        ..BodyDriverMetrics::default()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BodyUpdateExpectation {
+    Text,
+    TextStyle,
+    Checked(bool),
+    TextColor(Option<&'static str>),
+    CalloutIcon(bool),
+    DividerStyle,
+    BackgroundColor(Option<&'static str>),
+    HorizontalAlign,
+    VerticalAlign,
+    EmbedSource,
+    LinkAppearance,
+}
+
+fn update_target_changed_exactly(
+    before: &BodyBlock,
+    after: &BodyBlock,
+    expectation: BodyUpdateExpectation,
+) -> bool {
+    let mut restored = after.clone();
+    let exact_value = match expectation {
+        BodyUpdateExpectation::Text => {
+            let (BlockContent::Text(before), BlockContent::Text(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = after.text == "matrix text"
+                && after.marks.len() == 1
+                && after.marks[0].range.start == 0
+                && after.marks[0].range.end == 6
+                && matches!(after.marks[0].kind, MarkKind::Bold);
+            after.text.clone_from(&before.text);
+            after.marks.clone_from(&before.marks);
+            exact
+        }
+        BodyUpdateExpectation::TextStyle => {
+            let (BlockContent::Text(before), BlockContent::Text(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = after.style == TextStyle::Header2;
+            after.style = before.style;
+            exact
+        }
+        BodyUpdateExpectation::Checked(expected) => {
+            let (BlockContent::Text(before), BlockContent::Text(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = after.checked == expected;
+            after.checked = before.checked;
+            exact
+        }
+        BodyUpdateExpectation::TextColor(expected) => {
+            let (BlockContent::Text(before), BlockContent::Text(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = after.color.as_ref().map(|color| color.as_str()) == expected;
+            after.color.clone_from(&before.color);
+            exact
+        }
+        BodyUpdateExpectation::CalloutIcon(present) => {
+            let (BlockContent::Text(before), BlockContent::Text(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = if present {
+                matches!(after.icon, Some(CalloutIcon::Emoji(ref emoji)) if emoji == "📌")
+            } else {
+                after.icon.is_none()
+            };
+            after.icon.clone_from(&before.icon);
+            exact
+        }
+        BodyUpdateExpectation::DividerStyle => {
+            let (BlockContent::Divider(before), BlockContent::Divider(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = *after == DividerStyle::Line;
+            *after = *before;
+            exact
+        }
+        BodyUpdateExpectation::BackgroundColor(expected) => {
+            let exact = restored
+                .background_color
+                .as_ref()
+                .map(|color| color.as_str())
+                == expected;
+            restored
+                .background_color
+                .clone_from(&before.background_color);
+            exact
+        }
+        BodyUpdateExpectation::HorizontalAlign => {
+            let exact = restored.align == HorizontalAlign::Left;
+            restored.align = before.align;
+            exact
+        }
+        BodyUpdateExpectation::VerticalAlign => {
+            let exact = restored.vertical_align == VerticalAlign::Top;
+            restored.vertical_align = before.vertical_align;
+            exact
+        }
+        BodyUpdateExpectation::EmbedSource => {
+            let (BlockContent::Embed(before), BlockContent::Embed(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = after.processor == EmbedProcessor::Mermaid
+                && after.text == "graph LR; Updated-->Verified";
+            after.text.clone_from(&before.text);
+            exact
+        }
+        BodyUpdateExpectation::LinkAppearance => {
+            let (BlockContent::Link(before), BlockContent::Link(after)) =
+                (&before.content, &mut restored.content)
+            else {
+                return false;
+            };
+            let exact = after.card_style == LinkCardStyle::Inline
+                && after.icon_size == LinkIconSize::Medium
+                && after.description == LinkDescriptionMode::Added
+                && after.relations.is_empty();
+            after.card_style = before.card_style;
+            after.icon_size = before.icon_size;
+            after.description = before.description;
+            after.relations.clone_from(&before.relations);
+            exact
+        }
+    };
+    exact_value && restored == *before
+}
+
+fn exact_update_snapshot_transition(
+    before: &BodySnapshot,
+    after: &BodySnapshot,
+    block_id: &str,
+    expectation: BodyUpdateExpectation,
+) -> bool {
+    if before.space_id != after.space_id
+        || before.object_id != after.object_id
+        || before.root_id != after.root_id
+        || before.len() != after.len()
+    {
+        return false;
+    }
+    let before_ids = before.iter().map(|block| &block.id).collect::<Vec<_>>();
+    let after_ids = after.iter().map(|block| &block.id).collect::<Vec<_>>();
+    if before_ids != after_ids {
+        return false;
+    }
+    before.iter().all(|prior| {
+        let Some(fresh) = after.get(&prior.id) else {
+            return false;
+        };
+        if prior.id.as_str() == block_id {
+            update_target_changed_exactly(prior, fresh, expectation)
+        } else {
+            fresh == prior
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_body_update_arm(
+    driver: &mut impl McpDriver,
+    ctx: &TestContext,
+    object_id: &str,
+    snapshot_hash: &str,
+    block_id: &str,
+    change: Value,
+    expectation: BodyUpdateExpectation,
+    label: &str,
+) -> Result<(Value, String), String> {
+    let before = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, object_id)
+        .fetch()
+        .await
+        .map_err(|_| format!("{label} independent before read failed"))?;
+    let before_metrics = driver.body_acceptance_metrics();
+    let result = driver
+        .call_tool(
+            "body_block_update",
+            json!({
+                "space":ctx.space_id,
+                "object_id":object_id,
+                "expected_snapshot_hash":snapshot_hash,
+                "block_id":block_id,
+                "change":change
+            }),
+        )
+        .await?;
+    if let (Some(before), Some(after)) = (before_metrics, driver.body_acceptance_metrics()) {
+        let observed = body_metrics_delta(before, after)?;
+        if observed != expected_update_metrics() {
+            return Err(format!("{label} production metrics diverged: {observed:?}"));
+        }
+    }
+    let after = ctx
+        .client
+        .blocks()
+        .body(&ctx.space_id, object_id)
+        .fetch()
+        .await
+        .map_err(|_| format!("{label} independent after read failed"))?;
+    if !exact_update_snapshot_transition(&before, &after, block_id, expectation) {
+        return Err(format!(
+            "{label} changed more or less than its one exact typed field"
+        ));
+    }
+    let next_hash = body_string(&result, "/snapshot_hash", "update snapshot hash")?.to_owned();
+    Ok((normalize_body_result(&result), next_hash))
 }
 
 /// Proves that read-only mode advertises only body reads and rejects every
@@ -564,18 +800,6 @@ pub async fn run_body_scenario(
     }
     snapshot_hash = body_string(&replay, "/snapshot_hash", "replay hash")?.to_owned();
 
-    let updated = driver
-        .call_tool(
-            "body_block_update",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"block_id":created_block_id,
-                "change":{"kind":"set_text","text":"updated block","marks":[]}
-            }),
-        )
-        .await?;
-    normalized_results.push(normalize_body_result(&updated));
-    snapshot_hash = body_string(&updated, "/snapshot_hash", "update hash")?.to_owned();
     let child = driver
         .call_tool(
             "body_block_create",
@@ -704,7 +928,7 @@ pub async fn run_body_scenario(
             json!({
                 "space":ctx.space_id,"object_id":page.id,
                 "expected_snapshot_hash":snapshot_hash,"block_id":recreated_relation_id,
-                "target_block_id":created_block_id,"position":"after"
+                "target_block_id":heading_id,"position":"before"
             }),
         )
         .await?;
@@ -717,9 +941,9 @@ pub async fn run_body_scenario(
         .await
         .map_err(|_| "independent moved relation read failed".to_owned())?;
     let root_children = moved_relation_snapshot.children(&moved_relation_snapshot.root_id);
-    let adjacent = root_children.windows(2).any(|pair| {
-        pair[0].as_str() == created_block_id && pair[1].as_str() == recreated_relation_id
-    });
+    let adjacent = root_children
+        .windows(2)
+        .any(|pair| pair[0].as_str() == recreated_relation_id && pair[1].as_str() == heading_id);
     if !adjacent
         || !moved_relation_snapshot.iter().any(|block| {
             block.id.as_str() == recreated_relation_id
@@ -817,6 +1041,123 @@ pub async fn run_body_scenario(
         return Err("rich page replay did not retain one exact page".to_owned());
     }
     normalized_results.push(normalize_body_result(&rich_replay));
+
+    let mut rich_snapshot_hash = body_string(
+        &rich_replay,
+        "/final_snapshot_hash",
+        "rich replay snapshot hash",
+    )?
+    .to_owned();
+    let update_arms = [
+        (
+            "set_text",
+            primary_ids[0].as_str(),
+            json!({
+                "kind":"set_text","text":"matrix text",
+                "marks":[{"kind":"bold","start":0,"end":6}]
+            }),
+            BodyUpdateExpectation::Text,
+        ),
+        (
+            "set_text_style",
+            primary_ids[1].as_str(),
+            json!({"kind":"set_text_style","style":"heading_2"}),
+            BodyUpdateExpectation::TextStyle,
+        ),
+        (
+            "set_checked",
+            primary_ids[8].as_str(),
+            json!({"kind":"set_checked","checked":false}),
+            BodyUpdateExpectation::Checked(false),
+        ),
+        (
+            "set_text_color",
+            primary_ids[0].as_str(),
+            json!({"kind":"set_text_color","color":"red"}),
+            BodyUpdateExpectation::TextColor(Some("red")),
+        ),
+        (
+            "clear_text_color",
+            primary_ids[0].as_str(),
+            json!({"kind":"clear_text_color"}),
+            BodyUpdateExpectation::TextColor(None),
+        ),
+        (
+            "set_callout_icon",
+            primary_ids[10].as_str(),
+            json!({"kind":"set_callout_icon","icon":{"kind":"emoji","emoji":"📌"}}),
+            BodyUpdateExpectation::CalloutIcon(true),
+        ),
+        (
+            "clear_callout_icon",
+            primary_ids[10].as_str(),
+            json!({"kind":"clear_callout_icon"}),
+            BodyUpdateExpectation::CalloutIcon(false),
+        ),
+        (
+            "set_divider_style",
+            primary_ids[11].as_str(),
+            json!({"kind":"set_divider_style","style":"line"}),
+            BodyUpdateExpectation::DividerStyle,
+        ),
+        (
+            "set_background_color",
+            primary_ids[0].as_str(),
+            json!({"kind":"set_background_color","color":"green"}),
+            BodyUpdateExpectation::BackgroundColor(Some("green")),
+        ),
+        (
+            "clear_background_color",
+            primary_ids[0].as_str(),
+            json!({"kind":"clear_background_color"}),
+            BodyUpdateExpectation::BackgroundColor(None),
+        ),
+        (
+            "set_horizontal_align",
+            primary_ids[0].as_str(),
+            json!({"kind":"set_horizontal_align","align":"left"}),
+            BodyUpdateExpectation::HorizontalAlign,
+        ),
+        (
+            "set_vertical_align",
+            primary_ids[0].as_str(),
+            json!({"kind":"set_vertical_align","align":"top"}),
+            BodyUpdateExpectation::VerticalAlign,
+        ),
+        (
+            "set_embed_source",
+            primary_ids[14].as_str(),
+            json!({"kind":"set_embed_source","source":"graph LR; Updated-->Verified"}),
+            BodyUpdateExpectation::EmbedSource,
+        ),
+        (
+            "set_link_appearance",
+            primary_ids[13].as_str(),
+            json!({
+                "kind":"set_link_appearance","card_style":"inline","icon_size":"medium",
+                "description":"added","relations":[]
+            }),
+            BodyUpdateExpectation::LinkAppearance,
+        ),
+    ];
+    if update_arms.len() != 14 {
+        return Err("body update matrix did not own exactly fourteen arms".to_owned());
+    }
+    for (label, block_id, change, expectation) in update_arms {
+        let (evidence, next_hash) = run_body_update_arm(
+            driver,
+            ctx,
+            &rich_page_id,
+            &rich_snapshot_hash,
+            block_id,
+            change,
+            expectation,
+            label,
+        )
+        .await?;
+        normalized_results.push(evidence);
+        rich_snapshot_hash = next_hash;
+    }
 
     let supplemental_input = json!({
         "space":ctx.space_id,"name":format!("Rich variants {transport} {suffix}"),
