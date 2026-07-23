@@ -33,7 +33,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   plan. Exact 2,048/2,049-block, UTF-16 endpoint, lifecycle-counter, raw
   stable/preview frame, descriptor, and atomic read-restriction regressions
   close the acceptance matrix. Ignored body acceptance also fails closed unless
-  a reviewed absolute redacted server-log path is configured.
+  a reviewed absolute redacted server-log path is configured, and its
+  fixture-heavy shared workflow is heap-owned for default-stack execution.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection
