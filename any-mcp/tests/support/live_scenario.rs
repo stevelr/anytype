@@ -472,12 +472,54 @@ fn expected_rich_metrics(page_create_polls: usize, blocks: usize) -> BodyDriverM
 }
 
 fn expected_primitive_metrics() -> BodyDriverMetrics {
+    expected_primitive_metrics_with_verification_attempts(1)
+}
+
+fn expected_primitive_metrics_with_verification_attempts(
+    verification_attempts: usize,
+) -> BodyDriverMetrics {
+    let shows = verification_attempts.saturating_add(1);
     BodyDriverMetrics {
-        show_attempts: 2,
-        foreground_close_attempts: 2,
-        foreground_close_confirmed: 2,
+        show_attempts: shows,
+        foreground_close_attempts: shows,
+        foreground_close_confirmed: shows,
         write_polls: 1,
         ..BodyDriverMetrics::default()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BodyMetricExpectation {
+    Exact(BodyDriverMetrics),
+    PrimitiveMutation,
+}
+
+impl BodyMetricExpectation {
+    fn matches(self, observed: BodyDriverMetrics) -> bool {
+        match self {
+            Self::Exact(expected) => observed == expected,
+            Self::PrimitiveMutation => primitive_metrics_within_verification_budget(observed),
+        }
+    }
+
+    fn diagnose(self, label: &'static str, observed: BodyDriverMetrics) {
+        body_metric_vector_diagnostic(label, "observed", observed);
+        match self {
+            Self::Exact(expected) => body_metric_vector_diagnostic(label, "expected", expected),
+            Self::PrimitiveMutation => {
+                body_metric_vector_diagnostic(label, "expected_min", expected_primitive_metrics());
+                body_metric_vector_diagnostic(
+                    label,
+                    "expected_max",
+                    expected_primitive_metrics_with_verification_attempts(3),
+                );
+                body_primitive_metric_budget_diagnostic(
+                    label,
+                    observed,
+                    primitive_metrics_within_verification_budget(observed),
+                );
+            }
+        }
     }
 }
 
@@ -671,14 +713,14 @@ fallback_attempt,fallback_confirmed,write,show_limit,non_show_limit,close_limit,
     }
 }
 
-fn body_update_metric_budget_diagnostic(
+fn body_primitive_metric_budget_diagnostic(
     label: &'static str,
     observed: BodyDriverMetrics,
     bounded: bool,
 ) {
     if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
         eprintln!(
-            "body_semantic_phase=metric_call label={label} event=update_budget \
+            "body_semantic_phase=metric_call label={label} event=primitive_budget \
              verification_attempts={} bounded={bounded}",
             observed.show_attempts.saturating_sub(1),
         );
@@ -689,7 +731,7 @@ async fn call_body_tool_with_metrics(
     driver: &mut impl McpDriver,
     name: &'static str,
     arguments: Value,
-    expected: BodyDriverMetrics,
+    expected: BodyMetricExpectation,
     label: &'static str,
 ) -> Result<Value, String> {
     body_metric_call_marker(label, "call_start");
@@ -724,10 +766,9 @@ async fn call_body_tool_with_metrics(
     };
     if let Some(delta) = delta {
         let observed = delta?;
-        if observed != expected {
+        if !expected.matches(observed) {
             body_metric_call_marker(label, "metrics_mismatch");
-            body_metric_vector_diagnostic(label, "observed", observed);
-            body_metric_vector_diagnostic(label, "expected", expected);
+            expected.diagnose(label, observed);
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
         body_metric_call_marker(label, "metrics_match");
@@ -990,7 +1031,7 @@ async fn run_body_update_arm(
         let observed = body_metrics_delta(before, after)?;
         body_metric_vector_diagnostic(label, "update_delta", observed);
         let metrics_bounded = primitive_metrics_within_verification_budget(observed);
-        body_update_metric_budget_diagnostic(label, observed, metrics_bounded);
+        body_primitive_metric_budget_diagnostic(label, observed, metrics_bounded);
         if !metrics_bounded {
             body_scenario_update_stage("update_metrics_mismatch");
             return Err(format!("{label} production metrics diverged: {observed:?}"));
@@ -1664,7 +1705,7 @@ async fn run_body_scenario_inner(
         driver,
         "body_block_create",
         create_input.clone(),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "primitive create",
     )
     .await?;
@@ -1675,7 +1716,7 @@ async fn run_body_scenario_inner(
         driver,
         "body_block_create",
         create_input,
-        expected_create_replay_metrics(),
+        BodyMetricExpectation::Exact(expected_create_replay_metrics()),
         "primitive create replay",
     )
     .await?;
@@ -1701,7 +1742,7 @@ async fn run_body_scenario_inner(
             "block":{"kind":"text","style":"paragraph","text":"targeted child","marks":[]},
             "idempotency_key":format!("body-child-{transport}-{suffix}")
         }),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "heading append",
     )
     .await?;
@@ -1737,7 +1778,7 @@ async fn run_body_scenario_inner(
             "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
             "target_block_id":created_block_id,"position":"after"
         }),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "primitive move",
     )
     .await?;
@@ -1752,7 +1793,7 @@ async fn run_body_scenario_inner(
             "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
             "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
         }),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "primitive delete",
     )
     .await?;
@@ -1771,7 +1812,7 @@ async fn run_body_scenario_inner(
             "position":"last_child","block":{"kind":"relation","key":"tag"},
             "idempotency_key":format!("body-relation-{transport}-{suffix}")
         }),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "relation create",
     )
     .await?;
@@ -1804,7 +1845,7 @@ async fn run_body_scenario_inner(
             "expected_snapshot_hash":snapshot_hash,"block_id":relation_id,
             "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
         }),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "relation delete",
     )
     .await?;
@@ -1821,7 +1862,7 @@ async fn run_body_scenario_inner(
             "position":"last_child","block":{"kind":"relation","key":"tag"},
             "idempotency_key":format!("body-relation-recreate-{transport}-{suffix}")
         }),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "relation recreate",
     )
     .await?;
@@ -1843,7 +1884,7 @@ async fn run_body_scenario_inner(
             "expected_snapshot_hash":snapshot_hash,"block_id":recreated_relation_id,
             "target_block_id":heading_id,"position":"before"
         }),
-        expected_primitive_metrics(),
+        BodyMetricExpectation::PrimitiveMutation,
         "relation move",
     )
     .await?;

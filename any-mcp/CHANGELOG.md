@@ -49,7 +49,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   removed subtree's direct parent and proves the exact surviving DFS order.
   Value-only update readback permits only the opaque page root's derived byte
   summary to refresh while preserving its exact kind, unchanged child count,
-  structure, restrictions, and presentation. Live update metrics now accept
+  structure, restrictions, and presentation. Every body editor now caps the
+  inherited client verification policy at three attempts without widening a
+  smaller attempt or timeout policy. Live primitive mutation metrics accept
   the designed one-to-three semantic verification rounds instead of requiring
   the first read to observe the write, while retaining one write and exact
   close/fallback/limit counters.
