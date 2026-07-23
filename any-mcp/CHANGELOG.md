@@ -45,7 +45,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   structural child count while allowing only the insertion parent's
   protobuf-derived approximate byte summary to refresh. Move readback applies
   that exception only to the old and new structural parents and now also
-  proves exact post-move DFS order.
+  proves exact post-move DFS order. Delete readback applies it only to the
+  removed subtree's direct parent and proves the exact surviving DFS order.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection
