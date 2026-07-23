@@ -4108,6 +4108,14 @@ fn body_scenario_callback_error(
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn body_callback_boundary(stage: DisposableCallbackStage, error: TestError) -> TestError {
+    match error {
+        error @ TestError::DisposableCallback { .. } => error,
+        error => disposable_callback_error(stage, error),
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn run_direct_body_phase(
     ctx: &TestContext,
 ) -> BodyAcceptancePhaseFuture<'_, (BodyScenarioEvidence, Vec<Value>)> {
@@ -4222,7 +4230,7 @@ fn run_spawned_read_only_body_phase<'a>(
         let (_, output) = take_registered_body_driver(&child)?
             .try_finish()
             .map_err(|_| sentinel_assertion("read-only body child did not stop"))?;
-        require_body_diagnostics(&output.stderr, b"SECRET_UNPARSED_BODY_VALUE", false)?;
+        require_body_diagnostics(&output.stderr, b"SECRET_UNPARSED_BODY_VALUE", true)?;
         Ok(evidence)
     })
 }
@@ -4246,7 +4254,9 @@ fn run_shared_body_callback(
             .map_err(|_| sentinel_assertion("body parity fixture page creation failed"))?;
         ctx.register_object(&parity_page.id);
 
-        let (direct_evidence, direct_descriptors) = run_direct_body_phase(&ctx).await?;
+        let (direct_evidence, direct_descriptors) = run_direct_body_phase(&ctx)
+            .await
+            .map_err(|error| body_callback_boundary(DisposableCallbackStage::BodyDirect, error))?;
         let stable = run_spawned_body_phase(
             &ctx,
             stable_cleanup,
@@ -4254,7 +4264,8 @@ fn run_shared_body_callback(
             "stable",
             &parity_page.id,
         )
-        .await?;
+        .await
+        .map_err(|error| body_callback_boundary(DisposableCallbackStage::BodyStdioStable, error))?;
         let preview = run_spawned_body_phase(
             &ctx,
             preview_cleanup,
@@ -4262,7 +4273,10 @@ fn run_shared_body_callback(
             "preview",
             &parity_page.id,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            body_callback_boundary(DisposableCallbackStage::BodyStdioPreview, error)
+        })?;
         let stable_read_only = run_spawned_read_only_body_phase(
             &ctx,
             stable_read_only_cleanup,
@@ -4270,7 +4284,10 @@ fn run_shared_body_callback(
             &ctx.space_id,
             &parity_page.id,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            body_callback_boundary(DisposableCallbackStage::BodyReadOnlyStable, error)
+        })?;
         let preview_read_only = run_spawned_read_only_body_phase(
             &ctx,
             preview_read_only_cleanup,
@@ -4278,15 +4295,22 @@ fn run_shared_body_callback(
             &ctx.space_id,
             &parity_page.id,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            body_callback_boundary(DisposableCallbackStage::BodyReadOnlyPreview, error)
+        })?;
 
         inspect_reviewed_body_server_log(&[
             BODY_DIAGNOSTIC_SECRET.as_bytes(),
             b"SECRET_UNPARSED_BODY_VALUE",
-        ])?;
+        ])
+        .map_err(|error| body_callback_boundary(DisposableCallbackStage::BodyReviewedLog, error))?;
         if stable.descriptors != preview.descriptors || direct_descriptors != stable.descriptors {
-            return Err(sentinel_assertion(
-                "direct/stable/preview body descriptors, schemas, or annotations diverged",
+            return Err(disposable_callback_error(
+                DisposableCallbackStage::BodyParity,
+                sentinel_assertion(
+                    "direct/stable/preview body descriptors, schemas, or annotations diverged",
+                ),
             ));
         }
         if !body_protocol_frames_match(&stable.frames, &preview.frames)
@@ -4319,23 +4343,29 @@ fn run_shared_body_callback(
                 .and_then(Value::as_str)
                 != Some("validation")
         {
-            return Err(sentinel_assertion(
-                "stable/preview raw body success or error JSON-RPC frames diverged",
+            return Err(disposable_callback_error(
+                DisposableCallbackStage::BodyParity,
+                sentinel_assertion(
+                    "stable/preview raw body success or error JSON-RPC frames diverged",
+                ),
             ));
         }
         if stable.scenario != preview.scenario {
-            return Err(sentinel_assertion(
-                "stable and preview normalized body result shapes diverged",
+            return Err(disposable_callback_error(
+                DisposableCallbackStage::BodyParity,
+                sentinel_assertion("stable and preview normalized body result shapes diverged"),
             ));
         }
         if direct_evidence != stable.scenario {
-            return Err(sentinel_assertion(
-                "direct and stdio normalized body result shapes diverged",
+            return Err(disposable_callback_error(
+                DisposableCallbackStage::BodyParity,
+                sentinel_assertion("direct and stdio normalized body result shapes diverged"),
             ));
         }
         if stable_read_only != preview_read_only {
-            return Err(sentinel_assertion(
-                "stable and preview read-only body evidence diverged",
+            return Err(disposable_callback_error(
+                DisposableCallbackStage::BodyParity,
+                sentinel_assertion("stable and preview read-only body evidence diverged"),
             ));
         }
         Ok(ctx.space_id.clone())

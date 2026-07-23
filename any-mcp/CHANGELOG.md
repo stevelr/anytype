@@ -21,12 +21,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   mutations. Direct, protocol, spawned-stdio, schema, token, and disposable
   real-server verification accompany the registry without a mock server;
   deterministic transport faults remain deferred to the P4 fault-injection
-  design. The exact six-tool schema snapshot is 23,476 `o200k_base` tokens,
+  design. The exact six-tool schema snapshot is 24,286 `o200k_base` tokens,
   below the independently reviewed 25,000-token domain ceiling. Production
   gates count canonical request and dual-encoded result tokens, enforce
   complete-frame bytes, reject maximum dense legal values above their
   operation ceilings, and admit exact greatest-under boundary fixtures while
-  keeping accepted paired exchanges below the 200K context floor. A production
+  keeping accepted paired exchanges below the 200K context floor.
+  `body_block_create` is exactly at its reviewed 6,500-token per-tool ceiling;
+  the executable snapshot locks that zero-headroom boundary, so further schema
+  growth requires reduction or an explicit ceiling review. A production
   rich-prefix scheduler now owns verified receipts and permanently terminates
   every partial or indeterminate boundary; pending-candidate recovery reduces
   each bounded observation into one cached replay receipt without resuming the
