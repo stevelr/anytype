@@ -3689,6 +3689,7 @@ async fn headless_body_blocks_direct_stable_preview_and_object_show() {
     }
 }
 
+#[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
@@ -3705,7 +3706,6 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
         "any-mcp-body-shared-stdio",
         move |ctx| {
             Box::pin(async move {
-                #[cfg(feature = "acceptance-harness")]
                 let direct_evidence = {
                     let direct =
                         BodyAcceptanceDirect::new(ctx.client.clone(), false).map_err(|_| {
@@ -3834,7 +3834,6 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
                         "stable and preview normalized body result shapes diverged",
                     ));
                 }
-                #[cfg(feature = "acceptance-harness")]
                 if direct_evidence != stable_evidence {
                     return Err(sentinel_assertion(
                         "direct and stdio normalized body result shapes diverged",

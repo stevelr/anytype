@@ -59,7 +59,7 @@ jobs:
         run: cargo test --locked -p any-mcp --lib
 
       - name: Run portable production-process and stdio conformance tests
-        run: cargo test --locked -p any-mcp --test process_runtime --test stdio_conformance --test headless_stdio_e2e
+        run: cargo test --locked -p any-mcp --features acceptance-harness --test process_runtime --test stdio_conformance --test headless_stdio_e2e
 
   headless-e2e:
     name: stdio to headless Anytype
@@ -104,7 +104,7 @@ jobs:
           cargo run --locked -q -p anyr -- auth status --pretty
           cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1
-          cargo test --locked -p any-mcp --test headless_stdio_e2e -- \
+          cargo test --locked -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- \
             --ignored --test-threads=1
 
       - name: Retain redacted headless server evidence on failure
@@ -167,7 +167,7 @@ jobs:
           cargo run --locked -q -p anyr -- auth status --pretty
           cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1
-          cargo test --locked -p any-mcp --test headless_stdio_e2e -- \
+          cargo test --locked -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- \
             --ignored --test-threads=1
 
       - name: Retain redacted clean-server evidence on failure

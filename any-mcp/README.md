@@ -1248,7 +1248,7 @@ repository root:
 source .test-env
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
 cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
-cargo test -p any-mcp --test headless_stdio_e2e -- --ignored --test-threads=1
+cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- --ignored --test-threads=1
 ```
 
 The selectable `headless_direct_standard_*` and
