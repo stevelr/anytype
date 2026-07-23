@@ -388,6 +388,9 @@ Generated table descendants must form one canonical closed subtree.
 Move verification applies the same derived-summary rule only to its old and
 new structural parents, while requiring exact post-move DFS order and leaving
 every other opaque summary and block value unchanged.
+Delete verification applies it only to the removed subtree's direct parent,
+proves the exact filtered DFS order and sibling shifts, and keeps every
+surviving non-parent value exact.
 
 The finite `anytype-api` body lifecycle caps decoded Show at
 4,194,304 bytes and every non-Show body gRPC response—including foreground and
