@@ -1043,7 +1043,9 @@ fn inspect_reviewed_body_server_log_at(
     if log.is_empty()
         || log.len() > 524_288
         || std::str::from_utf8(&log).is_err()
-        || secrets.iter().any(|secret| contains_bytes(&log, secret))
+        || secrets
+            .iter()
+            .any(|secret| !secret.is_empty() && contains_bytes(&log, secret))
         || !credentials_absent(&log)
     {
         return Err(sentinel_assertion(
