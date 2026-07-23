@@ -25,7 +25,7 @@ use anytype::{
 
 /// Seeded value that must never cross into spawned diagnostics.
 pub const BODY_DIAGNOSTIC_SECRET: &str = "SECRET_BODY_DIAGNOSTIC_SENTINEL";
-/// Exact non-root item count in the live pagination fixture.
+/// Exact root-inclusive DFS item count in the live pagination fixture.
 pub const BODY_PAGINATION_ITEM_COUNT: usize = 20;
 
 fn body_fixture_marker(event: &'static str) {
@@ -114,11 +114,10 @@ fn body_fixture_shape_diagnostic(
     if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_none() {
         return;
     }
-    let blocks = snapshot.iter().skip(1).collect::<Vec<_>>();
+    let blocks = snapshot.iter().collect::<Vec<_>>();
     let suffix = blocks.get(initial_blocks.len()..);
-    let prefix_ok = blocks
-        .get(..initial_blocks.len())
-        .is_some_and(|prefix| prefix.iter().copied().eq(initial_blocks));
+    let prefix_ok = body_initial_full_prefix_unchanged(&blocks, initial_blocks);
+    let root_children_prefix_ok = body_initial_root_children_preserved(snapshot, initial_blocks);
     let suffix_count_ok = suffix.is_some_and(|items| {
         items.len() == created_ids.len() && items.len() == expected_suffix.len()
     });
@@ -152,11 +151,46 @@ fn body_fixture_shape_diagnostic(
             .eq(created_ids.iter().rev().map(String::as_str));
     eprintln!(
         "body_semantic_phase=fixture event=shape total={} expected={} prefix_ok={prefix_ok} \
-         suffix_count_ok={suffix_count_ok} suffix_ids_ok={suffix_ids_ok} \
-         suffix_content_ok={suffix_content_ok} direct_root_ok={direct_root_ok}",
+         root_children_prefix_ok={root_children_prefix_ok} suffix_count_ok={suffix_count_ok} \
+         suffix_ids_ok={suffix_ids_ok} suffix_content_ok={suffix_content_ok} \
+         direct_root_ok={direct_root_ok}",
         blocks.len(),
         BODY_PAGINATION_ITEM_COUNT
     );
+}
+
+fn body_block_state_except_children_matches(actual: &BodyBlock, expected: &BodyBlock) -> bool {
+    actual.id == expected.id
+        && actual.content == expected.content
+        && actual.align == expected.align
+        && actual.vertical_align == expected.vertical_align
+        && actual.background_color == expected.background_color
+        && actual.restrictions == expected.restrictions
+}
+
+fn body_initial_full_prefix_unchanged(blocks: &[&BodyBlock], initial_blocks: &[BodyBlock]) -> bool {
+    blocks.len() >= initial_blocks.len()
+        && blocks
+            .iter()
+            .zip(initial_blocks)
+            .enumerate()
+            .all(|(index, (actual, expected))| {
+                if index == 0 {
+                    body_block_state_except_children_matches(actual, expected)
+                } else {
+                    *actual == expected
+                }
+            })
+}
+
+fn body_initial_root_children_preserved(
+    snapshot: &BodySnapshot,
+    initial_blocks: &[BodyBlock],
+) -> bool {
+    initial_blocks.first().is_some_and(|initial_root| {
+        snapshot.root().children.get(..initial_root.children.len())
+            == Some(initial_root.children.as_slice())
+    })
 }
 
 fn body_pagination_suffix_spec(append_count: usize) -> Vec<(TextStyle, String)> {
@@ -195,13 +229,13 @@ fn is_exact_body_pagination_fixture(
     created_ids: &[String],
     expected_suffix: &[(TextStyle, String)],
 ) -> bool {
-    let blocks = snapshot.iter().skip(1).collect::<Vec<_>>();
+    let blocks = snapshot.iter().collect::<Vec<_>>();
     let Some(suffix) = blocks.get(initial_blocks.len()..) else {
         return false;
     };
-    let prefix_unchanged = blocks
-        .get(..initial_blocks.len())
-        .is_some_and(|prefix| prefix.iter().copied().eq(initial_blocks));
+    let prefix_unchanged = body_initial_full_prefix_unchanged(&blocks, initial_blocks);
+    let root_children_prefix_unchanged =
+        body_initial_root_children_preserved(snapshot, initial_blocks);
     let suffix_ids_match = suffix
         .iter()
         .map(|block| block.id.as_str())
@@ -228,6 +262,7 @@ fn is_exact_body_pagination_fixture(
             .eq(created_ids.iter().rev().map(String::as_str));
     blocks.len() == BODY_PAGINATION_ITEM_COUNT
         && prefix_unchanged
+        && root_children_prefix_unchanged
         && suffix.len() == created_ids.len()
         && suffix.len() == expected_suffix.len()
         && suffix_ids_match
@@ -236,18 +271,18 @@ fn is_exact_body_pagination_fixture(
 }
 
 #[test]
-fn body_pagination_fixture_plan_fills_twenty_while_preserving_initial_prefix() {
-    let expected = body_pagination_suffix_spec(17);
-    assert_eq!(expected.len(), 17);
+fn body_pagination_fixture_plan_fills_twenty_including_preserved_root_prefix() {
+    let expected = body_pagination_suffix_spec(16);
+    assert_eq!(expected.len(), 16);
     assert_eq!(
         expected.first(),
         Some(&(TextStyle::Header1, "Existing heading".to_owned()))
     );
     assert_eq!(
         expected.last(),
-        Some(&(TextStyle::Paragraph, "Paragraph 15".to_owned()))
+        Some(&(TextStyle::Paragraph, "Paragraph 14".to_owned()))
     );
-    for initial_count in [0, 3, 19] {
+    for initial_count in [1, 4, 19] {
         let append_count = BODY_PAGINATION_ITEM_COUNT - initial_count;
         let operations =
             body_pagination_append_operations(append_count).expect("valid fixture constructors");
@@ -963,7 +998,7 @@ async fn run_body_scenario_inner(
             body_fixture_marker("initial_fetch_failed");
             "body initial fixture read failed".to_owned()
         })?;
-    let initial_blocks = initial.iter().skip(1).cloned().collect::<Vec<_>>();
+    let initial_blocks = initial.iter().cloned().collect::<Vec<_>>();
     let append_count = BODY_PAGINATION_ITEM_COUNT
         .checked_sub(initial_blocks.len())
         .filter(|count| *count > 0)
@@ -1199,7 +1234,6 @@ async fn run_body_scenario_inner(
         .map_err(|_| "independent body read failed".to_owned())?;
     let independent_ids = independent
         .iter()
-        .skip(1)
         .map(|block| block.id.as_str().to_owned())
         .collect::<Vec<_>>();
     body_scenario_count("pagination_independent_items", independent_ids.len());
