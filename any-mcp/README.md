@@ -103,10 +103,10 @@ env_vars = [
 ]
 ```
 
-See [stdio protocol verification](STDIO_CONFORMANCE.md) for the tested Codex,
-Claude Code, and MCP Inspector registration commands and their exact pinned
-protocol revisions. Client registration is separate from Anytype login: create
-and store credentials with `anyr` or Anytype before starting the MCP host.
+The [stdio protocol verification](docs/STDIO_CONFORMANCE.md) records the pinned
+stable and preview protocol revisions tested with Codex, Claude Code, and MCP
+Inspector. Client registration is separate from Anytype login: create and
+store credentials with `anyr` or Anytype before starting the MCP host.
 
 ## Phase 1 foundations
 
@@ -680,8 +680,8 @@ most six physical attempts. Exact injected retry sequences remain deferred
 with the other transport faults rather than being emulated by a semantic
 server.
 
-The approved [attached discussions design](designs/attached-discussions-toolset.md)
-keeps page discussions separate from ordinary chats. Its production-unlinked
+The approved attached-discussions design keeps page discussions separate from
+ordinary chats. Its production-unlinked
 candidate contains only `object_discussion_get`, which returns normal `absent`
 state or the stable `discussionId` attached to one exact Basic or Note parent.
 It does not read comments or expose attachment as an MCP mutation. The
@@ -1091,9 +1091,8 @@ Phase 1 read path.
   conformance proves the configured backend returns the exact numeric and
   checkbox matches while continuation follows the checked upstream page;
   `any-mcp` never rewrites the filters or scans extra pages locally.
-  The workspace [filter-status matrix](../FILTER_STATUS.md) distinguishes
-  this verified production path from unsupported condition/value combinations
-  and tracks closure of the historical upstream parsing report.
+  Unsupported condition/value combinations remain explicit errors, and the
+  historical upstream parsing report remains open.
   File and object filter operands are validated as safe bounded identifiers
   before any upstream request. Cursor identity sorts and deduplicates
   commutative condition groups, nested groups, and set-valued operands while
@@ -1248,10 +1247,8 @@ runtime and advertises their static capability alongside the tool catalog.
   panic sentinels, and cleanup.
 - `tests/schema/mcp-2026-07-28.json` — official draft schema used only as a
   test oracle for actual preview requests and results.
-- `STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client discovery
-  evidence with current compatibility limits.
-- `TESTING.md` — executable test architecture, live ownership, evidence, and
-  CI cadence contract.
+- `docs/STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client
+  discovery evidence with current compatibility limits.
 
 ## Testing
 
@@ -1306,8 +1303,8 @@ rather than a Cartesian matrix. A typed catalog audit maps every advertised
 standard operation to exactly one executable scenario and fails on missing,
 duplicate, unknown, or non-executable owners. Pure schema, catalog, framing,
 and validation tests remain the only no-backend cases; production has no
-test-mode backend selector. See [`TESTING.md`](TESTING.md) for the maintained
-architecture and evidence contract.
+test-mode backend selector. The executable catalog audit and disposable live
+scenarios maintain the architecture and evidence contract.
 
 This is an OS-family portability gate, not a claim that CI exercises every CPU
 architecture. The workspace targets Linux x86_64/aarch64, macOS aarch64, and
@@ -1462,9 +1459,8 @@ cancellation, malformed and unknown requests, clean EOF, and stdout/stderr
 purity across profile and read-only modes. It also verifies preview stateless
 discovery, stable lifecycle negotiation, and exact malformed-frame recovery
 before and after stable initialization. See
-[stdio protocol verification](STDIO_CONFORMANCE.md)
-for commands, external-tool evidence, and the precise limits of the current
-compatibility claim.
+[stdio protocol verification](docs/STDIO_CONFORMANCE.md) for the exact
+compatibility claim and reproducible client commands.
 
 ## License
 
