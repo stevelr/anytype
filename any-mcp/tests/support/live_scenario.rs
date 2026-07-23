@@ -28,6 +28,112 @@ pub const BODY_DIAGNOSTIC_SECRET: &str = "SECRET_BODY_DIAGNOSTIC_SENTINEL";
 /// Exact non-root item count in the live pagination fixture.
 pub const BODY_PAGINATION_ITEM_COUNT: usize = 20;
 
+fn body_fixture_marker(event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=fixture event={event}");
+    }
+}
+
+fn body_fixture_count(event: &'static str, count: usize) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=fixture event={event} count={count}");
+    }
+}
+
+fn body_fixture_plan_diagnostic(initial: usize, append: usize, planned: usize) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=fixture event=plan initial={initial} \
+             append={append} planned={planned}"
+        );
+    }
+}
+
+fn body_fixture_outcome_diagnostic(
+    category: &'static str,
+    applied: usize,
+    failed: usize,
+    not_attempted: usize,
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=fixture event=apply_all category={category} \
+             applied={applied} failed={failed} not_attempted={not_attempted}"
+        );
+    }
+}
+
+fn body_fixture_receipt_diagnostic(
+    index: usize,
+    affected: usize,
+    address_ok: bool,
+    block_present: bool,
+    content_ok: bool,
+    root_last_ok: bool,
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=fixture event=receipt index={index} affected={affected} \
+             address_ok={address_ok} block_present={block_present} \
+             content_ok={content_ok} root_last_ok={root_last_ok}"
+        );
+    }
+}
+
+fn body_fixture_shape_diagnostic(
+    snapshot: &BodySnapshot,
+    initial_blocks: &[BodyBlock],
+    created_ids: &[String],
+    expected_suffix: &[(TextStyle, String)],
+) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_none() {
+        return;
+    }
+    let blocks = snapshot.iter().skip(1).collect::<Vec<_>>();
+    let suffix = blocks.get(initial_blocks.len()..);
+    let prefix_ok = blocks
+        .get(..initial_blocks.len())
+        .is_some_and(|prefix| prefix.iter().copied().eq(initial_blocks));
+    let suffix_count_ok = suffix.is_some_and(|items| {
+        items.len() == created_ids.len() && items.len() == expected_suffix.len()
+    });
+    let suffix_ids_ok = suffix.is_some_and(|items| {
+        items
+            .iter()
+            .map(|block| block.id.as_str())
+            .eq(created_ids.iter().map(String::as_str))
+    });
+    let suffix_content_ok = suffix.is_some_and(|items| {
+        items
+            .iter()
+            .zip(expected_suffix)
+            .all(|(block, (expected_style, expected_text))| {
+                matches!(
+                    &block.content,
+                    BlockContent::Text(content)
+                        if content.style == *expected_style
+                            && content.text == *expected_text
+                )
+            })
+    });
+    let direct_root_ok = snapshot.root().children.len() >= created_ids.len()
+        && snapshot
+            .root()
+            .children
+            .iter()
+            .rev()
+            .take(created_ids.len())
+            .map(|id| id.as_str())
+            .eq(created_ids.iter().rev().map(String::as_str));
+    eprintln!(
+        "body_semantic_phase=fixture event=shape total={} expected={} prefix_ok={prefix_ok} \
+         suffix_count_ok={suffix_count_ok} suffix_ids_ok={suffix_ids_ok} \
+         suffix_content_ok={suffix_content_ok} direct_root_ok={direct_root_ok}",
+        blocks.len(),
+        BODY_PAGINATION_ITEM_COUNT
+    );
+}
+
 fn body_pagination_suffix_spec(append_count: usize) -> Vec<(TextStyle, String)> {
     (0..append_count)
         .map(|index| {
@@ -816,81 +922,135 @@ async fn run_body_scenario_inner(
         ))
         .create()
         .await
-        .map_err(|_| "body fixture page create failed".to_owned())?;
+        .map_err(|_| {
+            body_fixture_marker("page_create_failed");
+            "body fixture page create failed".to_owned()
+        })?;
     ctx.register_object(&page.id);
+    body_fixture_marker("page_created");
     let initial = ctx
         .client
         .blocks()
         .body(&ctx.space_id, &page.id)
         .fetch()
         .await
-        .map_err(|_| "body initial fixture read failed".to_owned())?;
+        .map_err(|_| {
+            body_fixture_marker("initial_fetch_failed");
+            "body initial fixture read failed".to_owned()
+        })?;
     let initial_blocks = initial.iter().skip(1).cloned().collect::<Vec<_>>();
     let append_count = BODY_PAGINATION_ITEM_COUNT
         .checked_sub(initial_blocks.len())
         .filter(|count| *count > 0)
-        .ok_or_else(|| "body initial fixture already contains twenty or more blocks".to_owned())?;
+        .ok_or_else(|| {
+            body_fixture_marker("initial_count_invalid");
+            "body initial fixture already contains twenty or more blocks".to_owned()
+        })?;
     let expected_suffix = body_pagination_suffix_spec(append_count);
-    let fixture_operations = body_pagination_append_operations(append_count)?;
+    let fixture_operations = body_pagination_append_operations(append_count).inspect_err(|_| {
+        body_fixture_marker("append_plan_failed");
+    })?;
     let operation_count = fixture_operations.len();
+    body_fixture_plan_diagnostic(initial_blocks.len(), append_count, operation_count);
     let fixture_outcome = initial
         .edit(&ctx.client)
         .apply_all(fixture_operations)
         .await
-        .map_err(|_| "body deterministic fixture batch failed".to_owned())?;
+        .map_err(|_| {
+            body_fixture_marker("apply_all_error");
+            "body deterministic fixture batch failed".to_owned()
+        })?;
+    let outcome_category = if fixture_outcome.failed.is_some() {
+        "failed"
+    } else if fixture_outcome.not_attempted.is_empty()
+        && fixture_outcome.applied.len() == operation_count
+    {
+        "complete"
+    } else {
+        "incomplete"
+    };
+    body_fixture_outcome_diagnostic(
+        outcome_category,
+        fixture_outcome.applied.len(),
+        usize::from(fixture_outcome.failed.is_some()),
+        fixture_outcome.not_attempted.len(),
+    );
     if fixture_outcome.failed.is_some()
         || !fixture_outcome.not_attempted.is_empty()
         || fixture_outcome.applied.len() != operation_count
     {
+        body_fixture_marker("apply_all_incomplete");
         return Err("body deterministic fixture batch did not complete".to_owned());
     }
     let mut created_ids = Vec::with_capacity(operation_count);
-    for (receipt, (expected_style, expected_text)) in
-        fixture_outcome.applied.iter().zip(&expected_suffix)
+    for (index, (receipt, (expected_style, expected_text))) in fixture_outcome
+        .applied
+        .iter()
+        .zip(&expected_suffix)
+        .enumerate()
     {
         let Some(affected) = receipt.affected.first() else {
+            body_fixture_receipt_diagnostic(index, 0, false, false, false, false);
             return Err("body fixture append receipt omitted the created block".to_owned());
         };
+        let address_ok = affected.space_id == ctx.space_id && affected.object_id == page.id;
+        let receipt_block = receipt.snapshot.get(&affected.block_id);
+        let block_present = receipt_block.is_some();
+        let content_ok = receipt_block.is_some_and(|block| {
+            matches!(
+                &block.content,
+                BlockContent::Text(content)
+                    if content.style == *expected_style && content.text == *expected_text
+            )
+        });
+        let root_last_ok = receipt.snapshot.root().children.last() == Some(&affected.block_id);
+        body_fixture_receipt_diagnostic(
+            index,
+            receipt.affected.len(),
+            address_ok,
+            block_present,
+            content_ok,
+            root_last_ok,
+        );
         let receipt_is_exact = receipt.affected.len() == 1
-            && affected.space_id == ctx.space_id
-            && affected.object_id == page.id
-            && receipt
-                .snapshot
-                .get(&affected.block_id)
-                .is_some_and(|block| {
-                    matches!(
-                        &block.content,
-                        BlockContent::Text(content)
-                            if content.style == *expected_style
-                                && content.text == *expected_text
-                    )
-                })
-            && receipt.snapshot.root().children.last() == Some(&affected.block_id);
+            && address_ok
+            && block_present
+            && content_ok
+            && root_last_ok;
         if !receipt_is_exact {
+            body_fixture_marker("receipt_invalid");
             return Err("body fixture append receipt did not prove the exact suffix".to_owned());
         }
         created_ids.push(affected.block_id.as_str().to_owned());
     }
     if created_ids.len() != expected_suffix.len() {
+        body_fixture_marker("receipt_coverage_invalid");
         return Err("body fixture append receipts did not cover the exact suffix".to_owned());
     }
-    let heading_id = created_ids
-        .first()
-        .cloned()
-        .ok_or_else(|| "body fixture omitted its created heading receipt".to_owned())?;
+    body_fixture_count("receipts_valid", created_ids.len());
+    let heading_id = created_ids.first().cloned().ok_or_else(|| {
+        body_fixture_marker("heading_receipt_missing");
+        "body fixture omitted its created heading receipt".to_owned()
+    })?;
     let fixture = ctx
         .client
         .blocks()
         .body(&ctx.space_id, &page.id)
         .fetch()
         .await
-        .map_err(|_| "body deterministic fixture read failed".to_owned())?;
+        .map_err(|_| {
+            body_fixture_marker("refetch_failed");
+            "body deterministic fixture read failed".to_owned()
+        })?;
+    body_fixture_shape_diagnostic(&fixture, &initial_blocks, &created_ids, &expected_suffix);
     if !is_exact_body_pagination_fixture(&fixture, &initial_blocks, &created_ids, &expected_suffix)
     {
+        body_fixture_marker("shape_invalid");
         return Err(
             "body deterministic fixture did not contain the exact ordered blocks".to_owned(),
         );
     }
+    body_fixture_marker("complete");
 
     let tools = driver.list_tools().await?;
     for name in [
