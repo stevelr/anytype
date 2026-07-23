@@ -4,13 +4,14 @@
 target/
 result
 anyproto/
-docs/
+.docs
 .claude
 .codex
-tmp/
+.*.md
 AGENTS.md
+CLAUDE.md
 graphify-out
+tmp/
 
-# per-orchestration scratch notes — never committed
 .agent-notes
 .orchestrator-notes

@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn property_value_spans_downtones_object_id_suffix() {
+    fn property_value_spans_object_id_suffix() {
         let id = "bafyreixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
         let spans = property_value_spans(&format!("Open ({id}), Next"));
         let rendered: String = spans.iter().map(|s| s.content.as_ref()).collect();

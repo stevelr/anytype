@@ -2,7 +2,7 @@
 
 [files]
 # ignore these files
-extend-exclude = ["spec/*.yaml", "docs/cli-plan.md"]
+extend-exclude = ["spec/*.yaml"]
 
 [default.extend-identifiers]
 # overrides: if right side of equals is same as left side, no change is made

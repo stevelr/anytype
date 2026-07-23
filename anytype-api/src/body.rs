@@ -1554,7 +1554,7 @@ fn validate_and_convert(
     detect_cycles(blocks, &index)?;
 
     // Reachability and depth from the root. After the single-parent and
-    // acyclicity checks the reachable component is a tree.
+    // acyclic checks the reachable component is a tree.
     let mut visited = vec![false; blocks.len()];
     let mut stack: Vec<(usize, usize)> = vec![(root_position, 1)];
     let mut reached = 0_usize;
