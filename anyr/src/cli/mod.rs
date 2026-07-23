@@ -743,7 +743,7 @@ pub enum TypeCommands {
         #[arg(long, value_enum)]
         layout: Option<TypeLayoutArg>,
 
-        /// add property to type by name, key, or id (read/merge into current list)
+        /// add property to the exact non-featured list (requires HTTP and gRPC)
         #[arg(long = "add-property", value_name = "PROP_NAME_OR_ID")]
         add_properties: Vec<String>,
 

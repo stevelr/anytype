@@ -76,6 +76,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- `anyr type update --add-property` now uses Anytype's exact source-backed
+  property classification and resubmits only non-featured recommended
+  properties. This replaces the fixed system-key exclusion heuristic, preserves
+  deterministic first-key de-duplication, and requires working HTTP and gRPC
+  credentials.
 - `anyr auth status` now reports HTTP and gRPC credentials separately with an
   explicit present/missing indicator per set, so it is clear which credential
   set a REST versus gRPC command needs.
