@@ -34,6 +34,31 @@ fn body_fixture_marker(event: &'static str) {
     }
 }
 
+fn body_scenario_marker(event: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=scenario event={event}");
+    }
+}
+
+fn body_scenario_count(event: &'static str, count: usize) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=scenario event={event} count={count}");
+    }
+}
+
+fn body_scenario_check(event: &'static str, ok: bool) -> bool {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=scenario event={event} ok={ok}");
+    }
+    ok
+}
+
+fn body_scenario_update(index: usize, result: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!("body_semantic_phase=scenario event=update index={index} result={result}");
+    }
+}
+
 fn body_fixture_count(event: &'static str, count: usize) {
     if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
         eprintln!("body_semantic_phase=fixture event={event} count={count}");
@@ -1052,7 +1077,9 @@ async fn run_body_scenario_inner(
     }
     body_fixture_marker("complete");
 
+    body_scenario_marker("catalog_start");
     let tools = driver.list_tools().await?;
+    body_scenario_count("catalog_received", tools.len());
     for name in [
         "body_block_list",
         "body_block_create",
@@ -1062,16 +1089,20 @@ async fn run_body_scenario_inner(
         "rich_page_create",
     ] {
         if !tools.iter().any(|candidate| candidate == name) {
+            body_scenario_marker("catalog_missing_required_tool");
             return Err(format!("{transport} catalog omitted {name}"));
         }
     }
+    body_scenario_marker("catalog_complete");
 
+    body_scenario_marker("pagination_first_start");
     let first = driver
         .call_tool(
             "body_block_list",
             json!({"space":ctx.space_id,"object_id":page.id,"limit":8}),
         )
         .await?;
+    body_scenario_marker("pagination_first_received");
     normalized_results.push(normalize_body_result(&first));
     let root_id = body_string(&first, "/root_id", "root ID")?.to_owned();
     body_string(&first, "/snapshot_hash", "snapshot hash")?;
@@ -1082,9 +1113,11 @@ async fn run_body_scenario_inner(
         .iter()
         .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
         .collect::<Result<Vec<_>, _>>()?;
-    if listed_block_ids.len() != 8 {
+    body_scenario_count("pagination_first_items", listed_block_ids.len());
+    if !body_scenario_check("pagination_first_exact", listed_block_ids.len() == 8) {
         return Err("body first page did not contain the exact limit of eight".to_owned());
     }
+    body_scenario_marker("pagination_second_start");
     let second = driver
         .call_tool(
             "body_block_list",
@@ -1093,8 +1126,12 @@ async fn run_body_scenario_inner(
             }),
         )
         .await?;
+    body_scenario_marker("pagination_second_received");
     normalized_results.push(normalize_body_result(&second));
-    if second["snapshot_hash"] != first["snapshot_hash"] {
+    if !body_scenario_check(
+        "pagination_second_hash_matches",
+        second["snapshot_hash"] == first["snapshot_hash"],
+    ) {
         return Err("body pages mixed snapshot hashes".to_owned());
     }
     let second_cursor =
@@ -1107,9 +1144,11 @@ async fn run_body_scenario_inner(
             .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    if listed_block_ids.len() != 16 {
+    body_scenario_count("pagination_second_cumulative_items", listed_block_ids.len());
+    if !body_scenario_check("pagination_second_exact", listed_block_ids.len() == 16) {
         return Err("body second page did not consume the next eight blocks".to_owned());
     }
+    body_scenario_marker("pagination_third_start");
     let third = driver
         .call_tool(
             "body_block_list",
@@ -1118,8 +1157,12 @@ async fn run_body_scenario_inner(
             }),
         )
         .await?;
+    body_scenario_marker("pagination_third_received");
     normalized_results.push(normalize_body_result(&third));
-    if third["snapshot_hash"] != first["snapshot_hash"] {
+    if !body_scenario_check(
+        "pagination_third_hash_matches",
+        third["snapshot_hash"] == first["snapshot_hash"],
+    ) {
         return Err("body pages mixed snapshot hashes".to_owned());
     }
     let third_ids = third["items"]
@@ -1128,16 +1171,25 @@ async fn run_body_scenario_inner(
         .iter()
         .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
         .collect::<Result<Vec<_>, _>>()?;
-    if third_ids.len() != BODY_PAGINATION_ITEM_COUNT - 16 {
+    body_scenario_count("pagination_third_items", third_ids.len());
+    if !body_scenario_check(
+        "pagination_third_exact",
+        third_ids.len() == BODY_PAGINATION_ITEM_COUNT - 16,
+    ) {
         return Err("body third page did not contain the final four blocks".to_owned());
     }
     listed_block_ids.extend(third_ids);
-    if listed_block_ids.len() != BODY_PAGINATION_ITEM_COUNT {
+    body_scenario_count("pagination_total_items", listed_block_ids.len());
+    if !body_scenario_check(
+        "pagination_total_exact",
+        listed_block_ids.len() == BODY_PAGINATION_ITEM_COUNT,
+    ) {
         return Err("body pagination did not contain exactly twenty blocks".to_owned());
     }
-    if third.get("next_cursor").is_some() {
+    if !body_scenario_check("pagination_terminated", third.get("next_cursor").is_none()) {
         return Err("body three-page fixture unexpectedly returned a fourth cursor".to_owned());
     }
+    body_scenario_marker("pagination_independent_start");
     let independent = ctx
         .client
         .blocks()
@@ -1150,9 +1202,16 @@ async fn run_body_scenario_inner(
         .skip(1)
         .map(|block| block.id.as_str().to_owned())
         .collect::<Vec<_>>();
-    if listed_block_ids != independent_ids {
+    body_scenario_count("pagination_independent_items", independent_ids.len());
+    if !body_scenario_check(
+        "pagination_independent_equal",
+        listed_block_ids == independent_ids,
+    ) {
         return Err("body pages did not preserve exact DFS order".to_owned());
     }
+    body_scenario_marker("pagination_complete");
+
+    body_scenario_marker("stale_cursor_start");
     let stale_first = driver
         .call_tool(
             "body_block_list",
@@ -1170,6 +1229,7 @@ async fn run_body_scenario_inner(
         )
         .await
         .map_err(|_| "independent revision write failed".to_owned())?;
+    body_scenario_marker("stale_cursor_revision_written");
     let stale_error = driver
         .call_tool_error(
             "body_block_list",
@@ -1178,17 +1238,20 @@ async fn run_body_scenario_inner(
             }),
         )
         .await?;
-    if !stale_error.contains("conflict") {
+    if !body_scenario_check("stale_cursor_conflict", stale_error.contains("conflict")) {
         return Err("body continuation did not reject revision drift".to_owned());
     }
     normalized_results.push(json!({"error_category":"conflict"}));
+    body_scenario_marker("stale_cursor_complete");
 
+    body_scenario_marker("primitive_start");
     let fresh = driver
         .call_tool(
             "body_block_list",
             json!({"space":ctx.space_id,"object_id":page.id,"limit":8}),
         )
         .await?;
+    body_scenario_marker("primitive_fresh_list_received");
     normalized_results.push(normalize_body_result(&fresh));
     let mut snapshot_hash = body_string(&fresh, "/snapshot_hash", "fresh hash")?.to_owned();
     let create_input = json!({
@@ -1206,6 +1269,7 @@ async fn run_body_scenario_inner(
         "primitive create",
     )
     .await?;
+    body_scenario_marker("primitive_create_complete");
     normalized_results.push(normalize_body_result(&created));
     let created_block_id = body_string(&created, "/block/id", "created block ID")?.to_owned();
     let replay = call_body_tool_with_metrics(
@@ -1216,12 +1280,16 @@ async fn run_body_scenario_inner(
         "primitive create replay",
     )
     .await?;
+    body_scenario_marker("primitive_replay_received");
     normalized_results.push(normalize_body_result(&replay));
-    if replay["block"]["id"] != created["block"]["id"]
-        || replay["idempotency"]["key_reused"] != true
-    {
+    let replay_id_matches = replay["block"]["id"] == created["block"]["id"];
+    let replay_key_reused = replay["idempotency"]["key_reused"] == true;
+    let replay_id_ok = body_scenario_check("primitive_replay_id_matches", replay_id_matches);
+    let replay_key_ok = body_scenario_check("primitive_replay_key_reused", replay_key_reused);
+    if !replay_id_ok || !replay_key_ok {
         return Err("body create replay did not retain one assigned ID".to_owned());
     }
+    body_scenario_marker("primitive_replay_complete");
     snapshot_hash = body_string(&replay, "/snapshot_hash", "replay hash")?.to_owned();
 
     let child = call_body_tool_with_metrics(
@@ -1238,6 +1306,7 @@ async fn run_body_scenario_inner(
         "heading append",
     )
     .await?;
+    body_scenario_marker("primitive_heading_append_received");
     normalized_results.push(normalize_body_result(&child));
     let child_id = body_string(&child, "/block/id", "child ID")?.to_owned();
     snapshot_hash = body_string(&child, "/snapshot_hash", "child hash")?.to_owned();
@@ -1257,9 +1326,10 @@ async fn run_body_scenario_inner(
                 .iter()
                 .any(|child| child.as_str() == child_id)
         });
-    if !appended_under_heading {
+    if !body_scenario_check("primitive_heading_append_verified", appended_under_heading) {
         return Err("targeted append did not land beneath the existing heading".to_owned());
     }
+    body_scenario_marker("primitive_heading_append_complete");
     let moved = call_body_tool_with_metrics(
         driver,
         "body_block_move",
@@ -1272,6 +1342,7 @@ async fn run_body_scenario_inner(
         "primitive move",
     )
     .await?;
+    body_scenario_marker("primitive_move_complete");
     normalized_results.push(normalize_body_result(&moved));
     snapshot_hash = body_string(&moved, "/snapshot_hash", "move hash")?.to_owned();
     let deleted = call_body_tool_with_metrics(
@@ -1286,9 +1357,12 @@ async fn run_body_scenario_inner(
         "primitive delete",
     )
     .await?;
+    body_scenario_marker("primitive_delete_complete");
     normalized_results.push(normalize_body_result(&deleted));
     snapshot_hash = body_string(&deleted, "/snapshot_hash", "delete hash")?.to_owned();
+    body_scenario_marker("primitive_complete");
 
+    body_scenario_marker("relation_start");
     let relation = call_body_tool_with_metrics(
         driver,
         "body_block_create",
@@ -1302,6 +1376,7 @@ async fn run_body_scenario_inner(
         "relation create",
     )
     .await?;
+    body_scenario_marker("relation_create_complete");
     normalized_results.push(normalize_body_result(&relation));
     let relation_id = body_string(&relation, "/block/id", "relation block ID")?.to_owned();
     snapshot_hash = body_string(&relation, "/snapshot_hash", "relation hash")?.to_owned();
@@ -1312,13 +1387,14 @@ async fn run_body_scenario_inner(
         .fetch()
         .await
         .map_err(|_| "independent relation detection read failed".to_owned())?;
-    if !relation_snapshot.iter().any(|block| {
+    let relation_detected = relation_snapshot.iter().any(|block| {
         block.id.as_str() == relation_id
             && matches!(
                 block.content,
                 BlockContent::Relation(ref relation) if relation.key == "tag"
             )
-    }) {
+    });
+    if !body_scenario_check("relation_create_verified", relation_detected) {
         return Err("created relation block was not independently detected".to_owned());
     }
     let relation_deleted = call_body_tool_with_metrics(
@@ -1333,6 +1409,7 @@ async fn run_body_scenario_inner(
         "relation delete",
     )
     .await?;
+    body_scenario_marker("relation_delete_complete");
     normalized_results.push(normalize_body_result(&relation_deleted));
     snapshot_hash =
         body_string(&relation_deleted, "/snapshot_hash", "relation delete hash")?.to_owned();
@@ -1349,6 +1426,7 @@ async fn run_body_scenario_inner(
         "relation recreate",
     )
     .await?;
+    body_scenario_marker("relation_recreate_complete");
     normalized_results.push(normalize_body_result(&recreated_relation));
     let recreated_relation_id =
         body_string(&recreated_relation, "/block/id", "recreated relation ID")?.to_owned();
@@ -1370,6 +1448,7 @@ async fn run_body_scenario_inner(
         "relation move",
     )
     .await?;
+    body_scenario_marker("relation_move_received");
     normalized_results.push(normalize_body_result(&relation_moved));
     let moved_relation_snapshot = ctx
         .client
@@ -1382,18 +1461,24 @@ async fn run_body_scenario_inner(
     let adjacent = root_children
         .windows(2)
         .any(|pair| pair[0].as_str() == recreated_relation_id && pair[1].as_str() == heading_id);
-    if !adjacent
-        || !moved_relation_snapshot.iter().any(|block| {
-            block.id.as_str() == recreated_relation_id
-                && matches!(
+    let recreated_relation_detected = moved_relation_snapshot.iter().any(|block| {
+        block.id.as_str() == recreated_relation_id
+            && matches!(
                     block.content,
                     BlockContent::Relation(ref relation) if relation.key == "tag"
-                )
-        })
-    {
+            )
+    });
+    let relation_adjacent_ok = body_scenario_check("relation_move_adjacent", adjacent);
+    let relation_content_ok = body_scenario_check(
+        "relation_move_content_verified",
+        recreated_relation_detected,
+    );
+    if !relation_adjacent_ok || !relation_content_ok {
         return Err("relation recreation/move was not independently verified".to_owned());
     }
+    body_scenario_marker("relation_complete");
 
+    body_scenario_marker("rich_primary_start");
     let rich_input = json!({
         "space":ctx.space_id,"name":format!("Rich {transport} {suffix}"),
         "idempotency_key":format!("rich-{transport}-{suffix}"),
@@ -1438,9 +1523,13 @@ async fn run_body_scenario_inner(
     let rich = driver
         .call_tool("rich_page_create", rich_input.clone())
         .await?;
+    body_scenario_marker("rich_primary_received");
     if let (Some(before), Some(after)) = (before_rich_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
-        if observed != expected_rich_metrics(1, primary_keys.len()) {
+        if !body_scenario_check(
+            "rich_primary_metrics_match",
+            observed == expected_rich_metrics(1, primary_keys.len()),
+        ) {
             return Err(format!(
                 "primary rich production metrics diverged: {observed:?}"
             ));
@@ -1449,10 +1538,11 @@ async fn run_body_scenario_inner(
     let rich_page_id = body_string(&rich, "/object_id", "rich page ID")?.to_owned();
     ctx.register_object(&rich_page_id);
     normalized_results.push(normalize_body_result(&rich));
-    if rich["status"] != "complete" {
+    if !body_scenario_check("rich_primary_status_complete", rich["status"] == "complete") {
         return Err("rich page workflow did not complete".to_owned());
     }
     let primary_ids = rich_applied_ids(&rich, &primary_keys)?;
+    body_scenario_count("rich_primary_applied_ids", primary_ids.len());
     let rich_snapshot = ctx
         .client
         .blocks()
@@ -1460,25 +1550,37 @@ async fn run_body_scenario_inner(
         .fetch()
         .await
         .map_err(|_| "independent rich body read failed".to_owned())?;
-    if !verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id) {
+    if !body_scenario_check(
+        "rich_primary_snapshot_verified",
+        verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id),
+    ) {
         return Err("independent primary rich ObjectShow verification failed".to_owned());
     }
+    body_scenario_marker("rich_primary_complete");
+    body_scenario_marker("rich_replay_start");
     let before_replay_metrics = driver.body_acceptance_metrics();
     let rich_replay = driver.call_tool("rich_page_create", rich_input).await?;
+    body_scenario_marker("rich_replay_received");
     if let (Some(before), Some(after)) = (before_replay_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
-        if observed != expected_rich_metrics(0, 0) {
+        if !body_scenario_check(
+            "rich_replay_metrics_match",
+            observed == expected_rich_metrics(0, 0),
+        ) {
             return Err(format!(
                 "rich replay production metrics diverged: {observed:?}"
             ));
         }
     }
-    if rich_replay["object_id"] != rich["object_id"]
-        || rich_replay["idempotency"]["key_reused"] != true
-    {
+    let rich_replay_id_matches = rich_replay["object_id"] == rich["object_id"];
+    let rich_replay_key_reused = rich_replay["idempotency"]["key_reused"] == true;
+    let rich_replay_id_ok = body_scenario_check("rich_replay_id_matches", rich_replay_id_matches);
+    let rich_replay_key_ok = body_scenario_check("rich_replay_key_reused", rich_replay_key_reused);
+    if !rich_replay_id_ok || !rich_replay_key_ok {
         return Err("rich page replay did not retain one exact page".to_owned());
     }
     normalized_results.push(normalize_body_result(&rich_replay));
+    body_scenario_marker("rich_replay_complete");
 
     let mut rich_snapshot_hash = body_string(
         &rich_replay,
@@ -1578,10 +1680,12 @@ async fn run_body_scenario_inner(
             BodyUpdateExpectation::LinkAppearance,
         ),
     ];
-    if update_arms.len() != 14 {
+    body_scenario_count("update_cases", update_arms.len());
+    if !body_scenario_check("update_case_count_exact", update_arms.len() == 14) {
         return Err("body update matrix did not own exactly fourteen arms".to_owned());
     }
-    for (label, block_id, change, expectation) in update_arms {
+    for (index, (label, block_id, change, expectation)) in update_arms.into_iter().enumerate() {
+        body_scenario_update(index, "start");
         let (evidence, next_hash) = run_body_update_arm(
             driver,
             ctx,
@@ -1592,11 +1696,17 @@ async fn run_body_scenario_inner(
             expectation,
             label,
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            body_scenario_update(index, "failed");
+        })?;
         normalized_results.push(evidence);
         rich_snapshot_hash = next_hash;
+        body_scenario_update(index, "complete");
     }
+    body_scenario_marker("updates_complete");
 
+    body_scenario_marker("rich_supplemental_start");
     let supplemental_input = json!({
         "space":ctx.space_id,"name":format!("Rich variants {transport} {suffix}"),
         "idempotency_key":format!("rich-variants-{transport}-{suffix}"),
@@ -1623,12 +1733,16 @@ async fn run_body_scenario_inner(
     let supplemental = driver
         .call_tool("rich_page_create", supplemental_input)
         .await?;
+    body_scenario_marker("rich_supplemental_received");
     if let (Some(before), Some(after)) = (
         before_supplemental_metrics,
         driver.body_acceptance_metrics(),
     ) {
         let observed = body_metrics_delta(before, after)?;
-        if observed != expected_rich_metrics(1, supplemental_keys.len()) {
+        if !body_scenario_check(
+            "rich_supplemental_metrics_match",
+            observed == expected_rich_metrics(1, supplemental_keys.len()),
+        ) {
             return Err(format!(
                 "supplemental rich production metrics diverged: {observed:?}"
             ));
@@ -1638,10 +1752,14 @@ async fn run_body_scenario_inner(
         body_string(&supplemental, "/object_id", "supplemental rich page ID")?.to_owned();
     ctx.register_object(&supplemental_page_id);
     normalized_results.push(normalize_body_result(&supplemental));
-    if supplemental["status"] != "complete" {
+    if !body_scenario_check(
+        "rich_supplemental_status_complete",
+        supplemental["status"] == "complete",
+    ) {
         return Err("supplemental rich workflow did not complete".to_owned());
     }
     let supplemental_ids = rich_applied_ids(&supplemental, &supplemental_keys)?;
+    body_scenario_count("rich_supplemental_applied_ids", supplemental_ids.len());
     let supplemental_snapshot = ctx
         .client
         .blocks()
@@ -1649,9 +1767,16 @@ async fn run_body_scenario_inner(
         .fetch()
         .await
         .map_err(|_| "independent supplemental rich body read failed".to_owned())?;
-    if !verify_supplemental_rich_snapshot(&supplemental_snapshot, &supplemental_ids, &page.id) {
+    if !body_scenario_check(
+        "rich_supplemental_snapshot_verified",
+        verify_supplemental_rich_snapshot(&supplemental_snapshot, &supplemental_ids, &page.id),
+    ) {
         return Err("independent supplemental rich ObjectShow verification failed".to_owned());
     }
+    body_scenario_marker("rich_supplemental_complete");
+    body_scenario_count("final_normalized_results", normalized_results.len());
+    body_scenario_count("final_listed_blocks", listed_block_ids.len());
+    body_scenario_marker("final_evidence_complete");
 
     Ok(BodyScenarioEvidence {
         normalized_results,
