@@ -39,6 +39,7 @@ use anytype::{
         with_disposable_space_context, with_test_context,
     },
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -46,11 +47,14 @@ use sha2::{Digest, Sha256};
 mod support;
 
 #[cfg(feature = "acceptance-harness")]
-use support::live_scenario::BodyDriverMetrics;
-#[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
     BODY_DIAGNOSTIC_SECRET, BodyReadOnlyEvidence, BodyScenarioEvidence, BodyScenarioFailure,
     run_body_read_only_scenario, run_body_scenario,
+};
+#[cfg(feature = "acceptance-harness")]
+use support::live_scenario::{
+    BodyDriverMetrics, OPTIONAL_LIVE_OWNERSHIP, OptionalEvidenceTier, OptionalFastWorkflow,
+    OptionalOperation, OptionalRealWorkflow,
 };
 use support::{
     live_scenario::{
@@ -114,6 +118,84 @@ impl DriverOptions {
         )
     }
 }
+
+#[cfg(feature = "acceptance-harness")]
+type OptionalRealWorkflowFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
+
+#[cfg(feature = "acceptance-harness")]
+type OptionalRealWorkflowRunner = fn() -> OptionalRealWorkflowFuture;
+
+#[cfg(feature = "acceptance-harness")]
+#[derive(Clone, Copy)]
+struct OptionalRealWorkflowRegistration {
+    workflow: OptionalRealWorkflow,
+    runner: OptionalRealWorkflowRunner,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl OptionalRealWorkflowRegistration {
+    async fn run(self) {
+        (self.runner)().await;
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn body_blocks_real_runner() -> OptionalRealWorkflowFuture {
+    Box::pin(run_body_blocks_real_workflow())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn chats_real_runner() -> OptionalRealWorkflowFuture {
+    Box::pin(run_chats_real_workflow())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn files_real_runner() -> OptionalRealWorkflowFuture {
+    Box::pin(run_files_real_workflow())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn members_real_runner() -> OptionalRealWorkflowFuture {
+    Box::pin(run_members_real_workflow())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn schema_real_runner() -> OptionalRealWorkflowFuture {
+    Box::pin(run_schema_real_workflow())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn views_write_real_runner() -> OptionalRealWorkflowFuture {
+    Box::pin(run_views_write_real_workflow())
+}
+
+#[cfg(feature = "acceptance-harness")]
+const OPTIONAL_REAL_WORKFLOWS: [OptionalRealWorkflowRegistration; 6] = [
+    OptionalRealWorkflowRegistration {
+        workflow: OptionalRealWorkflow::BodyBlocks,
+        runner: body_blocks_real_runner,
+    },
+    OptionalRealWorkflowRegistration {
+        workflow: OptionalRealWorkflow::Chats,
+        runner: chats_real_runner,
+    },
+    OptionalRealWorkflowRegistration {
+        workflow: OptionalRealWorkflow::Files,
+        runner: files_real_runner,
+    },
+    OptionalRealWorkflowRegistration {
+        workflow: OptionalRealWorkflow::Members,
+        runner: members_real_runner,
+    },
+    OptionalRealWorkflowRegistration {
+        workflow: OptionalRealWorkflow::Schema,
+        runner: schema_real_runner,
+    },
+    OptionalRealWorkflowRegistration {
+        workflow: OptionalRealWorkflow::ViewsWrite,
+        runner: views_write_real_runner,
+    },
+];
 
 fn preview_meta() -> Value {
     json!({
@@ -1860,10 +1942,7 @@ spawned_baseline_test!(
 );
 spawned_baseline_test!(headless_stdio_standard_archive, ScenarioId::Archive);
 
-#[tokio::test]
-#[serial_test::serial]
-#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-async fn headless_stdio_members_minimizes_personal_data() {
+async fn run_members_real_workflow() {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
     let outcome = Box::pin(with_disposable_space_context(
@@ -1926,6 +2005,464 @@ async fn headless_stdio_members_minimizes_personal_data() {
     }
 }
 
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_members_minimizes_personal_data() {
+    run_members_real_workflow().await;
+}
+
+const FILE_RESOURCE_TEMPLATE: &str =
+    "anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}";
+
+#[derive(Debug)]
+struct SpawnedFilesEvidence {
+    normalized: Value,
+}
+
+fn disposable_credential_needles(ctx: &TestContext) -> TestResult<Vec<Vec<u8>>> {
+    const CREDENTIAL_NAMES: &[&str] = &[
+        "ANYTYPE_KEY_HTTP_TOKEN",
+        "ANYTYPE_KEY_ACCOUNT_ID",
+        "ANYTYPE_KEY_ACCOUNT_KEY",
+        "ANYTYPE_KEY_SESSION_TOKEN",
+    ];
+    let environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| sentinel_assertion("files workflow omitted disposable child credentials"))?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+    environment.configure(&mut command)?;
+    let needles = command
+        .get_envs()
+        .filter_map(|(name, value)| {
+            let name = name.to_str()?;
+            CREDENTIAL_NAMES.contains(&name).then_some(value?)
+        })
+        .map(|value| value.to_string_lossy().into_owned().into_bytes())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if needles.len() < 2 {
+        return Err(sentinel_assertion(
+            "files workflow child credentials were incomplete",
+        ));
+    }
+    Ok(needles)
+}
+
+fn require_files_diagnostics(
+    transcript: &str,
+    output: &ProcessOutput,
+    secrets: &[&[u8]],
+    credential_needles: &[Vec<u8>],
+) -> TestResult<()> {
+    let metrics = stderr_metrics(&output.stderr);
+    let categorized =
+        metrics.runtime_ready + metrics.operation_success + metrics.operation_non_success;
+    let transcript = transcript.as_bytes();
+    let leaks_secret = secrets.iter().any(|secret| {
+        !secret.is_empty()
+            && (contains_bytes(transcript, secret) || contains_bytes(&output.stderr, secret))
+    });
+    let leaks_credential = credential_needles.iter().any(|credential| {
+        contains_bytes(transcript, credential) || contains_bytes(&output.stderr, credential)
+    });
+    if output.stderr.len() > 524_288
+        || leaks_secret
+        || leaks_credential
+        || metrics.invalid_utf8
+        || metrics.runtime_ready != 1
+        || metrics.operation_success == 0
+        || metrics.stack_overflow != 0
+        || metrics.panic != 0
+        || metrics.fatal != 0
+        || metrics.other != 0
+        || metrics.lines != categorized
+    {
+        return Err(sentinel_assertion(
+            "files child diagnostics violated fixed-category/redaction bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn file_sha256(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    Sha256::digest(bytes)
+        .iter()
+        .flat_map(|byte| {
+            [
+                HEX[usize::from(*byte >> 4)] as char,
+                HEX[usize::from(*byte & 0x0f)] as char,
+            ]
+        })
+        .collect()
+}
+
+fn verify_file_resource(
+    resource: &Value,
+    expected_uri: &str,
+    expected_bytes: &[u8],
+) -> TestResult<()> {
+    let contents = resource["contents"]
+        .as_array()
+        .ok_or_else(|| sentinel_assertion("files resource omitted contents"))?;
+    if contents.len() != 1 {
+        return Err(sentinel_assertion(
+            "files resource returned the wrong content count",
+        ));
+    }
+    let content = &contents[0];
+    if content["uri"] != expected_uri || content["mimeType"] != "application/octet-stream" {
+        return Err(sentinel_assertion(
+            "files resource identity or media type diverged",
+        ));
+    }
+    let encoded = content["blob"]
+        .as_str()
+        .ok_or_else(|| sentinel_assertion("files resource omitted blob bytes"))?;
+    let decoded = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| sentinel_assertion("files resource returned invalid base64"))?;
+    if decoded != expected_bytes || file_sha256(&decoded) != file_sha256(expected_bytes) {
+        return Err(sentinel_assertion(
+            "files resource returned incorrect bounded bytes",
+        ));
+    }
+    Ok(())
+}
+
+async fn files_tool_value(
+    driver: &mut OwnedStdioDriver,
+    name: &'static str,
+    arguments: Value,
+) -> TestResult<Value> {
+    driver.call_tool(name, arguments).await.map_err(|error| {
+        eprintln!("spawned files debug: tool={name} category={error}");
+        sentinel_assertion("spawned files tool call failed")
+    })
+}
+
+async fn exercise_spawned_files_workflow(
+    driver: &mut OwnedStdioDriver,
+    ctx: &TestContext,
+    label: &str,
+    file_name: &str,
+    payload: &[u8],
+) -> TestResult<SpawnedFilesEvidence> {
+    let mut tools = driver
+        .list_tools()
+        .await
+        .map_err(|_| sentinel_assertion("spawned files tools/list failed"))?;
+    tools.sort();
+    let file_tools = tools
+        .iter()
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "file_metadata" | "file_read" | "file_upload" | "optional_toolset_status"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if file_tools
+        != [
+            "file_metadata",
+            "file_read",
+            "file_upload",
+            "optional_toolset_status",
+        ]
+    {
+        return Err(sentinel_assertion(
+            "spawned files catalog did not expose the exact registry",
+        ));
+    }
+    let status = files_tool_value(driver, "optional_toolset_status", json!({})).await?;
+    if status
+        != json!({
+            "configured_toolsets":["files"],
+            "active_toolsets":["files"]
+        })
+    {
+        return Err(sentinel_assertion(
+            "spawned files status did not identify the exact registry",
+        ));
+    }
+    let templates = driver
+        .list_resource_templates()
+        .await
+        .map_err(|_| sentinel_assertion("spawned files resource templates failed"))?;
+    let file_templates = templates["resourceTemplates"]
+        .as_array()
+        .ok_or_else(|| sentinel_assertion("spawned files templates omitted inventory"))?
+        .iter()
+        .filter(|template| template["uriTemplate"] == FILE_RESOURCE_TEMPLATE)
+        .count();
+    if file_templates != 1 {
+        return Err(sentinel_assertion(
+            "spawned files registry omitted its exact resource template",
+        ));
+    }
+    let content_sha256 = file_sha256(payload);
+    let encoded_payload = BASE64_STANDARD.encode(payload);
+    let upload = files_tool_value(
+        driver,
+        "file_upload",
+        json!({
+            "space":ctx.space_id,
+            "name":file_name,
+            "content_base64":encoded_payload,
+            "media_type":"application/octet-stream",
+            "idempotency_key":format!("mcp-files-{label}-{}", unique_suffix())
+        }),
+    )
+    .await?;
+    let file_id = upload["file_id"]
+        .as_str()
+        .ok_or_else(|| sentinel_assertion("spawned files upload omitted its object ID"))?
+        .to_owned();
+    ctx.register_file(&file_id);
+
+    if upload["space_id"] != ctx.space_id
+        || upload["requested_name"] != file_name
+        || upload["media_type"] != "application/octet-stream"
+        || upload["size_bytes"] != payload.len()
+        || upload["content_sha256"] != content_sha256
+        || upload["reused"] != false
+    {
+        return Err(sentinel_assertion(
+            "spawned files upload verification diverged",
+        ));
+    }
+
+    let metadata = files_tool_value(
+        driver,
+        "file_metadata",
+        json!({"space":ctx.space_id,"file_id":file_id}),
+    )
+    .await?;
+    if metadata["file_id"] != file_id
+        || metadata["space_id"] != ctx.space_id
+        || metadata["media_type"] != "application/octet-stream"
+        || metadata["size_bytes"] != payload.len()
+        || metadata["accepts_byte_ranges"] != true
+    {
+        return Err(sentinel_assertion(
+            "spawned files metadata verification diverged",
+        ));
+    }
+
+    let split = payload.len() / 2;
+    let mut ranges = Vec::new();
+    for (offset, length) in [(0, split), (split, payload.len() - split)] {
+        let expected_bytes = &payload[offset..offset + length];
+        let range_sha256 = file_sha256(expected_bytes);
+        let read = files_tool_value(
+            driver,
+            "file_read",
+            json!({
+                "space":ctx.space_id,
+                "file_id":file_id,
+                "offset":offset,
+                "length":length
+            }),
+        )
+        .await?;
+        let expected_uri = format!(
+            "anytype-file://bytes/{}/{}/{}/{}/{}",
+            ctx.space_id, file_id, offset, length, range_sha256
+        );
+        if read["file_id"] != file_id
+            || read["space_id"] != ctx.space_id
+            || read["media_type"] != "application/octet-stream"
+            || read["offset"] != offset
+            || read["requested_bytes"] != length
+            || read["returned_bytes"] != length
+            || read["total_bytes"] != payload.len()
+            || read["complete"] != (offset + length == payload.len())
+            || read["content_sha256"] != range_sha256
+            || read["content_kind"] != "blob_resource"
+            || read["resource_uri"] != expected_uri
+        {
+            return Err(sentinel_assertion(
+                "spawned files bounded read verification diverged",
+            ));
+        }
+        let resource = driver
+            .read_resource(&expected_uri)
+            .await
+            .map_err(|_| sentinel_assertion("spawned files resources/read failed"))?;
+        verify_file_resource(&resource, &expected_uri, expected_bytes)?;
+        ranges.push(json!({
+            "offset":offset,
+            "requested_bytes":length,
+            "returned_bytes":length,
+            "total_bytes":payload.len(),
+            "complete":offset + length == payload.len(),
+            "content_sha256":range_sha256,
+            "content_kind":"blob_resource",
+            "resource_media_type":"application/octet-stream"
+        }));
+    }
+
+    let independent = ctx
+        .client
+        .files()
+        .download_request(&ctx.space_id, &file_id)
+        .response_limit_bytes(payload.len() as u64 + 1)
+        .error_limit_bytes(16_384)
+        .header_evidence_limit_bytes(4_096)
+        .max_attempts(3)
+        .download()
+        .await?;
+    if independent.status.as_u16() != 200
+        || independent.bytes.as_ref() != payload
+        || file_sha256(&independent.bytes) != content_sha256
+    {
+        return Err(sentinel_assertion(
+            "independent Anytype API file download diverged",
+        ));
+    }
+
+    Ok(SpawnedFilesEvidence {
+        normalized: json!({
+            "tools":file_tools,
+            "status":status,
+            "resource_template":FILE_RESOURCE_TEMPLATE,
+            "upload":{
+                "media_type":upload["media_type"],
+                "size_bytes":upload["size_bytes"],
+                "content_sha256":upload["content_sha256"],
+                "reused":upload["reused"]
+            },
+            "metadata":{
+                "media_type":metadata["media_type"],
+                "size_bytes":metadata["size_bytes"],
+                "accepts_byte_ranges":metadata["accepts_byte_ranges"],
+                "strong_etag_present":metadata.get("strong_etag").is_some(),
+                "last_modified_present":metadata.get("last_modified").is_some()
+            },
+            "ranges":ranges,
+            "independent_download":{
+                "status":independent.status.as_u16(),
+                "size_bytes":independent.bytes.len(),
+                "content_sha256":content_sha256
+            }
+        }),
+    })
+}
+
+async fn run_spawned_files_transport(
+    ctx: &TestContext,
+    label: &str,
+    options: DriverOptions,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    payload: &[u8],
+    credential_needles: &[Vec<u8>],
+) -> TestResult<SpawnedFilesEvidence> {
+    let child = spawn_disposable_driver(ctx, cleanup_record, options, Some("files"))?;
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(&child),
+    };
+    driver.with_driver(StdioDriver::initialize);
+    let file_name = format!("private-mcp-files-{label}-{}.bin", unique_suffix());
+    let encoded_payload = BASE64_STANDARD.encode(payload);
+    let result =
+        exercise_spawned_files_workflow(&mut driver, ctx, label, &file_name, payload).await;
+    drop(driver);
+    let child = lock_driver(&child)
+        .take()
+        .ok_or_else(|| sentinel_assertion("registered files child disappeared"))?;
+    let (transcript, output) = child
+        .try_finish()
+        .map_err(|_| sentinel_assertion("registered files child did not stop cleanly"))?;
+    require_files_diagnostics(
+        &transcript,
+        &output,
+        &[file_name.as_bytes(), encoded_payload.as_bytes()],
+        credential_needles,
+    )?;
+    result
+}
+
+async fn run_files_real_workflow() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let stable_callback_cleanup = Arc::clone(&stable_cleanup);
+    let preview_callback_cleanup = Arc::clone(&preview_cleanup);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-stdio-files-registry",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let credential_needles = disposable_credential_needles(ctx.as_ref())?;
+                let mut state = 0x0A11_F17E_u32;
+                let mut payload = Vec::with_capacity(8_192);
+                for _ in 0..8_192 {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    payload.push((state & 0xff) as u8);
+                }
+
+                let stable = run_spawned_files_transport(
+                    ctx.as_ref(),
+                    "stable",
+                    DriverOptions::STANDARD,
+                    stable_callback_cleanup,
+                    &payload,
+                    &credential_needles,
+                )
+                .await?;
+                let preview = run_spawned_files_transport(
+                    ctx.as_ref(),
+                    "preview",
+                    DriverOptions::PREVIEW_STANDARD,
+                    preview_callback_cleanup,
+                    &payload,
+                    &credential_needles,
+                )
+                .await?;
+                if stable.normalized != preview.normalized {
+                    return Err(sentinel_assertion(
+                        "stable and preview spawned files evidence diverged",
+                    ));
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned files registry suite");
+    match outcome {
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *stable_cleanup.lock().expect("stable files cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_eq!(
+                *preview_cleanup
+                    .lock()
+                    .expect("preview files cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+        }
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("spawned files registry skipped before callback: {reason:?}");
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(disposable_anytype_files)]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_files_registry_runs_stable_and_preview_workflows() {
+    run_files_real_workflow().await;
+}
+
 fn chats_process_failure(
     label: &str,
     stage: &str,
@@ -1984,10 +2521,7 @@ async fn run_spawned_chats_registry_transport(
     }
 }
 
-#[tokio::test]
-#[serial_test::serial]
-#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-async fn headless_stdio_chats_registry_runs_stable_and_preview_workflows() {
+async fn run_chats_real_workflow() {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
     let outcome = Box::pin(with_disposable_space_context(
@@ -2058,6 +2592,13 @@ async fn headless_stdio_chats_registry_runs_stable_and_preview_workflows() {
             eprintln!("spawned chats registry suite skipped before callback: {reason:?}");
         }
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_chats_registry_runs_stable_and_preview_workflows() {
+    run_chats_real_workflow().await;
 }
 
 fn layouts_process_failure(
@@ -3132,10 +3673,7 @@ async fn run_shared_views_write_acceptance(ctx: Arc<TestContext>) -> TestResult<
 }
 
 #[cfg(feature = "acceptance-harness")]
-#[tokio::test]
-#[serial_test::serial]
-#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
+async fn run_views_write_real_workflow() {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
     let outcome = Box::pin(with_disposable_space_context(
@@ -3156,10 +3694,15 @@ async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
     }
 }
 
+#[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-async fn headless_stdio_schema_registry_runs_all_nine_workflows() {
+async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
+    run_views_write_real_workflow().await;
+}
+
+async fn run_schema_real_workflow() {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
     let outcome = Box::pin(with_disposable_space_context(
@@ -3445,6 +3988,520 @@ async fn headless_stdio_schema_registry_runs_all_nine_workflows() {
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned schema registry suite skipped before callback: {reason:?}");
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_schema_registry_runs_all_nine_workflows() {
+    run_schema_real_workflow().await;
+}
+
+const ALL_OPTIONAL_TOOLSETS: &str = "body-blocks,chats,files,members,schema,views-write";
+const ALL_OPTIONAL_TOOLSETS_REVERSED: &str = "views-write,schema,members,files,chats,body-blocks";
+const ALL_OPTIONAL_TOOLSET_NAMES: [&str; 6] = [
+    "body-blocks",
+    "chats",
+    "files",
+    "members",
+    "schema",
+    "views-write",
+];
+const STANDARD_CORE_TOOLS: [&str; 14] = [
+    "object_archive",
+    "object_create",
+    "object_edit",
+    "object_get",
+    "object_search",
+    "object_update",
+    "property_list",
+    "server_status",
+    "space_list",
+    "tag_list",
+    "template_list",
+    "type_list",
+    "view_list",
+    "view_object_list",
+];
+const READ_ONLY_CORE_TOOLS: [&str; 10] = [
+    "object_get",
+    "object_search",
+    "property_list",
+    "server_status",
+    "space_list",
+    "tag_list",
+    "template_list",
+    "type_list",
+    "view_list",
+    "view_object_list",
+];
+const ALL_OPTIONAL_READ_WRITE_TOOLS: [&str; 30] = [
+    "body_block_create",
+    "body_block_delete",
+    "body_block_list",
+    "body_block_move",
+    "body_block_update",
+    "chat_list",
+    "chat_message_add",
+    "chat_message_delete",
+    "chat_message_get",
+    "chat_message_list",
+    "chat_message_search",
+    "collection_member_add",
+    "collection_member_list",
+    "collection_member_remove",
+    "file_metadata",
+    "file_read",
+    "file_upload",
+    "member_get",
+    "member_list",
+    "optional_toolset_status",
+    "property_create",
+    "property_update",
+    "rich_page_create",
+    "space_create",
+    "space_update",
+    "tag_create",
+    "tag_update",
+    "type_create",
+    "type_get",
+    "type_update",
+];
+const ALL_OPTIONAL_READ_ONLY_TOOLS: [&str; 12] = [
+    "body_block_list",
+    "chat_list",
+    "chat_message_get",
+    "chat_message_list",
+    "chat_message_search",
+    "collection_member_list",
+    "file_metadata",
+    "file_read",
+    "member_get",
+    "member_list",
+    "optional_toolset_status",
+    "type_get",
+];
+
+fn aggregate_sentinel_error(message: impl Into<String>) -> TestError {
+    TestError::Assertion {
+        message: message.into(),
+    }
+}
+
+async fn require_aggregate_contract(
+    driver: &mut OwnedStdioDriver,
+    core_tools: &[&str],
+    optional_tools: &[&str],
+) -> TestResult<()> {
+    let mut actual = driver
+        .list_tools()
+        .await
+        .map_err(|_| aggregate_sentinel_error("aggregate tools/list failed"))?;
+    actual.sort();
+    let mut expected = core_tools
+        .iter()
+        .chain(optional_tools)
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    expected.sort();
+    if actual != expected {
+        return Err(aggregate_sentinel_error(format!(
+            "aggregate catalog mismatch: expected {} core + {} optional tools, observed {} total",
+            core_tools.len(),
+            optional_tools.len(),
+            actual.len()
+        )));
+    }
+
+    let status = driver
+        .call_tool("optional_toolset_status", json!({}))
+        .await
+        .map_err(|_| aggregate_sentinel_error("aggregate optional status failed"))?;
+    if status["configured_toolsets"] != json!(ALL_OPTIONAL_TOOLSET_NAMES)
+        || status["active_toolsets"] != json!(ALL_OPTIONAL_TOOLSET_NAMES)
+    {
+        return Err(aggregate_sentinel_error(
+            "aggregate optional status was not canonical and fully active",
+        ));
+    }
+
+    let templates = driver
+        .list_resource_templates()
+        .await
+        .map_err(|_| aggregate_sentinel_error("aggregate resource templates failed"))?;
+    let file_template_count = templates["resourceTemplates"]
+        .as_array()
+        .ok_or_else(|| aggregate_sentinel_error("aggregate templates omitted their inventory"))?
+        .iter()
+        .filter(|template| template["uriTemplate"] == FILE_RESOURCE_TEMPLATE)
+        .count();
+    if file_template_count != 1 {
+        return Err(aggregate_sentinel_error(
+            "aggregate files registry did not contribute exactly one resource template",
+        ));
+    }
+    Ok(())
+}
+
+async fn aggregate_tool_value(
+    driver: &mut OwnedStdioDriver,
+    name: &'static str,
+    arguments: Value,
+) -> TestResult<Value> {
+    driver.call_tool(name, arguments).await.map_err(|error| {
+        eprintln!("aggregate optional sentinel tool={name} category={error}");
+        aggregate_sentinel_error(format!("aggregate {name} call failed"))
+    })
+}
+
+async fn require_aggregate_representative_reads(
+    driver: &mut OwnedStdioDriver,
+    ctx: &TestContext,
+    page_id: &str,
+    chat_id: &str,
+    file_id: &str,
+    type_id: &str,
+    collection_id: &str,
+) -> TestResult<()> {
+    let body = aggregate_tool_value(
+        driver,
+        "body_block_list",
+        json!({"space":ctx.space_id,"object_id":page_id,"limit":8}),
+    )
+    .await?;
+    if body["object_id"] != page_id || body["space_id"] != ctx.space_id {
+        return Err(aggregate_sentinel_error(
+            "aggregate body-blocks read returned another fixture",
+        ));
+    }
+
+    let chats = aggregate_tool_value(
+        driver,
+        "chat_list",
+        json!({"space":ctx.space_id,"limit":20}),
+    )
+    .await?;
+    if !chats["items"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["id"].as_str() == Some(chat_id))
+    }) {
+        return Err(aggregate_sentinel_error(
+            "aggregate chats read omitted its fixture",
+        ));
+    }
+
+    let file = aggregate_tool_value(
+        driver,
+        "file_metadata",
+        json!({"space":ctx.space_id,"file_id":file_id}),
+    )
+    .await?;
+    if file["file_id"] != file_id || file["space_id"] != ctx.space_id {
+        return Err(aggregate_sentinel_error(
+            "aggregate files read returned another fixture",
+        ));
+    }
+
+    let members = aggregate_tool_value(
+        driver,
+        "member_list",
+        json!({"space":ctx.space_id,"limit":100}),
+    )
+    .await?;
+    if members["items"]
+        .as_array()
+        .is_none_or(|items| items.is_empty())
+    {
+        return Err(aggregate_sentinel_error(
+            "aggregate members read omitted the disposable-space owner",
+        ));
+    }
+
+    let schema = aggregate_tool_value(
+        driver,
+        "type_get",
+        json!({"space":ctx.space_id,"type":type_id}),
+    )
+    .await?;
+    if schema.pointer("/type/id").and_then(Value::as_str) != Some(type_id) {
+        return Err(aggregate_sentinel_error(
+            "aggregate schema read returned another type",
+        ));
+    }
+
+    let membership = aggregate_tool_value(
+        driver,
+        "collection_member_list",
+        json!({"space":ctx.space_id,"collection_id":collection_id,"limit":20}),
+    )
+    .await?;
+    let contains_page = membership["items"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["object_id"].as_str() == Some(page_id))
+    });
+    if !contains_page {
+        return Err(aggregate_sentinel_error(
+            "aggregate views-write read omitted its fixture member",
+        ));
+    }
+    Ok(())
+}
+
+fn finish_aggregate_child(
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    secrets: &[&[u8]],
+    credential_needles: &[Vec<u8>],
+) -> TestResult<()> {
+    let child = lock_driver(child)
+        .take()
+        .ok_or_else(|| aggregate_sentinel_error("aggregate stdio child disappeared"))?;
+    let (transcript, output) = child
+        .try_finish()
+        .map_err(|_| aggregate_sentinel_error("aggregate stdio child did not stop cleanly"))?;
+    require_files_diagnostics(&transcript, &output, secrets, credential_needles)
+        .map_err(|_| aggregate_sentinel_error("aggregate child diagnostics were not redacted"))
+}
+
+#[tokio::test]
+#[serial_test::serial(disposable_anytype_optional_toolsets)]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_children() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let stable_callback_cleanup = Arc::clone(&stable_cleanup);
+    let preview_callback_cleanup = Arc::clone(&preview_cleanup);
+
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-stdio-all-optional-toolsets",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let suffix = unique_suffix();
+                let page_name = format!("private aggregate page {suffix}");
+                let page = ctx
+                    .client
+                    .new_object(&ctx.space_id, "page")
+                    .name(&page_name)
+                    .create()
+                    .await?;
+                ctx.register_object(&page.id);
+
+                let chat_name = format!("private aggregate chat {suffix}");
+                let chat = ctx
+                    .client
+                    .chats()
+                    .in_space(&ctx.space_id)
+                    .create(
+                        &chat_name,
+                        Icon::Emoji {
+                            emoji: "🧩".to_owned(),
+                        },
+                    )
+                    .create()
+                    .await?;
+                ctx.register_object(&chat.id);
+
+                let type_name = format!("private aggregate collection type {suffix}");
+                let collection_type = ctx.create_collection_type_fixture(&type_name).await?;
+                let collection_name = format!("private aggregate collection {suffix}");
+                let collection = ctx
+                    .create_collection_fixture(&collection_type, &collection_name)
+                    .await?;
+                ctx.client
+                    .view_add_objects(&ctx.space_id, &collection.id, [&page.id])
+                    .await?;
+                let membership_before = ctx
+                    .client
+                    .collection_membership_page(&ctx.space_id, &collection.id, 20, None)
+                    .await?;
+                if membership_before.continuation.is_some()
+                    || membership_before.object_ids != [page.id.clone()]
+                {
+                    return Err(aggregate_sentinel_error(
+                        "aggregate collection fixture was not exact",
+                    ));
+                }
+                let credential_needles = disposable_credential_needles(ctx.as_ref())?;
+                let mut state = 0xA66E_6A7E_u32;
+                let mut payload = Vec::with_capacity(8_192);
+                for _ in 0..8_192 {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    payload.push((state & 0xff) as u8);
+                }
+                let encoded_payload = BASE64_STANDARD.encode(&payload);
+                let file_name = format!("private-aggregate-{suffix}.bin");
+
+                let stable_child = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    stable_callback_cleanup,
+                    DriverOptions::STANDARD,
+                    Some(ALL_OPTIONAL_TOOLSETS_REVERSED),
+                )?;
+                let mut stable = OwnedStdioDriver {
+                    driver: Arc::clone(&stable_child),
+                };
+                stable.with_driver(StdioDriver::initialize);
+                require_aggregate_contract(
+                    &mut stable,
+                    &STANDARD_CORE_TOOLS,
+                    &ALL_OPTIONAL_READ_WRITE_TOOLS,
+                )
+                .await?;
+                let upload = aggregate_tool_value(
+                    &mut stable,
+                    "file_upload",
+                    json!({
+                        "space":ctx.space_id,
+                        "name":file_name,
+                        "content_base64":encoded_payload,
+                        "media_type":"application/octet-stream",
+                        "idempotency_key":format!("aggregate-file-{suffix}")
+                    }),
+                )
+                .await?;
+                let file_id = upload["file_id"]
+                    .as_str()
+                    .ok_or_else(|| aggregate_sentinel_error("aggregate upload omitted file ID"))?
+                    .to_owned();
+                ctx.register_file(&file_id);
+                require_aggregate_representative_reads(
+                    &mut stable,
+                    ctx.as_ref(),
+                    &page.id,
+                    &chat.id,
+                    &file_id,
+                    &collection_type.id,
+                    &collection.id,
+                )
+                .await?;
+                drop(stable);
+                finish_aggregate_child(
+                    &stable_child,
+                    &[
+                        page_name.as_bytes(),
+                        chat_name.as_bytes(),
+                        collection_name.as_bytes(),
+                        file_name.as_bytes(),
+                        encoded_payload.as_bytes(),
+                    ],
+                    &credential_needles,
+                )?;
+
+                let preview_child = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    preview_callback_cleanup,
+                    DriverOptions::PREVIEW_READ_ONLY,
+                    Some(ALL_OPTIONAL_TOOLSETS),
+                )?;
+                let mut preview = OwnedStdioDriver {
+                    driver: Arc::clone(&preview_child),
+                };
+                preview.with_driver(StdioDriver::initialize);
+                require_aggregate_contract(
+                    &mut preview,
+                    &READ_ONLY_CORE_TOOLS,
+                    &ALL_OPTIONAL_READ_ONLY_TOOLS,
+                )
+                .await?;
+                require_aggregate_representative_reads(
+                    &mut preview,
+                    ctx.as_ref(),
+                    &page.id,
+                    &chat.id,
+                    &file_id,
+                    &collection_type.id,
+                    &collection.id,
+                )
+                .await?;
+
+                let rejection = preview.with_driver(|driver| {
+                    driver.request(
+                        "tools/call",
+                        json!({
+                            "name":"collection_member_remove",
+                            "arguments":{
+                                "space":ctx.space_id,
+                                "collection_id":collection.id,
+                                "object_id":page.id
+                            }
+                        }),
+                    )
+                });
+                if rejection.pointer("/result/isError") != Some(&json!(true))
+                    || rejection
+                        .pointer("/result/structuredContent/code")
+                        .and_then(Value::as_str)
+                        != Some("validation")
+                {
+                    return Err(aggregate_sentinel_error(
+                        "aggregate preview read-only child did not reject a stale mutation",
+                    ));
+                }
+
+                let membership_after = ctx
+                    .client
+                    .collection_membership_page(&ctx.space_id, &collection.id, 20, None)
+                    .await?;
+                if membership_after.object_ids != membership_before.object_ids
+                    || membership_after.continuation != membership_before.continuation
+                {
+                    return Err(aggregate_sentinel_error(
+                        "aggregate read-only rejection changed canonical membership",
+                    ));
+                }
+                let page_after = ctx.client.object(&ctx.space_id, &page.id).get().await?;
+                if page_after.id != page.id || page_after.name != page.name {
+                    return Err(aggregate_sentinel_error(
+                        "aggregate read-only rejection changed its fixture object",
+                    ));
+                }
+
+                drop(preview);
+                finish_aggregate_child(
+                    &preview_child,
+                    &[
+                        page_name.as_bytes(),
+                        chat_name.as_bytes(),
+                        collection_name.as_bytes(),
+                        file_name.as_bytes(),
+                        encoded_payload.as_bytes(),
+                    ],
+                    &credential_needles,
+                )?;
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe aggregate optional-toolset sentinels");
+
+    match outcome {
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *stable_cleanup
+                    .lock()
+                    .expect("aggregate stable cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_eq!(
+                *preview_cleanup
+                    .lock()
+                    .expect("aggregate preview cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+        }
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            eprintln!("aggregate optional-toolset sentinels skipped before callback: {reason:?}");
         }
     }
 }
@@ -4743,10 +5800,7 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
 }
 
 #[cfg(feature = "acceptance-harness")]
-#[tokio::test]
-#[serial_test::serial]
-#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
+async fn run_body_blocks_real_workflow() {
     let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
     let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
     let stable_read_only_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
@@ -4791,6 +5845,56 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
             ChildCleanupRecord::Stopped
         );
         assert_fresh_space_absence(&space_id).await;
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
+    run_body_blocks_real_workflow().await;
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn optional_real_workflow_registration_is_exact() {
+    let registered = OPTIONAL_REAL_WORKFLOWS.map(|registration| registration.workflow);
+    assert_eq!(registered, OptionalRealWorkflow::ALL);
+    assert_eq!(
+        OptionalOperation::ALL
+            .into_iter()
+            .map(OptionalOperation::fast_workflow)
+            .collect::<std::collections::BTreeSet<_>>(),
+        OptionalFastWorkflow::ALL.into_iter().collect()
+    );
+    for owner in OPTIONAL_LIVE_OWNERSHIP
+        .iter()
+        .filter(|owner| owner.scenario.tier() == OptionalEvidenceTier::RealHeadless)
+    {
+        assert!(
+            registered.contains(&owner.operation.real_workflow()),
+            "real operation owner lacks a registered executable workflow"
+        );
+    }
+    for workflow in OptionalRealWorkflow::ALL {
+        assert!(
+            OPTIONAL_LIVE_OWNERSHIP.iter().any(|owner| {
+                owner.scenario.tier() == OptionalEvidenceTier::RealHeadless
+                    && owner.operation.real_workflow() == workflow
+            }),
+            "registered workflow owns no real operation evidence"
+        );
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_stdio_all_registered_optional_real_workflows() {
+    for registration in OPTIONAL_REAL_WORKFLOWS {
+        registration.run().await;
     }
 }
 

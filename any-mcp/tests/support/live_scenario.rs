@@ -9,6 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     future::Future,
+    hash::Hash,
     pin::Pin,
     time::Duration,
 };
@@ -4239,6 +4240,395 @@ const fn own(operation: LiveOperation, scenario: ScenarioId) -> Ownership {
     }
 }
 
+#[path = "optional_workflow.rs"]
+mod optional_workflow;
+pub use optional_workflow::{OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow};
+
+/// Evidence tier required for every optional production operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OptionalEvidenceTier {
+    Fast,
+    RealHeadless,
+}
+
+/// Typed identifier for one reviewed optional-toolset scenario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OptionalScenarioId {
+    name: &'static str,
+    tier: OptionalEvidenceTier,
+}
+
+impl OptionalScenarioId {
+    /// Exact executable scenario inventory owned by the common foundation and
+    /// the six linked production descriptors.
+    pub const EXECUTABLE: [Self; 64] = [
+        optional_fast("optional_toolset_status_direct_contract"),
+        optional_fast("optional_toolset_status_stdio_contract"),
+        optional_fast("body_list_ordered_pages"),
+        optional_fast("body_list_revision_conflict"),
+        optional_fast("body_limits_fail_closed"),
+        optional_fast("body_opaque_read_only"),
+        optional_fast("body_create_idempotent"),
+        optional_fast("body_update_one_change"),
+        optional_fast("body_delete_confirmed_subtree"),
+        optional_fast("body_move_same_object"),
+        optional_fast("body_relation_workflows"),
+        optional_fast("body_targeted_heading_append"),
+        optional_fast("rich_page_complete"),
+        optional_fast("rich_page_partial"),
+        optional_fast("rich_page_indeterminate"),
+        optional_fast("rich_page_replay_drift"),
+        optional_fast("body_read_only_catalog"),
+        optional_fast("body_read_restricted"),
+        optional_fast("body_network_closed"),
+        optional_fast("body_protocol_parity"),
+        optional_fast("body_redaction_and_budgets"),
+        optional_real("body_blocks_direct_real_headless"),
+        optional_real("body_blocks_stable_stdio_real_headless"),
+        optional_real("body_blocks_preview_stdio_real_headless"),
+        optional_fast("chats_read_direct"),
+        optional_fast("chats_read_stdio"),
+        optional_fast("chat_add_direct"),
+        optional_fast("chat_add_stdio"),
+        optional_fast("chat_delete_direct"),
+        optional_fast("chat_delete_stdio"),
+        optional_fast("chats_registry_direct_contract"),
+        optional_fast("chats_registry_stable_stdio_contract"),
+        optional_fast("chats_registry_preview_stdio_contract"),
+        optional_real("chats_read_headless"),
+        optional_real("chat_add_headless"),
+        optional_real("chat_delete_headless"),
+        optional_real("chats_registry_real_direct"),
+        optional_real("chats_registry_real_stable_stdio"),
+        optional_real("chats_registry_real_preview_stdio"),
+        optional_fast("members_direct"),
+        optional_real("members_headless"),
+        optional_fast("file_content_direct_contract"),
+        optional_fast("file_content_stdio_contract"),
+        optional_fast("file_upload_direct_contract"),
+        optional_fast("file_upload_stdio_contract"),
+        optional_real("file_content_real_headless"),
+        optional_fast("schema_space_direct"),
+        optional_fast("schema_space_stdio"),
+        optional_fast("schema_type_direct"),
+        optional_fast("schema_type_stdio"),
+        optional_fast("schema_property_direct"),
+        optional_fast("schema_property_stdio"),
+        optional_fast("schema_tag_direct"),
+        optional_fast("schema_tag_stdio"),
+        optional_fast("schema_registry_direct_contract"),
+        optional_fast("schema_registry_stdio_contract"),
+        optional_real("schema_space_headless"),
+        optional_real("schema_type_headless"),
+        optional_real("schema_property_headless"),
+        optional_real("schema_tag_headless"),
+        optional_real("schema_registry_real_headless"),
+        optional_fast("collection_member_acceptance_direct"),
+        optional_fast("collection_member_acceptance_stdio"),
+        optional_real("collection_member_acceptance_headless"),
+    ];
+
+    /// Stable descriptor-owned scenario name.
+    pub const fn as_str(self) -> &'static str {
+        self.name
+    }
+
+    /// Required evidence tier for this scenario.
+    pub const fn tier(self) -> OptionalEvidenceTier {
+        self.tier
+    }
+
+    fn parse(name: &str, tier: OptionalEvidenceTier) -> Option<Self> {
+        Self::EXECUTABLE
+            .iter()
+            .copied()
+            .find(|scenario| scenario.name == name && scenario.tier == tier)
+    }
+}
+
+const fn optional_fast(name: &'static str) -> OptionalScenarioId {
+    OptionalScenarioId {
+        name,
+        tier: OptionalEvidenceTier::Fast,
+    }
+}
+
+const fn optional_real(name: &'static str) -> OptionalScenarioId {
+    OptionalScenarioId {
+        name,
+        tier: OptionalEvidenceTier::RealHeadless,
+    }
+}
+
+/// One operation-to-scenario binding at one evidence tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionalOwnership {
+    pub operation: OptionalOperation,
+    pub scenario: OptionalScenarioId,
+}
+
+const fn optional_owner(
+    operation: OptionalOperation,
+    scenario: OptionalScenarioId,
+) -> OptionalOwnership {
+    OptionalOwnership {
+        operation,
+        scenario,
+    }
+}
+
+/// Exact fast and real-headless ownership for every optional operation.
+pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 62] = &[
+    optional_owner(
+        OptionalOperation::OptionalToolsetStatus,
+        optional_fast("optional_toolset_status_direct_contract"),
+    ),
+    optional_owner(
+        OptionalOperation::OptionalToolsetStatus,
+        optional_real("members_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockList,
+        optional_fast("body_list_ordered_pages"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockList,
+        optional_real("body_blocks_direct_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockCreate,
+        optional_fast("body_create_idempotent"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockCreate,
+        optional_real("body_blocks_direct_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockUpdate,
+        optional_fast("body_update_one_change"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockUpdate,
+        optional_real("body_blocks_direct_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockDelete,
+        optional_fast("body_delete_confirmed_subtree"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockDelete,
+        optional_real("body_blocks_direct_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockMove,
+        optional_fast("body_move_same_object"),
+    ),
+    optional_owner(
+        OptionalOperation::BodyBlockMove,
+        optional_real("body_blocks_direct_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::RichPageCreate,
+        optional_fast("rich_page_complete"),
+    ),
+    optional_owner(
+        OptionalOperation::RichPageCreate,
+        optional_real("body_blocks_direct_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatList,
+        optional_fast("chats_read_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatList,
+        optional_real("chats_read_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageList,
+        optional_fast("chats_read_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageList,
+        optional_real("chats_read_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageGet,
+        optional_fast("chats_read_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageGet,
+        optional_real("chats_read_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageSearch,
+        optional_fast("chats_read_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageSearch,
+        optional_real("chats_read_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageAdd,
+        optional_fast("chat_add_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageAdd,
+        optional_real("chat_add_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageDelete,
+        optional_fast("chat_delete_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ChatMessageDelete,
+        optional_real("chat_delete_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::FileMetadata,
+        optional_fast("file_content_direct_contract"),
+    ),
+    optional_owner(
+        OptionalOperation::FileMetadata,
+        optional_real("file_content_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::FileRead,
+        optional_fast("file_content_direct_contract"),
+    ),
+    optional_owner(
+        OptionalOperation::FileRead,
+        optional_real("file_content_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::FileUpload,
+        optional_fast("file_upload_direct_contract"),
+    ),
+    optional_owner(
+        OptionalOperation::FileUpload,
+        optional_real("file_content_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::FileByteResource,
+        optional_fast("file_content_direct_contract"),
+    ),
+    optional_owner(
+        OptionalOperation::FileByteResource,
+        optional_real("file_content_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::MemberList,
+        optional_fast("members_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::MemberList,
+        optional_real("members_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::MemberGet,
+        optional_fast("members_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::MemberGet,
+        optional_real("members_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::SpaceCreate,
+        optional_fast("schema_space_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::SpaceCreate,
+        optional_real("schema_space_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::SpaceUpdate,
+        optional_fast("schema_space_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::SpaceUpdate,
+        optional_real("schema_space_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::TypeGet,
+        optional_fast("schema_type_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::TypeGet,
+        optional_real("schema_type_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::TypeCreate,
+        optional_fast("schema_type_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::TypeCreate,
+        optional_real("schema_type_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::TypeUpdate,
+        optional_fast("schema_type_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::TypeUpdate,
+        optional_real("schema_type_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::PropertyCreate,
+        optional_fast("schema_property_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::PropertyCreate,
+        optional_real("schema_property_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::PropertyUpdate,
+        optional_fast("schema_property_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::PropertyUpdate,
+        optional_real("schema_property_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::TagCreate,
+        optional_fast("schema_tag_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::TagCreate,
+        optional_real("schema_tag_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::TagUpdate,
+        optional_fast("schema_tag_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::TagUpdate,
+        optional_real("schema_tag_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::CollectionMemberList,
+        optional_fast("collection_member_acceptance_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::CollectionMemberList,
+        optional_real("collection_member_acceptance_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::CollectionMemberAdd,
+        optional_fast("collection_member_acceptance_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::CollectionMemberAdd,
+        optional_real("collection_member_acceptance_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::CollectionMemberRemove,
+        optional_fast("collection_member_acceptance_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::CollectionMemberRemove,
+        optional_real("collection_member_acceptance_headless"),
+    ),
+];
+
 fn parse_tool(name: &str) -> Option<LiveOperation> {
     Some(match name {
         "object_archive" => LiveOperation::ObjectArchive,
@@ -4268,6 +4658,47 @@ fn parse_resource(name: &str) -> Option<LiveOperation> {
     })
 }
 
+fn parse_optional_tool(name: &str) -> Option<OptionalOperation> {
+    Some(match name {
+        "optional_toolset_status" => OptionalOperation::OptionalToolsetStatus,
+        "body_block_list" => OptionalOperation::BodyBlockList,
+        "body_block_create" => OptionalOperation::BodyBlockCreate,
+        "body_block_update" => OptionalOperation::BodyBlockUpdate,
+        "body_block_delete" => OptionalOperation::BodyBlockDelete,
+        "body_block_move" => OptionalOperation::BodyBlockMove,
+        "rich_page_create" => OptionalOperation::RichPageCreate,
+        "chat_list" => OptionalOperation::ChatList,
+        "chat_message_list" => OptionalOperation::ChatMessageList,
+        "chat_message_get" => OptionalOperation::ChatMessageGet,
+        "chat_message_search" => OptionalOperation::ChatMessageSearch,
+        "chat_message_add" => OptionalOperation::ChatMessageAdd,
+        "chat_message_delete" => OptionalOperation::ChatMessageDelete,
+        "file_metadata" => OptionalOperation::FileMetadata,
+        "file_read" => OptionalOperation::FileRead,
+        "file_upload" => OptionalOperation::FileUpload,
+        "member_list" => OptionalOperation::MemberList,
+        "member_get" => OptionalOperation::MemberGet,
+        "space_create" => OptionalOperation::SpaceCreate,
+        "space_update" => OptionalOperation::SpaceUpdate,
+        "type_get" => OptionalOperation::TypeGet,
+        "type_create" => OptionalOperation::TypeCreate,
+        "type_update" => OptionalOperation::TypeUpdate,
+        "property_create" => OptionalOperation::PropertyCreate,
+        "property_update" => OptionalOperation::PropertyUpdate,
+        "tag_create" => OptionalOperation::TagCreate,
+        "tag_update" => OptionalOperation::TagUpdate,
+        "collection_member_list" => OptionalOperation::CollectionMemberList,
+        "collection_member_add" => OptionalOperation::CollectionMemberAdd,
+        "collection_member_remove" => OptionalOperation::CollectionMemberRemove,
+        _ => return None,
+    })
+}
+
+fn parse_optional_resource(name: &str) -> Option<OptionalOperation> {
+    (name == "anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}")
+        .then_some(OptionalOperation::FileByteResource)
+}
+
 /// Validates exact, unique, executable live ownership for the production catalog.
 pub fn validate_live_ownership(
     expected_tools: &[&str],
@@ -4292,33 +4723,149 @@ fn validate_ownership(
             .ok_or_else(|| format!("unknown advertised resource operation: {name}"))?;
         expected.insert(operation);
     }
+    validate_typed_ownership(
+        &expected,
+        owners.iter().map(|owner| (owner.operation, owner.scenario)),
+        |scenario| scenario.is_executable() && ScenarioId::EXECUTABLE.contains(&scenario),
+        ScenarioId::as_str,
+        "live operation",
+        "live scenario",
+    )
+}
+
+fn validate_typed_ownership<K, S>(
+    expected: &HashSet<K>,
+    owners: impl IntoIterator<Item = (K, S)>,
+    scenario_is_executable: impl Fn(S) -> bool,
+    scenario_name: impl Fn(S) -> &'static str,
+    operation_label: &str,
+    scenario_label: &str,
+) -> Result<(), String>
+where
+    K: Copy + Eq + Hash + Ord + std::fmt::Debug,
+    S: Copy,
+{
     let mut seen = HashSet::new();
-    for owner in owners {
-        if !expected.contains(&owner.operation) {
-            return Err(format!(
-                "unknown live operation owner: {:?}",
-                owner.operation
-            ));
+    for (operation, scenario) in owners {
+        if !expected.contains(&operation) {
+            return Err(format!("unknown {operation_label} owner: {operation:?}"));
         }
-        if !seen.insert(owner.operation) {
-            return Err(format!(
-                "duplicate live operation owner: {:?}",
-                owner.operation
-            ));
+        if !seen.insert(operation) {
+            return Err(format!("duplicate {operation_label} owner: {operation:?}"));
         }
-        if !owner.scenario.is_executable() || !ScenarioId::EXECUTABLE.contains(&owner.scenario) {
+        if !scenario_is_executable(scenario) {
             return Err(format!(
-                "non-executable live scenario owner: {}",
-                owner.scenario.as_str()
+                "non-executable {scenario_label} owner: {}",
+                scenario_name(scenario)
             ));
         }
     }
     let mut missing = expected.difference(&seen).copied().collect::<Vec<_>>();
     missing.sort_unstable();
     if let Some(operation) = missing.first() {
-        return Err(format!("missing live operation owner: {operation:?}"));
+        return Err(format!("missing {operation_label} owner: {operation:?}"));
     }
     Ok(())
+}
+
+fn optional_scenario_inventory(
+    scripted_scenarios: &[&str],
+    headless_scenarios: &[&str],
+) -> Result<HashSet<OptionalScenarioId>, String> {
+    let executable_names = OptionalScenarioId::EXECUTABLE
+        .iter()
+        .map(|scenario| scenario.as_str())
+        .collect::<BTreeSet<_>>();
+    if executable_names.len() != OptionalScenarioId::EXECUTABLE.len() {
+        return Err("duplicate executable optional scenario identifier".to_owned());
+    }
+
+    let mut names = HashSet::new();
+    let mut scenarios = HashSet::new();
+    for (tier, tier_name, declared) in [
+        (OptionalEvidenceTier::Fast, "fast", scripted_scenarios),
+        (
+            OptionalEvidenceTier::RealHeadless,
+            "real-headless",
+            headless_scenarios,
+        ),
+    ] {
+        for name in declared {
+            if !names.insert(*name) {
+                return Err(format!("duplicate optional scenario identifier: {name}"));
+            }
+            let scenario = OptionalScenarioId::parse(name, tier)
+                .ok_or_else(|| format!("unknown {tier_name} optional scenario: {name}"))?;
+            scenarios.insert(scenario);
+        }
+    }
+
+    let executable = OptionalScenarioId::EXECUTABLE
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut missing = executable
+        .difference(&scenarios)
+        .copied()
+        .collect::<Vec<_>>();
+    missing.sort_unstable();
+    if let Some(scenario) = missing.first() {
+        return Err(format!(
+            "missing executable optional scenario: {}",
+            scenario.as_str()
+        ));
+    }
+    Ok(scenarios)
+}
+
+/// Validates exact optional catalog ownership against the linked executable
+/// fast and real-headless scenario inventory.
+pub fn validate_optional_live_ownership(
+    expected_tools: &[&str],
+    expected_resource_families: &[&str],
+    scripted_scenarios: &[&str],
+    headless_scenarios: &[&str],
+) -> Result<(), String> {
+    let mut operations = HashSet::new();
+    for name in expected_tools {
+        let operation = parse_optional_tool(name)
+            .ok_or_else(|| format!("unknown advertised optional tool operation: {name}"))?;
+        if !operations.insert(operation) {
+            return Err(format!(
+                "duplicate advertised optional tool operation: {name}"
+            ));
+        }
+    }
+    for name in expected_resource_families {
+        let operation = parse_optional_resource(name)
+            .ok_or_else(|| format!("unknown advertised optional resource family: {name}"))?;
+        if !operations.insert(operation) {
+            return Err(format!(
+                "duplicate advertised optional resource family: {name}"
+            ));
+        }
+    }
+
+    let scenarios = optional_scenario_inventory(scripted_scenarios, headless_scenarios)?;
+    let expected = operations
+        .iter()
+        .flat_map(|operation| {
+            [
+                (*operation, OptionalEvidenceTier::Fast),
+                (*operation, OptionalEvidenceTier::RealHeadless),
+            ]
+        })
+        .collect::<HashSet<_>>();
+    validate_typed_ownership(
+        &expected,
+        OPTIONAL_LIVE_OWNERSHIP
+            .iter()
+            .map(|owner| ((owner.operation, owner.scenario.tier()), owner.scenario)),
+        |scenario| scenarios.contains(&scenario),
+        OptionalScenarioId::as_str,
+        "optional operation/tier",
+        "optional scenario",
+    )
 }
 
 fn required_string(value: &Value, pointer: &str) -> Result<String, String> {
@@ -4449,6 +4996,114 @@ mod ownership_tests {
     fn synthetic_missing_operation_fails_deterministically() {
         let error = validate_ownership(TOOLS, RESOURCES, &COMPLETE[..2]).unwrap_err();
         assert_eq!(error, "missing live operation owner: ResourcesRead");
+    }
+
+    #[test]
+    fn synthetic_missing_optional_tier_fails_deterministically() {
+        let expected = HashSet::from([
+            (OptionalOperation::MemberList, OptionalEvidenceTier::Fast),
+            (
+                OptionalOperation::MemberList,
+                OptionalEvidenceTier::RealHeadless,
+            ),
+        ]);
+        let owners = [(
+            (OptionalOperation::MemberList, OptionalEvidenceTier::Fast),
+            optional_fast("members_direct"),
+        )];
+        let error = validate_typed_ownership(
+            &expected,
+            owners,
+            |_| true,
+            OptionalScenarioId::as_str,
+            "optional operation/tier",
+            "optional scenario",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "missing optional operation/tier owner: (MemberList, RealHeadless)"
+        );
+    }
+
+    #[test]
+    fn optional_scenario_inventory_is_exact_unique_and_typed() {
+        let scripted = OptionalScenarioId::EXECUTABLE
+            .iter()
+            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::Fast)
+            .map(|scenario| scenario.as_str())
+            .collect::<Vec<_>>();
+        let headless = OptionalScenarioId::EXECUTABLE
+            .iter()
+            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::RealHeadless)
+            .map(|scenario| scenario.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            optional_scenario_inventory(&scripted, &headless)
+                .expect("exact typed optional scenario inventory")
+                .len(),
+            64
+        );
+
+        let mut duplicate = scripted.clone();
+        duplicate.push(scripted[0]);
+        assert!(
+            optional_scenario_inventory(&duplicate, &headless)
+                .unwrap_err()
+                .starts_with("duplicate optional scenario identifier")
+        );
+        assert_eq!(
+            optional_scenario_inventory(&scripted[1..], &headless).unwrap_err(),
+            format!("missing executable optional scenario: {}", scripted[0])
+        );
+    }
+
+    #[test]
+    fn optional_catalog_parser_covers_the_closed_operation_inventory() {
+        let tools = OptionalOperation::ALL
+            .into_iter()
+            .filter_map(OptionalOperation::tool_name)
+            .collect::<Vec<_>>();
+        let resources = OptionalOperation::ALL
+            .into_iter()
+            .filter_map(OptionalOperation::resource_family_name)
+            .collect::<Vec<_>>();
+        let scripted = OptionalScenarioId::EXECUTABLE
+            .iter()
+            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::Fast)
+            .map(|scenario| scenario.as_str())
+            .collect::<Vec<_>>();
+        let headless = OptionalScenarioId::EXECUTABLE
+            .iter()
+            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::RealHeadless)
+            .map(|scenario| scenario.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(tools.len(), 30);
+        assert_eq!(resources.len(), 1);
+        validate_optional_live_ownership(&tools, &resources, &scripted, &headless)
+            .expect("closed optional catalog parser inventory");
+    }
+
+    #[test]
+    fn optional_ownership_has_exact_two_tiers_for_thirty_one_operations() {
+        assert_eq!(OPTIONAL_LIVE_OWNERSHIP.len(), 62);
+        let operations = OPTIONAL_LIVE_OWNERSHIP
+            .iter()
+            .map(|owner| owner.operation)
+            .collect::<HashSet<_>>();
+        assert_eq!(operations.len(), 31);
+        assert!(operations.iter().all(|operation| {
+            OPTIONAL_LIVE_OWNERSHIP
+                .iter()
+                .filter(|owner| owner.operation == *operation)
+                .map(|owner| owner.scenario.tier())
+                .collect::<HashSet<_>>()
+                == HashSet::from([
+                    OptionalEvidenceTier::Fast,
+                    OptionalEvidenceTier::RealHeadless,
+                ])
+        }));
     }
 
     #[test]
