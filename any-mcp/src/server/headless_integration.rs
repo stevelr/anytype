@@ -20,8 +20,8 @@ use anytype::{
     chats::MessageContent,
     objects::Icon,
     prelude::{
-        Color, Filter, FilterExpression, HttpMetricsSnapshot, Object, ObjectLayout, PropertyFormat,
-        SetProperty,
+        AnytypeClient, ClientConfig, Color, Filter, FilterExpression, HttpCredentials,
+        HttpMetricsSnapshot, Object, ObjectLayout, PropertyFormat, SetProperty,
     },
     test_util::{
         DisposableCallbackStage, DisposableRun, TestContext, TestError, unique_suffix,
@@ -34,16 +34,19 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::optional_toolsets::{OptionalToolsetSelection, production_optional_metadata};
+use crate::optional_toolsets::{
+    OptionalToolsetSelection, production_optional_metadata, production_optional_registries,
+};
 use crate::runtime::{RuntimeContext, StartupStatus};
 
 #[path = "../../tests/support/live_scenario.rs"]
-mod live_scenario;
+pub(super) mod live_scenario;
 
 use live_scenario::{
-    BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
-    ToolErrorEvidence, run_body_scenario, run_chats_registry_scenario,
-    run_live_scenario_on_large_stack, run_representative_layout_scenario, run_scenario,
+    BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
+    OptionalOperation, OptionalRealWorkflow, ScenarioEvidence, ScenarioId, ToolErrorEvidence,
+    run_body_scenario, run_chats_registry_scenario, run_live_scenario_on_large_stack,
+    run_representative_layout_scenario, run_scenario,
 };
 
 fn arguments(value: Value) -> JsonObject {
@@ -2050,6 +2053,100 @@ fn advertised_catalog_has_exact_live_scenario_ownership() {
         ],
     )
     .expect("complete typed executable live ownership");
+}
+
+#[test]
+fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
+    let metadata = production_optional_metadata();
+    let selector = metadata
+        .iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>()
+        .join(",");
+    let selection = OptionalToolsetSelection::parse(Some(selector), &metadata)
+        .expect("all linked production optional toolsets");
+    let client = AnytypeClient::with_config(ClientConfig {
+        base_url: Some("http://127.0.0.1:1".to_owned()),
+        keystore: Some("env".to_owned()),
+        keystore_service: Some("any-mcp-optional-ownership-test".to_owned()),
+        app_name: "any-mcp-optional-ownership-test".to_owned(),
+        ..ClientConfig::default()
+    })
+    .expect("non-I/O optional ownership client");
+    client.set_api_key(HttpCredentials::new("fixture-token"));
+    let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+        client,
+        1,
+        Duration::from_secs(1),
+        StartupStatus {
+            http_available: true,
+            grpc_available: true,
+        },
+        ApplicationProfile::Standard,
+        false,
+        selection,
+    );
+    let server = AnyMcpServer::new(runtime).expect("all-selected production optional catalog");
+
+    let phase_one = ALL_TOOL_NAMES.iter().copied().collect::<HashSet<_>>();
+    let optional_tools = server
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .filter(|name| !phase_one.contains(name.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(optional_tools.len(), 30);
+    let optional_tool_refs = optional_tools
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    let templates = serde_json::to_value(
+        server
+            .list_resource_templates_wire(None)
+            .expect("all-selected production resource templates"),
+    )
+    .expect("serialize production resource templates");
+    let optional_resource_families = templates["resourceTemplates"]
+        .as_array()
+        .expect("resource template array")
+        .iter()
+        .filter_map(|template| template["uriTemplate"].as_str())
+        .filter(|uri| uri.starts_with("anytype-file://"))
+        .collect::<Vec<_>>();
+    assert_eq!(optional_resource_families.len(), 1);
+
+    let mut scripted_scenarios = vec![
+        "optional_toolset_status_direct_contract",
+        "optional_toolset_status_stdio_contract",
+    ];
+    let mut headless_scenarios = Vec::new();
+    for registry in production_optional_registries() {
+        scripted_scenarios.extend_from_slice(registry.scripted_scenario_ids());
+        headless_scenarios.extend_from_slice(registry.headless_scenario_ids());
+    }
+    assert_eq!(scripted_scenarios.len() + headless_scenarios.len(), 64);
+    live_scenario::validate_optional_live_ownership(
+        &optional_tool_refs,
+        &optional_resource_families,
+        &scripted_scenarios,
+        &headless_scenarios,
+    )
+    .expect("complete typed fast and real-headless optional ownership");
+    assert_eq!(
+        OptionalOperation::ALL
+            .into_iter()
+            .map(OptionalOperation::fast_workflow)
+            .collect::<HashSet<_>>(),
+        OptionalFastWorkflow::ALL.into_iter().collect()
+    );
+    assert_eq!(
+        OptionalOperation::ALL
+            .into_iter()
+            .map(OptionalOperation::real_workflow)
+            .collect::<HashSet<_>>(),
+        OptionalRealWorkflow::ALL.into_iter().collect()
+    );
 }
 
 async fn run_direct_baseline(scenario: ScenarioId) {

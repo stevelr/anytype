@@ -8,6 +8,32 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a terminal offline integration matrix for all six production optional
+  registries. It locks exact compact/standard read-write and read-only
+  inventories, canonical status under reversed selector order, stable/preview
+  contract identity, transport requirement union, all 29 disabled stale tool
+  calls, the disabled file resource, and all 18 read-only mutation calls before
+  decoding or HTTP work. A six-cell leave-one-registry-out matrix repeats stale
+  tool and resource rejection with the other five registries enabled. A
+  reviewed aggregate token snapshot records all four composed catalogs and
+  every registry's independent ceiling while the same test proves the four
+  Phase 1 snapshots and `server_status` remain unchanged without a selector.
+- Extend the typed live-scenario ownership audit to the exact production
+  optional surface: 29 domain tools, `optional_toolset_status`, and the file
+  byte-resource family. Every operation now owns one fast and one real-headless
+  scenario binding, and catalog, binding, or executable-scenario drift fails
+  deterministically. Seven compile-bound fast runners exercise every selected
+  production route before I/O; six compile-bound spawned runners execute every
+  registry's complete real-headless workflow.
+- Add a cleanup-safe files acceptance workflow through spawned stable and
+  preview production stdio children. It verifies upload, metadata, bounded
+  ranges, byte-resource decoding and hashes, independent API download,
+  protocol parity, redacted diagnostics, child termination, and exact cleanup
+  against a real headless Anytype server.
+- Add an aggregate stable read-write and preview read-only spawned sentinel
+  with all six registries selected. It locks the complete catalogs and status,
+  performs one real-backend read per registry, and proves a read-only stale
+  mutation leaves independently observed collection state unchanged.
 - Link the default-off `body-blocks` registry with one bounded list workflow
   and five mutation workflows for typed block creation, targeted update,
   confirmed subtree deletion, same-object movement, and finite rich-page

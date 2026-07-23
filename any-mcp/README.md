@@ -162,6 +162,24 @@ selection can authenticate or perform I/O, its effective
 `ANYTYPE_RATE_LIMIT_MAX_RETRIES` value must be in `1..=5`; empty-selection
 Phase 1 startup retains the existing `anytype-api` behavior.
 
+The offline production integration matrix composes all six linked registries
+together in compact and standard, read-write and read-only configurations. It
+locks their exact catalogs and canonical status, stable/preview contract
+identity, gRPC requirement union, disabled stale-call rejection, and aggregate
+`o200k_base` catalog cost. The same matrix proves that an absent selector leaves
+all four reviewed Phase 1 catalog snapshots and `server_status` unchanged. A
+leave-one-registry-out sweep also proves that every omitted registry remains
+unreachable while the other five are active.
+The production ownership audit independently binds each of the 29 domain tools,
+`optional_toolset_status`, and the file byte-resource family to one fast and one
+real-headless executable scenario. It rejects missing, duplicate, unknown, or
+untyped catalog and scenario entries. Compile-bound runner tables execute all
+seven fast workflow groups and all six spawned real-headless registry
+workflows. The files workflow verifies real upload, metadata, bounded reads,
+resources, independent download, diagnostics, and cleanup. A separate
+all-selected sentinel composes stable read-write and preview read-only children
+and performs one real-backend read per registry.
+
 The default-off `body-blocks` registry exposes `body_block_list` plus five
 write workflows for one-block create, update, delete, move, and bounded rich
 page creation. It uses the typed `anytype-api` body model only. Reads return

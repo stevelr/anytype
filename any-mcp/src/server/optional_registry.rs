@@ -6,8 +6,10 @@
 //! Test-only complete registries proving the common optional composition seam.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
+    future::Future,
+    pin::Pin,
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
@@ -31,10 +33,14 @@ use super::*;
 use crate::{
     optional_toolsets::{
         OptionalRegistryFuture, OptionalRegistryTool, OptionalToolsetMetadata,
-        OptionalToolsetSelection,
+        OptionalToolsetSelection, production_optional_metadata, production_optional_registries,
     },
     protocol::{ToolProfile, workflow_tool},
     runtime::StartupStatus,
+};
+
+use super::headless_integration::live_scenario::{
+    OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow,
 };
 
 const ALPHA_READ: &str = "alpha_read";
@@ -48,6 +54,151 @@ const ALPHA_TEMPLATE: &str = "anytype://optional/alpha/items/{item_id}";
 const OPTIONAL_SNAPSHOT: &str = include_str!("../../tests/snapshots/optional-toolsets.snap");
 const OPTIONAL_TOKEN_BUDGET: &str =
     include_str!("../../tests/snapshots/optional-toolsets-token-budget.json");
+const PRODUCTION_TOKEN_BUDGET: &str =
+    include_str!("../../tests/snapshots/production-optional-token-budget.json");
+const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("../../tests/snapshots/catalog-compact.snap");
+const COMPACT_READ_ONLY_CATALOG_SNAPSHOT: &str =
+    include_str!("../../tests/snapshots/catalog-compact-read-only.snap");
+const STANDARD_CATALOG_SNAPSHOT: &str = include_str!("../../tests/snapshots/catalog-normal.snap");
+const STANDARD_READ_ONLY_CATALOG_SNAPSHOT: &str =
+    include_str!("../../tests/snapshots/catalog-read-only.snap");
+
+const PRODUCTION_SELECTOR: &str = "body-blocks,chats,files,members,schema,views-write";
+const REVERSE_PRODUCTION_SELECTOR: &str = "views-write,schema,members,files,chats,body-blocks";
+const PRODUCTION_TOOLSET_NAMES: [&str; 6] = [
+    "body-blocks",
+    "chats",
+    "files",
+    "members",
+    "schema",
+    "views-write",
+];
+const PRODUCTION_READ_WRITE_TOOLS: [&str; 30] = [
+    "body_block_create",
+    "body_block_delete",
+    "body_block_list",
+    "body_block_move",
+    "body_block_update",
+    "chat_list",
+    "chat_message_add",
+    "chat_message_delete",
+    "chat_message_get",
+    "chat_message_list",
+    "chat_message_search",
+    "collection_member_add",
+    "collection_member_list",
+    "collection_member_remove",
+    "file_metadata",
+    "file_read",
+    "file_upload",
+    "member_get",
+    "member_list",
+    "optional_toolset_status",
+    "property_create",
+    "property_update",
+    "rich_page_create",
+    "space_create",
+    "space_update",
+    "tag_create",
+    "tag_update",
+    "type_create",
+    "type_get",
+    "type_update",
+];
+const PRODUCTION_READ_ONLY_TOOLS: [&str; 12] = [
+    "body_block_list",
+    "chat_list",
+    "chat_message_get",
+    "chat_message_list",
+    "chat_message_search",
+    "collection_member_list",
+    "file_metadata",
+    "file_read",
+    "member_get",
+    "member_list",
+    "optional_toolset_status",
+    "type_get",
+];
+const PRODUCTION_MUTATION_TOOLS: [&str; 18] = [
+    "body_block_create",
+    "body_block_delete",
+    "body_block_move",
+    "body_block_update",
+    "chat_message_add",
+    "chat_message_delete",
+    "collection_member_add",
+    "collection_member_remove",
+    "file_upload",
+    "property_create",
+    "property_update",
+    "rich_page_create",
+    "space_create",
+    "space_update",
+    "tag_create",
+    "tag_update",
+    "type_create",
+    "type_update",
+];
+const FILE_RESOURCE_PROBE: &str = "anytype-file://bytes/space-id/file-id/0/1/0000000000000000000000000000000000000000000000000000000000000000";
+
+type OptionalFastWorkflowFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
+type OptionalFastWorkflowRunner = fn() -> OptionalFastWorkflowFuture;
+
+#[derive(Clone, Copy)]
+struct OptionalFastWorkflowRegistration {
+    workflow: OptionalFastWorkflow,
+    runner: OptionalFastWorkflowRunner,
+}
+
+const fn fast_registration(
+    workflow: OptionalFastWorkflow,
+    runner: OptionalFastWorkflowRunner,
+) -> OptionalFastWorkflowRegistration {
+    OptionalFastWorkflowRegistration { workflow, runner }
+}
+
+fn optional_status_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(
+        OptionalFastWorkflow::OptionalStatus,
+    ))
+}
+
+fn body_blocks_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::BodyBlocks))
+}
+
+fn chats_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::Chats))
+}
+
+fn files_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::Files))
+}
+
+fn members_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::Members))
+}
+
+fn schema_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::Schema))
+}
+
+fn views_write_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::ViewsWrite))
+}
+
+const OPTIONAL_FAST_WORKFLOWS: [OptionalFastWorkflowRegistration; 7] = [
+    fast_registration(
+        OptionalFastWorkflow::OptionalStatus,
+        optional_status_fast_runner,
+    ),
+    fast_registration(OptionalFastWorkflow::BodyBlocks, body_blocks_fast_runner),
+    fast_registration(OptionalFastWorkflow::Chats, chats_fast_runner),
+    fast_registration(OptionalFastWorkflow::Files, files_fast_runner),
+    fast_registration(OptionalFastWorkflow::Members, members_fast_runner),
+    fast_registration(OptionalFastWorkflow::Schema, schema_fast_runner),
+    fast_registration(OptionalFastWorkflow::ViewsWrite, views_write_fast_runner),
+];
 
 static ALPHA_CALLS: AtomicUsize = AtomicUsize::new(0);
 static BETA_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -341,9 +492,130 @@ fn runtime_with_selection(
     )
 }
 
+fn production_selection(value: Option<&str>) -> OptionalToolsetSelection {
+    OptionalToolsetSelection::parse(
+        value.map(str::to_owned),
+        production_optional_metadata().as_slice(),
+    )
+    .expect("valid production selection")
+}
+
+fn production_server(
+    value: Option<&str>,
+    profile: ApplicationProfile,
+    read_only: bool,
+    grpc_available: bool,
+) -> Result<AnyMcpServer, ServerBuildError> {
+    AnyMcpServer::new(runtime_with_selection(
+        production_selection(value),
+        profile,
+        read_only,
+        grpc_available,
+    ))
+}
+
+const fn fast_workflow_selector(workflow: OptionalFastWorkflow) -> &'static str {
+    match workflow {
+        OptionalFastWorkflow::OptionalStatus | OptionalFastWorkflow::Members => "members",
+        OptionalFastWorkflow::BodyBlocks => "body-blocks",
+        OptionalFastWorkflow::Chats => "chats",
+        OptionalFastWorkflow::Files => "files",
+        OptionalFastWorkflow::Schema => "schema",
+        OptionalFastWorkflow::ViewsWrite => "views-write",
+    }
+}
+
+async fn run_optional_fast_workflow(workflow: OptionalFastWorkflow) {
+    let server = production_server(
+        Some(fast_workflow_selector(workflow)),
+        ApplicationProfile::Compact,
+        false,
+        true,
+    )
+    .expect("selected production fast-workflow server");
+    let before = server.runtime().client().http_metrics();
+    assert_eq!(server.phase1_dispatch_polls(), 0);
+
+    let operations = OptionalOperation::ALL
+        .into_iter()
+        .filter(|operation| operation.fast_workflow() == workflow)
+        .collect::<Vec<_>>();
+    assert!(!operations.is_empty(), "{workflow:?}");
+
+    for operation in operations {
+        if operation == OptionalOperation::FileByteResource {
+            let cancellation = CancellationToken::new();
+            cancellation.cancel();
+            let error = server
+                .read_resource_wire(
+                    ReadResourceRequestParams::new(FILE_RESOURCE_PROBE),
+                    &cancellation,
+                )
+                .await
+                .expect_err("selected file resource reaches its production handler");
+            assert_ne!(
+                error,
+                ErrorData::method_not_found::<rmcp::model::ReadResourceRequestMethod>(),
+                "{operation:?}"
+            );
+        } else {
+            let name = operation.tool_name().expect("tool operation has a name");
+            assert!(
+                server.tools().iter().any(|tool| tool.name == name),
+                "{operation:?} is absent from its selected production catalog"
+            );
+            let error = server
+                .dispatch_tool(
+                    CallToolRequestParams::new(name).with_arguments(
+                        json!({"fast_workflow_unknown": true})
+                            .as_object()
+                            .cloned()
+                            .expect("strict malformed arguments"),
+                    ),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("selected optional tool reaches its strict production decoder");
+            assert_eq!(
+                error.code,
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                "{operation:?}"
+            );
+        }
+        assert_eq!(server.phase1_dispatch_polls(), 0, "{operation:?}");
+        assert_eq!(
+            server.runtime().client().http_metrics(),
+            before,
+            "{operation:?} performed unexpected HTTP work"
+        );
+    }
+}
+
 fn server(value: &str, profile: ApplicationProfile, read_only: bool) -> AnyMcpServer {
     AnyMcpServer::new_with_optional_registries(runtime(value, profile, read_only, true), &LINKED)
         .expect("composed test-only catalog")
+}
+
+fn tool_names_owned(server: &AnyMcpServer) -> Vec<String> {
+    server
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect()
+}
+
+fn production_optional_tool_names(selected: &AnyMcpServer, base: &AnyMcpServer) -> Vec<String> {
+    let base_names = base
+        .tools()
+        .iter()
+        .map(|tool| tool.name.as_ref())
+        .collect::<std::collections::HashSet<_>>();
+    selected
+        .tools()
+        .iter()
+        .filter(|tool| !base_names.contains(tool.name.as_ref()))
+        .map(|tool| tool.name.to_string())
+        .collect()
 }
 
 fn optional_tool_names(server: &AnyMcpServer) -> Vec<&str> {
@@ -455,6 +727,158 @@ fn token_count(tokenizer: &CoreBPE, value: Value) -> usize {
     tokenizer
         .encode_with_special_tokens(&compact_canonical_json(value))
         .len()
+}
+
+fn canonical_sha256(value: Value) -> String {
+    let encoded = compact_canonical_json(value);
+    Sha256::digest(encoded.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn tools_list_value(server: &AnyMcpServer) -> Value {
+    serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
+        .expect("complete tools/list result")
+}
+
+fn production_catalog_snapshot(server: &AnyMcpServer, read_only: bool) -> String {
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&canonical_json(json!({
+            "read_only": read_only,
+            "tools": server.tools(),
+        })))
+        .expect("production catalog snapshot")
+    )
+}
+
+fn production_composition_budget(
+    tokenizer: &CoreBPE,
+    profile: ApplicationProfile,
+    read_only: bool,
+) -> Value {
+    let base = production_server(None, profile, read_only, true).expect("base production server");
+    let selected = production_server(Some(PRODUCTION_SELECTOR), profile, read_only, true)
+        .expect("all-selected production server");
+    let base_value = tools_list_value(&base);
+    let selected_value = tools_list_value(&selected);
+    let base_tokens = token_count(tokenizer, base_value.clone());
+    let selected_tokens = token_count(tokenizer, selected_value.clone());
+    json!({
+        "base_sha256":canonical_sha256(base_value),
+        "base_tokens":base_tokens,
+        "selected_sha256":canonical_sha256(selected_value),
+        "selected_tokens":selected_tokens,
+        "selected_contribution_tokens":selected_tokens.saturating_sub(base_tokens),
+    })
+}
+
+fn production_token_budget() -> Value {
+    let tokenizer = o200k_base().expect("pinned o200k_base tokenizer");
+    let base = production_server(None, ApplicationProfile::Compact, false, true)
+        .expect("base compact production server");
+    let mut registry_budgets = BTreeMap::new();
+    let mut registry_ceiling_tokens = 0_usize;
+
+    for registry in production_optional_registries() {
+        let metadata = registry.metadata();
+        let selected = production_server(
+            Some(metadata.name),
+            ApplicationProfile::Compact,
+            false,
+            true,
+        )
+        .expect("single production registry");
+        let base_names = base
+            .tools()
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<std::collections::HashSet<_>>();
+        let domain_tools = selected
+            .tools()
+            .iter()
+            .filter(|tool| {
+                tool.name != "optional_toolset_status" && !base_names.contains(tool.name.as_ref())
+            })
+            .collect::<Vec<_>>();
+        let domain_tokens = domain_tools
+            .iter()
+            .map(|tool| {
+                token_count(
+                    &tokenizer,
+                    serde_json::to_value(tool).expect("production tool value"),
+                )
+            })
+            .sum::<usize>();
+        let base_tokens = token_count(&tokenizer, tools_list_value(&base));
+        let selected_tokens = token_count(&tokenizer, tools_list_value(&selected));
+        let ceiling = registry.catalog_token_ceiling();
+        registry_ceiling_tokens = registry_ceiling_tokens.saturating_add(ceiling);
+        registry_budgets.insert(
+            metadata.name,
+            json!({
+                "catalog_ceiling_tokens":ceiling,
+                "domain_tokens":domain_tokens,
+                "selected_contribution_tokens":selected_tokens.saturating_sub(base_tokens),
+                "tool_count":domain_tools.len(),
+            }),
+        );
+    }
+
+    let status = production_server(Some("members"), ApplicationProfile::Compact, false, true)
+        .expect("status production server")
+        .tools()
+        .iter()
+        .find(|tool| tool.name == "optional_toolset_status")
+        .cloned()
+        .expect("optional status tool");
+    let status_tokens = token_count(
+        &tokenizer,
+        serde_json::to_value(ListToolsResult::with_all_items(vec![status]))
+            .expect("status tools/list value"),
+    );
+
+    canonical_json(json!({
+        "tokenizer":"tiktoken o200k_base (tiktoken-rs 0.12.0)",
+        "selected":PRODUCTION_TOOLSET_NAMES,
+        "common_status_ceiling_tokens":500,
+        "common_status_tokens":status_tokens,
+        "registry_ceiling_tokens":registry_ceiling_tokens,
+        "registry_budgets":registry_budgets,
+        "compositions":{
+            "compact_read_write":production_composition_budget(
+                &tokenizer,
+                ApplicationProfile::Compact,
+                false,
+            ),
+            "compact_read_only":production_composition_budget(
+                &tokenizer,
+                ApplicationProfile::Compact,
+                true,
+            ),
+            "standard_read_write":production_composition_budget(
+                &tokenizer,
+                ApplicationProfile::Standard,
+                false,
+            ),
+            "standard_read_only":production_composition_budget(
+                &tokenizer,
+                ApplicationProfile::Standard,
+                true,
+            ),
+        }
+    }))
+}
+
+fn production_budget_json() -> String {
+    let pretty = serde_json::to_string_pretty(&production_token_budget())
+        .expect("serialize production token budget")
+        .replace(
+            "[\n    \"body-blocks\",\n    \"chats\",\n    \"files\",\n    \"members\",\n    \"schema\",\n    \"views-write\"\n  ]",
+            "[\"body-blocks\", \"chats\", \"files\", \"members\", \"schema\", \"views-write\"]",
+        );
+    format!("{pretty}\n")
 }
 
 fn tools_list_tokens(tokenizer: &CoreBPE, value: &str, read_only: bool) -> usize {
@@ -896,6 +1320,681 @@ async fn phase_one_server_status_is_unchanged_by_optional_selection() {
     assert_eq!(selected.phase1_dispatch_polls(), 1);
 }
 
+async fn production_status(server: &AnyMcpServer, protocol: &ProtocolVersion) -> Value {
+    server
+        .dispatch_tool_for_protocol(
+            CallToolRequestParams::new("optional_toolset_status"),
+            protocol,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("production optional status")
+        .structured_content
+        .expect("structured optional status")
+}
+
+#[tokio::test]
+async fn production_optional_fast_workflow_registration_is_exact_and_executable() {
+    assert_eq!(
+        OPTIONAL_FAST_WORKFLOWS.map(|registration| registration.workflow),
+        OptionalFastWorkflow::ALL
+    );
+
+    let expected_counts = [
+        (OptionalFastWorkflow::OptionalStatus, 1_usize),
+        (OptionalFastWorkflow::BodyBlocks, 6),
+        (OptionalFastWorkflow::Chats, 6),
+        (OptionalFastWorkflow::Files, 4),
+        (OptionalFastWorkflow::Members, 2),
+        (OptionalFastWorkflow::Schema, 9),
+        (OptionalFastWorkflow::ViewsWrite, 3),
+    ];
+    let mut partition = BTreeMap::new();
+    let mut tool_names = BTreeSet::new();
+    for operation in OptionalOperation::ALL {
+        *partition
+            .entry(operation.fast_workflow())
+            .or_insert(0_usize) += 1;
+        if let Some(name) = operation.tool_name() {
+            assert!(tool_names.insert(name), "duplicate optional tool {name}");
+        }
+    }
+    assert_eq!(OptionalOperation::ALL.len(), 31);
+    assert_eq!(
+        partition,
+        expected_counts.into_iter().collect::<BTreeMap<_, _>>()
+    );
+    assert_eq!(
+        tool_names,
+        PRODUCTION_READ_WRITE_TOOLS
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        OptionalOperation::FileByteResource.resource_family_name(),
+        Some("anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}")
+    );
+    assert_eq!(
+        OptionalOperation::ALL
+            .into_iter()
+            .map(OptionalOperation::real_workflow)
+            .collect::<BTreeSet<_>>(),
+        OptionalRealWorkflow::ALL.into_iter().collect()
+    );
+
+    for registration in OPTIONAL_FAST_WORKFLOWS {
+        (registration.runner)().await;
+    }
+}
+
+#[tokio::test]
+async fn production_all_selected_inventories_status_and_reverse_order_are_exact() {
+    let expected_status = json!({
+        "configured_toolsets":PRODUCTION_TOOLSET_NAMES,
+        "active_toolsets":PRODUCTION_TOOLSET_NAMES,
+    });
+    for profile in [ApplicationProfile::Compact, ApplicationProfile::Standard] {
+        for read_only in [false, true] {
+            let base =
+                production_server(None, profile, read_only, true).expect("base production server");
+            let selected = production_server(Some(PRODUCTION_SELECTOR), profile, read_only, true)
+                .expect("all-selected production server");
+            let reversed =
+                production_server(Some(REVERSE_PRODUCTION_SELECTOR), profile, read_only, true)
+                    .expect("reverse-selected production server");
+            let expected = if read_only {
+                PRODUCTION_READ_ONLY_TOOLS.as_slice()
+            } else {
+                PRODUCTION_READ_WRITE_TOOLS.as_slice()
+            };
+            assert_eq!(
+                production_optional_tool_names(&selected, &base),
+                expected,
+                "profile={profile:?} read_only={read_only}"
+            );
+            assert_eq!(tool_names_owned(&reversed), tool_names_owned(&selected));
+            assert_eq!(
+                production_status(&selected, &ProtocolVersion::V_2025_11_25).await,
+                expected_status
+            );
+            assert_eq!(
+                production_status(&reversed, &ProtocolVersion::V_2026_07_28).await,
+                expected_status
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn production_all_selected_stable_and_preview_catalogs_are_identical() {
+    for profile in [ApplicationProfile::Compact, ApplicationProfile::Standard] {
+        for read_only in [false, true] {
+            let server = production_server(Some(PRODUCTION_SELECTOR), profile, read_only, true)
+                .expect("all-selected production server");
+            let stable_tools =
+                serde_json::to_value(server.list_tools_wire(None).expect("stable tools"))
+                    .expect("stable tools value");
+            let preview_tools = crate::stdio::dispatch_modern(
+                &server,
+                json!(1),
+                "tools/list",
+                Map::new(),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(preview_tools["result"]["tools"], stable_tools["tools"]);
+
+            let stable_resources =
+                serde_json::to_value(server.list_resources_wire(None).expect("stable resources"))
+                    .expect("stable resources value");
+            let preview_resources = crate::stdio::dispatch_modern(
+                &server,
+                json!(2),
+                "resources/list",
+                Map::new(),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(
+                preview_resources["result"]["resources"],
+                stable_resources["resources"]
+            );
+
+            let stable_templates = serde_json::to_value(
+                server
+                    .list_resource_templates_wire(None)
+                    .expect("stable templates"),
+            )
+            .expect("stable templates value");
+            let preview_templates = crate::stdio::dispatch_modern(
+                &server,
+                json!(3),
+                "resources/templates/list",
+                Map::new(),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(
+                preview_templates["result"]["resourceTemplates"],
+                stable_templates["resourceTemplates"]
+            );
+
+            let stable_status = production_status(&server, &ProtocolVersion::V_2025_11_25).await;
+            let preview_status = production_status(&server, &ProtocolVersion::V_2026_07_28).await;
+            assert_eq!(preview_status, stable_status);
+        }
+    }
+}
+
+#[tokio::test]
+async fn production_disabled_and_read_only_sweeps_stop_before_decode_or_io() {
+    let disabled = production_server(None, ApplicationProfile::Compact, false, false)
+        .expect("disabled production server");
+    let before_disabled = disabled.runtime().client().http_metrics();
+    let secret_arguments = json!({"credential-like": "must-not-decode"})
+        .as_object()
+        .cloned()
+        .expect("secret arguments");
+    for name in PRODUCTION_READ_WRITE_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| *name != "optional_toolset_status")
+    {
+        let error = disabled
+            .dispatch_tool(
+                CallToolRequestParams::new(name).with_arguments(secret_arguments.clone()),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("disabled production tool");
+        assert_eq!(
+            error,
+            ErrorData::method_not_found::<CallToolRequestMethod>(),
+            "{name}"
+        );
+    }
+    let status_error = disabled
+        .dispatch_tool(
+            CallToolRequestParams::new("optional_toolset_status")
+                .with_arguments(secret_arguments.clone()),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("disabled optional status");
+    assert_eq!(
+        status_error,
+        ErrorData::method_not_found::<CallToolRequestMethod>()
+    );
+    let resource_error = disabled
+        .read_resource_wire(
+            ReadResourceRequestParams::new(FILE_RESOURCE_PROBE),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("disabled file resource");
+    assert_eq!(
+        resource_error,
+        ErrorData::method_not_found::<rmcp::model::ReadResourceRequestMethod>()
+    );
+    assert_eq!(disabled.phase1_dispatch_polls(), 0);
+    assert_eq!(disabled.runtime().client().http_metrics(), before_disabled);
+
+    let read_only = production_server(
+        Some(PRODUCTION_SELECTOR),
+        ApplicationProfile::Compact,
+        true,
+        true,
+    )
+    .expect("read-only all-selected production server");
+    let read_write = production_server(
+        Some(PRODUCTION_SELECTOR),
+        ApplicationProfile::Compact,
+        false,
+        true,
+    )
+    .expect("read-write all-selected production server");
+    let read_only_names = read_only
+        .tools()
+        .iter()
+        .map(|tool| tool.name.as_ref())
+        .collect::<std::collections::HashSet<_>>();
+    let omitted = production_optional_tool_names(&read_write, &disabled)
+        .into_iter()
+        .filter(|name| {
+            name != "optional_toolset_status" && !read_only_names.contains(name.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(omitted, PRODUCTION_MUTATION_TOOLS);
+
+    let before_read_only = read_only.runtime().client().http_metrics();
+    let mut expected_rejection = None;
+    for name in PRODUCTION_MUTATION_TOOLS {
+        let result = read_only
+            .dispatch_tool(
+                CallToolRequestParams::new(name).with_arguments(secret_arguments.clone()),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("read-only stale mutation rejection");
+        assert_eq!(result.is_error, Some(true), "{name}");
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_str),
+            Some("validation"),
+            "{name}"
+        );
+        if let Some(expected) = expected_rejection.as_ref() {
+            assert_eq!(&result, expected, "{name}");
+        } else {
+            expected_rejection = Some(result);
+        }
+    }
+    assert_eq!(read_only.phase1_dispatch_polls(), 0);
+    assert_eq!(
+        read_only.runtime().client().http_metrics(),
+        before_read_only
+    );
+}
+
+#[tokio::test]
+async fn production_leave_one_out_isolates_each_registry_before_decode_or_io() {
+    let secret_arguments = json!({"credential-like": "must-not-decode"})
+        .as_object()
+        .cloned()
+        .expect("secret arguments");
+    let mut dynamic_resource_owner_cells = 0_usize;
+
+    for omitted_registry in production_optional_registries() {
+        let omitted_name = omitted_registry.metadata().name;
+        let selected_names = PRODUCTION_TOOLSET_NAMES
+            .iter()
+            .copied()
+            .filter(|name| *name != omitted_name)
+            .collect::<Vec<_>>();
+        assert_eq!(selected_names.len(), PRODUCTION_TOOLSET_NAMES.len() - 1);
+        let selector = selected_names.join(",");
+        let expected_status = json!({
+            "configured_toolsets": selected_names,
+            "active_toolsets": selected_names,
+        });
+
+        let read_write_base = production_server(None, ApplicationProfile::Compact, false, true)
+            .expect("read-write base production server");
+        let read_write_all = production_server(
+            Some(PRODUCTION_SELECTOR),
+            ApplicationProfile::Compact,
+            false,
+            true,
+        )
+        .expect("read-write all-selected production server");
+        let read_write_single =
+            production_server(Some(omitted_name), ApplicationProfile::Compact, false, true)
+                .expect("read-write single-registry production server");
+
+        let base_tool_names = tool_names_owned(&read_write_base)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let owned_tool_names = tool_names_owned(&read_write_single)
+            .into_iter()
+            .filter(|name| {
+                name != "optional_toolset_status" && !base_tool_names.contains(name.as_str())
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !owned_tool_names.is_empty(),
+            "{omitted_name} must own at least one production tool"
+        );
+
+        let base_resource_uris = read_write_base
+            .list_resources_wire(None)
+            .expect("base resource inventory")
+            .resources
+            .into_iter()
+            .map(|resource| resource.uri.to_string())
+            .collect::<BTreeSet<_>>();
+        let all_resource_uris = read_write_all
+            .list_resources_wire(None)
+            .expect("all-selected resource inventory")
+            .resources
+            .into_iter()
+            .map(|resource| resource.uri.to_string())
+            .collect::<BTreeSet<_>>();
+        let owned_resource_uris = read_write_single
+            .list_resources_wire(None)
+            .expect("single-registry resource inventory")
+            .resources
+            .into_iter()
+            .map(|resource| resource.uri.to_string())
+            .filter(|uri| !base_resource_uris.contains(uri))
+            .collect::<BTreeSet<_>>();
+        assert!(
+            owned_resource_uris
+                .iter()
+                .all(|uri| omitted_registry.owns_resource_uri(uri)),
+            "{omitted_name} resource inventory must match registry ownership"
+        );
+
+        let base_template_uris = read_write_base
+            .list_resource_templates_wire(None)
+            .expect("base resource-template inventory")
+            .resource_templates
+            .into_iter()
+            .map(|template| template.uri_template.to_string())
+            .collect::<BTreeSet<_>>();
+        let all_template_uris = read_write_all
+            .list_resource_templates_wire(None)
+            .expect("all-selected resource-template inventory")
+            .resource_templates
+            .into_iter()
+            .map(|template| template.uri_template.to_string())
+            .collect::<BTreeSet<_>>();
+        let owned_template_uris = read_write_single
+            .list_resource_templates_wire(None)
+            .expect("single-registry resource-template inventory")
+            .resource_templates
+            .into_iter()
+            .map(|template| template.uri_template.to_string())
+            .filter(|uri| !base_template_uris.contains(uri))
+            .collect::<BTreeSet<_>>();
+        assert!(
+            owned_template_uris
+                .iter()
+                .all(|uri| omitted_registry.owns_resource_template(uri)),
+            "{omitted_name} resource-template inventory must match registry ownership"
+        );
+
+        for read_only in [false, true] {
+            let base = production_server(None, ApplicationProfile::Compact, read_only, true)
+                .expect("base production server");
+            let all = production_server(
+                Some(PRODUCTION_SELECTOR),
+                ApplicationProfile::Compact,
+                read_only,
+                true,
+            )
+            .expect("all-selected production server");
+            let leave_one = production_server(
+                Some(selector.as_str()),
+                ApplicationProfile::Compact,
+                read_only,
+                true,
+            )
+            .expect("leave-one-out production server");
+            let single = production_server(
+                Some(omitted_name),
+                ApplicationProfile::Compact,
+                read_only,
+                true,
+            )
+            .expect("single-registry production server");
+
+            let base_names = tool_names_owned(&base).into_iter().collect::<BTreeSet<_>>();
+            let all_names = tool_names_owned(&all).into_iter().collect::<BTreeSet<_>>();
+            let single_names = tool_names_owned(&single)
+                .into_iter()
+                .filter(|name| {
+                    name != "optional_toolset_status" && !base_names.contains(name.as_str())
+                })
+                .collect::<BTreeSet<_>>();
+            let expected_names = all_names
+                .difference(&single_names)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                tool_names_owned(&leave_one)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                expected_names,
+                "tool inventory omitted={omitted_name} read_only={read_only}"
+            );
+            assert!(
+                owned_tool_names.iter().all(|name| !leave_one
+                    .tools()
+                    .iter()
+                    .any(|tool| tool.name == name.as_str())),
+                "all read-write-owned tools must stay absent when omitted={omitted_name} \
+                 read_only={read_only}"
+            );
+
+            assert_eq!(
+                production_status(&leave_one, &ProtocolVersion::V_2025_11_25).await,
+                expected_status,
+                "status omitted={omitted_name} read_only={read_only}"
+            );
+
+            let leave_resource_uris = leave_one
+                .list_resources_wire(None)
+                .expect("leave-one-out resource inventory")
+                .resources
+                .into_iter()
+                .map(|resource| resource.uri.to_string())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                leave_resource_uris,
+                all_resource_uris
+                    .difference(&owned_resource_uris)
+                    .cloned()
+                    .collect(),
+                "resource inventory omitted={omitted_name} read_only={read_only}"
+            );
+
+            let leave_template_uris = leave_one
+                .list_resource_templates_wire(None)
+                .expect("leave-one-out resource-template inventory")
+                .resource_templates
+                .into_iter()
+                .map(|template| template.uri_template.to_string())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                leave_template_uris,
+                all_template_uris
+                    .difference(&owned_template_uris)
+                    .cloned()
+                    .collect(),
+                "resource-template inventory omitted={omitted_name} read_only={read_only}"
+            );
+
+            let before = leave_one.runtime().client().http_metrics();
+            for name in &owned_tool_names {
+                let error = leave_one
+                    .dispatch_tool(
+                        CallToolRequestParams::new(name.clone())
+                            .with_arguments(secret_arguments.clone()),
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .expect_err("omitted production tool");
+                assert_eq!(
+                    error,
+                    ErrorData::method_not_found::<CallToolRequestMethod>(),
+                    "stale tool omitted={omitted_name} read_only={read_only} name={name}"
+                );
+            }
+            for uri in &owned_resource_uris {
+                let error = leave_one
+                    .read_resource_wire(
+                        ReadResourceRequestParams::new(uri.clone()),
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .expect_err("omitted static production resource");
+                assert_eq!(
+                    error,
+                    ErrorData::method_not_found::<rmcp::model::ReadResourceRequestMethod>(),
+                    "stale resource omitted={omitted_name} read_only={read_only} uri={uri}"
+                );
+            }
+            if omitted_registry.owns_resource_uri(FILE_RESOURCE_PROBE) {
+                dynamic_resource_owner_cells = dynamic_resource_owner_cells.saturating_add(1);
+                let error = leave_one
+                    .read_resource_wire(
+                        ReadResourceRequestParams::new(FILE_RESOURCE_PROBE),
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .expect_err("omitted dynamic production resource");
+                assert_eq!(
+                    error,
+                    ErrorData::method_not_found::<rmcp::model::ReadResourceRequestMethod>(),
+                    "stale dynamic resource omitted={omitted_name} read_only={read_only}"
+                );
+            }
+            assert_eq!(
+                leave_one.phase1_dispatch_polls(),
+                0,
+                "phase-one dispatch omitted={omitted_name} read_only={read_only}"
+            );
+            assert_eq!(
+                leave_one.runtime().client().http_metrics(),
+                before,
+                "I/O omitted={omitted_name} read_only={read_only}"
+            );
+        }
+    }
+
+    assert_eq!(
+        dynamic_resource_owner_cells, 2,
+        "the files registry must own the dynamic resource probe in both access modes"
+    );
+}
+
+#[tokio::test]
+async fn production_optional_selection_preserves_phase_one_snapshots_and_status() {
+    let snapshots = [
+        (ApplicationProfile::Compact, false, COMPACT_CATALOG_SNAPSHOT),
+        (
+            ApplicationProfile::Compact,
+            true,
+            COMPACT_READ_ONLY_CATALOG_SNAPSHOT,
+        ),
+        (
+            ApplicationProfile::Standard,
+            false,
+            STANDARD_CATALOG_SNAPSHOT,
+        ),
+        (
+            ApplicationProfile::Standard,
+            true,
+            STANDARD_READ_ONLY_CATALOG_SNAPSHOT,
+        ),
+    ];
+    for (profile, read_only, snapshot) in snapshots {
+        let base =
+            production_server(None, profile, read_only, true).expect("base production server");
+        let selected = production_server(Some(PRODUCTION_SELECTOR), profile, read_only, true)
+            .expect("all-selected production server");
+        assert_eq!(production_catalog_snapshot(&base, read_only), snapshot);
+        let base_status = base
+            .dispatch_tool(
+                CallToolRequestParams::new("server_status"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("base server status");
+        let selected_status = selected
+            .dispatch_tool(
+                CallToolRequestParams::new("server_status"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("selected server status");
+        assert_eq!(selected_status, base_status);
+    }
+}
+
+#[test]
+fn production_optional_transport_union_is_exact() {
+    let metadata = production_optional_metadata();
+    assert_eq!(
+        metadata
+            .iter()
+            .map(|entry| (entry.name, entry.requires_grpc))
+            .collect::<Vec<_>>(),
+        [
+            ("body-blocks", true),
+            ("chats", false),
+            ("members", false),
+            ("files", false),
+            ("schema", true),
+            ("views-write", true),
+        ]
+    );
+    assert!(
+        production_server(
+            Some(PRODUCTION_SELECTOR),
+            ApplicationProfile::Compact,
+            true,
+            false,
+        )
+        .is_err()
+    );
+    assert!(
+        production_server(
+            Some("chats,files,members"),
+            ApplicationProfile::Compact,
+            false,
+            false,
+        )
+        .is_ok()
+    );
+    for name in ["body-blocks", "schema", "views-write"] {
+        assert!(
+            production_server(Some(name), ApplicationProfile::Compact, true, false,).is_err(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn production_catalogs_match_reviewed_aggregate_token_budget() {
+    let actual = production_token_budget();
+    let reviewed: Value =
+        serde_json::from_str(PRODUCTION_TOKEN_BUDGET).expect("production token snapshot");
+    assert_eq!(actual, reviewed);
+    assert_eq!(production_budget_json(), PRODUCTION_TOKEN_BUDGET);
+    assert!(
+        actual["common_status_tokens"]
+            .as_u64()
+            .expect("common status tokens")
+            <= actual["common_status_ceiling_tokens"]
+                .as_u64()
+                .expect("common status ceiling")
+    );
+    for budget in actual["registry_budgets"]
+        .as_object()
+        .expect("registry budgets")
+        .values()
+    {
+        assert!(
+            budget["domain_tokens"].as_u64().expect("domain tokens")
+                <= budget["catalog_ceiling_tokens"]
+                    .as_u64()
+                    .expect("catalog ceiling")
+        );
+    }
+    let aggregate_ceiling = actual["registry_ceiling_tokens"]
+        .as_u64()
+        .expect("aggregate registry ceiling")
+        + actual["common_status_ceiling_tokens"]
+            .as_u64()
+            .expect("status ceiling");
+    for composition in actual["compositions"]
+        .as_object()
+        .expect("production compositions")
+        .values()
+    {
+        assert!(
+            composition["selected_contribution_tokens"]
+                .as_u64()
+                .expect("selected contribution")
+                <= aggregate_ceiling
+        );
+    }
+}
+
 #[test]
 fn optional_transport_requirements_union_with_phase_one() {
     assert!(
@@ -1151,4 +2250,9 @@ fn write_optional_snapshots() {
         budget_json(&actual_token_budget()),
     )
     .expect("write reviewed optional token budget");
+    fs::write(
+        directory.join("production-optional-token-budget.json"),
+        production_budget_json(),
+    )
+    .expect("write reviewed production optional token budget");
 }
