@@ -4242,7 +4242,9 @@ const fn own(operation: LiveOperation, scenario: ScenarioId) -> Ownership {
 
 #[path = "optional_workflow.rs"]
 mod optional_workflow;
-pub use optional_workflow::{OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow};
+pub use optional_workflow::{
+    OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow, OptionalRegistry,
+};
 
 /// Evidence tier required for every optional production operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -4251,81 +4253,447 @@ pub enum OptionalEvidenceTier {
     RealHeadless,
 }
 
+/// Exact executable workflow bound to one optional scenario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OptionalExecutableWorkflow {
+    Fast(OptionalFastWorkflow),
+    RealHeadless(OptionalRealWorkflow),
+}
+
+impl OptionalExecutableWorkflow {
+    /// Evidence tier executed by this workflow.
+    pub const fn tier(self) -> OptionalEvidenceTier {
+        match self {
+            Self::Fast(_) => OptionalEvidenceTier::Fast,
+            Self::RealHeadless(_) => OptionalEvidenceTier::RealHeadless,
+        }
+    }
+
+    /// Production registry routed by this workflow.
+    pub const fn registry(self) -> OptionalRegistry {
+        match self {
+            Self::Fast(workflow) => workflow.registry(),
+            Self::RealHeadless(workflow) => workflow.registry(),
+        }
+    }
+}
+
+const STATUS_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::OptionalToolsetStatus];
+const BODY_READ_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockList];
+const BODY_CREATE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockCreate];
+const BODY_UPDATE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockUpdate];
+const BODY_DELETE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockDelete];
+const BODY_MOVE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockMove];
+const RICH_PAGE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::RichPageCreate];
+const BODY_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::BodyBlockList,
+    OptionalOperation::BodyBlockCreate,
+    OptionalOperation::BodyBlockUpdate,
+    OptionalOperation::BodyBlockDelete,
+    OptionalOperation::BodyBlockMove,
+    OptionalOperation::RichPageCreate,
+];
+const CHAT_READ_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::ChatList,
+    OptionalOperation::ChatMessageList,
+    OptionalOperation::ChatMessageGet,
+    OptionalOperation::ChatMessageSearch,
+];
+const CHAT_ADD_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::ChatMessageAdd];
+const CHAT_DELETE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::ChatMessageDelete];
+const CHAT_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::ChatList,
+    OptionalOperation::ChatMessageList,
+    OptionalOperation::ChatMessageGet,
+    OptionalOperation::ChatMessageSearch,
+    OptionalOperation::ChatMessageAdd,
+    OptionalOperation::ChatMessageDelete,
+];
+const MEMBER_OPERATIONS: &[OptionalOperation] =
+    &[OptionalOperation::MemberList, OptionalOperation::MemberGet];
+const MEMBER_REAL_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::OptionalToolsetStatus,
+    OptionalOperation::MemberList,
+    OptionalOperation::MemberGet,
+];
+const FILE_READ_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::FileMetadata,
+    OptionalOperation::FileRead,
+    OptionalOperation::FileByteResource,
+];
+const FILE_UPLOAD_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::FileUpload];
+const FILE_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::FileMetadata,
+    OptionalOperation::FileRead,
+    OptionalOperation::FileUpload,
+    OptionalOperation::FileByteResource,
+];
+const SPACE_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::SpaceCreate,
+    OptionalOperation::SpaceUpdate,
+];
+const TYPE_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::TypeGet,
+    OptionalOperation::TypeCreate,
+    OptionalOperation::TypeUpdate,
+];
+const PROPERTY_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::PropertyCreate,
+    OptionalOperation::PropertyUpdate,
+];
+const TAG_OPERATIONS: &[OptionalOperation] =
+    &[OptionalOperation::TagCreate, OptionalOperation::TagUpdate];
+const SCHEMA_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::SpaceCreate,
+    OptionalOperation::SpaceUpdate,
+    OptionalOperation::TypeGet,
+    OptionalOperation::TypeCreate,
+    OptionalOperation::TypeUpdate,
+    OptionalOperation::PropertyCreate,
+    OptionalOperation::PropertyUpdate,
+    OptionalOperation::TagCreate,
+    OptionalOperation::TagUpdate,
+];
+const VIEW_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::CollectionMemberList,
+    OptionalOperation::CollectionMemberAdd,
+    OptionalOperation::CollectionMemberRemove,
+];
+
 /// Typed identifier for one reviewed optional-toolset scenario.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OptionalScenarioId {
     name: &'static str,
     tier: OptionalEvidenceTier,
+    registry: OptionalRegistry,
+    workflow: OptionalExecutableWorkflow,
+    operations: &'static [OptionalOperation],
 }
 
 impl OptionalScenarioId {
     /// Exact executable scenario inventory owned by the common foundation and
     /// the six linked production descriptors.
     pub const EXECUTABLE: [Self; 64] = [
-        optional_fast("optional_toolset_status_direct_contract"),
-        optional_fast("optional_toolset_status_stdio_contract"),
-        optional_fast("body_list_ordered_pages"),
-        optional_fast("body_list_revision_conflict"),
-        optional_fast("body_limits_fail_closed"),
-        optional_fast("body_opaque_read_only"),
-        optional_fast("body_create_idempotent"),
-        optional_fast("body_update_one_change"),
-        optional_fast("body_delete_confirmed_subtree"),
-        optional_fast("body_move_same_object"),
-        optional_fast("body_relation_workflows"),
-        optional_fast("body_targeted_heading_append"),
-        optional_fast("rich_page_complete"),
-        optional_fast("rich_page_partial"),
-        optional_fast("rich_page_indeterminate"),
-        optional_fast("rich_page_replay_drift"),
-        optional_fast("body_read_only_catalog"),
-        optional_fast("body_read_restricted"),
-        optional_fast("body_network_closed"),
-        optional_fast("body_protocol_parity"),
-        optional_fast("body_redaction_and_budgets"),
-        optional_real("body_blocks_direct_real_headless"),
-        optional_real("body_blocks_stable_stdio_real_headless"),
-        optional_real("body_blocks_preview_stdio_real_headless"),
-        optional_fast("chats_read_direct"),
-        optional_fast("chats_read_stdio"),
-        optional_fast("chat_add_direct"),
-        optional_fast("chat_add_stdio"),
-        optional_fast("chat_delete_direct"),
-        optional_fast("chat_delete_stdio"),
-        optional_fast("chats_registry_direct_contract"),
-        optional_fast("chats_registry_stable_stdio_contract"),
-        optional_fast("chats_registry_preview_stdio_contract"),
-        optional_real("chats_read_headless"),
-        optional_real("chat_add_headless"),
-        optional_real("chat_delete_headless"),
-        optional_real("chats_registry_real_direct"),
-        optional_real("chats_registry_real_stable_stdio"),
-        optional_real("chats_registry_real_preview_stdio"),
-        optional_fast("members_direct"),
-        optional_real("members_headless"),
-        optional_fast("file_content_direct_contract"),
-        optional_fast("file_content_stdio_contract"),
-        optional_fast("file_upload_direct_contract"),
-        optional_fast("file_upload_stdio_contract"),
-        optional_real("file_content_real_headless"),
-        optional_fast("schema_space_direct"),
-        optional_fast("schema_space_stdio"),
-        optional_fast("schema_type_direct"),
-        optional_fast("schema_type_stdio"),
-        optional_fast("schema_property_direct"),
-        optional_fast("schema_property_stdio"),
-        optional_fast("schema_tag_direct"),
-        optional_fast("schema_tag_stdio"),
-        optional_fast("schema_registry_direct_contract"),
-        optional_fast("schema_registry_stdio_contract"),
-        optional_real("schema_space_headless"),
-        optional_real("schema_type_headless"),
-        optional_real("schema_property_headless"),
-        optional_real("schema_tag_headless"),
-        optional_real("schema_registry_real_headless"),
-        optional_fast("collection_member_acceptance_direct"),
-        optional_fast("collection_member_acceptance_stdio"),
-        optional_real("collection_member_acceptance_headless"),
+        define_fast(
+            "optional_toolset_status_direct_contract",
+            OptionalFastWorkflow::OptionalStatus,
+            STATUS_OPERATIONS,
+        ),
+        define_fast(
+            "optional_toolset_status_stdio_contract",
+            OptionalFastWorkflow::OptionalStatus,
+            STATUS_OPERATIONS,
+        ),
+        define_fast(
+            "body_list_ordered_pages",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_READ_OPERATIONS,
+        ),
+        define_fast(
+            "body_list_revision_conflict",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_READ_OPERATIONS,
+        ),
+        define_fast(
+            "body_limits_fail_closed",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_fast(
+            "body_opaque_read_only",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_READ_OPERATIONS,
+        ),
+        define_fast(
+            "body_create_idempotent",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_CREATE_OPERATIONS,
+        ),
+        define_fast(
+            "body_update_one_change",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_UPDATE_OPERATIONS,
+        ),
+        define_fast(
+            "body_delete_confirmed_subtree",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_DELETE_OPERATIONS,
+        ),
+        define_fast(
+            "body_move_same_object",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_MOVE_OPERATIONS,
+        ),
+        define_fast(
+            "body_relation_workflows",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_fast(
+            "body_targeted_heading_append",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_UPDATE_OPERATIONS,
+        ),
+        define_fast(
+            "rich_page_complete",
+            OptionalFastWorkflow::BodyBlocks,
+            RICH_PAGE_OPERATIONS,
+        ),
+        define_fast(
+            "rich_page_partial",
+            OptionalFastWorkflow::BodyBlocks,
+            RICH_PAGE_OPERATIONS,
+        ),
+        define_fast(
+            "rich_page_indeterminate",
+            OptionalFastWorkflow::BodyBlocks,
+            RICH_PAGE_OPERATIONS,
+        ),
+        define_fast(
+            "rich_page_replay_drift",
+            OptionalFastWorkflow::BodyBlocks,
+            RICH_PAGE_OPERATIONS,
+        ),
+        define_fast(
+            "body_read_only_catalog",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_READ_OPERATIONS,
+        ),
+        define_fast(
+            "body_read_restricted",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_READ_OPERATIONS,
+        ),
+        define_fast(
+            "body_network_closed",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_fast(
+            "body_protocol_parity",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_fast(
+            "body_redaction_and_budgets",
+            OptionalFastWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_real(
+            "body_blocks_direct_real_headless",
+            OptionalRealWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_real(
+            "body_blocks_stable_stdio_real_headless",
+            OptionalRealWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_real(
+            "body_blocks_preview_stdio_real_headless",
+            OptionalRealWorkflow::BodyBlocks,
+            BODY_OPERATIONS,
+        ),
+        define_fast(
+            "chats_read_direct",
+            OptionalFastWorkflow::Chats,
+            CHAT_READ_OPERATIONS,
+        ),
+        define_fast(
+            "chats_read_stdio",
+            OptionalFastWorkflow::Chats,
+            CHAT_READ_OPERATIONS,
+        ),
+        define_fast(
+            "chat_add_direct",
+            OptionalFastWorkflow::Chats,
+            CHAT_ADD_OPERATIONS,
+        ),
+        define_fast(
+            "chat_add_stdio",
+            OptionalFastWorkflow::Chats,
+            CHAT_ADD_OPERATIONS,
+        ),
+        define_fast(
+            "chat_delete_direct",
+            OptionalFastWorkflow::Chats,
+            CHAT_DELETE_OPERATIONS,
+        ),
+        define_fast(
+            "chat_delete_stdio",
+            OptionalFastWorkflow::Chats,
+            CHAT_DELETE_OPERATIONS,
+        ),
+        define_fast(
+            "chats_registry_direct_contract",
+            OptionalFastWorkflow::Chats,
+            CHAT_OPERATIONS,
+        ),
+        define_fast(
+            "chats_registry_stable_stdio_contract",
+            OptionalFastWorkflow::Chats,
+            CHAT_OPERATIONS,
+        ),
+        define_fast(
+            "chats_registry_preview_stdio_contract",
+            OptionalFastWorkflow::Chats,
+            CHAT_OPERATIONS,
+        ),
+        define_real(
+            "chats_read_headless",
+            OptionalRealWorkflow::Chats,
+            CHAT_READ_OPERATIONS,
+        ),
+        define_real(
+            "chat_add_headless",
+            OptionalRealWorkflow::Chats,
+            CHAT_ADD_OPERATIONS,
+        ),
+        define_real(
+            "chat_delete_headless",
+            OptionalRealWorkflow::Chats,
+            CHAT_DELETE_OPERATIONS,
+        ),
+        define_real(
+            "chats_registry_real_direct",
+            OptionalRealWorkflow::Chats,
+            CHAT_OPERATIONS,
+        ),
+        define_real(
+            "chats_registry_real_stable_stdio",
+            OptionalRealWorkflow::Chats,
+            CHAT_OPERATIONS,
+        ),
+        define_real(
+            "chats_registry_real_preview_stdio",
+            OptionalRealWorkflow::Chats,
+            CHAT_OPERATIONS,
+        ),
+        define_fast(
+            "members_direct",
+            OptionalFastWorkflow::Members,
+            MEMBER_OPERATIONS,
+        ),
+        define_real(
+            "members_headless",
+            OptionalRealWorkflow::Members,
+            MEMBER_REAL_OPERATIONS,
+        ),
+        define_fast(
+            "file_content_direct_contract",
+            OptionalFastWorkflow::Files,
+            FILE_READ_OPERATIONS,
+        ),
+        define_fast(
+            "file_content_stdio_contract",
+            OptionalFastWorkflow::Files,
+            FILE_READ_OPERATIONS,
+        ),
+        define_fast(
+            "file_upload_direct_contract",
+            OptionalFastWorkflow::Files,
+            FILE_UPLOAD_OPERATIONS,
+        ),
+        define_fast(
+            "file_upload_stdio_contract",
+            OptionalFastWorkflow::Files,
+            FILE_UPLOAD_OPERATIONS,
+        ),
+        define_real(
+            "file_content_real_headless",
+            OptionalRealWorkflow::Files,
+            FILE_OPERATIONS,
+        ),
+        define_fast(
+            "schema_space_direct",
+            OptionalFastWorkflow::Schema,
+            SPACE_OPERATIONS,
+        ),
+        define_fast(
+            "schema_space_stdio",
+            OptionalFastWorkflow::Schema,
+            SPACE_OPERATIONS,
+        ),
+        define_fast(
+            "schema_type_direct",
+            OptionalFastWorkflow::Schema,
+            TYPE_OPERATIONS,
+        ),
+        define_fast(
+            "schema_type_stdio",
+            OptionalFastWorkflow::Schema,
+            TYPE_OPERATIONS,
+        ),
+        define_fast(
+            "schema_property_direct",
+            OptionalFastWorkflow::Schema,
+            PROPERTY_OPERATIONS,
+        ),
+        define_fast(
+            "schema_property_stdio",
+            OptionalFastWorkflow::Schema,
+            PROPERTY_OPERATIONS,
+        ),
+        define_fast(
+            "schema_tag_direct",
+            OptionalFastWorkflow::Schema,
+            TAG_OPERATIONS,
+        ),
+        define_fast(
+            "schema_tag_stdio",
+            OptionalFastWorkflow::Schema,
+            TAG_OPERATIONS,
+        ),
+        define_fast(
+            "schema_registry_direct_contract",
+            OptionalFastWorkflow::Schema,
+            SCHEMA_OPERATIONS,
+        ),
+        define_fast(
+            "schema_registry_stdio_contract",
+            OptionalFastWorkflow::Schema,
+            SCHEMA_OPERATIONS,
+        ),
+        define_real(
+            "schema_space_headless",
+            OptionalRealWorkflow::Schema,
+            SPACE_OPERATIONS,
+        ),
+        define_real(
+            "schema_type_headless",
+            OptionalRealWorkflow::Schema,
+            TYPE_OPERATIONS,
+        ),
+        define_real(
+            "schema_property_headless",
+            OptionalRealWorkflow::Schema,
+            PROPERTY_OPERATIONS,
+        ),
+        define_real(
+            "schema_tag_headless",
+            OptionalRealWorkflow::Schema,
+            TAG_OPERATIONS,
+        ),
+        define_real(
+            "schema_registry_real_headless",
+            OptionalRealWorkflow::Schema,
+            SCHEMA_OPERATIONS,
+        ),
+        define_fast(
+            "collection_member_acceptance_direct",
+            OptionalFastWorkflow::ViewsWrite,
+            VIEW_OPERATIONS,
+        ),
+        define_fast(
+            "collection_member_acceptance_stdio",
+            OptionalFastWorkflow::ViewsWrite,
+            VIEW_OPERATIONS,
+        ),
+        define_real(
+            "collection_member_acceptance_headless",
+            OptionalRealWorkflow::ViewsWrite,
+            VIEW_OPERATIONS,
+        ),
     ];
 
     /// Stable descriptor-owned scenario name.
@@ -4338,6 +4706,21 @@ impl OptionalScenarioId {
         self.tier
     }
 
+    /// Production descriptor that declares this scenario.
+    pub const fn registry(self) -> OptionalRegistry {
+        self.registry
+    }
+
+    /// Exact executable workflow that runs this scenario.
+    pub const fn workflow(self) -> OptionalExecutableWorkflow {
+        self.workflow
+    }
+
+    /// Returns whether this scenario directly exercises the operation.
+    pub fn covers(self, operation: OptionalOperation) -> bool {
+        self.operations.contains(&operation)
+    }
+
     fn parse(name: &str, tier: OptionalEvidenceTier) -> Option<Self> {
         Self::EXECUTABLE
             .iter()
@@ -4346,18 +4729,77 @@ impl OptionalScenarioId {
     }
 }
 
-const fn optional_fast(name: &'static str) -> OptionalScenarioId {
+const fn define_fast(
+    name: &'static str,
+    workflow: OptionalFastWorkflow,
+    operations: &'static [OptionalOperation],
+) -> OptionalScenarioId {
     OptionalScenarioId {
         name,
         tier: OptionalEvidenceTier::Fast,
+        registry: workflow.registry(),
+        workflow: OptionalExecutableWorkflow::Fast(workflow),
+        operations,
+    }
+}
+
+const fn define_real(
+    name: &'static str,
+    workflow: OptionalRealWorkflow,
+    operations: &'static [OptionalOperation],
+) -> OptionalScenarioId {
+    OptionalScenarioId {
+        name,
+        tier: OptionalEvidenceTier::RealHeadless,
+        registry: workflow.registry(),
+        workflow: OptionalExecutableWorkflow::RealHeadless(workflow),
+        operations,
+    }
+}
+
+const fn optional_fast(name: &'static str) -> OptionalScenarioId {
+    match find_optional_scenario(name, OptionalEvidenceTier::Fast) {
+        Some(scenario) => scenario,
+        None => panic!("unknown fast optional scenario"),
     }
 }
 
 const fn optional_real(name: &'static str) -> OptionalScenarioId {
-    OptionalScenarioId {
-        name,
-        tier: OptionalEvidenceTier::RealHeadless,
+    match find_optional_scenario(name, OptionalEvidenceTier::RealHeadless) {
+        Some(scenario) => scenario,
+        None => panic!("unknown real-headless optional scenario"),
     }
+}
+
+const fn find_optional_scenario(
+    name: &str,
+    tier: OptionalEvidenceTier,
+) -> Option<OptionalScenarioId> {
+    let mut index = 0;
+    while index < OptionalScenarioId::EXECUTABLE.len() {
+        let scenario = OptionalScenarioId::EXECUTABLE[index];
+        if scenario.tier as u8 == tier as u8 && optional_scenario_name_eq(scenario.name, name) {
+            return Some(scenario);
+        }
+        index += 1;
+    }
+    None
+}
+
+const fn optional_scenario_name_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// One operation-to-scenario binding at one evidence tier.
@@ -4768,9 +5210,42 @@ where
     Ok(())
 }
 
+/// One descriptor-tagged optional scenario declaration.
+///
+/// Keeping the descriptor identity beside the scenario name prevents a valid
+/// identifier from one registry from silently satisfying another registry's
+/// inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionalScenarioDeclaration {
+    registry: OptionalRegistry,
+    name: &'static str,
+    tier: OptionalEvidenceTier,
+}
+
+impl OptionalScenarioDeclaration {
+    /// Declares one fast scenario under its production descriptor.
+    #[allow(dead_code)] // Shared support targets do not all enumerate descriptors.
+    pub const fn fast(registry: OptionalRegistry, name: &'static str) -> Self {
+        Self {
+            registry,
+            name,
+            tier: OptionalEvidenceTier::Fast,
+        }
+    }
+
+    /// Declares one real-headless scenario under its production descriptor.
+    #[allow(dead_code)] // Shared support targets do not all enumerate descriptors.
+    pub const fn real_headless(registry: OptionalRegistry, name: &'static str) -> Self {
+        Self {
+            registry,
+            name,
+            tier: OptionalEvidenceTier::RealHeadless,
+        }
+    }
+}
+
 fn optional_scenario_inventory(
-    scripted_scenarios: &[&str],
-    headless_scenarios: &[&str],
+    declarations: &[OptionalScenarioDeclaration],
 ) -> Result<HashSet<OptionalScenarioId>, String> {
     let executable_names = OptionalScenarioId::EXECUTABLE
         .iter()
@@ -4782,22 +5257,41 @@ fn optional_scenario_inventory(
 
     let mut names = HashSet::new();
     let mut scenarios = HashSet::new();
-    for (tier, tier_name, declared) in [
-        (OptionalEvidenceTier::Fast, "fast", scripted_scenarios),
-        (
-            OptionalEvidenceTier::RealHeadless,
-            "real-headless",
-            headless_scenarios,
-        ),
-    ] {
-        for name in declared {
-            if !names.insert(*name) {
-                return Err(format!("duplicate optional scenario identifier: {name}"));
-            }
-            let scenario = OptionalScenarioId::parse(name, tier)
-                .ok_or_else(|| format!("unknown {tier_name} optional scenario: {name}"))?;
-            scenarios.insert(scenario);
+    for declaration in declarations {
+        if !names.insert(declaration.name) {
+            return Err(format!(
+                "duplicate optional scenario identifier: {}",
+                declaration.name
+            ));
         }
+        let tier_name = match declaration.tier {
+            OptionalEvidenceTier::Fast => "fast",
+            OptionalEvidenceTier::RealHeadless => "real-headless",
+        };
+        let scenario =
+            OptionalScenarioId::parse(declaration.name, declaration.tier).ok_or_else(|| {
+                format!(
+                    "unknown {tier_name} optional scenario: {}",
+                    declaration.name
+                )
+            })?;
+        if scenario.registry() != declaration.registry {
+            return Err(format!(
+                "optional scenario descriptor mismatch: {} declared by {}, owned by {}",
+                scenario.as_str(),
+                declaration.registry.as_str(),
+                scenario.registry().as_str()
+            ));
+        }
+        if scenario.workflow().tier() != declaration.tier
+            || scenario.workflow().registry() != declaration.registry
+        {
+            return Err(format!(
+                "optional scenario workflow mismatch: {}",
+                scenario.as_str()
+            ));
+        }
+        scenarios.insert(scenario);
     }
 
     let executable = OptionalScenarioId::EXECUTABLE
@@ -4823,8 +5317,7 @@ fn optional_scenario_inventory(
 pub fn validate_optional_live_ownership(
     expected_tools: &[&str],
     expected_resource_families: &[&str],
-    scripted_scenarios: &[&str],
-    headless_scenarios: &[&str],
+    scenario_declarations: &[OptionalScenarioDeclaration],
 ) -> Result<(), String> {
     let mut operations = HashSet::new();
     for name in expected_tools {
@@ -4846,7 +5339,7 @@ pub fn validate_optional_live_ownership(
         }
     }
 
-    let scenarios = optional_scenario_inventory(scripted_scenarios, headless_scenarios)?;
+    let scenarios = optional_scenario_inventory(scenario_declarations)?;
     let expected = operations
         .iter()
         .flat_map(|operation| {
@@ -4856,16 +5349,80 @@ pub fn validate_optional_live_ownership(
             ]
         })
         .collect::<HashSet<_>>();
-    validate_typed_ownership(
-        &expected,
-        OPTIONAL_LIVE_OWNERSHIP
-            .iter()
-            .map(|owner| ((owner.operation, owner.scenario.tier()), owner.scenario)),
-        |scenario| scenarios.contains(&scenario),
-        OptionalScenarioId::as_str,
-        "optional operation/tier",
-        "optional scenario",
-    )
+    validate_optional_typed_ownership(&expected, OPTIONAL_LIVE_OWNERSHIP, &scenarios)
+}
+
+fn validate_optional_typed_ownership(
+    expected: &HashSet<(OptionalOperation, OptionalEvidenceTier)>,
+    owners: &[OptionalOwnership],
+    scenarios: &HashSet<OptionalScenarioId>,
+) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for owner in owners {
+        let key = (owner.operation, owner.scenario.tier());
+        if !expected.contains(&key) {
+            return Err(format!("unknown optional operation/tier owner: {key:?}"));
+        }
+        if !seen.insert(key) {
+            return Err(format!("duplicate optional operation/tier owner: {key:?}"));
+        }
+        if !scenarios.contains(&owner.scenario) {
+            return Err(format!(
+                "non-executable optional scenario owner: {}",
+                owner.scenario.as_str()
+            ));
+        }
+
+        let operation_registry = owner.operation.registry();
+        let scenario_registry = owner.scenario.registry();
+        if operation_registry != scenario_registry {
+            return Err(format!(
+                "optional owner registry mismatch: {:?} is {}, scenario {} is {}",
+                owner.operation,
+                operation_registry.as_str(),
+                owner.scenario.as_str(),
+                scenario_registry.as_str()
+            ));
+        }
+
+        let expected_workflow = match owner.scenario.tier() {
+            OptionalEvidenceTier::Fast => {
+                OptionalExecutableWorkflow::Fast(owner.operation.fast_workflow())
+            }
+            OptionalEvidenceTier::RealHeadless => {
+                OptionalExecutableWorkflow::RealHeadless(owner.operation.real_workflow())
+            }
+        };
+        if expected_workflow.registry() != operation_registry {
+            return Err(format!(
+                "optional operation workflow registry mismatch: {:?}",
+                owner.operation
+            ));
+        }
+        if owner.scenario.workflow() != expected_workflow {
+            return Err(format!(
+                "optional owner workflow mismatch: {:?} uses {}, scenario {} uses {:?}",
+                owner.operation,
+                operation_registry.as_str(),
+                owner.scenario.as_str(),
+                owner.scenario.workflow()
+            ));
+        }
+        if !owner.scenario.covers(owner.operation) {
+            return Err(format!(
+                "optional scenario does not cover operation: {} does not cover {:?}",
+                owner.scenario.as_str(),
+                owner.operation
+            ));
+        }
+    }
+
+    let mut missing = expected.difference(&seen).copied().collect::<Vec<_>>();
+    missing.sort_unstable();
+    if let Some(key) = missing.first() {
+        return Err(format!("missing optional operation/tier owner: {key:?}"));
+    }
+    Ok(())
 }
 
 fn required_string(value: &Value, pointer: &str) -> Result<String, String> {
@@ -5028,33 +5585,34 @@ mod ownership_tests {
 
     #[test]
     fn optional_scenario_inventory_is_exact_unique_and_typed() {
-        let scripted = OptionalScenarioId::EXECUTABLE
+        let declarations = OptionalScenarioId::EXECUTABLE
             .iter()
-            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::Fast)
-            .map(|scenario| scenario.as_str())
-            .collect::<Vec<_>>();
-        let headless = OptionalScenarioId::EXECUTABLE
-            .iter()
-            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::RealHeadless)
-            .map(|scenario| scenario.as_str())
+            .map(|scenario| OptionalScenarioDeclaration {
+                registry: scenario.registry(),
+                name: scenario.as_str(),
+                tier: scenario.tier(),
+            })
             .collect::<Vec<_>>();
         assert_eq!(
-            optional_scenario_inventory(&scripted, &headless)
+            optional_scenario_inventory(&declarations)
                 .expect("exact typed optional scenario inventory")
                 .len(),
             64
         );
 
-        let mut duplicate = scripted.clone();
-        duplicate.push(scripted[0]);
+        let mut duplicate = declarations.clone();
+        duplicate.push(declarations[0]);
         assert!(
-            optional_scenario_inventory(&duplicate, &headless)
+            optional_scenario_inventory(&duplicate)
                 .unwrap_err()
                 .starts_with("duplicate optional scenario identifier")
         );
         assert_eq!(
-            optional_scenario_inventory(&scripted[1..], &headless).unwrap_err(),
-            format!("missing executable optional scenario: {}", scripted[0])
+            optional_scenario_inventory(&declarations[1..]).unwrap_err(),
+            format!(
+                "missing executable optional scenario: {}",
+                declarations[0].name
+            )
         );
     }
 
@@ -5068,21 +5626,109 @@ mod ownership_tests {
             .into_iter()
             .filter_map(OptionalOperation::resource_family_name)
             .collect::<Vec<_>>();
-        let scripted = OptionalScenarioId::EXECUTABLE
+        let scenarios = OptionalScenarioId::EXECUTABLE
             .iter()
-            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::Fast)
-            .map(|scenario| scenario.as_str())
-            .collect::<Vec<_>>();
-        let headless = OptionalScenarioId::EXECUTABLE
-            .iter()
-            .filter(|scenario| scenario.tier() == OptionalEvidenceTier::RealHeadless)
-            .map(|scenario| scenario.as_str())
+            .map(|scenario| OptionalScenarioDeclaration {
+                registry: scenario.registry(),
+                name: scenario.as_str(),
+                tier: scenario.tier(),
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(tools.len(), 30);
         assert_eq!(resources.len(), 1);
-        validate_optional_live_ownership(&tools, &resources, &scripted, &headless)
+        validate_optional_live_ownership(&tools, &resources, &scenarios)
             .expect("closed optional catalog parser inventory");
+    }
+
+    fn complete_optional_expected() -> HashSet<(OptionalOperation, OptionalEvidenceTier)> {
+        OptionalOperation::ALL
+            .into_iter()
+            .flat_map(|operation| {
+                [
+                    (operation, OptionalEvidenceTier::Fast),
+                    (operation, OptionalEvidenceTier::RealHeadless),
+                ]
+            })
+            .collect()
+    }
+
+    fn complete_optional_scenarios() -> HashSet<OptionalScenarioId> {
+        OptionalScenarioId::EXECUTABLE.into_iter().collect()
+    }
+
+    #[test]
+    fn optional_owner_rejects_another_valid_same_tier_scenario() {
+        let mut owners = OPTIONAL_LIVE_OWNERSHIP.to_vec();
+        let owner = owners
+            .iter_mut()
+            .find(|owner| {
+                owner.operation == OptionalOperation::BodyBlockList
+                    && owner.scenario.tier() == OptionalEvidenceTier::Fast
+            })
+            .expect("body list fast owner");
+        owner.scenario = optional_fast("chats_read_direct");
+
+        assert_eq!(
+            validate_optional_typed_ownership(
+                &complete_optional_expected(),
+                &owners,
+                &complete_optional_scenarios(),
+            )
+            .unwrap_err(),
+            "optional owner registry mismatch: BodyBlockList is body-blocks, scenario chats_read_direct is chats"
+        );
+    }
+
+    #[test]
+    fn optional_inventory_rejects_swapped_valid_descriptor_scenarios() {
+        let mut declarations = OptionalScenarioId::EXECUTABLE
+            .iter()
+            .map(|scenario| OptionalScenarioDeclaration {
+                registry: scenario.registry(),
+                name: scenario.as_str(),
+                tier: scenario.tier(),
+            })
+            .collect::<Vec<_>>();
+        let chat_index = declarations
+            .iter()
+            .position(|declaration| declaration.name == "chats_read_direct")
+            .expect("chat scenario declaration");
+        let member_index = declarations
+            .iter()
+            .position(|declaration| declaration.name == "members_direct")
+            .expect("member scenario declaration");
+        let chat_registry = declarations[chat_index].registry;
+        declarations[chat_index].registry = declarations[member_index].registry;
+        declarations[member_index].registry = chat_registry;
+
+        assert_eq!(
+            optional_scenario_inventory(&declarations).unwrap_err(),
+            "optional scenario descriptor mismatch: chats_read_direct declared by members, owned by chats"
+        );
+    }
+
+    #[test]
+    fn optional_owner_rejects_correct_broad_workflow_with_wrong_scenario() {
+        let mut owners = OPTIONAL_LIVE_OWNERSHIP.to_vec();
+        let owner = owners
+            .iter_mut()
+            .find(|owner| {
+                owner.operation == OptionalOperation::SpaceCreate
+                    && owner.scenario.tier() == OptionalEvidenceTier::Fast
+            })
+            .expect("space create fast owner");
+        owner.scenario = optional_fast("schema_type_direct");
+
+        assert_eq!(
+            validate_optional_typed_ownership(
+                &complete_optional_expected(),
+                &owners,
+                &complete_optional_scenarios(),
+            )
+            .unwrap_err(),
+            "optional scenario does not cover operation: schema_type_direct does not cover SpaceCreate"
+        );
     }
 
     #[test]

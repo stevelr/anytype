@@ -3,6 +3,56 @@
 
 //! Closed optional-operation ownership shared by library and process tests.
 
+/// Closed identity of each production optional registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OptionalRegistry {
+    BodyBlocks,
+    Chats,
+    Files,
+    Members,
+    Schema,
+    ViewsWrite,
+}
+
+impl OptionalRegistry {
+    /// Every production optional registry.
+    #[allow(dead_code)] // Shared support targets do not all enumerate runners.
+    pub const ALL: [Self; 6] = [
+        Self::BodyBlocks,
+        Self::Chats,
+        Self::Files,
+        Self::Members,
+        Self::Schema,
+        Self::ViewsWrite,
+    ];
+
+    /// Parses an exact production descriptor name.
+    #[allow(dead_code)] // This shared support module is compiled by targets without descriptors.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "body-blocks" => Self::BodyBlocks,
+            "chats" => Self::Chats,
+            "files" => Self::Files,
+            "members" => Self::Members,
+            "schema" => Self::Schema,
+            "views-write" => Self::ViewsWrite,
+            _ => return None,
+        })
+    }
+
+    /// Exact production descriptor name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BodyBlocks => "body-blocks",
+            Self::Chats => "chats",
+            Self::Files => "files",
+            Self::Members => "members",
+            Self::Schema => "schema",
+            Self::ViewsWrite => "views-write",
+        }
+    }
+}
+
 /// Closed inventory of optional production tools and resource families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptionalOperation {
@@ -122,6 +172,45 @@ impl OptionalOperation {
         }
     }
 
+    /// Production registry that advertises this operation.
+    ///
+    /// The common status operation is assigned to `members`, whose fast and
+    /// real workflows provide its executable evidence.
+    pub const fn registry(self) -> OptionalRegistry {
+        match self {
+            Self::OptionalToolsetStatus | Self::MemberList | Self::MemberGet => {
+                OptionalRegistry::Members
+            }
+            Self::BodyBlockList
+            | Self::BodyBlockCreate
+            | Self::BodyBlockUpdate
+            | Self::BodyBlockDelete
+            | Self::BodyBlockMove
+            | Self::RichPageCreate => OptionalRegistry::BodyBlocks,
+            Self::ChatList
+            | Self::ChatMessageList
+            | Self::ChatMessageGet
+            | Self::ChatMessageSearch
+            | Self::ChatMessageAdd
+            | Self::ChatMessageDelete => OptionalRegistry::Chats,
+            Self::FileMetadata | Self::FileRead | Self::FileUpload | Self::FileByteResource => {
+                OptionalRegistry::Files
+            }
+            Self::SpaceCreate
+            | Self::SpaceUpdate
+            | Self::TypeGet
+            | Self::TypeCreate
+            | Self::TypeUpdate
+            | Self::PropertyCreate
+            | Self::PropertyUpdate
+            | Self::TagCreate
+            | Self::TagUpdate => OptionalRegistry::Schema,
+            Self::CollectionMemberList
+            | Self::CollectionMemberAdd
+            | Self::CollectionMemberRemove => OptionalRegistry::ViewsWrite,
+        }
+    }
+
     /// Production registry whose deterministic workflow owns this operation's fast evidence.
     pub const fn fast_workflow(self) -> OptionalFastWorkflow {
         match self {
@@ -217,6 +306,18 @@ impl OptionalFastWorkflow {
         Self::Schema,
         Self::ViewsWrite,
     ];
+
+    /// Registry whose production routing this workflow executes.
+    pub const fn registry(self) -> OptionalRegistry {
+        match self {
+            Self::OptionalStatus | Self::Members => OptionalRegistry::Members,
+            Self::BodyBlocks => OptionalRegistry::BodyBlocks,
+            Self::Chats => OptionalRegistry::Chats,
+            Self::Files => OptionalRegistry::Files,
+            Self::Schema => OptionalRegistry::Schema,
+            Self::ViewsWrite => OptionalRegistry::ViewsWrite,
+        }
+    }
 }
 
 /// Closed inventory of production registries with executable real-headless workflows.
@@ -240,4 +341,16 @@ impl OptionalRealWorkflow {
         Self::Schema,
         Self::ViewsWrite,
     ];
+
+    /// Registry whose spawned production routing this workflow executes.
+    pub const fn registry(self) -> OptionalRegistry {
+        match self {
+            Self::BodyBlocks => OptionalRegistry::BodyBlocks,
+            Self::Chats => OptionalRegistry::Chats,
+            Self::Files => OptionalRegistry::Files,
+            Self::Members => OptionalRegistry::Members,
+            Self::Schema => OptionalRegistry::Schema,
+            Self::ViewsWrite => OptionalRegistry::ViewsWrite,
+        }
+    }
 }

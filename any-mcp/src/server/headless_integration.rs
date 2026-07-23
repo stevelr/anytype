@@ -44,8 +44,9 @@ pub(super) mod live_scenario;
 
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
-    OptionalOperation, OptionalRealWorkflow, ScenarioEvidence, ScenarioId, ToolErrorEvidence,
-    run_body_scenario, run_chats_registry_scenario, run_live_scenario_on_large_stack,
+    OptionalOperation, OptionalRealWorkflow, OptionalRegistry, OptionalScenarioDeclaration,
+    ScenarioEvidence, ScenarioId, ToolErrorEvidence, run_body_scenario,
+    run_chats_registry_scenario, run_live_scenario_on_large_stack,
     run_representative_layout_scenario, run_scenario,
 };
 
@@ -2116,21 +2117,39 @@ fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
         .collect::<Vec<_>>();
     assert_eq!(optional_resource_families.len(), 1);
 
-    let mut scripted_scenarios = vec![
-        "optional_toolset_status_direct_contract",
-        "optional_toolset_status_stdio_contract",
+    let mut scenario_declarations = vec![
+        OptionalScenarioDeclaration::fast(
+            OptionalRegistry::Members,
+            "optional_toolset_status_direct_contract",
+        ),
+        OptionalScenarioDeclaration::fast(
+            OptionalRegistry::Members,
+            "optional_toolset_status_stdio_contract",
+        ),
     ];
-    let mut headless_scenarios = Vec::new();
     for registry in production_optional_registries() {
-        scripted_scenarios.extend_from_slice(registry.scripted_scenario_ids());
-        headless_scenarios.extend_from_slice(registry.headless_scenario_ids());
+        let registry_id = OptionalRegistry::from_name(registry.metadata().name)
+            .expect("known production optional registry identity");
+        scenario_declarations.extend(
+            registry
+                .scripted_scenario_ids()
+                .iter()
+                .copied()
+                .map(|scenario| OptionalScenarioDeclaration::fast(registry_id, scenario)),
+        );
+        scenario_declarations.extend(
+            registry
+                .headless_scenario_ids()
+                .iter()
+                .copied()
+                .map(|scenario| OptionalScenarioDeclaration::real_headless(registry_id, scenario)),
+        );
     }
-    assert_eq!(scripted_scenarios.len() + headless_scenarios.len(), 64);
+    assert_eq!(scenario_declarations.len(), 64);
     live_scenario::validate_optional_live_ownership(
         &optional_tool_refs,
         &optional_resource_families,
-        &scripted_scenarios,
-        &headless_scenarios,
+        &scenario_declarations,
     )
     .expect("complete typed fast and real-headless optional ownership");
     assert_eq!(

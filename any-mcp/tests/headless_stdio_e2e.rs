@@ -53,8 +53,8 @@ use support::live_scenario::{
 };
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    BodyDriverMetrics, OPTIONAL_LIVE_OWNERSHIP, OptionalEvidenceTier, OptionalFastWorkflow,
-    OptionalOperation, OptionalRealWorkflow,
+    BodyDriverMetrics, OPTIONAL_LIVE_OWNERSHIP, OptionalEvidenceTier, OptionalExecutableWorkflow,
+    OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow, OptionalRegistry,
 };
 use support::{
     live_scenario::{
@@ -98,7 +98,6 @@ impl DriverOptions {
         read_only: false,
         preview: true,
     };
-    #[cfg(feature = "acceptance-harness")]
     const PREVIEW_READ_ONLY: Self = Self {
         profile: "standard",
         read_only: true,
@@ -119,8 +118,24 @@ impl DriverOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionalRealWorkflowRun {
+    Executed,
+    Skipped,
+}
+
 #[cfg(feature = "acceptance-harness")]
-type OptionalRealWorkflowFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
+fn require_optional_workflow_executed(
+    outcome: OptionalRealWorkflowRun,
+) -> Result<(), &'static str> {
+    match outcome {
+        OptionalRealWorkflowRun::Executed => Ok(()),
+        OptionalRealWorkflowRun::Skipped => Err("required real-headless workflow was skipped"),
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+type OptionalRealWorkflowFuture = Pin<Box<dyn Future<Output = OptionalRealWorkflowRun> + 'static>>;
 
 #[cfg(feature = "acceptance-harness")]
 type OptionalRealWorkflowRunner = fn() -> OptionalRealWorkflowFuture;
@@ -134,8 +149,8 @@ struct OptionalRealWorkflowRegistration {
 
 #[cfg(feature = "acceptance-harness")]
 impl OptionalRealWorkflowRegistration {
-    async fn run(self) {
-        (self.runner)().await;
+    async fn run(self) -> OptionalRealWorkflowRun {
+        (self.runner)().await
     }
 }
 
@@ -1942,28 +1957,47 @@ spawned_baseline_test!(
 );
 spawned_baseline_test!(headless_stdio_standard_archive, ScenarioId::Archive);
 
-async fn run_members_real_workflow() {
+async fn run_members_real_workflow() -> OptionalRealWorkflowRun {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
+    let cleanup_record = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let callback_cleanup = Arc::clone(&cleanup_record);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-stdio-members",
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
-                let mut driver =
-                    StdioDriver::start_with_toolsets(DriverOptions::STANDARD, Some("members"));
-                let tools = driver.list_tools_sync().expect("members tools/list");
+                let credential_needles = disposable_child_credential_needles(ctx.as_ref())?;
+                let child = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    DriverOptions::STANDARD,
+                    Some("members"),
+                )?;
+                lock_driver(&child)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("registered members child disappeared"))?
+                    .initialize();
+                let mut driver = OwnedStdioDriver {
+                    driver: Arc::clone(&child),
+                };
+                let tools = driver
+                    .list_tools()
+                    .await
+                    .map_err(|_| sentinel_assertion("members tools/list failed"))?;
                 assert!(tools.iter().any(|name| name == "member_list"));
                 assert!(tools.iter().any(|name| name == "member_get"));
                 assert!(tools.iter().any(|name| name == "optional_toolset_status"));
 
                 let status = driver
-                    .call_tool_sync("optional_toolset_status", json!({}))
+                    .call_tool("optional_toolset_status", json!({}))
+                    .await
                     .expect("members status");
                 assert_eq!(status["configured_toolsets"], json!(["members"]));
                 assert_eq!(status["active_toolsets"], json!(["members"]));
                 let page = driver
-                    .call_tool_sync("member_list", json!({"space": ctx.space_id, "limit": 100}))
+                    .call_tool("member_list", json!({"space": ctx.space_id, "limit": 100}))
+                    .await
                     .expect("spawned member_list");
                 let items = page["items"].as_array().expect("spawned members items");
                 assert!(!items.is_empty(), "disposable space has an owner member");
@@ -1974,18 +2008,29 @@ async fn run_members_real_workflow() {
                         assert!(!wire.contains(forbidden));
                     }
                     let exact = driver
-                        .call_tool_sync(
+                        .call_tool(
                             "member_get",
                             json!({
                                 "space": ctx.space_id,
                                 "member_id": item["id"]
                             }),
                         )
+                        .await
                         .expect("spawned member_get");
                     assert_eq!(exact["member"], *item);
                 }
-                let (transcript, output) = driver.finish();
-                assert!(!transcript.contains("network-secret"));
+                let registered = lock_driver(&child)
+                    .take()
+                    .ok_or_else(|| sentinel_assertion("registered members child disappeared"))?;
+                let (transcript, output) = registered
+                    .try_finish()
+                    .map_err(|_| sentinel_assertion("members child did not stop cleanly"))?;
+                require_spawned_diagnostics(
+                    &transcript,
+                    &output,
+                    &[b"network-secret"],
+                    &credential_needles,
+                )?;
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 for forbidden in ["identity", "global_name", "globalName", "icon"] {
                     assert!(!stderr.contains(forbidden));
@@ -1997,10 +2042,18 @@ async fn run_members_real_workflow() {
     .await
     .expect("cleanup-safe spawned members suite");
     match outcome {
-        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *cleanup_record.lock().expect("members cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            OptionalRealWorkflowRun::Executed
+        }
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned members suite skipped before callback: {reason:?}");
+            OptionalRealWorkflowRun::Skipped
         }
     }
 }
@@ -2009,7 +2062,7 @@ async fn run_members_real_workflow() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_members_minimizes_personal_data() {
-    run_members_real_workflow().await;
+    let _ = run_members_real_workflow().await;
 }
 
 const FILE_RESOURCE_TEMPLATE: &str =
@@ -2020,7 +2073,7 @@ struct SpawnedFilesEvidence {
     normalized: Value,
 }
 
-fn disposable_credential_needles(ctx: &TestContext) -> TestResult<Vec<Vec<u8>>> {
+fn disposable_child_credential_needles(ctx: &TestContext) -> TestResult<Vec<Vec<u8>>> {
     const CREDENTIAL_NAMES: &[&str] = &[
         "ANYTYPE_KEY_HTTP_TOKEN",
         "ANYTYPE_KEY_ACCOUNT_ID",
@@ -2029,7 +2082,7 @@ fn disposable_credential_needles(ctx: &TestContext) -> TestResult<Vec<Vec<u8>>> 
     ];
     let environment = ctx
         .disposable_child_environment()
-        .ok_or_else(|| sentinel_assertion("files workflow omitted disposable child credentials"))?;
+        .ok_or_else(|| sentinel_assertion("workflow omitted disposable child credentials"))?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
     environment.configure(&mut command)?;
     let needles = command
@@ -2043,13 +2096,13 @@ fn disposable_credential_needles(ctx: &TestContext) -> TestResult<Vec<Vec<u8>>> 
         .collect::<Vec<_>>();
     if needles.len() < 2 {
         return Err(sentinel_assertion(
-            "files workflow child credentials were incomplete",
+            "workflow child credentials were incomplete",
         ));
     }
     Ok(needles)
 }
 
-fn require_files_diagnostics(
+fn require_spawned_diagnostics(
     transcript: &str,
     output: &ProcessOutput,
     secrets: &[&[u8]],
@@ -2079,7 +2132,7 @@ fn require_files_diagnostics(
         || metrics.lines != categorized
     {
         return Err(sentinel_assertion(
-            "files child diagnostics violated fixed-category/redaction bounds",
+            "child diagnostics violated fixed-category/redaction bounds",
         ));
     }
     Ok(())
@@ -2375,7 +2428,7 @@ async fn run_spawned_files_transport(
     let (transcript, output) = child
         .try_finish()
         .map_err(|_| sentinel_assertion("registered files child did not stop cleanly"))?;
-    require_files_diagnostics(
+    require_spawned_diagnostics(
         &transcript,
         &output,
         &[file_name.as_bytes(), encoded_payload.as_bytes()],
@@ -2384,7 +2437,7 @@ async fn run_spawned_files_transport(
     result
 }
 
-async fn run_files_real_workflow() {
+async fn run_files_real_workflow() -> OptionalRealWorkflowRun {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
     let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
@@ -2396,7 +2449,7 @@ async fn run_files_real_workflow() {
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
-                let credential_needles = disposable_credential_needles(ctx.as_ref())?;
+                let credential_needles = disposable_child_credential_needles(ctx.as_ref())?;
                 let mut state = 0x0A11_F17E_u32;
                 let mut payload = Vec::with_capacity(8_192);
                 for _ in 0..8_192 {
@@ -2448,19 +2501,21 @@ async fn run_files_real_workflow() {
                     .expect("preview files cleanup record"),
                 ChildCleanupRecord::Stopped
             );
+            OptionalRealWorkflowRun::Executed
         }
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned files registry skipped before callback: {reason:?}");
+            OptionalRealWorkflowRun::Skipped
         }
     }
 }
 
 #[tokio::test]
-#[serial_test::serial(disposable_anytype_files)]
+#[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_files_registry_runs_stable_and_preview_workflows() {
-    run_files_real_workflow().await;
+    let _ = run_files_real_workflow().await;
 }
 
 fn chats_process_failure(
@@ -2481,20 +2536,43 @@ fn chats_process_failure(
 }
 
 async fn run_spawned_chats_registry_transport(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    credential_needles: &[Vec<u8>],
     label: &str,
     options: DriverOptions,
     fixture: ChatsRegistryFixture<'_>,
 ) -> Result<ChatsRegistryEvidence, TestError> {
-    let mut driver = StdioDriver::spawn_with_toolsets_uninitialized(options, Some("chats"));
-    if std::panic::catch_unwind(AssertUnwindSafe(|| driver.initialize())).is_err() {
+    let search_query = fixture.search_query;
+    let add_text = fixture.add_text;
+    let child = spawn_disposable_driver(ctx, cleanup_record, options, Some("chats"))?;
+    if std::panic::catch_unwind(AssertUnwindSafe(|| {
+        lock_driver(&child)
+            .as_mut()
+            .expect("registered chats child remains owned")
+            .initialize();
+    }))
+    .is_err()
+    {
+        let driver = lock_driver(&child)
+            .take()
+            .ok_or_else(|| sentinel_assertion("registered chats child disappeared"))?;
         return Err(chats_process_failure(label, "initialize", driver));
     }
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(&child),
+    };
     let result = AssertUnwindSafe(run_chats_registry_scenario(&mut driver, fixture))
         .catch_unwind()
         .await;
     match result {
         Ok(Ok(evidence)) => {
-            let (transcript, output) = driver.finish();
+            let driver = lock_driver(&child)
+                .take()
+                .ok_or_else(|| sentinel_assertion("registered chats child disappeared"))?;
+            let (transcript, output) = driver
+                .try_finish()
+                .map_err(|_| sentinel_assertion("registered chats child did not stop cleanly"))?;
             let stderr = stderr_metrics(&output.stderr);
             if stderr.stack_overflow != 0 || stderr.panic != 0 || stderr.fatal != 0 {
                 eprintln!(
@@ -2505,30 +2583,47 @@ async fn run_spawned_chats_registry_transport(
                     message: "spawned chats registry emitted fatal diagnostics".to_owned(),
                 });
             }
-            if transcript.contains("private-content-sentinel") {
-                return Err(TestError::Assertion {
-                    message: "spawned chats registry transcript exposed content".to_owned(),
-                });
-            }
+            require_spawned_diagnostics(
+                &transcript,
+                &output,
+                &[
+                    search_query.as_bytes(),
+                    add_text.as_bytes(),
+                    b"private-content-sentinel",
+                ],
+                credential_needles,
+            )?;
             Ok(evidence)
         }
         Ok(Err(message)) => {
-            let _ = driver.finish();
+            if let Some(driver) = lock_driver(&child).take() {
+                let _ = driver.try_finish();
+            }
             eprintln!("spawned chats registry scenario failed: transport={label} stage={message}");
             Err(TestError::Assertion { message })
         }
-        Err(_) => Err(chats_process_failure(label, "scenario", driver)),
+        Err(_) => {
+            let driver = lock_driver(&child)
+                .take()
+                .ok_or_else(|| sentinel_assertion("registered chats child disappeared"))?;
+            Err(chats_process_failure(label, "scenario", driver))
+        }
     }
 }
 
-async fn run_chats_real_workflow() {
+async fn run_chats_real_workflow() -> OptionalRealWorkflowRun {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
+    let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let stable_callback_cleanup = Arc::clone(&stable_cleanup);
+    let preview_callback_cleanup = Arc::clone(&preview_cleanup);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-stdio-chats-registry",
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
+                let credential_needles = disposable_child_credential_needles(ctx.as_ref())?;
                 let suffix = unique_suffix();
                 let query = format!("mcpstdiochats{suffix}");
                 let chat = ctx
@@ -2556,13 +2651,16 @@ async fn run_chats_real_workflow() {
                     .await?;
                 ctx.register_chat_message(&chat.id, &seed_id)?;
 
-                for (label, options) in [
-                    ("stable", DriverOptions::COMPACT),
-                    ("preview", DriverOptions::PREVIEW),
+                for (label, options, cleanup_record) in [
+                    ("stable", DriverOptions::COMPACT, stable_callback_cleanup),
+                    ("preview", DriverOptions::PREVIEW, preview_callback_cleanup),
                 ] {
                     let add_text = format!("{label} chats registry {suffix}");
                     let idempotency_key = format!("{label}-chats-registry-{suffix}");
                     let evidence = Box::pin(run_spawned_chats_registry_transport(
+                        ctx.as_ref(),
+                        cleanup_record,
+                        &credential_needles,
                         label,
                         options,
                         ChatsRegistryFixture {
@@ -2586,10 +2684,24 @@ async fn run_chats_real_workflow() {
     .await
     .expect("cleanup-safe spawned chats registry suite");
     match outcome {
-        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *stable_cleanup.lock().expect("stable chats cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_eq!(
+                *preview_cleanup
+                    .lock()
+                    .expect("preview chats cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            OptionalRealWorkflowRun::Executed
+        }
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned chats registry suite skipped before callback: {reason:?}");
+            OptionalRealWorkflowRun::Skipped
         }
     }
 }
@@ -2598,7 +2710,7 @@ async fn run_chats_real_workflow() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_chats_registry_runs_stable_and_preview_workflows() {
-    run_chats_real_workflow().await;
+    let _ = run_chats_real_workflow().await;
 }
 
 fn layouts_process_failure(
@@ -3673,7 +3785,7 @@ async fn run_shared_views_write_acceptance(ctx: Arc<TestContext>) -> TestResult<
 }
 
 #[cfg(feature = "acceptance-harness")]
-async fn run_views_write_real_workflow() {
+async fn run_views_write_real_workflow() -> OptionalRealWorkflowRun {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
     let outcome = Box::pin(with_disposable_space_context(
@@ -3686,10 +3798,14 @@ async fn run_views_write_real_workflow() {
     .await
     .expect("cleanup-safe spawned views-write acceptance");
     match outcome {
-        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            OptionalRealWorkflowRun::Executed
+        }
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned views-write acceptance skipped before callback: {reason:?}");
+            OptionalRealWorkflowRun::Skipped
         }
     }
 }
@@ -3699,20 +3815,39 @@ async fn run_views_write_real_workflow() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn shared_direct_stable_preview_views_write_acceptance_is_exact() {
-    run_views_write_real_workflow().await;
+    let _ = run_views_write_real_workflow().await;
 }
 
-async fn run_schema_real_workflow() {
+async fn run_schema_real_workflow() -> OptionalRealWorkflowRun {
     let callback_ran = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&callback_ran);
+    let cleanup_record = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let callback_cleanup = Arc::clone(&cleanup_record);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-stdio-schema",
         move |ctx| {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
-                let mut driver =
-                    StdioDriver::start_with_toolsets(DriverOptions::STANDARD, Some("schema"));
-                let tools = driver.list_tools_sync().expect("schema tools/list");
+                let credential_needles = disposable_child_credential_needles(ctx.as_ref())?;
+                let child = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    DriverOptions::STANDARD,
+                    Some("schema"),
+                )?;
+                lock_driver(&child)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("registered schema child disappeared"))?
+                    .initialize();
+                let driver = OwnedStdioDriver {
+                    driver: Arc::clone(&child),
+                };
+                let call_tool = |name: &'static str, arguments: Value| {
+                    driver.with_driver(|driver| driver.call_tool_sync(name, arguments))
+                };
+                let tools = driver
+                    .with_driver(StdioDriver::list_tools_sync)
+                    .expect("schema tools/list");
                 let schema_names = [
                     "property_create",
                     "property_update",
@@ -3737,8 +3872,7 @@ async fn run_schema_real_workflow() {
                         .count(),
                     1
                 );
-                let status = driver
-                    .call_tool_sync("optional_toolset_status", json!({}))
+                let status = call_tool("optional_toolset_status", json!({}))
                     .expect("schema status");
                 assert_eq!(status["configured_toolsets"], json!(["schema"]));
                 assert_eq!(status["active_toolsets"], json!(["schema"]));
@@ -3747,7 +3881,7 @@ async fn run_schema_real_workflow() {
                 let created_space_claim =
                     Arc::new(ctx.prepare_space_fixture_claim(&created_space_name).await?);
                 let created_space = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    driver.call_tool_sync(
+                    call_tool(
                         "space_create",
                         json!({
                             "name":created_space_name,
@@ -3758,7 +3892,10 @@ async fn run_schema_real_workflow() {
                 })) {
                     Ok(result) => result.expect("spawned space_create"),
                     Err(_) => {
-                        let (_, output, process_category) = driver.finish_after_panic();
+                        let registered = lock_driver(&child)
+                            .take()
+                            .expect("registered schema child remains owned");
+                        let (_, output, process_category) = registered.finish_after_panic();
                         let stderr = stderr_metrics(&output.stderr);
                         panic!(
                             "spawned schema call failed: process={process_category} status={} stderr={}",
@@ -3778,15 +3915,14 @@ async fn run_schema_real_workflow() {
                     created_space_claim.as_ref(),
                     &created_space_readback,
                 )?;
-                let updated_space = driver
-                    .call_tool_sync(
+                let updated_space = call_tool(
                         "space_update",
                         json!({
                             "space":created_space_id,
                             "description":"schema registry updated"
                         }),
                     )
-                    .expect("spawned space_update");
+                .expect("spawned space_update");
                 assert_eq!(
                     updated_space
                         .pointer("/space/description")
@@ -3804,8 +3940,7 @@ async fn run_schema_real_workflow() {
                 );
 
                 let type_name = format!("MCP schema type {}", unique_suffix());
-                let created_type = driver
-                    .call_tool_sync(
+                let created_type = call_tool(
                         "type_create",
                         json!({
                             "space":ctx.space_id,
@@ -3814,23 +3949,24 @@ async fn run_schema_real_workflow() {
                             "idempotency_key":format!("type-{}", unique_suffix())
                         }),
                     )
-                    .expect("spawned type_create");
+                .expect("spawned type_create");
                 let type_id = created_type
                     .pointer("/type/id")
                     .and_then(Value::as_str)
                     .expect("created type id")
                     .to_owned();
                 ctx.register_type(&type_id);
-                let fetched_type = driver
-                    .call_tool_sync("type_get", json!({"space":ctx.space_id,"type":type_id}))
+                let fetched_type = call_tool(
+                    "type_get",
+                    json!({"space":ctx.space_id,"type":type_id}),
+                )
                     .expect("spawned type_get");
                 assert_eq!(
                     fetched_type.pointer("/type/id").and_then(Value::as_str),
                     Some(type_id.as_str())
                 );
                 let updated_type_name = format!("MCP schema updated type {}", unique_suffix());
-                let updated_type = driver
-                    .call_tool_sync(
+                let updated_type = call_tool(
                         "type_update",
                         json!({
                             "space":ctx.space_id,
@@ -3838,7 +3974,7 @@ async fn run_schema_real_workflow() {
                             "name":updated_type_name
                         }),
                     )
-                    .expect("spawned type_update");
+                .expect("spawned type_update");
                 assert_eq!(
                     updated_type.pointer("/type/name").and_then(Value::as_str),
                     Some(updated_type_name.as_str())
@@ -3854,8 +3990,7 @@ async fn run_schema_real_workflow() {
                 );
 
                 let property_name = format!("MCP schema property {}", unique_suffix());
-                let created_property = driver
-                    .call_tool_sync(
+                let created_property = call_tool(
                         "property_create",
                         json!({
                             "space":ctx.space_id,
@@ -3864,7 +3999,7 @@ async fn run_schema_real_workflow() {
                             "idempotency_key":format!("property-{}", unique_suffix())
                         }),
                     )
-                    .expect("spawned property_create");
+                .expect("spawned property_create");
                 let property_id = created_property
                     .pointer("/property/id")
                     .and_then(Value::as_str)
@@ -3874,8 +4009,7 @@ async fn run_schema_real_workflow() {
                 assert_eq!(created_property["tags"], json!([]));
                 let updated_property_name =
                     format!("MCP schema updated property {}", unique_suffix());
-                let updated_property = driver
-                    .call_tool_sync(
+                let updated_property = call_tool(
                         "property_update",
                         json!({
                             "space":ctx.space_id,
@@ -3883,7 +4017,7 @@ async fn run_schema_real_workflow() {
                             "name":updated_property_name
                         }),
                     )
-                    .expect("spawned property_update");
+                .expect("spawned property_update");
                 assert_eq!(
                     updated_property
                         .pointer("/property/name")
@@ -3900,8 +4034,7 @@ async fn run_schema_real_workflow() {
                 );
 
                 let tag_name = format!("MCP schema tag {}", unique_suffix());
-                let created_tag = driver
-                    .call_tool_sync(
+                let created_tag = call_tool(
                         "tag_create",
                         json!({
                             "space":ctx.space_id,
@@ -3911,7 +4044,7 @@ async fn run_schema_real_workflow() {
                             "idempotency_key":format!("tag-{}", unique_suffix())
                         }),
                     )
-                    .expect("spawned tag_create");
+                .expect("spawned tag_create");
                 let tag_id = created_tag
                     .pointer("/tag/id")
                     .and_then(Value::as_str)
@@ -3930,8 +4063,7 @@ async fn run_schema_real_workflow() {
                 assert_eq!(created_tag_readback.tag.name, tag_name);
                 assert_eq!(created_tag_readback.tag.color, Color::Grey);
                 let updated_tag_name = format!("MCP schema updated tag {}", unique_suffix());
-                let updated_tag = driver
-                    .call_tool_sync(
+                let updated_tag = call_tool(
                         "tag_update",
                         json!({
                             "space":ctx.space_id,
@@ -3941,7 +4073,7 @@ async fn run_schema_real_workflow() {
                             "color":"teal"
                         }),
                     )
-                    .expect("spawned tag_update");
+                .expect("spawned tag_update");
                 assert_eq!(
                     updated_tag.pointer("/tag/name").and_then(Value::as_str),
                     Some(updated_tag_name.as_str())
@@ -3963,20 +4095,26 @@ async fn run_schema_real_workflow() {
                 assert_eq!(updated_tag_readback.tag.name, updated_tag_name);
                 assert_eq!(updated_tag_readback.tag.color, Color::Teal);
 
-                let (transcript, output) = driver.finish();
-                assert!(!transcript.contains(&created_space_name));
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                for sensitive in [
-                    created_space_name.as_str(),
-                    type_name.as_str(),
-                    updated_type_name.as_str(),
-                    property_name.as_str(),
-                    updated_property_name.as_str(),
-                    tag_name.as_str(),
-                    updated_tag_name.as_str(),
-                ] {
-                    assert!(!stderr.contains(sensitive));
-                }
+                let registered = lock_driver(&child)
+                    .take()
+                    .ok_or_else(|| sentinel_assertion("registered schema child disappeared"))?;
+                let (transcript, output) = registered
+                    .try_finish()
+                    .map_err(|_| sentinel_assertion("schema child did not stop cleanly"))?;
+                require_spawned_diagnostics(
+                    &transcript,
+                    &output,
+                    &[
+                        created_space_name.as_bytes(),
+                        type_name.as_bytes(),
+                        updated_type_name.as_bytes(),
+                        property_name.as_bytes(),
+                        updated_property_name.as_bytes(),
+                        tag_name.as_bytes(),
+                        updated_tag_name.as_bytes(),
+                    ],
+                    &credential_needles,
+                )?;
                 Ok(())
             })
         },
@@ -3984,10 +4122,18 @@ async fn run_schema_real_workflow() {
     .await
     .expect("cleanup-safe spawned schema registry suite");
     match outcome {
-        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Completed(()) => {
+            assert!(callback_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                *cleanup_record.lock().expect("schema cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            OptionalRealWorkflowRun::Executed
+        }
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
             eprintln!("spawned schema registry suite skipped before callback: {reason:?}");
+            OptionalRealWorkflowRun::Skipped
         }
     }
 }
@@ -3996,7 +4142,7 @@ async fn run_schema_real_workflow() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_schema_registry_runs_all_nine_workflows() {
-    run_schema_real_workflow().await;
+    let _ = run_schema_real_workflow().await;
 }
 
 const ALL_OPTIONAL_TOOLSETS: &str = "body-blocks,chats,files,members,schema,views-write";
@@ -4262,12 +4408,12 @@ fn finish_aggregate_child(
     let (transcript, output) = child
         .try_finish()
         .map_err(|_| aggregate_sentinel_error("aggregate stdio child did not stop cleanly"))?;
-    require_files_diagnostics(&transcript, &output, secrets, credential_needles)
+    require_spawned_diagnostics(&transcript, &output, secrets, credential_needles)
         .map_err(|_| aggregate_sentinel_error("aggregate child diagnostics were not redacted"))
 }
 
 #[tokio::test]
-#[serial_test::serial(disposable_anytype_optional_toolsets)]
+#[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_children() {
     let callback_ran = Arc::new(AtomicBool::new(false));
@@ -4327,7 +4473,7 @@ async fn headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_child
                         "aggregate collection fixture was not exact",
                     ));
                 }
-                let credential_needles = disposable_credential_needles(ctx.as_ref())?;
+                let credential_needles = disposable_child_credential_needles(ctx.as_ref())?;
                 let mut state = 0xA66E_6A7E_u32;
                 let mut payload = Vec::with_capacity(8_192);
                 for _ in 0..8_192 {
@@ -4501,7 +4647,7 @@ async fn headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_child
         }
         DisposableRun::Skipped(reason) => {
             assert!(!callback_ran.load(Ordering::SeqCst));
-            eprintln!("aggregate optional-toolset sentinels skipped before callback: {reason:?}");
+            panic!("required aggregate optional-toolset sentinels were skipped: {reason:?}");
         }
     }
 }
@@ -5800,7 +5946,7 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
 }
 
 #[cfg(feature = "acceptance-harness")]
-async fn run_body_blocks_real_workflow() {
+async fn run_body_blocks_real_workflow() -> OptionalRealWorkflowRun {
     let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
     let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
     let stable_read_only_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
@@ -5823,28 +5969,35 @@ async fn run_body_blocks_real_workflow() {
     ))
     .await
     .expect("cleanup-safe shared stable/preview body scenario");
-    if let DisposableRun::Completed(space_id) = outcome {
-        assert_eq!(
-            *stable_cleanup.lock().expect("stable cleanup record"),
-            ChildCleanupRecord::Stopped
-        );
-        assert_eq!(
-            *preview_cleanup.lock().expect("preview cleanup record"),
-            ChildCleanupRecord::Stopped
-        );
-        assert_eq!(
-            *stable_read_only_cleanup
-                .lock()
-                .expect("stable read-only cleanup record"),
-            ChildCleanupRecord::Stopped
-        );
-        assert_eq!(
-            *preview_read_only_cleanup
-                .lock()
-                .expect("preview read-only cleanup record"),
-            ChildCleanupRecord::Stopped
-        );
-        assert_fresh_space_absence(&space_id).await;
+    match outcome {
+        DisposableRun::Completed(space_id) => {
+            assert_eq!(
+                *stable_cleanup.lock().expect("stable cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_eq!(
+                *preview_cleanup.lock().expect("preview cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_eq!(
+                *stable_read_only_cleanup
+                    .lock()
+                    .expect("stable read-only cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_eq!(
+                *preview_read_only_cleanup
+                    .lock()
+                    .expect("preview read-only cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            assert_fresh_space_absence(&space_id).await;
+            OptionalRealWorkflowRun::Executed
+        }
+        DisposableRun::Skipped(reason) => {
+            eprintln!("body-block workflow skipped before callback: {reason:?}");
+            OptionalRealWorkflowRun::Skipped
+        }
     }
 }
 
@@ -5853,7 +6006,7 @@ async fn run_body_blocks_real_workflow() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
-    run_body_blocks_real_workflow().await;
+    let _ = run_body_blocks_real_workflow().await;
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -5861,6 +6014,10 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
 fn optional_real_workflow_registration_is_exact() {
     let registered = OPTIONAL_REAL_WORKFLOWS.map(|registration| registration.workflow);
     assert_eq!(registered, OptionalRealWorkflow::ALL);
+    assert_eq!(
+        registered.map(OptionalRealWorkflow::registry),
+        OptionalRegistry::ALL
+    );
     assert_eq!(
         OptionalOperation::ALL
             .into_iter()
@@ -5872,16 +6029,24 @@ fn optional_real_workflow_registration_is_exact() {
         .iter()
         .filter(|owner| owner.scenario.tier() == OptionalEvidenceTier::RealHeadless)
     {
+        let workflow = owner.scenario.workflow();
+        assert_eq!(workflow.tier(), OptionalEvidenceTier::RealHeadless);
+        let OptionalExecutableWorkflow::RealHeadless(workflow) = workflow else {
+            panic!("real ownership resolved to a fast executable workflow");
+        };
         assert!(
-            registered.contains(&owner.operation.real_workflow()),
+            registered.contains(&workflow),
             "real operation owner lacks a registered executable workflow"
         );
+        assert!(owner.scenario.covers(owner.operation));
+        assert_eq!(owner.scenario.registry(), workflow.registry());
+        assert_eq!(owner.scenario.registry(), owner.operation.registry());
     }
     for workflow in OptionalRealWorkflow::ALL {
         assert!(
             OPTIONAL_LIVE_OWNERSHIP.iter().any(|owner| {
-                owner.scenario.tier() == OptionalEvidenceTier::RealHeadless
-                    && owner.operation.real_workflow() == workflow
+                owner.scenario.workflow() == OptionalExecutableWorkflow::RealHeadless(workflow)
+                    && owner.scenario.covers(owner.operation)
             }),
             "registered workflow owns no real operation evidence"
         );
@@ -5891,11 +6056,22 @@ fn optional_real_workflow_registration_is_exact() {
 #[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+#[ignore = "requires env-only disposable credentials, an authenticated headless Anytype server, ANY_MCP_HEADLESS_LOG_RUN_MARKER, and ANY_MCP_HEADLESS_REDACTED_LOG_FILE"]
 async fn headless_stdio_all_registered_optional_real_workflows() {
     for registration in OPTIONAL_REAL_WORKFLOWS {
-        registration.run().await;
+        require_optional_workflow_executed(registration.run().await).unwrap_or_else(|message| {
+            panic!("{message}: {:?}", registration.workflow);
+        });
     }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn terminal_optional_real_workflow_gate_rejects_missing_disposable_environment() {
+    assert_eq!(
+        require_optional_workflow_executed(OptionalRealWorkflowRun::Skipped),
+        Err("required real-headless workflow was skipped")
+    );
 }
 
 #[tokio::test]
