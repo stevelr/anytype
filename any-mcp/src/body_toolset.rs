@@ -42,7 +42,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     create_idempotency::{
         Attempt, BeginAttempt, CreateDisposition, CreateExecution, DEFAULT_IDEMPOTENCY_CAPACITY,
-        IdempotencyKey, IdempotencyStore, PendingCandidate, PendingCandidateLookup,
+        IdempotencyKey, IdempotencyStore, PendingCandidate, PendingCandidateLookup, ReplayWitness,
         finish_supervised_execution, wait_for_attempt_until, wait_for_leader_attempt_until,
     },
     cursor::{CursorStore, CursorToken, EvidenceCursorState, QueryFingerprint},
@@ -1643,9 +1643,7 @@ fn project_snapshot(snapshot: &BodySnapshot) -> Result<ProjectedSnapshot, Handle
     let space_id = EntityId::new(snapshot.space_id.clone()).map_err(upstream_domain)?;
     let object_id = EntityId::new(snapshot.object_id.clone()).map_err(upstream_domain)?;
     let root_id = EntityId::new(snapshot.root_id.as_str()).map_err(upstream_domain)?;
-    if !read_access_allowed(snapshot.iter().map(|block| block.restrictions.read)) {
-        return Err(HandlerError::new(ToolError::upstream()));
-    }
+    require_read_access(snapshot.iter().map(|block| block.restrictions.read))?;
     let mut parents = HashMap::<&str, (&str, usize)>::new();
     for parent in snapshot.iter() {
         for (index, child) in parent.children.iter().enumerate() {
@@ -1716,6 +1714,14 @@ fn project_snapshot(snapshot: &BodySnapshot) -> Result<ProjectedSnapshot, Handle
 
 fn read_access_allowed(restrictions: impl IntoIterator<Item = bool>) -> bool {
     !restrictions.into_iter().any(|restricted| restricted)
+}
+
+fn require_read_access(restrictions: impl IntoIterator<Item = bool>) -> Result<(), HandlerError> {
+    if read_access_allowed(restrictions) {
+        Ok(())
+    } else {
+        Err(HandlerError::new(ToolError::upstream()))
+    }
 }
 
 fn validate_table_fanout(snapshot: &BodySnapshot, block: &BodyBlock) -> Result<(), HandlerError> {
@@ -3047,7 +3053,11 @@ where
     .await
 }
 
-async fn observe_first_write_poll<F, T>(future: F, progress: MutationProgress) -> T
+async fn observe_first_write_poll<F, T>(
+    future: F,
+    progress: MutationProgress,
+    page_create_polls: Arc<std::sync::atomic::AtomicUsize>,
+) -> T
 where
     F: Future<Output = T>,
 {
@@ -3055,6 +3065,11 @@ where
     let mut marked = false;
     std::future::poll_fn(move |context: &mut Context<'_>| {
         if !marked {
+            let _ = page_create_polls.fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |current| Some(current.saturating_add(1)),
+            );
             progress.mark_dispatched();
             marked = true;
         }
@@ -3131,6 +3146,8 @@ struct BodyHandlers {
     rich_create: WorkflowTool<RichPageCreateOutput>,
     block_creates: Arc<IdempotencyStore>,
     rich_creates: Arc<IdempotencyStore>,
+    rpc_metrics: BodyRpcMetrics,
+    page_create_polls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for BodyHandlers {
@@ -3254,7 +3271,14 @@ impl BodyHandlers {
             rich_create: rich_create_tool()?,
             block_creates: Arc::new(IdempotencyStore::new(DEFAULT_IDEMPOTENCY_CAPACITY)),
             rich_creates: Arc::new(IdempotencyStore::new(DEFAULT_IDEMPOTENCY_CAPACITY)),
+            rpc_metrics: BodyRpcMetrics::default(),
+            page_create_polls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
+    }
+
+    fn rpc_config(&self, deadline: std::time::Instant) -> BodyRpcConfig {
+        BodyRpcConfig::new(tokio::time::Instant::from_std(deadline))
+            .with_metrics(self.rpc_metrics.clone())
     }
 
     fn call_tool<'a>(
@@ -3429,6 +3453,117 @@ impl OptionalToolsetRegistry for BodyRegistry {
     }
 }
 
+/// Payload-free counters from the production body handler lifecycle.
+#[cfg(feature = "acceptance-harness")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BodyAcceptanceMetricsSnapshot {
+    pub page_create_polls: usize,
+    pub show_attempts: usize,
+    pub foreground_close_attempts: usize,
+    pub foreground_close_confirmed: usize,
+    pub fallback_close_attempts: usize,
+    pub fallback_close_confirmed: usize,
+    pub write_polls: usize,
+    pub show_limit_rejections: usize,
+    pub non_show_limit_rejections: usize,
+    pub close_limit_rejections: usize,
+    pub mutation_limit_rejections: usize,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl BodyAcceptanceMetricsSnapshot {
+    fn capture(handlers: &BodyHandlers) -> Self {
+        let rpc = handlers.rpc_metrics.snapshot();
+        Self {
+            page_create_polls: handlers
+                .page_create_polls
+                .load(std::sync::atomic::Ordering::Acquire),
+            show_attempts: rpc.show_attempts,
+            foreground_close_attempts: rpc.foreground_close_attempts,
+            foreground_close_confirmed: rpc.foreground_close_confirmed,
+            fallback_close_attempts: rpc.fallback_close_attempts,
+            fallback_close_confirmed: rpc.fallback_close_confirmed,
+            write_polls: rpc.write_polls,
+            show_limit_rejections: rpc.show_limit_rejections,
+            non_show_limit_rejections: rpc.non_show_limit_rejections,
+            close_limit_rejections: rpc.close_limit_rejections,
+            mutation_limit_rejections: rpc.mutation_limit_rejections,
+        }
+    }
+}
+
+/// Direct acceptance driver around the exact production body registry/router.
+#[cfg(feature = "acceptance-harness")]
+#[doc(hidden)]
+pub struct BodyAcceptanceDirect {
+    server: crate::server::AnyMcpServer,
+    handlers: Arc<BodyHandlers>,
+}
+
+#[cfg(feature = "acceptance-harness")]
+static BODY_ACCEPTANCE_REGISTRIES: &[&dyn OptionalToolsetRegistry] = &[BODY_BLOCKS_REGISTRY];
+
+#[cfg(feature = "acceptance-harness")]
+impl BodyAcceptanceDirect {
+    pub fn new(client: AnytypeClient, read_only: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        use std::time::Duration;
+
+        use crate::{
+            config::ApplicationProfile,
+            optional_toolsets::{OptionalToolsetMetadata, OptionalToolsetSelection},
+            runtime::StartupStatus,
+        };
+
+        let metadata = [OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME, true)];
+        let selection =
+            OptionalToolsetSelection::parse(Some(BODY_BLOCKS_TOOLSET_NAME.to_owned()), &metadata)?;
+        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
+            client,
+            2,
+            Duration::from_secs(30),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            ApplicationProfile::Compact,
+            read_only,
+            selection,
+        );
+        let handlers =
+            runtime_handlers(&runtime).map_err(|_| "body acceptance contracts unavailable")?;
+        let server = crate::server::AnyMcpServer::new_with_optional_registries(
+            runtime,
+            BODY_ACCEPTANCE_REGISTRIES,
+        )?;
+        Ok(Self { server, handlers })
+    }
+
+    pub async fn call(&self, name: &'static str, arguments: serde_json::Value) -> CallToolResult {
+        let arguments = arguments.as_object().cloned().unwrap_or_default();
+        Box::pin(self.server.dispatch_tool(
+            CallToolRequestParams::new(name).with_arguments(arguments),
+            &CancellationToken::new(),
+        ))
+        .await
+        .unwrap_or_else(|_| tool_error(&ToolError::upstream()))
+    }
+
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.server
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> BodyAcceptanceMetricsSnapshot {
+        BodyAcceptanceMetricsSnapshot::capture(&self.handlers)
+    }
+}
+
 #[derive(Serialize)]
 struct BodyCursorBinding<'a> {
     tool: &'static str,
@@ -3450,6 +3585,7 @@ impl BodyHandlers {
         }
         let client = runtime.client().clone();
         let deadline = runtime.request_deadline();
+        let rpc = self.rpc_config(deadline);
         execute_prepared_handler_until(
             runtime,
             deadline,
@@ -3474,7 +3610,6 @@ impl BodyHandlers {
                     .transpose()
                     .map_err(HandlerError::from)?;
                 let offset = prior.as_ref().map_or(0, |state| state.offset().get());
-                let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(deadline));
                 let snapshot =
                     fetch_body(&client, space_id.as_str(), input.object_id.as_str(), rpc).await?;
                 let projected = project_snapshot(&snapshot).map_err(HandlerOperationError::from)?;
@@ -3592,10 +3727,12 @@ async fn prepare_body(
     object_id: &EntityId,
     expected: &SnapshotHash,
     deadline: std::time::Instant,
+    rpc_metrics: BodyRpcMetrics,
 ) -> Result<PreparedBody, HandlerOperationError> {
     let resolved = client.resolve_space_id(space.as_str()).await?;
     let space_id = EntityId::new(resolved).map_err(|_| HandlerError::new(ToolError::upstream()))?;
-    let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(deadline));
+    let rpc =
+        BodyRpcConfig::new(tokio::time::Instant::from_std(deadline)).with_metrics(rpc_metrics);
     let snapshot = fetch_body(client, space_id.as_str(), object_id.as_str(), rpc.clone()).await?;
     let projected = project_snapshot(&snapshot).map_err(HandlerOperationError::from)?;
     if projected.space_id != space_id || projected.object_id != *object_id {
@@ -3639,12 +3776,152 @@ fn mutable_block(
     Ok(())
 }
 
+fn validate_create_target(
+    target: &BodyBlock,
+    root: &BlockId,
+    position: WireInsertPosition,
+) -> Result<(), HandlerError> {
+    if &target.id == root {
+        if matches!(
+            position,
+            WireInsertPosition::Before | WireInsertPosition::After
+        ) {
+            return Err(HandlerError::new(ToolError::validation()));
+        }
+        return Ok(());
+    }
+    mutable_block(target, root, MutationKind::Target)
+}
+
 #[derive(Clone, Copy)]
 enum MutationKind {
     Edit,
     Remove,
     Move,
     Target,
+}
+
+fn projected_structural_or_opaque(content: &BlockProjection) -> bool {
+    matches!(
+        content,
+        BlockProjection::Layout { .. }
+            | BlockProjection::FeaturedRelations
+            | BlockProjection::Table
+            | BlockProjection::TableRow { .. }
+            | BlockProjection::TableColumn
+            | BlockProjection::File { .. }
+            | BlockProjection::Unsupported { .. }
+            | BlockProjection::Text {
+                style: WireTextStyle::Title | WireTextStyle::Description | WireTextStyle::Heading4,
+                ..
+            }
+    )
+}
+
+fn projected_mutable_block(
+    block: &BlockSummary,
+    root: &EntityId,
+    operation: MutationKind,
+) -> Result<(), HandlerError> {
+    if &block.id == root {
+        return Err(HandlerError::new(ToolError::validation()));
+    }
+    let denied = match operation {
+        MutationKind::Edit => block.restrictions.edit,
+        MutationKind::Remove => block.restrictions.remove,
+        MutationKind::Move => block.restrictions.drag,
+        MutationKind::Target => block.restrictions.drop_on,
+    };
+    if denied || projected_structural_or_opaque(&block.content) {
+        return Err(HandlerError::new(ToolError::validation()));
+    }
+    Ok(())
+}
+
+fn projected_block<'a>(
+    snapshot: &'a ProjectedSnapshot,
+    id: &EntityId,
+) -> Result<&'a BlockSummary, HandlerError> {
+    snapshot
+        .items
+        .iter()
+        .find(|block| &block.id == id)
+        .ok_or_else(|| HandlerError::new(ToolError::not_found()))
+}
+
+fn validate_projected_create_plan(
+    snapshot: &ProjectedSnapshot,
+    target_id: &EntityId,
+    position: WireInsertPosition,
+) -> Result<(), HandlerError> {
+    let target = projected_block(snapshot, target_id)?;
+    if target.id == snapshot.root_id {
+        if matches!(
+            position,
+            WireInsertPosition::Before | WireInsertPosition::After
+        ) {
+            return Err(HandlerError::new(ToolError::validation()));
+        }
+        return Ok(());
+    }
+    projected_mutable_block(target, &snapshot.root_id, MutationKind::Target)
+}
+
+fn validate_projected_delete_plan(
+    snapshot: &ProjectedSnapshot,
+    subtree: &[BlockId],
+    expected_subtree_blocks: u16,
+) -> Result<(), HandlerError> {
+    let Some(root) = subtree.first() else {
+        return Err(HandlerError::new(ToolError::validation()));
+    };
+    let root = EntityId::new(root.as_str()).map_err(upstream_domain)?;
+    projected_mutable_block(
+        projected_block(snapshot, &root)?,
+        &snapshot.root_id,
+        MutationKind::Remove,
+    )?;
+    if subtree.len() != usize::from(expected_subtree_blocks)
+        || subtree.iter().any(|id| {
+            EntityId::new(id.as_str())
+                .ok()
+                .and_then(|id| projected_block(snapshot, &id).ok())
+                .is_none_or(|block| {
+                    projected_mutable_block(block, &snapshot.root_id, MutationKind::Remove).is_err()
+                })
+        })
+    {
+        return Err(HandlerError::new(ToolError::validation()));
+    }
+    Ok(())
+}
+
+fn validate_projected_move_plan(
+    snapshot: &ProjectedSnapshot,
+    moved_id: &EntityId,
+    target_id: &EntityId,
+    subtree: &[BlockId],
+) -> Result<(), HandlerError> {
+    let moved = projected_block(snapshot, moved_id)?;
+    let target = projected_block(snapshot, target_id)?;
+    projected_mutable_block(moved, &snapshot.root_id, MutationKind::Move)?;
+    if target.id != snapshot.root_id {
+        projected_mutable_block(target, &snapshot.root_id, MutationKind::Target)?;
+    }
+    if moved_id == target_id
+        || subtree.iter().any(|id| id.as_str() == target_id.as_str())
+        || subtree.iter().any(|id| {
+            EntityId::new(id.as_str())
+                .ok()
+                .and_then(|id| projected_block(snapshot, &id).ok())
+                .is_none_or(|block| {
+                    projected_mutable_block(block, &snapshot.root_id, MutationKind::Move).is_err()
+                })
+        })
+    {
+        return Err(HandlerError::new(ToolError::validation()));
+    }
+    Ok(())
 }
 
 fn structural_or_opaque(content: &BlockContent) -> bool {
@@ -3680,6 +3957,37 @@ fn subtree_is_mutable(
             !denied && !structural_or_opaque(&block.content)
         })
     })
+}
+
+fn validate_delete_plan(
+    target: &BodyBlock,
+    root: &BlockId,
+    subtree_blocks: usize,
+    expected_subtree_blocks: u16,
+    subtree_mutable: bool,
+) -> Result<(), HandlerError> {
+    mutable_block(target, root, MutationKind::Remove)?;
+    if subtree_blocks != usize::from(expected_subtree_blocks) || !subtree_mutable {
+        return Err(HandlerError::new(ToolError::validation()));
+    }
+    Ok(())
+}
+
+fn validate_move_plan(
+    moved: &BodyBlock,
+    target: &BodyBlock,
+    root: &BlockId,
+    subtree: &[BlockId],
+    subtree_mutable: bool,
+) -> Result<(), HandlerError> {
+    mutable_block(moved, root, MutationKind::Move)?;
+    if &target.id != root {
+        mutable_block(target, root, MutationKind::Target)?;
+    }
+    if moved.id == target.id || subtree.contains(&target.id) || !subtree_mutable {
+        return Err(HandlerError::new(ToolError::validation()));
+    }
+    Ok(())
 }
 
 fn mutation_output(
@@ -3814,12 +4122,17 @@ fn apply_projected_change(
         BlockChangeInput::SetVerticalAlign { align } => block.vertical_align = *align,
         BlockChangeInput::SetEmbedSource { source } => {
             let BlockProjection::Embed {
-                source: current, ..
+                processor,
+                source: current,
             } = &mut block.content
             else {
                 return Err(HandlerError::new(ToolError::validation()));
             };
-            *current = source.clone();
+            *current = if *processor == WireEmbedProcessor::Youtube {
+                format!("https://www.youtube.com/watch?v={source}")
+            } else {
+                source.clone()
+            };
         }
         BlockChangeInput::SetLinkAppearance {
             card_style,
@@ -3996,6 +4309,7 @@ impl BodyHandlers {
         let progress = MutationProgress::new();
         let operation_progress = progress.clone();
         let intended_contract = self.update.clone();
+        let rpc_metrics = self.rpc_metrics.clone();
         execute_mutation_handler_until(
             runtime,
             deadline,
@@ -4010,6 +4324,7 @@ impl BodyHandlers {
                     &input.object_id,
                     &input.expected_snapshot_hash,
                     deadline,
+                    rpc_metrics,
                 )
                 .await?;
                 let (current, block_id) = find_api_block(&prepared, &input.block_id)
@@ -4022,6 +4337,9 @@ impl BodyHandlers {
                     .map_err(HandlerOperationError::from)?;
                 validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                     .map_err(HandlerOperationError::from)?;
+                let before =
+                    project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
+                let projected_change = input.change.clone();
                 let metrics = prepared.rpc.metrics();
                 let editor = prepared
                     .snapshot
@@ -4033,9 +4351,15 @@ impl BodyHandlers {
                     operation_progress,
                 )
                 .await?;
-                Ok::<_, HandlerOperationError>((receipt, input.block_id))
+                Ok::<_, HandlerOperationError>((receipt, input.block_id, projected_change, before))
             },
-            |(receipt, block_id)| async move { mutation_output(receipt, &block_id) },
+            |(receipt, block_id, change, before)| async move {
+                let after = project_snapshot(&receipt.snapshot)?;
+                if !verify_update_transition(&before, &after, &block_id, &change) {
+                    return Err(HandlerError::new(ToolError::mutation_indeterminate()));
+                }
+                mutation_output(receipt, &block_id)
+            },
         )
         .await
     }
@@ -4054,6 +4378,7 @@ impl BodyHandlers {
         let progress = MutationProgress::new();
         let operation_progress = progress.clone();
         let intended_contract = self.delete.clone();
+        let rpc_metrics = self.rpc_metrics.clone();
         execute_mutation_handler_until(
             runtime,
             deadline,
@@ -4068,25 +4393,29 @@ impl BodyHandlers {
                     &input.object_id,
                     &input.expected_snapshot_hash,
                     deadline,
+                    rpc_metrics,
                 )
                 .await?;
                 let (current, block_id) = find_api_block(&prepared, &input.block_id)
                     .map_err(HandlerOperationError::from)?;
-                mutable_block(current, &prepared.snapshot.root_id, MutationKind::Remove)
-                    .map_err(HandlerOperationError::from)?;
                 let subtree = subtree_ids(&prepared.snapshot, &block_id)
                     .map_err(HandlerOperationError::from)?;
-                if subtree.len() != usize::from(input.expected_subtree_blocks)
-                    || !subtree_is_mutable(&prepared.snapshot, &subtree, MutationKind::Remove)
-                {
-                    return Err(HandlerError::new(ToolError::validation()).into());
-                }
+                let before =
+                    project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
+                validate_projected_delete_plan(&before, &subtree, input.expected_subtree_blocks)
+                    .map_err(HandlerOperationError::from)?;
+                validate_delete_plan(
+                    current,
+                    &prepared.snapshot.root_id,
+                    subtree.len(),
+                    input.expected_subtree_blocks,
+                    subtree_is_mutable(&prepared.snapshot, &subtree, MutationKind::Remove),
+                )
+                .map_err(HandlerOperationError::from)?;
                 let intended = intended_delete_output(&prepared, &input.block_id, subtree.len())
                     .map_err(HandlerOperationError::from)?;
                 validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                     .map_err(HandlerOperationError::from)?;
-                let before =
-                    project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
                 let metrics = prepared.rpc.metrics();
                 let editor = prepared
                     .snapshot
@@ -4130,6 +4459,7 @@ impl BodyHandlers {
         let progress = MutationProgress::new();
         let operation_progress = progress.clone();
         let intended_contract = self.move_block.clone();
+        let rpc_metrics = self.rpc_metrics.clone();
         execute_mutation_handler_until(
             runtime,
             deadline,
@@ -4144,32 +4474,36 @@ impl BodyHandlers {
                     &input.object_id,
                     &input.expected_snapshot_hash,
                     deadline,
+                    rpc_metrics,
                 )
                 .await?;
                 let (moved, block_id) = find_api_block(&prepared, &input.block_id)
                     .map_err(HandlerOperationError::from)?;
                 let (target, target_id) = find_api_block(&prepared, &input.target_block_id)
                     .map_err(HandlerOperationError::from)?;
-                mutable_block(moved, &prepared.snapshot.root_id, MutationKind::Move)
-                    .map_err(HandlerOperationError::from)?;
-                if target.id != prepared.snapshot.root_id {
-                    mutable_block(target, &prepared.snapshot.root_id, MutationKind::Target)
-                        .map_err(HandlerOperationError::from)?;
-                }
                 let subtree = subtree_ids(&prepared.snapshot, &block_id)
                     .map_err(HandlerOperationError::from)?;
-                if block_id == target_id
-                    || subtree.contains(&target_id)
-                    || !subtree_is_mutable(&prepared.snapshot, &subtree, MutationKind::Move)
-                {
-                    return Err(HandlerError::new(ToolError::validation()).into());
-                }
+                let before =
+                    project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
+                validate_projected_move_plan(
+                    &before,
+                    &input.block_id,
+                    &input.target_block_id,
+                    &subtree,
+                )
+                .map_err(HandlerOperationError::from)?;
+                validate_move_plan(
+                    moved,
+                    target,
+                    &prepared.snapshot.root_id,
+                    &subtree,
+                    subtree_is_mutable(&prepared.snapshot, &subtree, MutationKind::Move),
+                )
+                .map_err(HandlerOperationError::from)?;
                 let intended = intended_move_output(&prepared, &input.block_id)
                     .map_err(HandlerOperationError::from)?;
                 validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                     .map_err(HandlerOperationError::from)?;
-                let before =
-                    project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
                 let metrics = prepared.rpc.metrics();
                 let editor = prepared
                     .snapshot
@@ -4227,6 +4561,100 @@ fn projected_identity_set(snapshot: &ProjectedSnapshot) -> Option<HashSet<&str>>
     (ids.len() == snapshot.items.len()).then_some(ids)
 }
 
+fn verify_create_transition(
+    before: &ProjectedSnapshot,
+    after: &ProjectedSnapshot,
+    created_id: &EntityId,
+    target_id: &EntityId,
+    position: WireInsertPosition,
+    input: &NewBlockInput,
+) -> bool {
+    if before.space_id != after.space_id
+        || before.object_id != after.object_id
+        || before.root_id != after.root_id
+        || before.items.iter().any(|block| &block.id == created_id)
+    {
+        return false;
+    }
+    let Some(created) = after.items.iter().find(|block| &block.id == created_id) else {
+        return false;
+    };
+    let Some(target) = after.items.iter().find(|block| &block.id == target_id) else {
+        return false;
+    };
+    let Ok(intended) = intended_create_output(&after.space_id, &after.object_id, input) else {
+        return false;
+    };
+    let exact_position = match position {
+        WireInsertPosition::Before => {
+            created.parent_id == target.parent_id
+                && created.sibling_index.checked_add(1) == Some(target.sibling_index)
+        }
+        WireInsertPosition::After => {
+            created.parent_id == target.parent_id
+                && target.sibling_index.checked_add(1) == Some(created.sibling_index)
+        }
+        WireInsertPosition::FirstChild => {
+            created.parent_id.as_ref() == Some(target_id) && created.sibling_index == 0
+        }
+        WireInsertPosition::LastChild => {
+            created.parent_id.as_ref() == Some(target_id)
+                && created.sibling_index.checked_add(1) == Some(target.child_count)
+        }
+    };
+    exact_position
+        && created.content == intended.block.content
+        && created.align == intended.block.align
+        && created.vertical_align == intended.block.vertical_align
+        && created.background_color == intended.block.background_color
+        && before.items.iter().all(|prior| {
+            after
+                .items
+                .iter()
+                .find(|current| current.id == prior.id)
+                .is_some_and(|current| {
+                    prior.content == current.content
+                        && prior.restrictions == current.restrictions
+                        && prior.align == current.align
+                        && prior.vertical_align == current.vertical_align
+                        && prior.background_color == current.background_color
+                })
+        })
+}
+
+fn verify_update_transition(
+    before: &ProjectedSnapshot,
+    after: &ProjectedSnapshot,
+    block_id: &EntityId,
+    change: &BlockChangeInput,
+) -> bool {
+    if before.space_id != after.space_id
+        || before.object_id != after.object_id
+        || before.root_id != after.root_id
+        || projected_identity_set(before) != projected_identity_set(after)
+    {
+        return false;
+    }
+    let Some(prior) = before.items.iter().find(|block| &block.id == block_id) else {
+        return false;
+    };
+    let Some(current) = after.items.iter().find(|block| &block.id == block_id) else {
+        return false;
+    };
+    let mut expected = prior.clone();
+    if apply_projected_change(&mut expected, change).is_err() || &expected != current {
+        return false;
+    }
+    before.items.iter().all(|prior| {
+        prior.id == *block_id
+            || after
+                .items
+                .iter()
+                .find(|current| current.id == prior.id)
+                .is_some_and(|current| current == prior)
+    })
+}
+
 fn verify_delete_transition(
     before: &ProjectedSnapshot,
     after: &ProjectedSnapshot,
@@ -4245,6 +4673,17 @@ fn verify_delete_transition(
         return false;
     };
     let removed = subtree.iter().map(BlockId::as_str).collect::<HashSet<_>>();
+    let Some(removed_root) = subtree.first().and_then(|id| {
+        before
+            .items
+            .iter()
+            .find(|candidate| candidate.id.as_str() == id.as_str())
+    }) else {
+        return false;
+    };
+    let Some(removed_parent) = removed_root.parent_id.as_ref() else {
+        return false;
+    };
     let expected = before_ids
         .iter()
         .copied()
@@ -4254,16 +4693,35 @@ fn verify_delete_transition(
         && removed
             .iter()
             .all(|id| before_ids.contains(id) && !after_ids.contains(id))
-}
-
-fn same_block_value(left: &BlockSummary, right: &BlockSummary) -> bool {
-    left.id == right.id
-        && left.child_count == right.child_count
-        && left.restrictions == right.restrictions
-        && left.align == right.align
-        && left.vertical_align == right.vertical_align
-        && left.background_color == right.background_color
-        && left.content == right.content
+        && after.items.iter().all(|current| {
+            let Some(prior) = before.items.iter().find(|prior| prior.id == current.id) else {
+                return false;
+            };
+            if prior.content != current.content
+                || prior.restrictions != current.restrictions
+                || prior.align != current.align
+                || prior.vertical_align != current.vertical_align
+                || prior.background_color != current.background_color
+                || prior.parent_id != current.parent_id
+                || prior.depth != current.depth
+            {
+                return false;
+            }
+            let expected_children = if &prior.id == removed_parent {
+                prior.child_count.checked_sub(1)
+            } else {
+                Some(prior.child_count)
+            };
+            let expected_sibling = if prior.parent_id.as_ref() == Some(removed_parent)
+                && prior.sibling_index > removed_root.sibling_index
+            {
+                prior.sibling_index.checked_sub(1)
+            } else {
+                Some(prior.sibling_index)
+            };
+            expected_children == Some(current.child_count)
+                && expected_sibling == Some(current.sibling_index)
+        })
 }
 
 fn verify_move_transition(
@@ -4281,67 +4739,140 @@ fn verify_move_transition(
         return false;
     }
     let subtree_ids = subtree.iter().map(BlockId::as_str).collect::<HashSet<_>>();
-    if subtree_ids.len() != subtree.len() {
+    let Some(moved_root_id) = subtree.first().map(BlockId::as_str) else {
+        return false;
+    };
+    if subtree_ids.len() != subtree.len() || subtree_ids.contains(target_id.as_str()) {
         return false;
     }
-    let before_subtree = before
-        .items
-        .iter()
-        .filter(|block| subtree_ids.contains(block.id.as_str()))
-        .collect::<Vec<_>>();
-    let after_subtree = after
-        .items
-        .iter()
-        .filter(|block| subtree_ids.contains(block.id.as_str()))
-        .collect::<Vec<_>>();
-    if before_subtree.len() != subtree.len()
-        || after_subtree.len() != subtree.len()
-        || before_subtree
+    let mut children = HashMap::<String, Vec<(u64, String)>>::new();
+    for block in &before.items {
+        children.entry(block.id.as_str().to_owned()).or_default();
+    }
+    for block in &before.items {
+        if block.id == before.root_id {
+            if block.parent_id.is_some() {
+                return false;
+            }
+            continue;
+        }
+        let Some(parent) = block.parent_id.as_ref() else {
+            return false;
+        };
+        let Some(siblings) = children.get_mut(parent.as_str()) else {
+            return false;
+        };
+        siblings.push((block.sibling_index, block.id.as_str().to_owned()));
+    }
+    let mut ordered_children = HashMap::<String, Vec<String>>::new();
+    for (parent, mut siblings) in children {
+        siblings.sort_by_key(|(index, _)| *index);
+        if siblings
             .iter()
-            .map(|block| block.id.as_str())
-            .ne(after_subtree.iter().map(|block| block.id.as_str()))
-    {
-        return false;
+            .enumerate()
+            .any(|(index, (actual, _))| u64::try_from(index).ok() != Some(*actual))
+        {
+            return false;
+        }
+        ordered_children.insert(parent, siblings.into_iter().map(|(_, id)| id).collect());
     }
-    let Some(before_root) = before_subtree.first().copied() else {
-        return false;
-    };
-    let Some(after_root) = after_subtree.first().copied() else {
-        return false;
-    };
-    let Some(target) = after.items.iter().find(|block| &block.id == target_id) else {
-        return false;
-    };
-    let exact_position = match position {
-        WireInsertPosition::Before => {
-            after_root.parent_id == target.parent_id
-                && after_root.sibling_index.checked_add(1) == Some(target.sibling_index)
-        }
-        WireInsertPosition::After => {
-            after_root.parent_id == target.parent_id
-                && target.sibling_index.checked_add(1) == Some(after_root.sibling_index)
-        }
-        WireInsertPosition::FirstChild => {
-            after_root.parent_id.as_ref() == Some(target_id) && after_root.sibling_index == 0
-        }
-        WireInsertPosition::LastChild => {
-            after_root.parent_id.as_ref() == Some(target_id)
-                && after_root.sibling_index.checked_add(1) == Some(target.child_count)
-        }
-    };
-    if !exact_position || !same_block_value(before_root, after_root) {
-        return false;
-    }
-    let depth_delta = i128::from(after_root.depth) - i128::from(before_root.depth);
-    before_subtree
+    let Some(before_moved) = before
+        .items
         .iter()
-        .skip(1)
-        .zip(after_subtree.iter().skip(1))
-        .all(|(prior, current)| {
-            same_block_value(prior, current)
-                && prior.parent_id == current.parent_id
-                && prior.sibling_index == current.sibling_index
-                && i128::from(current.depth) - i128::from(prior.depth) == depth_delta
+        .find(|block| block.id.as_str() == moved_root_id)
+    else {
+        return false;
+    };
+    let Some(old_parent) = before_moved.parent_id.as_ref().map(EntityId::as_str) else {
+        return false;
+    };
+    let Some(old_siblings) = ordered_children.get_mut(old_parent) else {
+        return false;
+    };
+    let Some(old_position) = old_siblings.iter().position(|id| id == moved_root_id) else {
+        return false;
+    };
+    old_siblings.remove(old_position);
+    let Some(before_target) = before.items.iter().find(|block| &block.id == target_id) else {
+        return false;
+    };
+    let new_parent = match position {
+        WireInsertPosition::Before | WireInsertPosition::After => {
+            let Some(parent) = before_target.parent_id.as_ref() else {
+                return false;
+            };
+            parent.as_str().to_owned()
+        }
+        WireInsertPosition::FirstChild | WireInsertPosition::LastChild => {
+            target_id.as_str().to_owned()
+        }
+    };
+    let Some(new_siblings) = ordered_children.get_mut(&new_parent) else {
+        return false;
+    };
+    let insertion = match position {
+        WireInsertPosition::Before | WireInsertPosition::After => {
+            let Some(target_position) = new_siblings.iter().position(|id| id == target_id.as_str())
+            else {
+                return false;
+            };
+            if position == WireInsertPosition::After {
+                target_position.saturating_add(1)
+            } else {
+                target_position
+            }
+        }
+        WireInsertPosition::FirstChild => 0,
+        WireInsertPosition::LastChild => new_siblings.len(),
+    };
+    if insertion > new_siblings.len() {
+        return false;
+    }
+    new_siblings.insert(insertion, moved_root_id.to_owned());
+
+    let mut expected = HashMap::<String, (Option<String>, u64, u64, u64)>::new();
+    let mut stack = vec![(before.root_id.as_str().to_owned(), None, 0_u64, 0_u64)];
+    while let Some((id, parent, sibling_index, depth)) = stack.pop() {
+        if expected.contains_key(&id) {
+            return false;
+        }
+        let Some(children) = ordered_children.get(&id) else {
+            return false;
+        };
+        let Ok(child_count) = u64::try_from(children.len()) else {
+            return false;
+        };
+        expected.insert(id.clone(), (parent, sibling_index, depth, child_count));
+        let Some(child_depth) = depth.checked_add(1) else {
+            return false;
+        };
+        for (index, child) in children.iter().enumerate().rev() {
+            let Ok(index) = u64::try_from(index) else {
+                return false;
+            };
+            stack.push((child.clone(), Some(id.clone()), index, child_depth));
+        }
+    }
+    expected.len() == before.items.len()
+        && after.items.iter().all(|current| {
+            let Some(prior) = before.items.iter().find(|prior| prior.id == current.id) else {
+                return false;
+            };
+            let Some((parent, sibling_index, depth, child_count)) =
+                expected.get(current.id.as_str())
+            else {
+                return false;
+            };
+            prior.id == current.id
+                && prior.restrictions == current.restrictions
+                && prior.align == current.align
+                && prior.vertical_align == current.vertical_align
+                && prior.background_color == current.background_color
+                && prior.content == current.content
+                && current.parent_id.as_ref().map(EntityId::as_str) == parent.as_deref()
+                && current.sibling_index == *sibling_index
+                && current.depth == *depth
+                && current.child_count == *child_count
         })
 }
 
@@ -4410,6 +4941,7 @@ impl BodyHandlers {
                 let runtime = runtime.clone();
                 let contract = self.create.clone();
                 let store = self.block_creates.clone();
+                let rpc_metrics = self.rpc_metrics.clone();
                 let task_attempt = attempt.clone();
                 tokio::spawn(async move {
                     let progress = task_attempt.progress();
@@ -4422,6 +4954,7 @@ impl BodyHandlers {
                             resolved,
                             &task_progress,
                             deadline,
+                            rpc_metrics,
                         )
                         .await
                     });
@@ -4450,7 +4983,7 @@ impl BodyHandlers {
             return tool_error(&ToolError::conflict());
         };
         let deadline = runtime.request_deadline();
-        let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(deadline));
+        let rpc = self.rpc_config(deadline);
         let snapshot = match fetch_body(
             runtime.client(),
             resolved_space,
@@ -4508,6 +5041,7 @@ async fn execute_block_create(
     resolved_space: String,
     progress: &MutationProgress,
     deadline: std::time::Instant,
+    rpc_metrics: BodyRpcMetrics,
 ) -> CreateExecution {
     let client = runtime.client().clone();
     let operation_progress = progress.clone();
@@ -4522,7 +5056,8 @@ async fn execute_block_create(
         async move {
             let space_id = EntityId::new(resolved_space)
                 .map_err(|_| HandlerError::new(ToolError::upstream()))?;
-            let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(deadline));
+            let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(deadline))
+                .with_metrics(rpc_metrics);
             let snapshot = fetch_body(
                 &client,
                 space_id.as_str(),
@@ -4530,27 +5065,22 @@ async fn execute_block_create(
                 rpc.clone(),
             )
             .await?;
-            let projected = project_snapshot(&snapshot).map_err(HandlerOperationError::from)?;
-            if projected.hash != input.expected_snapshot_hash
-                || projected.space_id != space_id
-                || projected.object_id != input.object_id
+            let before = project_snapshot(&snapshot).map_err(HandlerOperationError::from)?;
+            if before.hash != input.expected_snapshot_hash
+                || before.space_id != space_id
+                || before.object_id != input.object_id
             {
                 return Err(HandlerError::new(ToolError::conflict()).into());
             }
             let target_id =
                 api_block_id(&input.target_block_id).map_err(HandlerOperationError::from)?;
+            validate_projected_create_plan(&before, &input.target_block_id, input.position)
+                .map_err(HandlerOperationError::from)?;
             let target = snapshot
                 .get(&target_id)
                 .ok_or_else(|| HandlerError::new(ToolError::not_found()))?;
-            if target.id != snapshot.root_id {
-                mutable_block(target, &snapshot.root_id, MutationKind::Target)
-                    .map_err(HandlerOperationError::from)?;
-            } else if matches!(
-                input.position,
-                WireInsertPosition::Before | WireInsertPosition::After
-            ) {
-                return Err(HandlerError::new(ToolError::validation()).into());
-            }
+            validate_create_target(target, &snapshot.root_id, input.position)
+                .map_err(HandlerOperationError::from)?;
             let new = new_block(&input.block).map_err(HandlerOperationError::from)?;
             let intended = intended_create_output(&space_id, &input.object_id, &input.block)
                 .map_err(HandlerOperationError::from)?;
@@ -4572,6 +5102,16 @@ async fn execute_block_create(
                 .map_err(|_| HandlerError::new(ToolError::mutation_indeterminate()))?;
             let projected =
                 project_snapshot(&receipt.snapshot).map_err(HandlerOperationError::from)?;
+            if !verify_create_transition(
+                &before,
+                &projected,
+                &block_id,
+                &input.target_block_id,
+                input.position,
+                &input.block,
+            ) {
+                return Err(HandlerError::new(ToolError::mutation_indeterminate()).into());
+            }
             let block = projected
                 .items
                 .iter()
@@ -4932,12 +5472,15 @@ struct RichExecutionContext<'a> {
     attempt: &'a Arc<Attempt>,
     cancellation: &'a CancellationToken,
     deadline: std::time::Instant,
+    rpc_metrics: BodyRpcMetrics,
+    page_create_polls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn verify_rich_applied_replay(
     input: &RichPageCreateInput,
     value: &serde_json::Value,
     projected: &ProjectedSnapshot,
+    root_append_index: Option<u64>,
 ) -> bool {
     let Some(applied_value) = value.get("applied") else {
         return false;
@@ -4948,7 +5491,10 @@ fn verify_rich_applied_replay(
     if applied.len() > input.blocks.len() {
         return false;
     }
-    verified_rich_prefix_len(input, &applied, projected, None) == applied.len()
+    if !applied.is_empty() && root_append_index.is_none() {
+        return false;
+    }
+    verified_rich_prefix_len(input, &applied, projected, root_append_index) == applied.len()
 }
 
 fn verified_rich_prefix_len(
@@ -5048,7 +5594,8 @@ impl BodyHandlers {
             .await
         {
             BeginAttempt::Cached(result) => {
-                self.replay_rich_create(runtime, &input, &resolved, result)
+                let replay_witness = self.rich_creates.replay_witness(&key, fingerprint).await;
+                self.replay_rich_create(runtime, &input, &resolved, result, replay_witness)
                     .await
             }
             BeginAttempt::Indeterminate => {
@@ -5083,6 +5630,8 @@ impl BodyHandlers {
                 let runtime = runtime.clone();
                 let contract = self.rich_create.clone();
                 let store = self.rich_creates.clone();
+                let rpc_metrics = self.rpc_metrics.clone();
+                let page_create_polls = self.page_create_polls.clone();
                 let task_attempt = attempt.clone();
                 tokio::spawn(async move {
                     let progress = task_attempt.progress();
@@ -5100,6 +5649,8 @@ impl BodyHandlers {
                                 attempt: &execution_attempt,
                                 cancellation: &leader_cancellation,
                                 deadline,
+                                rpc_metrics,
+                                page_create_polls,
                             },
                         )
                         .await
@@ -5148,7 +5699,7 @@ impl BodyHandlers {
         {
             return tool_error(&ToolError::conflict());
         }
-        let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(recovery.deadline));
+        let rpc = self.rpc_config(recovery.deadline);
         let body = tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(RichFailureCategory::Upstream),
@@ -5215,6 +5766,7 @@ impl BodyHandlers {
         input: &RichPageCreateInput,
         resolved_space: &str,
         cached: CallToolResult,
+        replay_witness: Option<ReplayWitness>,
     ) -> CallToolResult {
         let Some(mut value) = cached.structured_content.clone() else {
             return tool_error(&ToolError::conflict());
@@ -5242,7 +5794,7 @@ impl BodyHandlers {
             runtime.client(),
             resolved_space,
             object_id,
-            BodyRpcConfig::new(tokio::time::Instant::from_std(runtime.request_deadline())),
+            self.rpc_config(runtime.request_deadline()),
         )
         .await
         {
@@ -5253,11 +5805,13 @@ impl BodyHandlers {
             Ok(projected) => projected,
             Err(_) => return tool_error(&ToolError::conflict()),
         };
+        let root_append_index =
+            replay_witness.map(|ReplayWitness::RichRootAppendIndex(value)| value);
         if value
             .get("final_snapshot_hash")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|expected| expected != projected.hash.as_str())
-            || !verify_rich_applied_replay(input, &value, &projected)
+            || !verify_rich_applied_replay(input, &value, &projected, root_append_index)
         {
             return tool_error(&ToolError::conflict());
         }
@@ -5285,6 +5839,8 @@ async fn execute_rich_create(
         attempt,
         cancellation,
         deadline,
+        rpc_metrics,
+        page_create_polls,
     } = context;
     let plan = match validate_rich_plan(&input) {
         Ok(plan) => plan,
@@ -5346,7 +5902,8 @@ async fn execute_rich_create(
         .name(input.name.as_str())
         .no_verify()
         .create();
-    let observed_page_create = observe_first_write_poll(page_create, progress.clone());
+    let observed_page_create =
+        observe_first_write_poll(page_create, progress.clone(), page_create_polls);
     let candidate = match tokio::select! {
         biased;
         () = cancellation.cancelled() => {
@@ -5425,7 +5982,8 @@ async fn execute_rich_create(
             CreateDisposition::Indeterminate,
         );
     }
-    let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(deadline));
+    let rpc =
+        BodyRpcConfig::new(tokio::time::Instant::from_std(deadline)).with_metrics(rpc_metrics);
     let initial_result = tokio::select! {
         biased;
         () = cancellation.cancelled() => None,
@@ -5466,6 +6024,9 @@ async fn execute_rich_create(
             return finish_rich_result(contract, output, CreateDisposition::Terminal);
         }
     };
+    attempt
+        .record_replay_witness(ReplayWitness::RichRootAppendIndex(root_append_baseline))
+        .await;
     let mut current = initial;
     let mut applied = Vec::with_capacity(plan.entries.len());
     let mut actual_ids = HashMap::<String, BlockId>::new();
@@ -6129,6 +6690,79 @@ mod tests {
         }
     }
 
+    fn rich_replay_value(applied: &[RichApplied]) -> Value {
+        json!({"applied": applied})
+    }
+
+    fn rich_root_replay_fixture() -> (RichPageCreateInput, Vec<RichApplied>, ProjectedSnapshot) {
+        let input = parse_rich(vec![
+            entry("a", None, text_block("A")),
+            entry("b", None, text_block("B")),
+        ]);
+        let applied = vec![rich_applied(0, "a", "a_id"), rich_applied(1, "b", "b_id")];
+        let snapshot = projected(vec![
+            summary("root", None, 0, 0, 4, projected_text("root")),
+            summary("prior_a", Some("root"), 0, 1, 0, projected_text("prior A")),
+            summary("prior_b", Some("root"), 1, 1, 0, projected_text("prior B")),
+            summary("a_id", Some("root"), 2, 1, 0, projected_text("A")),
+            summary("b_id", Some("root"), 3, 1, 0, projected_text("B")),
+        ]);
+        (input, applied, snapshot)
+    }
+
+    #[test]
+    fn rich_replay_rejects_foreign_root_insertion_before_authored_prefix() {
+        let (input, applied, baseline) = rich_root_replay_fixture();
+        let value = rich_replay_value(&applied);
+        assert!(verify_rich_applied_replay(
+            &input,
+            &value,
+            &baseline,
+            Some(2)
+        ));
+        assert!(!verify_rich_applied_replay(&input, &value, &baseline, None));
+
+        let inserted = projected(vec![
+            summary("root", None, 0, 0, 5, projected_text("root")),
+            summary("prior_a", Some("root"), 0, 1, 0, projected_text("prior A")),
+            summary("foreign", Some("root"), 1, 1, 0, projected_text("foreign")),
+            summary("prior_b", Some("root"), 2, 1, 0, projected_text("prior B")),
+            summary("a_id", Some("root"), 3, 1, 0, projected_text("A")),
+            summary("b_id", Some("root"), 4, 1, 0, projected_text("B")),
+        ]);
+        assert!(!verify_rich_applied_replay(
+            &input,
+            &value,
+            &inserted,
+            Some(2)
+        ));
+    }
+
+    #[test]
+    fn rich_replay_rejects_foreign_root_deletion_before_authored_prefix() {
+        let (input, applied, baseline) = rich_root_replay_fixture();
+        let value = rich_replay_value(&applied);
+        assert!(verify_rich_applied_replay(
+            &input,
+            &value,
+            &baseline,
+            Some(2)
+        ));
+
+        let deleted = projected(vec![
+            summary("root", None, 0, 0, 3, projected_text("root")),
+            summary("prior_b", Some("root"), 0, 1, 0, projected_text("prior B")),
+            summary("a_id", Some("root"), 1, 1, 0, projected_text("A")),
+            summary("b_id", Some("root"), 2, 1, 0, projected_text("B")),
+        ]);
+        assert!(!verify_rich_applied_replay(
+            &input,
+            &value,
+            &deleted,
+            Some(2)
+        ));
+    }
+
     fn canonical(value: Value) -> String {
         serde_json::to_string(&recursively_sorted_json(value)).expect("canonical JSON")
     }
@@ -6769,7 +7403,7 @@ mod tests {
     fn execute_scripted_scenario(id: &str) {
         match id {
             "body_list_ordered_pages" => {
-                let items = (0..13)
+                let items = (0..20)
                     .map(|index| {
                         summary(
                             &format!("b{index}"),
@@ -6789,11 +7423,11 @@ mod tests {
                     &snapshot,
                     Some(&continuation),
                     continuation.offset().get(),
-                    8,
+                    12,
                 )
                 .expect("continuation production page");
                 assert_eq!(first.len(), 8);
-                assert_eq!(second.len(), 5);
+                assert_eq!(second.len(), 12);
                 assert!(terminal.is_none());
                 assert_eq!(continuation.boundary_id(), snapshot.hash.as_str());
                 let combined = first
@@ -6836,24 +7470,111 @@ mod tests {
                 assert!(select_body_page(&after, Some(&prior), 1, 8).is_err());
             }
             "body_limits_fail_closed" => {
-                const { assert!(MAX_LIST_LIMIT <= 12) };
-                const { assert!(MAX_BODY_BLOCKS <= 2_048) };
-                const { assert!(MAX_TABLE_CELLS < MAX_TABLE_ROWS * MAX_TABLE_COLUMNS) };
+                let limits = body_limits();
+                assert_eq!(limits.max_blocks, MAX_BODY_BLOCKS);
+                assert_eq!(limits.max_depth, MAX_BODY_DEPTH);
+                assert_eq!(limits.max_children, MAX_BODY_CHILDREN);
+                assert_eq!(limits.max_text_bytes, MAX_TEXT_BYTES);
+                assert_eq!(limits.max_marks_per_text, MAX_MARKS_PER_TEXT);
+                assert_eq!(limits.max_table_rows, MAX_TABLE_ROWS);
+                assert_eq!(limits.max_table_columns, MAX_TABLE_COLUMNS);
+
+                let exact_text = parse_block(text_block(&"x".repeat(MAX_TEXT_BYTES)));
+                assert!(new_block(&exact_text).is_ok());
+                let over_text = parse_block(text_block(&"x".repeat(MAX_TEXT_BYTES + 1)));
+                assert!(new_block(&over_text).is_err());
+
+                let exact_emoji = "😀".repeat(16);
+                assert_eq!(exact_emoji.len(), 64);
+                let exact_emoji_block = parse_block(json!({
+                    "kind":"text","style":"callout","text":"x","marks":[],
+                    "icon":{"kind":"emoji","emoji":exact_emoji}
+                }));
+                assert!(new_block(&exact_emoji_block).is_ok());
+                let over_emoji_block = parse_block(json!({
+                    "kind":"text","style":"callout","text":"x","marks":[],
+                    "icon":{"kind":"emoji","emoji":"😀".repeat(17)}
+                }));
+                assert!(new_block(&over_emoji_block).is_err());
+
+                for invalid in [
+                    json!({"kind":"bold","start":5,"end":4}),
+                    json!({"kind":"bold","start":0,"end":5}),
+                ] {
+                    let value = parse_block(json!({
+                        "kind":"text","style":"paragraph","text":"a😀b","marks":[invalid]
+                    }));
+                    assert!(new_block(&value).is_err());
+                }
+                let exact_endpoints = parse_block(json!({
+                    "kind":"text","style":"paragraph","text":"a😀b",
+                    "marks":[{"kind":"bold","start":0,"end":4}]
+                }));
+                assert!(new_block(&exact_endpoints).is_ok());
+
+                let exact_table = parse_block(json!({
+                    "kind":"table","rows":12,"columns":12,"header_row":true
+                }));
+                assert!(new_block(&exact_table).is_ok());
+                for (rows, columns) in [(13, 12), (12, 13)] {
+                    let over = parse_block(json!({
+                        "kind":"table","rows":rows,"columns":columns,"header_row":false
+                    }));
+                    assert!(new_block(&over).is_err());
+                }
+
+                let rpc = BodyRpcConfig::for_timeout(Duration::from_secs(1))
+                    .response_limits(usize::MAX, usize::MAX);
+                assert_eq!(rpc.show_response_limit(), 4_194_304);
+                assert_eq!(rpc.non_show_response_limit(), 65_536);
                 assert!(
                     validate_body_result_bounds(&list_result_with_tail(7_656), LIST_FRAME_BOUNDS)
                         .is_err()
                 );
+                assert!(
+                    validate_body_result_bounds(
+                        &primitive_result_with_marks(99),
+                        PRIMITIVE_FRAME_BOUNDS,
+                    )
+                    .is_err()
+                );
+                let over_rich = CallToolRequestParams::new(RICH_PAGE_CREATE)
+                    .with_arguments(args(rich_request_with_marks(512)));
+                assert!(ensure_body_request_bounds(&over_rich, RICH_FRAME_BOUNDS).is_err());
             }
             "body_opaque_read_only" => {
-                let opaque = BlockProjection::Unsupported {
+                let opaque_projection = BlockProjection::Unsupported {
                     opaque_kind: OpaqueKind::new("dataview".to_owned()).expect("opaque kind"),
-                    child_count: 2,
+                    child_count: 0,
                     approx_bytes: 9,
                 };
-                let encoded = serde_json::to_string(&opaque).expect("opaque JSON");
+                let encoded =
+                    serde_json::to_string(&opaque_projection).expect("opaque projection JSON");
                 assert!(!encoded.contains("secret"));
-                assert!(valid_opaque_kind("dataview"));
-                assert!(!valid_opaque_kind("DataView"));
+                let snapshot = projected(vec![
+                    summary("root", None, 0, 0, 1, projected_text("root")),
+                    summary("opaque", Some("root"), 0, 1, 0, opaque_projection),
+                ]);
+                let opaque_id = EntityId::new("opaque").expect("opaque ID");
+                let subtree = [BlockId::try_from("opaque".to_owned()).expect("opaque ID")];
+                let rejected = [
+                    validate_projected_create_plan(
+                        &snapshot,
+                        &opaque_id,
+                        WireInsertPosition::LastChild,
+                    ),
+                    validate_projected_delete_plan(&snapshot, &subtree, 1),
+                    validate_projected_move_plan(
+                        &snapshot,
+                        &opaque_id,
+                        &snapshot.root_id,
+                        &subtree,
+                    ),
+                    validate_projected_move_plan(&snapshot, &snapshot.root_id, &opaque_id, &[]),
+                ];
+                let write_polls = rejected.iter().filter(|result| result.is_ok()).count();
+                assert!(rejected.into_iter().all(|result| result.is_err()));
+                assert_eq!(write_polls, 0, "all opaque cases stop predispatch");
             }
             "body_create_idempotent" => {
                 let input = serde_json::from_value::<BodyBlockCreateInput>(json!({
@@ -7056,7 +7777,66 @@ mod tests {
                 assert_eq!(child.parent_id.as_ref(), Some(&heading.id));
                 assert_eq!(child.sibling_index, 0);
             }
-            "rich_page_complete" | "rich_page_replay_drift" => {
+            "rich_page_complete" => {
+                let input = parse_rich(
+                    (0..MAX_RICH_OPS)
+                        .map(|index| {
+                            entry(
+                                &format!("local_{index}"),
+                                None,
+                                text_block(&format!("Text {index}")),
+                            )
+                        })
+                        .collect(),
+                );
+                let applied = (0..MAX_RICH_OPS)
+                    .map(|index| {
+                        rich_applied(
+                            rich_index(index),
+                            &format!("local_{index}"),
+                            &format!("block_{index}"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut items = vec![
+                    summary("root", None, 0, 0, 18, projected_text("root")),
+                    summary("prior_0", Some("root"), 0, 1, 0, projected_text("prior 0")),
+                    summary("prior_1", Some("root"), 1, 1, 0, projected_text("prior 1")),
+                ];
+                items.extend((0..MAX_RICH_OPS).map(|index| {
+                    summary(
+                        &format!("block_{index}"),
+                        Some("root"),
+                        u64::try_from(index + 2).expect("sibling index"),
+                        1,
+                        0,
+                        projected_text(&format!("Text {index}")),
+                    )
+                }));
+                let snapshot = projected(items);
+                assert!(validate_rich_plan(&input).is_ok());
+                assert_eq!(
+                    verified_rich_prefix_len(&input, &applied, &snapshot, Some(2)),
+                    MAX_RICH_OPS
+                );
+                assert_eq!(
+                    snapshot
+                        .items
+                        .iter()
+                        .rev()
+                        .take(MAX_RICH_OPS)
+                        .map(|block| block.id.as_str())
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>(),
+                    applied
+                        .iter()
+                        .map(|receipt| receipt.block_id.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+            "rich_page_replay_drift" => {
                 let input = parse_rich(vec![
                     entry("a", None, text_block("A")),
                     entry("b", Some("a"), text_block("B")),
@@ -7077,61 +7857,167 @@ mod tests {
                     verified_rich_prefix_len(&input, &applied, &drifted, Some(0)),
                     0
                 );
-                if id == "rich_page_replay_drift" {
-                    let flat = parse_rich(vec![
-                        entry("a", None, text_block("A")),
-                        entry("b", None, text_block("B")),
-                    ]);
-                    let interleaved = projected(vec![
-                        summary("root", None, 0, 0, 3, projected_text("root")),
-                        summary("a_id", Some("root"), 0, 1, 0, projected_text("A")),
-                        summary("foreign", Some("root"), 1, 1, 0, projected_text("foreign")),
-                        summary("b_id", Some("root"), 2, 1, 0, projected_text("B")),
-                    ]);
+                let flat = parse_rich(vec![
+                    entry("a", None, text_block("A")),
+                    entry("b", None, text_block("B")),
+                ]);
+                let interleaved = projected(vec![
+                    summary("root", None, 0, 0, 3, projected_text("root")),
+                    summary("a_id", Some("root"), 0, 1, 0, projected_text("A")),
+                    summary("foreign", Some("root"), 1, 1, 0, projected_text("foreign")),
+                    summary("b_id", Some("root"), 2, 1, 0, projected_text("B")),
+                ]);
+                assert_eq!(
+                    verified_rich_prefix_len(&flat, &applied, &interleaved, Some(0)),
+                    1
+                );
+            }
+            "rich_page_partial" => {
+                let space = EntityId::new("space").expect("space");
+                let object = EntityId::new("object").expect("object");
+                for index in 0..MAX_RICH_OPS {
+                    let applied = (0..index)
+                        .map(|position| {
+                            rich_applied(
+                                rich_index(position),
+                                &format!("local_{position}"),
+                                &format!("block_{position}"),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let expected_applied =
+                        serde_json::to_value(&applied).expect("applied evidence");
+                    let prewrite = rich_local_failure(
+                        &space,
+                        &object,
+                        index,
+                        MAX_RICH_OPS,
+                        applied.clone(),
+                        RichFailureCategory::Validation,
+                        None,
+                    );
+                    assert_eq!(prewrite.status, RichStatus::Partial);
                     assert_eq!(
-                        verified_rich_prefix_len(&flat, &applied, &interleaved, Some(0)),
-                        1
+                        serde_json::to_value(&prewrite.applied).expect("prewrite applied"),
+                        expected_applied
+                    );
+                    assert_eq!(
+                        prewrite.not_attempted,
+                        (index..MAX_RICH_OPS).map(rich_index).collect::<Vec<_>>()
+                    );
+                    let rejected = rich_attempted_rejection(
+                        &space,
+                        &object,
+                        index,
+                        MAX_RICH_OPS,
+                        applied,
+                        RichFailureCategory::Validation,
+                        None,
+                    );
+                    assert_eq!(rejected.status, RichStatus::Partial);
+                    assert_eq!(
+                        serde_json::to_value(&rejected.applied).expect("rejected applied"),
+                        expected_applied
+                    );
+                    assert_eq!(
+                        rejected.not_attempted,
+                        (index + 1..MAX_RICH_OPS)
+                            .map(rich_index)
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(prewrite.final_snapshot_hash.is_none());
+                    assert!(rejected.final_snapshot_hash.is_none());
+                }
+            }
+            "rich_page_indeterminate" => {
+                let space = EntityId::new("space").expect("space");
+                let object = EntityId::new("object").expect("object");
+                for index in 0..MAX_RICH_OPS {
+                    let applied = (0..index)
+                        .map(|position| {
+                            rich_applied(
+                                rich_index(position),
+                                &format!("local_{position}"),
+                                &format!("block_{position}"),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let output = rich_cancelled_at_write_boundary(
+                        &space,
+                        &object,
+                        index,
+                        MAX_RICH_OPS,
+                        applied,
+                        true,
+                    );
+                    assert_eq!(output.status, RichStatus::Indeterminate);
+                    assert_eq!(
+                        output.failed.as_ref().map(|failure| failure.category),
+                        Some(RichFailureCategory::Indeterminate)
+                    );
+                    assert_eq!(
+                        output.not_attempted,
+                        (index + 1..MAX_RICH_OPS)
+                            .map(rich_index)
+                            .collect::<Vec<_>>()
                     );
                 }
             }
-            "rich_page_partial" => {
-                let output = rich_attempted_rejection(
-                    &EntityId::new("space").expect("space"),
-                    &EntityId::new("object").expect("object"),
-                    2,
-                    4,
-                    vec![rich_applied(0, "a", "a"), rich_applied(1, "b", "b")],
-                    RichFailureCategory::Validation,
-                    None,
-                );
-                assert_eq!(output.status, RichStatus::Partial);
-                assert_eq!(output.not_attempted, vec![3]);
-            }
-            "rich_page_indeterminate" => {
-                let output = rich_cancelled_at_write_boundary(
-                    &EntityId::new("space").expect("space"),
-                    &EntityId::new("object").expect("object"),
-                    1,
-                    3,
-                    vec![rich_applied(0, "a", "a")],
-                    true,
-                );
-                assert_eq!(output.status, RichStatus::Indeterminate);
-                assert_eq!(output.not_attempted, vec![2]);
-            }
             "body_read_only_catalog" => {
-                let read_only = server(
-                    Some(BODY_BLOCKS_TOOLSET_NAME),
-                    ApplicationProfile::Compact,
-                    true,
-                );
-                assert_eq!(body_names(&read_only), vec![BODY_BLOCK_LIST]);
+                run_large_future(move || async move {
+                    let read_only = server(
+                        Some(BODY_BLOCKS_TOOLSET_NAME),
+                        ApplicationProfile::Compact,
+                        true,
+                    );
+                    assert_eq!(body_names(&read_only), vec![BODY_BLOCK_LIST]);
+                    let before = read_only.runtime().client().http_metrics();
+                    for name in MUTATION_NAMES {
+                        assert!(!read_only.tools().iter().any(|tool| tool.name == name));
+                        let request = CallToolRequestParams::new(name)
+                            .with_arguments(args(json!({"SECRET_UNPARSED_BODY_VALUE":true})));
+                        let stable = read_only
+                            .dispatch_tool_for_protocol(
+                                request.clone(),
+                                &rmcp::model::ProtocolVersion::V_2025_11_25,
+                                &CancellationToken::new(),
+                            )
+                            .await
+                            .expect("stable read-only rejection");
+                        let preview = read_only
+                            .dispatch_tool_for_protocol(
+                                request,
+                                &rmcp::model::ProtocolVersion::V_2026_07_28,
+                                &CancellationToken::new(),
+                            )
+                            .await
+                            .expect("preview read-only rejection");
+                        assert_eq!(stable, preview);
+                        let encoded = serde_json::to_string(&stable).expect("read-only error JSON");
+                        assert!(!encoded.contains("SECRET_UNPARSED_BODY_VALUE"));
+                    }
+                    assert_eq!(read_only.runtime().client().http_metrics(), before);
+                });
             }
             "body_read_restricted" => {
-                assert!(read_access_allowed([false, false]));
-                assert!(!read_access_allowed([false, true, false]));
+                assert!(require_read_access([false, false]).is_ok());
+                let error = require_read_access([false, true, false])
+                    .expect_err("one restricted descendant rejects the whole read");
+                let result = tool_error(error.tool_error());
+                assert_eq!(
+                    result
+                        .structured_content
+                        .as_ref()
+                        .and_then(|value| value["code"].as_str()),
+                    Some("upstream")
+                );
+                let encoded = serde_json::to_value(result).expect("restricted error JSON");
+                assert!(encoded.get("snapshot_hash").is_none());
+                assert!(encoded.get("next_cursor").is_none());
             }
             "body_network_closed" => {
+                let client = client();
+                let before = client.http_metrics();
                 let schema = serde_json::to_string(
                     &rmcp::handler::server::tool::schema_for_input::<BodyBlockCreateInput>()
                         .expect("create schema"),
@@ -7140,7 +8026,15 @@ mod tests {
                 for forbidden in ["mime", "base64", "host_path", "bookmark"] {
                     assert!(!schema.contains(forbidden));
                 }
-                assert!(valid_youtube_id("a1_B2-c3D4e"));
+                let youtube = parse_block(json!({
+                    "kind":"embed","processor":"youtube","source":"a1_B2-c3D4e"
+                }));
+                new_block(&youtube).expect("inert YouTube constructor");
+                assert_eq!(
+                    client.http_metrics(),
+                    before,
+                    "constructor performs no network work"
+                );
             }
             "body_protocol_parity" => {
                 let stable = server(
@@ -7166,12 +8060,88 @@ mod tests {
                     .map(|tool| serde_json::to_value(tool).expect("preview tool"))
                     .collect::<Vec<_>>();
                 assert_eq!(stable_body, preview_body);
+                run_large_future(move || async move {
+                    let request = CallToolRequestParams::new(BODY_BLOCK_LIST)
+                        .with_arguments(args(json!({"invalid":true})));
+                    let direct = stable
+                        .dispatch_tool(request.clone(), &CancellationToken::new())
+                        .await
+                        .expect_err("direct body error");
+                    let stable_result = stable
+                        .dispatch_tool_for_protocol(
+                            request.clone(),
+                            &rmcp::model::ProtocolVersion::V_2025_11_25,
+                            &CancellationToken::new(),
+                        )
+                        .await
+                        .expect_err("stable body error");
+                    let preview_result = stable
+                        .dispatch_tool_for_protocol(
+                            request,
+                            &rmcp::model::ProtocolVersion::V_2026_07_28,
+                            &CancellationToken::new(),
+                        )
+                        .await
+                        .expect_err("preview body error");
+                    assert_eq!(
+                        serde_json::to_value(&direct).expect("direct error JSON"),
+                        serde_json::to_value(&stable_result).expect("stable error JSON")
+                    );
+                    assert_eq!(
+                        serde_json::to_value(&stable_result).expect("stable error JSON"),
+                        serde_json::to_value(&preview_result).expect("preview error JSON")
+                    );
+                    assert_eq!(
+                        serde_json::to_vec(&json!({
+                            "jsonrpc":"2.0","id":17,"error":stable_result
+                        }))
+                        .expect("stable frame"),
+                        serde_json::to_vec(&json!({
+                            "jsonrpc":"2.0","id":17,"error":preview_result
+                        }))
+                        .expect("preview frame")
+                    );
+                });
             }
             "body_redaction_and_budgets" => {
                 let secret = "SECRET_BODY_TOKEN";
-                let encoded =
-                    serde_json::to_string(&tool_error(&ToolError::upstream())).expect("error JSON");
-                assert!(!encoded.contains(secret));
+                for error in [
+                    ToolError::authentication(),
+                    ToolError::validation(),
+                    ToolError::not_found(),
+                    ToolError::conflict(),
+                    ToolError::bounded_result(),
+                    ToolError::upstream(),
+                    ToolError::mutation_indeterminate(),
+                ] {
+                    let encoded = serde_json::to_string(&tool_error(&error)).expect("error JSON");
+                    assert!(!encoded.contains(secret));
+                }
+                run_large_future(move || async move {
+                    let server = server(
+                        Some(BODY_BLOCKS_TOOLSET_NAME),
+                        ApplicationProfile::Compact,
+                        true,
+                    );
+                    let before = server.runtime().client().http_metrics();
+                    for name in MUTATION_NAMES {
+                        let result = server
+                            .dispatch_tool(
+                                CallToolRequestParams::new(name)
+                                    .with_arguments(args(json!({"secret":secret}))),
+                                &CancellationToken::new(),
+                            )
+                            .await
+                            .expect("redacted read-only error");
+                        let encoded = serde_json::to_string(&result).expect("result JSON");
+                        assert!(!encoded.contains(secret));
+                    }
+                    assert_eq!(server.runtime().client().http_metrics(), before);
+                });
+                assert_eq!(
+                    BodyRpcMetrics::default().snapshot(),
+                    BodyRpcMetrics::default().snapshot()
+                );
                 const { assert!(MAX_BODY_REQUEST_FRAME_BYTES < MAX_BODY_SUCCESS_FRAME_BYTES) };
             }
             other => panic!("unowned body scenario {other}"),
@@ -7192,12 +8162,6 @@ mod tests {
         body_list_revision_conflict,
         body_limits_fail_closed,
         body_opaque_read_only,
-        body_create_idempotent,
-        body_update_one_change,
-        body_delete_confirmed_subtree,
-        body_move_same_object,
-        body_relation_workflows,
-        body_targeted_heading_append,
         rich_page_complete,
         rich_page_partial,
         rich_page_indeterminate,
@@ -7208,6 +8172,598 @@ mod tests {
         body_protocol_parity,
         body_redaction_and_budgets,
     );
+
+    fn refresh_projection_hash(snapshot: &mut ProjectedSnapshot) {
+        snapshot.hash = hash_projection(
+            &snapshot.space_id,
+            &snapshot.object_id,
+            &snapshot.root_id,
+            &snapshot.items,
+        );
+    }
+
+    fn projected_link(target: &str, relations: Vec<RelationKey>) -> BlockProjection {
+        BlockProjection::Link {
+            target_object_id: EntityId::new(target).expect("link target"),
+            card_style: WireLinkCardStyle::Text,
+            icon_size: WireLinkIconSize::None,
+            description: WireLinkDescription::None,
+            relations,
+        }
+    }
+
+    #[test]
+    fn body_create_idempotent() {
+        run_large_future(move || async move {
+            let input = serde_json::from_value::<BodyBlockCreateInput>(json!({
+                "space":"space","object_id":"object",
+                "expected_snapshot_hash":"a".repeat(64),"target_block_id":"root",
+                "position":"last_child","block":text_block("same"),
+                "idempotency_key":"create-key"
+            }))
+            .expect("create input");
+            let fingerprint = body_create_fingerprint(&input, "space");
+            let store = Arc::new(IdempotencyStore::new(16));
+            let key = IdempotencyKey::new("create-key").expect("key");
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let store = store.clone();
+                let key = key.clone();
+                tasks.push(tokio::spawn(
+                    async move { store.begin(key, fingerprint).await },
+                ));
+            }
+            let mut leader = None;
+            let mut cohort = Vec::new();
+            for task in tasks {
+                match task.await.expect("cohort task") {
+                    BeginAttempt::Lead(attempt) => {
+                        assert!(leader.replace(attempt.clone()).is_none());
+                        cohort.push(attempt);
+                    }
+                    BeginAttempt::Wait(attempt) => cohort.push(attempt),
+                    _ => panic!("unexpected cohort result"),
+                }
+            }
+            let leader = leader.expect("one leader");
+            assert!(cohort.iter().all(|attempt| Arc::ptr_eq(attempt, &leader)));
+            let receipt = CallToolResult::structured(json!({"assigned_id":"block"}));
+            store
+                .finish(
+                    &key,
+                    &leader,
+                    CreateExecution::new(receipt.clone(), CreateDisposition::Verified),
+                )
+                .await;
+            assert!(matches!(
+                store.begin(key.clone(), fingerprint).await,
+                BeginAttempt::Cached(_)
+            ));
+            let mut changed = input.clone();
+            changed.block = parse_block(text_block("different"));
+            assert!(matches!(
+                store
+                    .begin(key, body_create_fingerprint(&changed, "space"))
+                    .await,
+                BeginAttempt::Conflict
+            ));
+            let uncertain_key = IdempotencyKey::new("uncertain-key").expect("uncertain key");
+            let uncertain = match store.begin(uncertain_key.clone(), [7; 32]).await {
+                BeginAttempt::Lead(attempt) => attempt,
+                _ => panic!("unexpected uncertain result"),
+            };
+            uncertain.progress().mark_dispatched();
+            store
+                .finish(
+                    &uncertain_key,
+                    &uncertain,
+                    CreateExecution::new(
+                        tool_error(&ToolError::mutation_indeterminate()),
+                        CreateDisposition::Indeterminate,
+                    ),
+                )
+                .await;
+            for _ in 0..3 {
+                assert!(matches!(
+                    store.begin(uncertain_key.clone(), [7; 32]).await,
+                    BeginAttempt::Indeterminate
+                ));
+            }
+        });
+    }
+
+    #[test]
+    fn body_update_one_change() {
+        let relations = (0..MAX_RELATIONS)
+            .map(|index| RelationKey::new(format!("r{index}")).expect("relation"))
+            .collect::<Vec<_>>();
+        let cases = [
+            (
+                projected_text("before"),
+                json!({"kind":"set_text","text":"after","marks":[]}),
+            ),
+            (
+                projected_text("before"),
+                json!({"kind":"set_text_style","style":"heading_1"}),
+            ),
+            (
+                BlockProjection::Text {
+                    text: "todo".to_owned(),
+                    style: WireTextStyle::Checkbox,
+                    checked: false,
+                    color: None,
+                    icon: None,
+                    marks: Vec::new(),
+                },
+                json!({"kind":"set_checked","checked":true}),
+            ),
+            (
+                projected_text("before"),
+                json!({"kind":"set_text_color","color":"red"}),
+            ),
+            (
+                BlockProjection::Text {
+                    text: "before".to_owned(),
+                    style: WireTextStyle::Paragraph,
+                    checked: false,
+                    color: Some(ColorInput::new("red".to_owned()).expect("color")),
+                    icon: None,
+                    marks: Vec::new(),
+                },
+                json!({"kind":"clear_text_color"}),
+            ),
+            (
+                BlockProjection::Text {
+                    text: "note".to_owned(),
+                    style: WireTextStyle::Callout,
+                    checked: false,
+                    color: None,
+                    icon: None,
+                    marks: Vec::new(),
+                },
+                json!({"kind":"set_callout_icon","icon":{"kind":"emoji","emoji":"!"}}),
+            ),
+            (
+                BlockProjection::Text {
+                    text: "note".to_owned(),
+                    style: WireTextStyle::Callout,
+                    checked: false,
+                    color: None,
+                    icon: Some(WireIcon::Emoji {
+                        emoji: "!".to_owned(),
+                    }),
+                    marks: Vec::new(),
+                },
+                json!({"kind":"clear_callout_icon"}),
+            ),
+            (
+                BlockProjection::Divider {
+                    style: WireDividerStyle::Line,
+                },
+                json!({"kind":"set_divider_style","style":"dots"}),
+            ),
+            (
+                projected_text("before"),
+                json!({"kind":"set_background_color","color":"grey"}),
+            ),
+            (
+                projected_text("before"),
+                json!({"kind":"clear_background_color"}),
+            ),
+            (
+                projected_text("before"),
+                json!({"kind":"set_horizontal_align","align":"center"}),
+            ),
+            (
+                projected_text("before"),
+                json!({"kind":"set_vertical_align","align":"middle"}),
+            ),
+            (
+                BlockProjection::Embed {
+                    processor: WireEmbedProcessor::Mermaid,
+                    source: "a-->b".to_owned(),
+                },
+                json!({"kind":"set_embed_source","source":"b-->c"}),
+            ),
+            (
+                projected_link("referenced-object", Vec::new()),
+                json!({"kind":"set_link_appearance","card_style":"card","icon_size":"small","description":"content","relations":relations}),
+            ),
+        ];
+        assert_eq!(cases.len(), 14);
+        for (content, raw_change) in cases {
+            let before = projected(vec![
+                summary("root", None, 0, 0, 2, projected_text("root")),
+                summary("target", Some("root"), 0, 1, 0, content),
+                summary(
+                    "unrelated",
+                    Some("root"),
+                    1,
+                    1,
+                    0,
+                    projected_text("unchanged"),
+                ),
+            ]);
+            let change =
+                serde_json::from_value::<BlockChangeInput>(raw_change).expect("closed update arm");
+            let mut after = before.clone();
+            let target = after
+                .items
+                .iter_mut()
+                .find(|block| block.id.as_str() == "target")
+                .expect("target");
+            apply_projected_change(target, &change).expect("applicable update");
+            refresh_projection_hash(&mut after);
+            assert!(verify_update_transition(
+                &before,
+                &after,
+                &EntityId::new("target").expect("target ID"),
+                &change
+            ));
+            let mut drifted = after.clone();
+            drifted.items[2].content = projected_text("collateral drift");
+            assert!(!verify_update_transition(
+                &before,
+                &drifted,
+                &EntityId::new("target").expect("target ID"),
+                &change
+            ));
+        }
+    }
+
+    #[test]
+    fn body_delete_confirmed_subtree() {
+        let before = projected(vec![
+            summary("root", None, 0, 0, 3, projected_text("root")),
+            summary("gone", Some("root"), 0, 1, 1, projected_text("gone")),
+            summary(
+                "gone-child",
+                Some("gone"),
+                0,
+                2,
+                0,
+                projected_text("gone child"),
+            ),
+            summary(
+                "reference",
+                Some("root"),
+                1,
+                1,
+                0,
+                projected_link("external-object", Vec::new()),
+            ),
+            summary(
+                "unrelated",
+                Some("root"),
+                2,
+                1,
+                0,
+                projected_text("unchanged"),
+            ),
+        ]);
+        let subtree = [
+            BlockId::try_from("gone".to_owned()).expect("block"),
+            BlockId::try_from("gone-child".to_owned()).expect("block"),
+        ];
+        let mut after = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary(
+                "reference",
+                Some("root"),
+                0,
+                1,
+                0,
+                projected_link("external-object", Vec::new()),
+            ),
+            summary(
+                "unrelated",
+                Some("root"),
+                1,
+                1,
+                0,
+                projected_text("unchanged"),
+            ),
+        ]);
+        refresh_projection_hash(&mut after);
+        validate_projected_delete_plan(&before, &subtree, 2).expect("valid delete plan");
+        assert!(verify_delete_transition(&before, &after, &subtree));
+        assert!(
+            matches!(after.items[1].content, BlockProjection::Link { ref target_object_id, .. } if target_object_id.as_str() == "external-object")
+        );
+
+        let root = [BlockId::try_from("root".to_owned()).expect("root")];
+        let mut restricted = before.clone();
+        restricted.items[1].restrictions.remove = true;
+        let mut structural = before.clone();
+        structural.items[1].content = BlockProjection::Table;
+        for invalid in [
+            validate_projected_delete_plan(&before, &root, 1),
+            validate_projected_delete_plan(&before, &subtree, 1),
+            validate_projected_delete_plan(&restricted, &subtree, 2),
+            validate_projected_delete_plan(&structural, &subtree, 2),
+        ] {
+            assert!(invalid.is_err());
+        }
+        let mut drifted = after.clone();
+        drifted.items[2].content = projected_text("unexpected collateral edit");
+        assert!(!verify_delete_transition(&before, &drifted, &subtree));
+    }
+
+    #[test]
+    fn body_move_same_object() {
+        let before = projected(vec![
+            summary("root", None, 0, 0, 3, projected_text("root")),
+            summary("moved", Some("root"), 0, 1, 1, projected_text("moved")),
+            summary("child", Some("moved"), 0, 2, 0, projected_text("child")),
+            summary("target", Some("root"), 1, 1, 0, projected_text("target")),
+            summary(
+                "reference",
+                Some("root"),
+                2,
+                1,
+                0,
+                projected_link("external-object", Vec::new()),
+            ),
+        ]);
+        let subtree = [
+            BlockId::try_from("moved".to_owned()).expect("moved"),
+            BlockId::try_from("child".to_owned()).expect("child"),
+        ];
+        let moved = EntityId::new("moved").expect("moved");
+        let child = EntityId::new("child").expect("child");
+        let target = EntityId::new("target").expect("target");
+        let root = EntityId::new("root").expect("root");
+        let mut structural = before.clone();
+        structural.items[1].content = BlockProjection::Table;
+        for invalid in [
+            validate_projected_move_plan(&before, &moved, &moved, &subtree),
+            validate_projected_move_plan(&before, &moved, &child, &subtree),
+            validate_projected_move_plan(&before, &root, &target, &subtree),
+            validate_projected_move_plan(&structural, &moved, &target, &subtree),
+        ] {
+            assert!(invalid.is_err());
+        }
+        let cross_object = json!({
+            "space":"space","object_id":"object","expected_snapshot_hash":"a".repeat(64),
+            "block_id":"moved","target_block_id":"target","target_object_id":"other",
+            "position":"after"
+        });
+        assert!(serde_json::from_value::<BodyBlockMoveInput>(cross_object).is_err());
+        validate_projected_move_plan(&before, &moved, &target, &subtree)
+            .expect("same-object move plan");
+        let after = projected(vec![
+            summary("root", None, 0, 0, 3, projected_text("root")),
+            summary("target", Some("root"), 0, 1, 0, projected_text("target")),
+            summary("moved", Some("root"), 1, 1, 1, projected_text("moved")),
+            summary("child", Some("moved"), 0, 2, 0, projected_text("child")),
+            summary(
+                "reference",
+                Some("root"),
+                2,
+                1,
+                0,
+                projected_link("external-object", Vec::new()),
+            ),
+        ]);
+        assert!(verify_move_transition(
+            &before,
+            &after,
+            &subtree,
+            &target,
+            WireInsertPosition::After
+        ));
+        let mut unrelated_reorder = after.clone();
+        for block in &mut unrelated_reorder.items {
+            block.sibling_index = match block.id.as_str() {
+                "reference" => 0,
+                "target" => 1,
+                "moved" => 2,
+                _ => block.sibling_index,
+            };
+        }
+        assert!(!verify_move_transition(
+            &before,
+            &unrelated_reorder,
+            &subtree,
+            &target,
+            WireInsertPosition::After,
+        ));
+    }
+
+    #[test]
+    fn body_relation_workflows() {
+        let relation_set = (0..MAX_RELATIONS)
+            .map(|index| RelationKey::new(format!("r{index}")).expect("relation"))
+            .collect::<Vec<_>>();
+        let target_id = EntityId::new("link").expect("link");
+        let mut current = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary(
+                "link",
+                Some("root"),
+                0,
+                1,
+                0,
+                projected_link("external-object", Vec::new()),
+            ),
+            summary("anchor", Some("root"), 1, 1, 0, projected_text("anchor")),
+        ]);
+        for relations in [relation_set.clone(), Vec::new(), relation_set.clone()] {
+            let change = BlockChangeInput::SetLinkAppearance {
+                card_style: WireLinkCardStyle::Card,
+                icon_size: WireLinkIconSize::Small,
+                description: WireLinkDescription::Content,
+                relations,
+            };
+            let before = current.clone();
+            apply_projected_change(&mut current.items[1], &change).expect("link update");
+            refresh_projection_hash(&mut current);
+            assert!(verify_update_transition(
+                &before, &current, &target_id, &change
+            ));
+            assert!(
+                matches!(current.items[1].content, BlockProjection::Link { ref target_object_id, .. } if target_object_id.as_str() == "external-object")
+            );
+        }
+        assert!(
+            matches!(current.items[1].content, BlockProjection::Link { ref relations, .. } if relations.len() == MAX_RELATIONS)
+        );
+        let subtree = [BlockId::try_from("link".to_owned()).expect("link")];
+        let anchor = EntityId::new("anchor").expect("anchor");
+        validate_projected_move_plan(&current, &target_id, &anchor, &subtree).expect("link move");
+        let moved_link = current.items[1].content.clone();
+        let moved = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+            summary("link", Some("root"), 1, 1, 0, moved_link),
+        ]);
+        assert!(verify_move_transition(
+            &current,
+            &moved,
+            &subtree,
+            &anchor,
+            WireInsertPosition::After
+        ));
+        let relation_id = EntityId::new("relation").expect("relation ID");
+        let relation_subtree = [BlockId::try_from("relation".to_owned()).expect("relation block")];
+        let relation_before = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary(
+                "relation",
+                Some("root"),
+                0,
+                1,
+                0,
+                BlockProjection::Relation {
+                    key: RelationKey::new("tag".to_owned()).expect("relation key"),
+                },
+            ),
+            summary("anchor", Some("root"), 1, 1, 0, projected_text("anchor")),
+        ]);
+        let without_relation = projected(vec![
+            summary("root", None, 0, 0, 1, projected_text("root")),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+        ]);
+        validate_projected_delete_plan(&relation_before, &relation_subtree, 1)
+            .expect("relation removal plan");
+        assert!(verify_delete_transition(
+            &relation_before,
+            &without_relation,
+            &relation_subtree
+        ));
+        let relation_input = parse_block(json!({"kind":"relation","key":"tag"}));
+        let recreated = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary("anchor", Some("root"), 0, 1, 0, projected_text("anchor")),
+            summary(
+                "relation",
+                Some("root"),
+                1,
+                1,
+                0,
+                BlockProjection::Relation {
+                    key: RelationKey::new("tag".to_owned()).expect("relation key"),
+                },
+            ),
+        ]);
+        validate_projected_create_plan(
+            &without_relation,
+            &without_relation.root_id,
+            WireInsertPosition::LastChild,
+        )
+        .expect("relation recreation plan");
+        assert!(verify_create_transition(
+            &without_relation,
+            &recreated,
+            &relation_id,
+            &without_relation.root_id,
+            WireInsertPosition::LastChild,
+            &relation_input,
+        ));
+        validate_projected_move_plan(&recreated, &relation_id, &anchor, &relation_subtree)
+            .expect("relation move plan");
+        let relation_moved = projected(vec![
+            summary("root", None, 0, 0, 2, projected_text("root")),
+            summary(
+                "relation",
+                Some("root"),
+                0,
+                1,
+                0,
+                BlockProjection::Relation {
+                    key: RelationKey::new("tag".to_owned()).expect("relation key"),
+                },
+            ),
+            summary("anchor", Some("root"), 1, 1, 0, projected_text("anchor")),
+        ]);
+        assert!(verify_move_transition(
+            &recreated,
+            &relation_moved,
+            &relation_subtree,
+            &anchor,
+            WireInsertPosition::Before,
+        ));
+    }
+
+    #[test]
+    fn body_targeted_heading_append() {
+        let heading_id = EntityId::new("heading").expect("heading");
+        let before = projected(vec![
+            summary("root", None, 0, 0, 1, projected_text("root")),
+            summary(
+                "heading",
+                Some("root"),
+                0,
+                1,
+                0,
+                BlockProjection::Text {
+                    text: "Heading".to_owned(),
+                    style: WireTextStyle::Heading1,
+                    checked: false,
+                    color: None,
+                    icon: None,
+                    marks: Vec::new(),
+                },
+            ),
+        ]);
+        validate_projected_create_plan(&before, &heading_id, WireInsertPosition::LastChild)
+            .expect("heading accepts child append");
+        let block = parse_block(text_block("Body"));
+        let child_id = EntityId::new("child").expect("child");
+        let after = projected(vec![
+            summary("root", None, 0, 0, 1, projected_text("root")),
+            summary(
+                "heading",
+                Some("root"),
+                0,
+                1,
+                1,
+                BlockProjection::Text {
+                    text: "Heading".to_owned(),
+                    style: WireTextStyle::Heading1,
+                    checked: false,
+                    color: None,
+                    icon: None,
+                    marks: Vec::new(),
+                },
+            ),
+            summary("child", Some("heading"), 0, 2, 0, projected_text("Body")),
+        ]);
+        assert!(verify_create_transition(
+            &before,
+            &after,
+            &child_id,
+            &heading_id,
+            WireInsertPosition::LastChild,
+            &block
+        ));
+        let mut restricted = before.clone();
+        restricted.items[1].restrictions.drop_on = true;
+        assert!(
+            validate_projected_create_plan(&restricted, &heading_id, WireInsertPosition::LastChild)
+                .is_err()
+        );
+    }
 
     #[test]
     fn scripted_scenario_inventory_is_executable_and_exact() {

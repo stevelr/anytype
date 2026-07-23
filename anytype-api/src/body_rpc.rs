@@ -249,6 +249,18 @@ impl BodyRpcConfig {
         self.metrics.clone()
     }
 
+    /// Reuses one metrics observer across multiple independently-deadlined
+    /// body operations.
+    ///
+    /// This is useful for a higher-level workflow that must account for every
+    /// show, close, and write poll while still giving each request its own
+    /// absolute deadline.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: BodyRpcMetrics) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
     pub(crate) fn remaining(&self) -> Option<Duration> {
         self.deadline.checked_duration_since(Instant::now())
     }
@@ -962,6 +974,24 @@ mod tests {
                 mutation_limit_rejections: 1,
             }
         );
+    }
+
+    #[test]
+    fn independently_deadlined_configs_share_one_metrics_observer() {
+        let metrics = BodyRpcMetrics::default();
+        let first =
+            BodyRpcConfig::for_timeout(Duration::from_secs(1)).with_metrics(metrics.clone());
+        let second =
+            BodyRpcConfig::for_timeout(Duration::from_secs(2)).with_metrics(metrics.clone());
+
+        first.metrics().record_show_poll();
+        second.metrics().record_write_poll();
+
+        let observed = metrics.snapshot();
+        assert_eq!(observed.show_attempts, 1);
+        assert_eq!(observed.write_polls, 1);
+        assert_eq!(first.metrics().snapshot(), observed);
+        assert_eq!(second.metrics().snapshot(), observed);
     }
 
     #[test]

@@ -18,6 +18,8 @@ use std::{
 };
 
 #[cfg(feature = "acceptance-harness")]
+use any_mcp::body_toolset::BodyAcceptanceDirect;
+#[cfg(feature = "acceptance-harness")]
 use any_mcp::collection_member_toolset::{
     AcceptanceMetricsSnapshot, AcceptanceMutationMode, ViewsWriteAcceptanceDirect,
 };
@@ -39,10 +41,13 @@ use sha2::{Digest, Sha256};
 
 mod support;
 
+#[cfg(feature = "acceptance-harness")]
+use support::live_scenario::BodyDriverMetrics;
 use support::{
     live_scenario::{
-        ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
-        run_body_scenario, run_chats_registry_scenario, run_live_scenario_on_large_stack,
+        BODY_DIAGNOSTIC_SECRET, ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver,
+        ScenarioEvidence, ScenarioId, run_body_read_only_scenario, run_body_scenario,
+        run_chats_registry_scenario, run_live_scenario_on_large_stack,
         run_representative_layout_scenario, run_scenario, validate_live_ownership,
     },
     process::{ProcessOutput, ProtocolProcess},
@@ -79,6 +84,11 @@ impl DriverOptions {
     const PREVIEW_STANDARD: Self = Self {
         profile: "standard",
         read_only: false,
+        preview: true,
+    };
+    const PREVIEW_READ_ONLY: Self = Self {
+        profile: "standard",
+        read_only: true,
         preview: true,
     };
 
@@ -644,6 +654,102 @@ impl McpDriver for OwnedStdioDriver {
     }
 }
 
+#[cfg(feature = "acceptance-harness")]
+struct DirectBodyDriver {
+    driver: BodyAcceptanceDirect,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl McpDriver for DirectBodyDriver {
+    fn body_acceptance_metrics(&self) -> Option<BodyDriverMetrics> {
+        let metrics = self.driver.metrics();
+        Some(BodyDriverMetrics {
+            page_create_polls: metrics.page_create_polls,
+            show_attempts: metrics.show_attempts,
+            foreground_close_attempts: metrics.foreground_close_attempts,
+            foreground_close_confirmed: metrics.foreground_close_confirmed,
+            fallback_close_attempts: metrics.fallback_close_attempts,
+            fallback_close_confirmed: metrics.fallback_close_confirmed,
+            write_polls: metrics.write_polls,
+            show_limit_rejections: metrics.show_limit_rejections,
+            non_show_limit_rejections: metrics.non_show_limit_rejections,
+            close_limit_rejections: metrics.close_limit_rejections,
+            mutation_limit_rejections: metrics.mutation_limit_rejections,
+        })
+    }
+
+    fn call_tool<'a>(
+        &'a mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(async move {
+            let result = self.driver.call(name, arguments).await;
+            if result.is_error == Some(true) {
+                let code = result
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value["code"].as_str())
+                    .unwrap_or("missing");
+                return Err(format!("{name} returned tool error {code}"));
+            }
+            result
+                .structured_content
+                .ok_or_else(|| format!("{name} success omitted structured content"))
+        })
+    }
+
+    fn call_tool_error<'a>(
+        &'a mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+        Box::pin(async move {
+            let result = self.driver.call(name, arguments).await;
+            if result.is_error != Some(true) {
+                return Err(format!("{name} unexpectedly succeeded"));
+            }
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value["code"].as_str())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| format!("{name} error omitted code"))
+        })
+    }
+
+    fn list_tools<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>> {
+        Box::pin(std::future::ready(Ok(self.driver.tool_names())))
+    }
+
+    fn list_resources<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "direct body scenario does not use resources/list".to_owned(),
+        )))
+    }
+
+    fn list_resource_templates<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "direct body scenario does not use resources/templates/list".to_owned(),
+        )))
+    }
+
+    fn read_resource<'a>(
+        &'a mut self,
+        _uri: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "direct body scenario does not use resources/read".to_owned(),
+        )))
+    }
+}
+
 fn tool_success(name: &str, response: &Value) -> Result<Value, String> {
     let result = response
         .get("result")
@@ -782,6 +888,58 @@ fn stderr_metrics(stderr: &[u8]) -> StderrMetrics {
         }
     }
     metrics
+}
+
+fn require_body_diagnostics(
+    stderr: &[u8],
+    secret: &[u8],
+    expect_operations: bool,
+) -> TestResult<()> {
+    let metrics = stderr_metrics(stderr);
+    let categorized =
+        metrics.runtime_ready + metrics.operation_success + metrics.operation_non_success;
+    if stderr.len() > 524_288
+        || contains_bytes(stderr, secret)
+        || metrics.invalid_utf8
+        || metrics.runtime_ready != 1
+        || metrics.stack_overflow != 0
+        || metrics.panic != 0
+        || metrics.fatal != 0
+        || metrics.other != 0
+        || metrics.lines != categorized
+        || (expect_operations && metrics.operation_success == 0)
+        || (!expect_operations
+            && (metrics.operation_success != 0 || metrics.operation_non_success != 0))
+    {
+        return Err(sentinel_assertion(
+            "body child diagnostics violated fixed-category/redaction bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
+    let Some(path) = std::env::var_os("ANY_MCP_HEADLESS_REDACTED_LOG_FILE") else {
+        eprintln!("reviewed headless server-log evidence unavailable");
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log path was not absolute",
+        ));
+    }
+    let log = std::fs::read(path)
+        .map_err(|_| sentinel_assertion("reviewed headless server log was unreadable"))?;
+    if log.len() > 524_288
+        || std::str::from_utf8(&log).is_err()
+        || secrets.iter().any(|secret| contains_bytes(&log, secret))
+    {
+        return Err(sentinel_assertion(
+            "reviewed headless server log violated size/UTF-8/redaction bounds",
+        ));
+    }
+    Ok(())
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -3534,15 +3692,31 @@ async fn headless_body_blocks_direct_stable_preview_and_object_show() {
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-async fn headless_body_blocks_shared_stable_and_preview_scenarios() {
+async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
     let stable_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
     let preview_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let stable_read_only_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let preview_read_only_cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
     let stable_callback_cleanup = Arc::clone(&stable_cleanup);
     let preview_callback_cleanup = Arc::clone(&preview_cleanup);
+    let stable_read_only_callback_cleanup = Arc::clone(&stable_read_only_cleanup);
+    let preview_read_only_callback_cleanup = Arc::clone(&preview_read_only_cleanup);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-body-shared-stdio",
         move |ctx| {
             Box::pin(async move {
+                #[cfg(feature = "acceptance-harness")]
+                let direct_evidence = {
+                    let direct =
+                        BodyAcceptanceDirect::new(ctx.client.clone(), false).map_err(|_| {
+                            sentinel_assertion("direct body driver construction failed")
+                        })?;
+                    let mut direct_driver = DirectBodyDriver { driver: direct };
+                    run_body_scenario(&mut direct_driver, &ctx, "direct")
+                        .await
+                        .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?
+                };
+
                 let stable = spawn_disposable_driver(
                     ctx.as_ref(),
                     stable_callback_cleanup,
@@ -3559,9 +3733,14 @@ async fn headless_body_blocks_shared_stable_and_preview_scenarios() {
                 let stable_evidence = run_body_scenario(&mut stable_driver, &ctx, "stable")
                     .await
                     .map_err(|_| sentinel_assertion("stable shared body scenario failed"))?;
-                take_registered_body_driver(&stable)?
+                let (_, stable_output) = take_registered_body_driver(&stable)?
                     .try_finish()
                     .map_err(|_| sentinel_assertion("stable shared body child did not stop"))?;
+                require_body_diagnostics(
+                    &stable_output.stderr,
+                    BODY_DIAGNOSTIC_SECRET.as_bytes(),
+                    true,
+                )?;
 
                 let preview = spawn_disposable_driver(
                     ctx.as_ref(),
@@ -3579,13 +3758,91 @@ async fn headless_body_blocks_shared_stable_and_preview_scenarios() {
                 let preview_evidence = run_body_scenario(&mut preview_driver, &ctx, "preview")
                     .await
                     .map_err(|_| sentinel_assertion("preview shared body scenario failed"))?;
-                take_registered_body_driver(&preview)?
+                let (_, preview_output) = take_registered_body_driver(&preview)?
                     .try_finish()
                     .map_err(|_| sentinel_assertion("preview shared body child did not stop"))?;
+                require_body_diagnostics(
+                    &preview_output.stderr,
+                    BODY_DIAGNOSTIC_SECRET.as_bytes(),
+                    true,
+                )?;
+
+                let stable_read_only = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    stable_read_only_callback_cleanup,
+                    DriverOptions::READ_ONLY,
+                    Some("body-blocks"),
+                )?;
+                lock_driver(&stable_read_only)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("stable read-only body child missing"))?
+                    .initialize();
+                let mut stable_read_only_driver = OwnedStdioDriver {
+                    driver: Arc::clone(&stable_read_only),
+                };
+                let stable_read_only_evidence =
+                    run_body_read_only_scenario(&mut stable_read_only_driver)
+                        .await
+                        .map_err(|_| sentinel_assertion("stable read-only body scenario failed"))?;
+                let (_, stable_read_only_output) = take_registered_body_driver(&stable_read_only)?
+                    .try_finish()
+                    .map_err(|_| sentinel_assertion("stable read-only body child did not stop"))?;
+                require_body_diagnostics(
+                    &stable_read_only_output.stderr,
+                    b"SECRET_UNPARSED_BODY_VALUE",
+                    false,
+                )?;
+
+                let preview_read_only = spawn_disposable_driver(
+                    ctx.as_ref(),
+                    preview_read_only_callback_cleanup,
+                    DriverOptions::PREVIEW_READ_ONLY,
+                    Some("body-blocks"),
+                )?;
+                lock_driver(&preview_read_only)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("preview read-only body child missing"))?
+                    .initialize();
+                let mut preview_read_only_driver = OwnedStdioDriver {
+                    driver: Arc::clone(&preview_read_only),
+                };
+                let preview_read_only_evidence =
+                    run_body_read_only_scenario(&mut preview_read_only_driver)
+                        .await
+                        .map_err(|_| {
+                            sentinel_assertion("preview read-only body scenario failed")
+                        })?;
+                let (_, preview_read_only_output) =
+                    take_registered_body_driver(&preview_read_only)?
+                        .try_finish()
+                        .map_err(|_| {
+                            sentinel_assertion("preview read-only body child did not stop")
+                        })?;
+                require_body_diagnostics(
+                    &preview_read_only_output.stderr,
+                    b"SECRET_UNPARSED_BODY_VALUE",
+                    false,
+                )?;
+
+                inspect_reviewed_body_server_log(&[
+                    BODY_DIAGNOSTIC_SECRET.as_bytes(),
+                    b"SECRET_UNPARSED_BODY_VALUE",
+                ])?;
 
                 if stable_evidence != preview_evidence {
                     return Err(sentinel_assertion(
                         "stable and preview normalized body result shapes diverged",
+                    ));
+                }
+                #[cfg(feature = "acceptance-harness")]
+                if direct_evidence != stable_evidence {
+                    return Err(sentinel_assertion(
+                        "direct and stdio normalized body result shapes diverged",
+                    ));
+                }
+                if stable_read_only_evidence != preview_read_only_evidence {
+                    return Err(sentinel_assertion(
+                        "stable and preview read-only body evidence diverged",
                     ));
                 }
                 Ok(ctx.space_id.clone())
@@ -3601,6 +3858,18 @@ async fn headless_body_blocks_shared_stable_and_preview_scenarios() {
         );
         assert_eq!(
             *preview_cleanup.lock().expect("preview cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+        assert_eq!(
+            *stable_read_only_cleanup
+                .lock()
+                .expect("stable read-only cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+        assert_eq!(
+            *preview_read_only_cleanup
+                .lock()
+                .expect("preview read-only cleanup record"),
             ChildCleanupRecord::Stopped
         );
         assert_fresh_space_absence(&space_id).await;

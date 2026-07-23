@@ -601,6 +601,10 @@ async fn append_with_one_budget(client: &AnytypeClient) -> Result<(), AnytypeErr
 The write counter advances immediately before the one write future is first
 polled. A zero counter therefore proves that validation, authentication,
 acquisition, deadline, or cancellation stopped the operation before dispatch.
+Higher-level workflows whose steps need independent absolute deadlines can
+attach clones of one `BodyRpcMetrics` observer with
+`BodyRpcConfig::with_metrics`; its snapshot accounts for every configured step
+without retaining payloads or identifiers.
 After it advances, transport failure, timeout, malformed or oversized response,
 cleanup failure, and exhausted verification are
 `BodyMutationIndeterminate`; callers must reread before considering a retry.

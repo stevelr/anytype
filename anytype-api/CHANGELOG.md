@@ -15,7 +15,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   close response above 64 KiB before body allocation/decode. Closed lifecycle
   errors, exact payload-free counters, and the pre-poll write counter expose
   cleanup and dispatch certainty without retaining identifiers or upstream
-  response text. Body reads and writes now enforce 1..64-byte control-free
+  response text. Independently-deadlined workflow steps can share one metrics
+  observer for exact aggregate lifecycle accounting. Body reads and writes now
+  enforce 1..64-byte control-free
   emoji values and both UTF-16 mark endpoints as ordered in-bounds Unicode
   scalar boundaries.
 - Add typed attached-discussion discovery and idempotent ensure operations for

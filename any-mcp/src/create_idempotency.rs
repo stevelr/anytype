@@ -113,6 +113,7 @@ enum StoredAttempt {
     Complete {
         fingerprint: [u8; 32],
         result: CallToolResult,
+        replay_witness: Option<ReplayWitness>,
     },
     Indeterminate {
         fingerprint: [u8; 32],
@@ -129,7 +130,13 @@ pub(crate) struct Attempt {
     progress: MutationProgress,
     deadline: Option<Instant>,
     pending_candidate: Mutex<Option<PendingCandidate>>,
+    replay_witness: Mutex<Option<ReplayWitness>>,
     leader_cancellation: CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayWitness {
+    RichRootAppendIndex(u64),
 }
 
 impl Attempt {
@@ -149,6 +156,10 @@ impl Attempt {
         let candidate = PendingCandidate::new(space_id, object_id);
         *self.pending_candidate.lock().await = Some(candidate.clone());
         candidate
+    }
+
+    pub(crate) async fn record_replay_witness(&self, witness: ReplayWitness) {
+        *self.replay_witness.lock().await = Some(witness);
     }
 
     pub(crate) fn leader_cancellation(&self) -> CancellationToken {
@@ -259,6 +270,7 @@ impl IdempotencyStore {
                 StoredAttempt::Complete {
                     fingerprint: saved,
                     result,
+                    ..
                 } if saved == &fingerprint => BeginAttempt::Cached(result.clone()),
                 StoredAttempt::Indeterminate { fingerprint: saved } if saved == &fingerprint => {
                     BeginAttempt::Indeterminate
@@ -282,6 +294,7 @@ impl IdempotencyStore {
             progress: MutationProgress::new(),
             deadline,
             pending_candidate: Mutex::new(None),
+            replay_witness: Mutex::new(None),
             leader_cancellation: CancellationToken::new(),
         });
         entries.insert(
@@ -306,6 +319,7 @@ impl IdempotencyStore {
         execution: CreateExecution,
     ) {
         let pending_candidate = attempt.pending_candidate.lock().await.clone();
+        let replay_witness = *attempt.replay_witness.lock().await;
         let mut entries = self.entries.lock().await;
         if let Some(StoredAttempt::Running {
             fingerprint,
@@ -321,6 +335,7 @@ impl IdempotencyStore {
                         StoredAttempt::Complete {
                             fingerprint,
                             result: execution.result.clone(),
+                            replay_witness,
                         },
                     );
                 }
@@ -330,6 +345,7 @@ impl IdempotencyStore {
                         StoredAttempt::Complete {
                             fingerprint,
                             result: execution.result.clone(),
+                            replay_witness,
                         },
                     );
                 }
@@ -379,6 +395,7 @@ impl IdempotencyStore {
                 StoredAttempt::Complete {
                     fingerprint,
                     result,
+                    replay_witness: None,
                 },
             );
         }
@@ -405,6 +422,22 @@ impl IdempotencyStore {
                 PendingCandidateLookup::Exhausted
             }
             _ => PendingCandidateLookup::Absent,
+        }
+    }
+
+    pub(crate) async fn replay_witness(
+        &self,
+        key: &IdempotencyKey,
+        fingerprint: [u8; 32],
+    ) -> Option<ReplayWitness> {
+        let entries = self.entries.lock().await;
+        match entries.get(key) {
+            Some(StoredAttempt::Complete {
+                fingerprint: saved,
+                replay_witness,
+                ..
+            }) if saved == &fingerprint => *replay_witness,
+            _ => None,
         }
     }
 }
@@ -632,5 +665,38 @@ mod tests {
             panic!("proven candidate is cached");
         };
         assert_eq!(cached.structured_content, receipt.structured_content);
+    }
+
+    #[tokio::test]
+    async fn terminal_attempt_preserves_internal_replay_witness() {
+        let store = IdempotencyStore::new(1);
+        let key = key();
+        let fingerprint = [5; 32];
+        let BeginAttempt::Lead(attempt) = store.begin(key.clone(), fingerprint).await else {
+            panic!("first call leads");
+        };
+        attempt
+            .record_replay_witness(ReplayWitness::RichRootAppendIndex(7))
+            .await;
+        store
+            .finish(
+                &key,
+                &attempt,
+                CreateExecution::new(
+                    CallToolResult::structured(serde_json::json!({"status":"partial"})),
+                    CreateDisposition::Terminal,
+                ),
+            )
+            .await;
+
+        assert!(matches!(
+            store.begin(key.clone(), fingerprint).await,
+            BeginAttempt::Cached(_)
+        ));
+        assert_eq!(
+            store.replay_witness(&key, fingerprint).await,
+            Some(ReplayWitness::RichRootAppendIndex(7))
+        );
+        assert_eq!(store.replay_witness(&key, [6; 32]).await, None);
     }
 }

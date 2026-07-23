@@ -2298,7 +2298,7 @@ fn headless_direct_body_blocks_runs_shared_scenario() {
                         .map_err(|_| TestError::Assertion {
                             message: "direct shared body scenario failed".to_owned(),
                         })?;
-                    if evidence.normalized_results.is_empty() || evidence.listed_block_count != 15 {
+                    if evidence.normalized_results.is_empty() || evidence.listed_block_count != 20 {
                         return Err(TestError::Assertion {
                             message: "direct shared body evidence was incomplete".to_owned(),
                         });
