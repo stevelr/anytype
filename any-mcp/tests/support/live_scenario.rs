@@ -470,6 +470,60 @@ fn body_metric_call_marker(label: &'static str, event: &'static str) {
     }
 }
 
+fn body_driver_error_category(error: &str) -> &'static str {
+    if error.contains("mutation_indeterminate") {
+        "mutation_indeterminate"
+    } else if error.contains("authentication") {
+        "authentication"
+    } else if error.contains("validation") {
+        "validation"
+    } else if error.contains("not_found") {
+        "not_found"
+    } else if error.contains("conflict") {
+        "conflict"
+    } else if error.contains("bounded_result") {
+        "bounded_result"
+    } else if error.contains("upstream") {
+        "upstream"
+    } else if error.contains("read_only") {
+        "read_only"
+    } else {
+        "unknown"
+    }
+}
+
+fn body_metric_error_diagnostic(label: &'static str, category: &'static str) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "body_semantic_phase=metric_call label={label} \
+             event=driver_error_category category={category}"
+        );
+    }
+}
+
+#[test]
+fn body_driver_error_classifier_is_closed_and_payload_free() {
+    for category in [
+        "authentication",
+        "validation",
+        "not_found",
+        "conflict",
+        "bounded_result",
+        "upstream",
+        "mutation_indeterminate",
+        "read_only",
+    ] {
+        assert_eq!(
+            body_driver_error_category(&format!("adapter error {category}")),
+            category
+        );
+    }
+    assert_eq!(
+        body_driver_error_category("SECRET_UNPARSED_BODY_VALUE"),
+        "unknown"
+    );
+}
+
 fn body_metric_availability_diagnostic(
     label: &'static str,
     before_available: bool,
@@ -518,9 +572,13 @@ async fn call_body_tool_with_metrics(
 ) -> Result<Value, String> {
     body_metric_call_marker(label, "call_start");
     let before = driver.body_acceptance_metrics();
-    let result = driver.call_tool(name, arguments).await.inspect_err(|_| {
-        body_metric_call_marker(label, "driver_error");
-    })?;
+    let result = driver
+        .call_tool(name, arguments)
+        .await
+        .inspect_err(|error| {
+            body_metric_call_marker(label, "driver_error");
+            body_metric_error_diagnostic(label, body_driver_error_category(error));
+        })?;
     body_metric_call_marker(label, "call_returned");
     let after = driver.body_acceptance_metrics();
     body_metric_availability_diagnostic(label, before.is_some(), after.is_some());
@@ -1257,6 +1315,7 @@ async fn run_body_scenario_inner(
     let root_id = body_string(&first, "/root_id", "root ID")?.to_owned();
     body_string(&first, "/snapshot_hash", "snapshot hash")?;
     let cursor = body_string(&first, "/next_cursor", "continuation cursor")?.to_owned();
+    body_scenario_marker("pagination_root_hash_cursor_extracted");
     let mut listed_block_ids = first["items"]
         .as_array()
         .ok_or_else(|| "body first page omitted items".to_owned())?
@@ -1403,6 +1462,7 @@ async fn run_body_scenario_inner(
     body_scenario_marker("primitive_fresh_list_received");
     normalized_results.push(normalize_body_result(&fresh));
     let mut snapshot_hash = body_string(&fresh, "/snapshot_hash", "fresh hash")?.to_owned();
+    body_scenario_marker("primitive_fresh_hash_extracted");
     let create_input = json!({
         "space":ctx.space_id,"object_id":page.id,
         "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
