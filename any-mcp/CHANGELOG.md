@@ -40,7 +40,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   generated identities, snapshot/cursor tokens, and the `encoded_len`-derived
   byte estimate of explicitly unsupported blocks; opaque kind and child count,
   all typed content, presentation, restrictions, ordering, status, errors, and
-  idempotency remain exact. Ignored body acceptance also fails closed unless
+  idempotency remain exact. The independently created pagination pages now use
+  one transport-neutral title so their server-generated title blocks remain
+  semantically comparable without normalizing text. Ignored body acceptance
+  also fails closed unless
   a reviewed absolute redacted server-log path is configured, and its
   fixture-heavy shared workflow is heap-owned for default-stack execution.
   The production router returns optional-registry futures before constructing
