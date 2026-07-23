@@ -1002,6 +1002,106 @@ impl BodySnapshot {
     }
 }
 
+/// Narrow typed body fixtures for downstream contract tests.
+///
+/// The module is absent from ordinary builds so production callers cannot
+/// forge a [`BodySnapshot`] and pass it off as server evidence.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod test_fixtures {
+    use super::*;
+    use model::block::{ContentValue, content};
+
+    /// Builds one valid depth-first text tree with exactly `block_count`
+    /// blocks. `restricted_index` addresses the resulting depth-first block
+    /// order and marks only that block read-restricted.
+    ///
+    /// This fixture intentionally supports only the two production-cap
+    /// boundary sizes and small restriction tests.
+    #[must_use]
+    pub fn bounded_text_snapshot(
+        block_count: usize,
+        restricted_index: Option<usize>,
+    ) -> Option<BodySnapshot> {
+        if block_count == 0 || block_count > 2_049 {
+            return None;
+        }
+        let container_count = block_count.saturating_sub(1).div_ceil(513);
+        let leaf_count = block_count.saturating_sub(1 + container_count);
+        let mut container_sizes = vec![0usize; container_count];
+        for index in 0..leaf_count {
+            if let Some(size) = container_sizes.get_mut(index % container_count.max(1)) {
+                *size = size.saturating_add(1);
+            }
+        }
+        let container_ids = (0..container_count)
+            .map(|index| format!("fixture-layout-{index}"))
+            .collect::<Vec<_>>();
+        let block = |id: String, children_ids: Vec<String>, content_value| model::Block {
+            id,
+            fields: None,
+            restrictions: None,
+            children_ids,
+            background_color: String::new(),
+            align: 0,
+            vertical_align: 0,
+            content_value,
+        };
+        let mut blocks = Vec::with_capacity(block_count);
+        blocks.push(block(
+            "fixture-root".to_owned(),
+            container_ids.clone(),
+            Some(ContentValue::Smartblock(content::Smartblock {})),
+        ));
+        let mut leaf_index = 0usize;
+        for (container_index, (container_id, size)) in
+            container_ids.into_iter().zip(container_sizes).enumerate()
+        {
+            let child_ids = (0..size)
+                .map(|offset| format!("fixture-text-{}", leaf_index.saturating_add(offset)))
+                .collect::<Vec<_>>();
+            blocks.push(block(
+                container_id,
+                child_ids.clone(),
+                Some(ContentValue::Smartblock(content::Smartblock {})),
+            ));
+            for (offset, id) in child_ids.into_iter().enumerate() {
+                blocks.push(block(
+                    id,
+                    Vec::new(),
+                    Some(ContentValue::Text(content::Text {
+                        text: format!("fixture {container_index} {offset}"),
+                        style: 0,
+                        marks: None,
+                        checked: false,
+                        color: String::new(),
+                        icon_emoji: String::new(),
+                        icon_image: String::new(),
+                    })),
+                ));
+            }
+            leaf_index = leaf_index.saturating_add(size);
+        }
+        let view = model::ObjectView {
+            root_id: "fixture-root".to_owned(),
+            blocks,
+            ..Default::default()
+        };
+        let limits = BodyLimits {
+            max_blocks: block_count,
+            max_children: 512,
+            ..BodyLimits::default()
+        }
+        .clamped();
+        let mut snapshot =
+            snapshot_from_view("fixture-space", "fixture-object", &view, &limits).ok()?;
+        if let Some(block) = restricted_index.and_then(|index| snapshot.blocks.get_mut(index)) {
+            block.restrictions.read = true;
+        }
+        Some(snapshot)
+    }
+}
+
 // ============================================================================
 // Graph validation errors
 // ============================================================================

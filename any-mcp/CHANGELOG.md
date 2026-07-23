@@ -26,7 +26,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   gates count canonical request and dual-encoded result tokens, enforce
   complete-frame bytes, reject maximum dense legal values above their
   operation ceilings, and admit exact greatest-under boundary fixtures while
-  keeping accepted paired exchanges below the 200K context floor.
+  keeping accepted paired exchanges below the 200K context floor. A production
+  rich-prefix scheduler now owns verified receipts and permanently terminates
+  every partial or indeterminate boundary; pending-candidate recovery reduces
+  each bounded observation into one cached replay receipt without resuming the
+  plan. Exact 2,048/2,049-block, UTF-16 endpoint, lifecycle-counter, raw
+  stable/preview frame, descriptor, and atomic read-restriction regressions
+  close the acceptance matrix. Ignored body acceptance also fails closed unless
+  a reviewed absolute redacted server-log path is configured.
 - Document the feasibility and security limits of a future object-tag
   exclusion policy. REST object, search, and saved-view pages already include
   assigned select and multi-select tags, while canonical collection

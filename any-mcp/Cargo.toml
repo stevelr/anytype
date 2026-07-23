@@ -55,6 +55,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+anytype = { workspace = true, features = ["test-fixtures"] }
 futures-util = "0.3.33"
 jsonschema = { version = "0.48.2", default-features = false }
 reqwest.workspace = true

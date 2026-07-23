@@ -612,6 +612,12 @@ Inline emoji marks and callout emoji are 1..64 UTF-8 bytes and control-free.
 Mark start and end values are independently validated as ordered, in-bounds
 UTF-16 offsets at Unicode scalar boundaries.
 
+Downstream contract suites may opt into the disabled-by-default
+`test-fixtures` Cargo feature. It exposes only a narrow production-validated
+typed snapshot constructor for exact block-count and read-restriction boundary
+tests; it does not add deserialization or a general snapshot-forging API and
+must not be enabled by production dependents.
+
 Mutations start from a snapshot and accept only typed constructors and targets
 that belong to that snapshot. Every write is sent once, then a bounded fresh
 `ObjectShow` read must prove the exact ID, rich state, and sibling/parent

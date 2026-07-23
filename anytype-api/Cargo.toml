@@ -18,6 +18,9 @@ description = "An ergonomic Anytype API client in rust"
 
 [features]
 default = []
+# Narrow fixture constructors for downstream contract tests. This feature is
+# never enabled by production dependents.
+test-fixtures = []
 
 [lib]
 path = "src/lib.rs"

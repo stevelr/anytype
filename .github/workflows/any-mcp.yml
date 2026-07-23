@@ -94,10 +94,14 @@ jobs:
         shell: bash
         env:
           ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
+          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           test -n "$ANY_MCP_HEADLESS_ENV_FILE"
           test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           set -a
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a
@@ -157,10 +161,14 @@ jobs:
         shell: bash
         env:
           ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
+          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           test -n "$ANY_MCP_HEADLESS_ENV_FILE"
           test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           set -a
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a

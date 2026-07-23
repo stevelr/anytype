@@ -124,6 +124,15 @@ const PREVIEW_COMPACT_TOOLS: &[&str] = &[
     "server_status",
 ];
 
+const BODY_TOOL_NAMES: &[&str] = &[
+    "body_block_create",
+    "body_block_delete",
+    "body_block_list",
+    "body_block_move",
+    "body_block_update",
+    "rich_page_create",
+];
+
 fn validate_preview_compact_catalog(tools: &[String]) -> Result<(), String> {
     let actual = tools.iter().map(String::as_str).collect::<Vec<_>>();
     (actual == PREVIEW_COMPACT_TOOLS)
@@ -499,6 +508,41 @@ impl StdioDriver {
                     .ok_or_else(|| "tools/list entry omitted name".to_owned())
             })
             .collect()
+    }
+
+    #[cfg(feature = "acceptance-harness")]
+    fn body_tool_descriptors_sync(&mut self) -> Result<Vec<Value>, String> {
+        let response = self.request("tools/list", json!({}));
+        Ok(response["result"]["tools"]
+            .as_array()
+            .ok_or_else(|| "tools/list omitted descriptors".to_owned())?
+            .iter()
+            .filter(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| BODY_TOOL_NAMES.contains(&name))
+            })
+            .cloned()
+            .collect::<Vec<_>>())
+    }
+
+    #[cfg(feature = "acceptance-harness")]
+    fn raw_body_parity_frames(&mut self, space_id: &str, object_id: &str) -> [Value; 2] {
+        let success = self.request(
+            "tools/call",
+            json!({
+                "name":"body_block_list",
+                "arguments":{"space":space_id,"object_id":object_id,"limit":8}
+            }),
+        );
+        let error = self.request(
+            "tools/call",
+            json!({
+                "name":"body_block_list",
+                "arguments":{"space":null,"object_id":object_id,"limit":8}
+            }),
+        );
+        [success, error]
     }
 
     fn list_resources_sync(&mut self) -> Result<Value, String> {
@@ -919,9 +963,20 @@ fn require_body_diagnostics(
 }
 
 fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
-    let Some(path) = std::env::var_os("ANY_MCP_HEADLESS_REDACTED_LOG_FILE") else {
-        eprintln!("reviewed headless server-log evidence unavailable");
-        return Ok(());
+    inspect_reviewed_body_server_log_at(
+        std::env::var_os("ANY_MCP_HEADLESS_REDACTED_LOG_FILE"),
+        secrets,
+    )
+}
+
+fn inspect_reviewed_body_server_log_at(
+    path: Option<OsString>,
+    secrets: &[&[u8]],
+) -> TestResult<()> {
+    let Some(path) = path else {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log evidence was not configured",
+        ));
     };
     let path = PathBuf::from(path);
     if !path.is_absolute() {
@@ -3706,15 +3761,27 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
         "any-mcp-body-shared-stdio",
         move |ctx| {
             Box::pin(async move {
-                let direct_evidence = {
+                let parity_page = ctx
+                    .client
+                    .new_object(&ctx.space_id, "page")
+                    .name("Body protocol parity fixture")
+                    .body("Protocol parity body")
+                    .create()
+                    .await?;
+                ctx.register_object(&parity_page.id);
+                let (direct_evidence, direct_descriptors) = {
                     let direct =
                         BodyAcceptanceDirect::new(ctx.client.clone(), false).map_err(|_| {
                             sentinel_assertion("direct body driver construction failed")
                         })?;
+                    let descriptors = direct.tool_descriptors().map_err(|_| {
+                        sentinel_assertion("direct body descriptors were not serializable")
+                    })?;
                     let mut direct_driver = DirectBodyDriver { driver: direct };
-                    run_body_scenario(&mut direct_driver, &ctx, "direct")
+                    let evidence = run_body_scenario(&mut direct_driver, &ctx, "direct")
                         .await
-                        .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?
+                        .map_err(|_| sentinel_assertion("direct shared body scenario failed"))?;
+                    (evidence, descriptors)
                 };
 
                 let stable = spawn_disposable_driver(
@@ -3723,10 +3790,19 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
                     DriverOptions::STANDARD,
                     Some("body-blocks"),
                 )?;
-                lock_driver(&stable)
-                    .as_mut()
-                    .ok_or_else(|| sentinel_assertion("stable body child missing"))?
-                    .initialize();
+                let (stable_descriptors, stable_frames) = {
+                    let mut stable_guard = lock_driver(&stable);
+                    let stable_process = stable_guard
+                        .as_mut()
+                        .ok_or_else(|| sentinel_assertion("stable body child missing"))?;
+                    stable_process.initialize();
+                    let descriptors = stable_process
+                        .body_tool_descriptors_sync()
+                        .map_err(|_| sentinel_assertion("stable body descriptors failed"))?;
+                    let frames =
+                        stable_process.raw_body_parity_frames(&ctx.space_id, &parity_page.id);
+                    (descriptors, frames)
+                };
                 let mut stable_driver = OwnedStdioDriver {
                     driver: Arc::clone(&stable),
                 };
@@ -3748,10 +3824,19 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
                     DriverOptions::PREVIEW_STANDARD,
                     Some("body-blocks"),
                 )?;
-                lock_driver(&preview)
-                    .as_mut()
-                    .ok_or_else(|| sentinel_assertion("preview body child missing"))?
-                    .initialize();
+                let (preview_descriptors, preview_frames) = {
+                    let mut preview_guard = lock_driver(&preview);
+                    let preview_process = preview_guard
+                        .as_mut()
+                        .ok_or_else(|| sentinel_assertion("preview body child missing"))?;
+                    preview_process.initialize();
+                    let descriptors = preview_process
+                        .body_tool_descriptors_sync()
+                        .map_err(|_| sentinel_assertion("preview body descriptors failed"))?;
+                    let frames =
+                        preview_process.raw_body_parity_frames(&ctx.space_id, &parity_page.id);
+                    (descriptors, frames)
+                };
                 let mut preview_driver = OwnedStdioDriver {
                     driver: Arc::clone(&preview),
                 };
@@ -3829,6 +3914,28 @@ async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
                     b"SECRET_UNPARSED_BODY_VALUE",
                 ])?;
 
+                if stable_descriptors != preview_descriptors
+                    || direct_descriptors != stable_descriptors
+                {
+                    return Err(sentinel_assertion(
+                        "direct/stable/preview body descriptors, schemas, or annotations diverged",
+                    ));
+                }
+                if stable_frames != preview_frames
+                    || stable_frames[0]
+                        .pointer("/result/structuredContent/items")
+                        .and_then(Value::as_array)
+                        .is_none()
+                    || stable_frames[1]
+                        .pointer("/result/structuredContent/code")
+                        .and_then(Value::as_str)
+                        != Some("validation")
+                {
+                    return Err(sentinel_assertion(
+                        "stable/preview raw body success or error JSON-RPC frames diverged",
+                    ));
+                }
+
                 if stable_evidence != preview_evidence {
                     return Err(sentinel_assertion(
                         "stable and preview normalized body result shapes diverged",
@@ -3885,6 +3992,11 @@ async fn headless_stdio_preview_sentinel() {
 mod keystore_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn body_server_log_inspection_fails_closed_when_path_is_missing() {
+        assert!(inspect_reviewed_body_server_log_at(None, &[]).is_err());
+    }
 
     fn temporary_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("any-mcp-{name}-{}", unique_suffix()))

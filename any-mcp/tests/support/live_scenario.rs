@@ -97,7 +97,7 @@ fn expected_rich_metrics(page_create_polls: usize, blocks: usize) -> BodyDriverM
     }
 }
 
-fn expected_update_metrics() -> BodyDriverMetrics {
+fn expected_primitive_metrics() -> BodyDriverMetrics {
     BodyDriverMetrics {
         show_attempts: 2,
         foreground_close_attempts: 2,
@@ -105,6 +105,33 @@ fn expected_update_metrics() -> BodyDriverMetrics {
         write_polls: 1,
         ..BodyDriverMetrics::default()
     }
+}
+
+fn expected_create_replay_metrics() -> BodyDriverMetrics {
+    BodyDriverMetrics {
+        show_attempts: 1,
+        foreground_close_attempts: 1,
+        foreground_close_confirmed: 1,
+        ..BodyDriverMetrics::default()
+    }
+}
+
+async fn call_body_tool_with_metrics(
+    driver: &mut impl McpDriver,
+    name: &'static str,
+    arguments: Value,
+    expected: BodyDriverMetrics,
+    label: &str,
+) -> Result<Value, String> {
+    let before = driver.body_acceptance_metrics();
+    let result = driver.call_tool(name, arguments).await?;
+    if let (Some(before), Some(after)) = (before, driver.body_acceptance_metrics()) {
+        let observed = body_metrics_delta(before, after)?;
+        if observed != expected {
+            return Err(format!("{label} production metrics diverged: {observed:?}"));
+        }
+    }
+    Ok(result)
 }
 
 #[derive(Clone, Copy)]
@@ -313,7 +340,7 @@ async fn run_body_update_arm(
         .await?;
     if let (Some(before), Some(after)) = (before_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
-        if observed != expected_update_metrics() {
+        if observed != expected_primitive_metrics() {
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
     }
@@ -786,12 +813,24 @@ pub async fn run_body_scenario(
         "block":{"kind":"text","style":"paragraph","text":"created block","marks":[]},
         "idempotency_key":format!("body-{transport}-{suffix}")
     });
-    let created = driver
-        .call_tool("body_block_create", create_input.clone())
-        .await?;
+    let created = call_body_tool_with_metrics(
+        driver,
+        "body_block_create",
+        create_input.clone(),
+        expected_primitive_metrics(),
+        "primitive create",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&created));
     let created_block_id = body_string(&created, "/block/id", "created block ID")?.to_owned();
-    let replay = driver.call_tool("body_block_create", create_input).await?;
+    let replay = call_body_tool_with_metrics(
+        driver,
+        "body_block_create",
+        create_input,
+        expected_create_replay_metrics(),
+        "primitive create replay",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&replay));
     if replay["block"]["id"] != created["block"]["id"]
         || replay["idempotency"]["key_reused"] != true
@@ -800,18 +839,20 @@ pub async fn run_body_scenario(
     }
     snapshot_hash = body_string(&replay, "/snapshot_hash", "replay hash")?.to_owned();
 
-    let child = driver
-        .call_tool(
-            "body_block_create",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"target_block_id":heading_id,
-                "position":"last_child",
-                "block":{"kind":"text","style":"paragraph","text":"targeted child","marks":[]},
-                "idempotency_key":format!("body-child-{transport}-{suffix}")
-            }),
-        )
-        .await?;
+    let child = call_body_tool_with_metrics(
+        driver,
+        "body_block_create",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"target_block_id":heading_id,
+            "position":"last_child",
+            "block":{"kind":"text","style":"paragraph","text":"targeted child","marks":[]},
+            "idempotency_key":format!("body-child-{transport}-{suffix}")
+        }),
+        expected_primitive_metrics(),
+        "heading append",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&child));
     let child_id = body_string(&child, "/block/id", "child ID")?.to_owned();
     snapshot_hash = body_string(&child, "/snapshot_hash", "child hash")?.to_owned();
@@ -834,42 +875,48 @@ pub async fn run_body_scenario(
     if !appended_under_heading {
         return Err("targeted append did not land beneath the existing heading".to_owned());
     }
-    let moved = driver
-        .call_tool(
-            "body_block_move",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
-                "target_block_id":created_block_id,"position":"after"
-            }),
-        )
-        .await?;
+    let moved = call_body_tool_with_metrics(
+        driver,
+        "body_block_move",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
+            "target_block_id":created_block_id,"position":"after"
+        }),
+        expected_primitive_metrics(),
+        "primitive move",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&moved));
     snapshot_hash = body_string(&moved, "/snapshot_hash", "move hash")?.to_owned();
-    let deleted = driver
-        .call_tool(
-            "body_block_delete",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
-                "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
-            }),
-        )
-        .await?;
+    let deleted = call_body_tool_with_metrics(
+        driver,
+        "body_block_delete",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"block_id":child_id,
+            "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
+        }),
+        expected_primitive_metrics(),
+        "primitive delete",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&deleted));
     snapshot_hash = body_string(&deleted, "/snapshot_hash", "delete hash")?.to_owned();
 
-    let relation = driver
-        .call_tool(
-            "body_block_create",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
-                "position":"last_child","block":{"kind":"relation","key":"tag"},
-                "idempotency_key":format!("body-relation-{transport}-{suffix}")
-            }),
-        )
-        .await?;
+    let relation = call_body_tool_with_metrics(
+        driver,
+        "body_block_create",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
+            "position":"last_child","block":{"kind":"relation","key":"tag"},
+            "idempotency_key":format!("body-relation-{transport}-{suffix}")
+        }),
+        expected_primitive_metrics(),
+        "relation create",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&relation));
     let relation_id = body_string(&relation, "/block/id", "relation block ID")?.to_owned();
     snapshot_hash = body_string(&relation, "/snapshot_hash", "relation hash")?.to_owned();
@@ -889,30 +936,34 @@ pub async fn run_body_scenario(
     }) {
         return Err("created relation block was not independently detected".to_owned());
     }
-    let relation_deleted = driver
-        .call_tool(
-            "body_block_delete",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"block_id":relation_id,
-                "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
-            }),
-        )
-        .await?;
+    let relation_deleted = call_body_tool_with_metrics(
+        driver,
+        "body_block_delete",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"block_id":relation_id,
+            "expected_subtree_blocks":1,"confirm_delete":"delete_subtree"
+        }),
+        expected_primitive_metrics(),
+        "relation delete",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&relation_deleted));
     snapshot_hash =
         body_string(&relation_deleted, "/snapshot_hash", "relation delete hash")?.to_owned();
-    let recreated_relation = driver
-        .call_tool(
-            "body_block_create",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
-                "position":"last_child","block":{"kind":"relation","key":"tag"},
-                "idempotency_key":format!("body-relation-recreate-{transport}-{suffix}")
-            }),
-        )
-        .await?;
+    let recreated_relation = call_body_tool_with_metrics(
+        driver,
+        "body_block_create",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
+            "position":"last_child","block":{"kind":"relation","key":"tag"},
+            "idempotency_key":format!("body-relation-recreate-{transport}-{suffix}")
+        }),
+        expected_primitive_metrics(),
+        "relation recreate",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&recreated_relation));
     let recreated_relation_id =
         body_string(&recreated_relation, "/block/id", "recreated relation ID")?.to_owned();
@@ -922,16 +973,18 @@ pub async fn run_body_scenario(
         "recreated relation hash",
     )?
     .to_owned();
-    let relation_moved = driver
-        .call_tool(
-            "body_block_move",
-            json!({
-                "space":ctx.space_id,"object_id":page.id,
-                "expected_snapshot_hash":snapshot_hash,"block_id":recreated_relation_id,
-                "target_block_id":heading_id,"position":"before"
-            }),
-        )
-        .await?;
+    let relation_moved = call_body_tool_with_metrics(
+        driver,
+        "body_block_move",
+        json!({
+            "space":ctx.space_id,"object_id":page.id,
+            "expected_snapshot_hash":snapshot_hash,"block_id":recreated_relation_id,
+            "target_block_id":heading_id,"position":"before"
+        }),
+        expected_primitive_metrics(),
+        "relation move",
+    )
+    .await?;
     normalized_results.push(normalize_body_result(&relation_moved));
     let moved_relation_snapshot = ctx
         .client
