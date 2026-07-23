@@ -10,8 +10,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Add an opt-in `test-fixtures` feature with a narrow, production-validated
   typed body snapshot constructor for downstream block-count and atomic
-  read-restriction contract tests. The feature is disabled by default, is not
-  enabled by production dependents, and does not make snapshots deserializable.
+  read-restriction contract tests, canonical/malformed table fixtures, and a
+  boolean-only check that verifies a test buffer omits configured HTTP/gRPC
+  credential bytes without returning them. The feature is disabled by default,
+  is not enabled by production dependents, and does not make snapshots
+  deserializable.
 - Add a public protobuf-free finite body RPC seam. `BodyRpcConfig` shares one
   absolute deadline across gRPC acquisition, `ObjectShow`, bounded foreground
   and cancellation fallback `ObjectClose`, one-shot writes, and verification.
@@ -112,6 +115,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   incomplete index evidence cannot manufacture an absence result.
 
 ### Fixed
+
+- Require verified table-create receipts to contain the complete canonical
+  subtree: exact ordered regions, columns, rows, and empty paragraph cells
+  with default presentation and no children. Missing, extra, foreign, nested,
+  or malformed cells no longer satisfy receipt verification.
 
 - Make disposable-space readiness convergence finite and observable with an
   exact 20-second/50-attempt budget. Readiness now resolves only the exact

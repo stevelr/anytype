@@ -113,9 +113,9 @@
       "success_structured_bytes": 7691
     },
     "rich_table_prompt_request": {
-      "bytes": 1014,
-      "sha256": "3aa9e9488c3572c1be176abc8ec5e2bdf190bb9fdfb393f9bafd9ef223170601",
-      "tokens": 265
+      "bytes": 626,
+      "sha256": "d7ed73b3b8387fc38f52b56f2788c28640a255ceab1ed3d770c5e1946c66b5c3",
+      "tokens": 165
     }
   },
   "per_tool_ceiling_tokens": 6500,

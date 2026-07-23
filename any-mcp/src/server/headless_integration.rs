@@ -42,8 +42,8 @@ mod live_scenario;
 
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
-    run_body_scenario, run_chats_registry_scenario, run_live_scenario_on_large_stack,
-    run_representative_layout_scenario, run_scenario,
+    ToolErrorEvidence, run_body_scenario, run_chats_registry_scenario,
+    run_live_scenario_on_large_stack, run_representative_layout_scenario, run_scenario,
 };
 
 fn arguments(value: Value) -> JsonObject {
@@ -253,18 +253,12 @@ impl McpDriver for DirectRouterDriver<'_> {
         &'a mut self,
         name: &'static str,
         arguments: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>> {
         Box::pin(async move {
             let result = call(self.server, name, arguments).await;
-            if result.is_error != Some(true) {
-                return Err(format!("{name} unexpectedly succeeded"));
-            }
-            result
-                .structured_content
-                .as_ref()
-                .and_then(|value| value["code"].as_str())
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| format!("{name} error omitted code"))
+            let value = serde_json::to_value(result)
+                .map_err(|_| format!("{name} error result was not serializable"))?;
+            ToolErrorEvidence::from_result(&value, false)
         })
     }
 

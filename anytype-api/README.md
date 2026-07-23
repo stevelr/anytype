@@ -614,9 +614,12 @@ UTF-16 offsets at Unicode scalar boundaries.
 
 Downstream contract suites may opt into the disabled-by-default
 `test-fixtures` Cargo feature. It exposes only a narrow production-validated
-typed snapshot constructor for exact block-count and read-restriction boundary
-tests; it does not add deserialization or a general snapshot-forging API and
-must not be enabled by production dependents.
+typed snapshot constructors for exact block-count, read-restriction, and
+canonical-table boundary tests. The same feature provides a boolean-only
+keystore check that proves a test-owned byte buffer contains none of the
+configured HTTP or gRPC credential bytes without returning those credentials.
+It does not add deserialization or a general snapshot-forging API and must not
+be enabled by production dependents.
 
 Mutations start from a snapshot and accept only typed constructors and targets
 that belong to that snapshot. Every write is sent once, then a bounded fresh
@@ -651,8 +654,11 @@ and operation-restricted targets are rejected before dispatch.
 That fail-closed anchor policy also applies to a sibling target's parent and
 the existing first child used to encode a first-child insertion. Verified
 table creation proves the canonical ordered columns/rows layout regions,
-direct column and row membership, dimensions, and exact first-row header state;
-aggregate descendant counts are never accepted as table evidence.
+direct column and row membership, dimensions, exact first-row header state,
+and one ordered canonical empty paragraph leaf per cell. Missing, extra,
+misplaced, nonempty, nested, structurally typed, or non-default-presentation
+cells fail receipt verification; aggregate descendant counts are never
+accepted as table evidence.
 
 ## Cache-independent Space Reads
 

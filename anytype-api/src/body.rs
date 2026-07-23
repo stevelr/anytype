@@ -1012,6 +1012,160 @@ pub mod test_fixtures {
     use super::*;
     use model::block::{ContentValue, content};
 
+    /// Deliberate table-shape defect for downstream verifier tests.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum TableFixtureDefect {
+        /// Exact two-by-two canonical table.
+        None,
+        /// One row omits a cell.
+        MissingCell,
+        /// One row contains an extra cell.
+        ExtraCell,
+        /// One cell has a structural content type.
+        WrongCellType,
+        /// One cell contains text.
+        NonemptyCell,
+        /// One cell uses non-default presentation.
+        WrongCellPresentation,
+        /// One cell has a child.
+        CellWithChild,
+        /// Table regions appear in the wrong order.
+        ReversedRegions,
+    }
+
+    /// Builds a valid body graph containing one two-by-two table, optionally
+    /// with one deliberate semantic shape defect.
+    #[must_use]
+    pub fn table_snapshot(defect: TableFixtureDefect) -> Option<BodySnapshot> {
+        let block = |id: &str, children: &[&str], content_value| model::Block {
+            id: id.to_owned(),
+            fields: None,
+            restrictions: None,
+            children_ids: children.iter().map(|child| (*child).to_owned()).collect(),
+            background_color: String::new(),
+            align: 0,
+            vertical_align: 0,
+            content_value: Some(content_value),
+        };
+        let text = |id: &str, value: &str| {
+            block(
+                id,
+                &[],
+                ContentValue::Text(content::Text {
+                    text: value.to_owned(),
+                    ..Default::default()
+                }),
+            )
+        };
+        let table_children = if defect == TableFixtureDefect::ReversedRegions {
+            ["rows", "columns"]
+        } else {
+            ["columns", "rows"]
+        };
+        let row_two_cells: &[&str] = if defect == TableFixtureDefect::MissingCell {
+            &["r2c1"]
+        } else if defect == TableFixtureDefect::ExtraCell {
+            &["r2c1", "r2c2", "r2c3"]
+        } else {
+            &["r2c1", "r2c2"]
+        };
+        let cell_one_children: &[&str] = if defect == TableFixtureDefect::CellWithChild {
+            &["nested"]
+        } else {
+            &[]
+        };
+        let mut blocks = vec![
+            block(
+                "root",
+                &["table"],
+                ContentValue::Smartblock(content::Smartblock {}),
+            ),
+            block(
+                "table",
+                &table_children,
+                ContentValue::Table(content::Table {}),
+            ),
+            block(
+                "columns",
+                &["c1", "c2"],
+                ContentValue::Layout(content::Layout {
+                    style: content::layout::Style::TableColumns as i32,
+                }),
+            ),
+            block(
+                "c1",
+                &[],
+                ContentValue::TableColumn(content::TableColumn {}),
+            ),
+            block(
+                "c2",
+                &[],
+                ContentValue::TableColumn(content::TableColumn {}),
+            ),
+            block(
+                "rows",
+                &["r1", "r2"],
+                ContentValue::Layout(content::Layout {
+                    style: content::layout::Style::TableRows as i32,
+                }),
+            ),
+            block(
+                "r1",
+                &["r1c1", "r1c2"],
+                ContentValue::TableRow(content::TableRow { is_header: true }),
+            ),
+            block(
+                "r1c1",
+                cell_one_children,
+                if defect == TableFixtureDefect::WrongCellType {
+                    ContentValue::TableColumn(content::TableColumn {})
+                } else {
+                    ContentValue::Text(content::Text {
+                        text: if defect == TableFixtureDefect::NonemptyCell {
+                            "not empty".to_owned()
+                        } else {
+                            String::new()
+                        },
+                        ..Default::default()
+                    })
+                },
+            ),
+            text("r1c2", ""),
+            block(
+                "r2",
+                row_two_cells,
+                ContentValue::TableRow(content::TableRow { is_header: false }),
+            ),
+            text("r2c1", ""),
+        ];
+        if defect != TableFixtureDefect::MissingCell {
+            blocks.push(text("r2c2", ""));
+        }
+        if defect == TableFixtureDefect::ExtraCell {
+            blocks.push(text("r2c3", ""));
+        }
+        if defect == TableFixtureDefect::CellWithChild {
+            blocks.push(text("nested", ""));
+        }
+        if defect == TableFixtureDefect::WrongCellPresentation
+            && let Some(cell) = blocks.iter_mut().find(|block| block.id == "r1c1")
+        {
+            cell.align = model::block::Align::Center as i32;
+        }
+        let view = model::ObjectView {
+            root_id: "root".to_owned(),
+            blocks,
+            ..Default::default()
+        };
+        snapshot_from_view(
+            "fixture-space",
+            "fixture-object",
+            &view,
+            &BodyLimits::default(),
+        )
+        .ok()
+    }
+
     /// Builds one valid depth-first text tree with exactly `block_count`
     /// blocks. `restricted_index` addresses the resulting depth-first block
     /// order and marks only that block read-restricted.

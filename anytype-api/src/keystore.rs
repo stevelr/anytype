@@ -515,6 +515,35 @@ impl KeyStore {
         })
     }
 
+    /// Checks a test-owned byte buffer for every configured credential
+    /// without returning any credential bytes to the caller.
+    ///
+    /// This helper exists only for downstream acceptance fixtures. It returns
+    /// `false` when either HTTP or gRPC credentials are absent, or when any
+    /// configured credential occurs verbatim in `bytes`.
+    #[cfg(feature = "test-fixtures")]
+    #[doc(hidden)]
+    pub fn configured_credentials_absent_from(&self, bytes: &[u8]) -> Result<bool, KeyStoreError> {
+        let mut http = self.get_http_credentials()?;
+        let mut grpc = self.get_grpc_credentials()?;
+        let configured = http.has_creds() && grpc.has_creds();
+        let exposed = http
+            .token
+            .iter()
+            .chain(grpc.account_id.iter())
+            .chain(grpc.account_key.iter())
+            .chain(grpc.session_token.iter())
+            .filter(|credential| !credential.is_empty())
+            .any(|credential| {
+                bytes
+                    .windows(credential.len())
+                    .any(|window| window == credential.as_bytes())
+            });
+        http.zeroize();
+        grpc.zeroize();
+        Ok(configured && !exposed)
+    }
+
     /// Saves HTTP credentials (read-modify-write).
     /// Fails if credentials are empty (use clear_* to remove).
     pub fn update_http_credentials(&self, creds: &HttpCredentials) -> Result<(), KeyStoreError> {
@@ -615,6 +644,27 @@ mod tests {
         let (_, modifiers) =
             parse_keystore("file:path=first.db:path=second.db").expect("duplicate grammar");
         assert_eq!(modifiers.get("path"), Some(&"second.db"));
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    #[test]
+    fn credential_absence_check_never_returns_secret_bytes() -> Result<(), KeyStoreError> {
+        let temp_dir =
+            std::env::temp_dir().join(format!("anytype_credential_absence_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        let file_path = temp_dir.join("credentials.db");
+        let store = KeyStore::new(
+            "credential-absence-test",
+            &format!("file:path={}", file_path.display()),
+        )?;
+        store.update_http_credentials(&HttpCredentials::new("http-secret"))?;
+        store.update_grpc_credentials(&GrpcCredentials::from_account_key("grpc-secret"))?;
+        assert!(store.configured_credentials_absent_from(b"reviewed event")?);
+        assert!(!store.configured_credentials_absent_from(b"prefix http-secret suffix")?);
+        assert!(!store.configured_credentials_absent_from(b"prefix grpc-secret suffix")?);
+        store.clear_all_credentials()?;
+        let _ = fs::remove_dir_all(temp_dir);
+        Ok(())
     }
 
     // TODO: this test case checks too many things - should be split up

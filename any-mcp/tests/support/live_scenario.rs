@@ -15,9 +15,9 @@ use std::{
 
 use anytype::{
     body::{
-        BlockContent, BodyBlock, BodySnapshot, CalloutIcon, DividerStyle, EmbedProcessor,
-        HorizontalAlign, LayoutStyle, LinkCardStyle, LinkDescriptionMode, LinkIconSize, MarkKind,
-        TextStyle, VerticalAlign,
+        BlockContent, BlockRestrictions, BodyBlock, BodySnapshot, CalloutIcon, DividerStyle,
+        EmbedProcessor, HorizontalAlign, LayoutStyle, LinkCardStyle, LinkDescriptionMode,
+        LinkIconSize, MarkKind, TextStyle, VerticalAlign,
     },
     prelude::{BodyOp, Color, InsertPosition, NewBlock, ObjectLayout, PropertyFormat},
     test_util::{TestContext, unique_suffix},
@@ -241,7 +241,198 @@ fn body_scenario_futures_keep_only_a_heap_handle_inline() {
 #[derive(Debug, PartialEq, Eq)]
 pub struct BodyReadOnlyEvidence {
     pub body_tools: Vec<String>,
+    pub list_result: Value,
     pub mutation_error_categories: Vec<String>,
+}
+
+/// Fully validated, transport-neutral evidence for one domain tool error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolErrorEvidence {
+    result: Value,
+    code: String,
+}
+
+impl ToolErrorEvidence {
+    /// Validates the complete MCP tool-error result, including its canonical
+    /// text duplicate. Preview may add only `resultType: complete`.
+    pub fn from_result(result: &Value, preview: bool) -> Result<Self, String> {
+        let object = result
+            .as_object()
+            .ok_or_else(|| "tool error result was not an object".to_owned())?;
+        let expected_keys = if preview { 4 } else { 3 };
+        if object.len() != expected_keys
+            || object.get("isError") != Some(&Value::Bool(true))
+            || preview
+                != object
+                    .get("resultType")
+                    .is_some_and(|value| value == "complete")
+        {
+            return Err("tool error result envelope was not exact".to_owned());
+        }
+        let structured = object
+            .get("structuredContent")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "tool error omitted structured content".to_owned())?;
+        if !(2..=3).contains(&structured.len())
+            || !structured
+                .keys()
+                .all(|key| matches!(key.as_str(), "code" | "message" | "candidates"))
+        {
+            return Err("tool error structured content was not exact".to_owned());
+        }
+        let code = structured
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "tool error omitted code".to_owned())?
+            .to_owned();
+        structured
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "tool error omitted message".to_owned())?;
+        if let Some(candidates) = structured.get("candidates") {
+            let candidates = candidates
+                .as_array()
+                .filter(|values| !values.is_empty() && values.len() <= 8)
+                .ok_or_else(|| "tool error candidates were not bounded".to_owned())?;
+            if !candidates.iter().all(|candidate| {
+                candidate.as_object().is_some_and(|candidate| {
+                    candidate.len() == 2
+                        && candidate
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+                        && candidate
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+                })
+            }) {
+                return Err("tool error candidates were not exact".to_owned());
+            }
+        }
+        let content = object
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "tool error omitted content".to_owned())?;
+        let [item] = content.as_slice() else {
+            return Err("tool error content count was not exact".to_owned());
+        };
+        let item = item
+            .as_object()
+            .ok_or_else(|| "tool error content item was not an object".to_owned())?;
+        if item.len() != 2 || item.get("type") != Some(&json!("text")) {
+            return Err("tool error content item was not canonical text".to_owned());
+        }
+        let text = item
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "tool error text duplicate was absent".to_owned())?;
+        let structured_value = Value::Object(structured.clone());
+        let canonical = serde_json::to_string(&structured_value)
+            .map_err(|_| "tool error structured content was not serializable".to_owned())?;
+        if text != canonical
+            || serde_json::from_str::<Value>(text).ok().as_ref() != Some(&structured_value)
+        {
+            return Err("tool error text duplicate was not canonical".to_owned());
+        }
+        let mut normalized = object.clone();
+        normalized.remove("resultType");
+        Ok(Self {
+            result: Value::Object(normalized),
+            code,
+        })
+    }
+
+    /// Returns the stable domain error code after full result validation.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Returns the complete transport-neutral tool result.
+    #[must_use]
+    pub fn normalized_result(&self) -> &Value {
+        &self.result
+    }
+}
+
+#[test]
+fn tool_error_evidence_requires_complete_canonical_result() {
+    let structured = json!({"code":"conflict","message":"Conflict."});
+    let stable = json!({
+        "content":[{"type":"text","text":serde_json::to_string(&structured).expect("canonical")}],
+        "structuredContent":structured,
+        "isError":true
+    });
+    let mut preview = stable.clone();
+    preview["resultType"] = json!("complete");
+    assert_eq!(
+        ToolErrorEvidence::from_result(&stable, false)
+            .expect("stable error")
+            .code(),
+        "conflict"
+    );
+    assert_eq!(
+        ToolErrorEvidence::from_result(&preview, true)
+            .expect("preview error")
+            .normalized_result(),
+        &stable
+    );
+    let ambiguous_structured = json!({
+        "code":"ambiguous",
+        "message":"Choose one.",
+        "candidates":[{"id":"candidate-1","name":"Candidate"}]
+    });
+    let ambiguous = json!({
+        "content":[{
+            "type":"text",
+            "text":serde_json::to_string(&ambiguous_structured).expect("canonical")
+        }],
+        "structuredContent":ambiguous_structured,
+        "isError":true
+    });
+    assert_eq!(
+        ToolErrorEvidence::from_result(&ambiguous, false)
+            .expect("ambiguous error")
+            .code(),
+        "ambiguous"
+    );
+
+    let mutate = |pointer: &str, value: Value| {
+        let mut candidate = stable.clone();
+        *candidate.pointer_mut(pointer).expect("test pointer") = value;
+        candidate
+    };
+    let mut extra_structured = stable.clone();
+    extra_structured["structuredContent"]["extra"] = json!(true);
+    let mut extra_result = stable.clone();
+    extra_result["extra"] = json!(true);
+    let mut extra_content = stable.clone();
+    extra_content["content"]
+        .as_array_mut()
+        .expect("content array")
+        .push(json!({"type":"text","text":"duplicate"}));
+    for invalid in [
+        mutate("/isError", json!(false)),
+        mutate("/content/0/type", json!("image")),
+        mutate(
+            "/content/0/text",
+            json!("{\"message\":\"Conflict.\",\"code\":\"conflict\"}"),
+        ),
+        mutate("/structuredContent/code", json!("")),
+        mutate("/structuredContent/message", json!("")),
+        extra_structured,
+        extra_result,
+        extra_content,
+    ] {
+        assert!(ToolErrorEvidence::from_result(&invalid, false).is_err());
+    }
+    assert!(ToolErrorEvidence::from_result(&stable, true).is_err());
+    assert!(ToolErrorEvidence::from_result(&preview, false).is_err());
+    preview["resultType"] = json!("partial");
+    assert!(ToolErrorEvidence::from_result(&preview, true).is_err());
 }
 
 /// Heap-owned future for the read-only rich-body acceptance workflow.
@@ -676,12 +867,18 @@ async fn run_body_update_arm(
 #[allow(dead_code)]
 pub fn run_body_read_only_scenario<'a>(
     driver: &'a mut impl McpDriver,
+    space_id: &'a str,
+    object_id: &'a str,
 ) -> BodyReadOnlyScenarioFuture<'a> {
-    Box::pin(run_body_read_only_scenario_inner(driver))
+    Box::pin(run_body_read_only_scenario_inner(
+        driver, space_id, object_id,
+    ))
 }
 
 async fn run_body_read_only_scenario_inner(
     driver: &mut impl McpDriver,
+    space_id: &str,
+    object_id: &str,
 ) -> Result<BodyReadOnlyEvidence, String> {
     const BODY_TOOLS: [&str; 6] = [
         "body_block_create",
@@ -707,21 +904,41 @@ async fn run_body_read_only_scenario_inner(
     if body_tools != ["body_block_list"] {
         return Err("read-only body catalog was not the exact one-tool inventory".to_owned());
     }
+    let list_result = driver
+        .call_tool(
+            "body_block_list",
+            json!({"space":space_id,"object_id":object_id,"limit":8}),
+        )
+        .await?;
+    if list_result["space_id"] != space_id
+        || list_result["object_id"] != object_id
+        || list_result["items"]
+            .as_array()
+            .is_none_or(|items| items.is_empty())
+    {
+        return Err("read-only body list did not return the shared fixture".to_owned());
+    }
+    let list_result = normalize_body_result(&list_result);
     let mut mutation_error_categories = Vec::new();
     for name in MUTATIONS {
         let error = driver
             .call_tool_error(name, json!({"SECRET_UNPARSED_BODY_VALUE":true}))
             .await?;
-        if error.contains("SECRET_UNPARSED_BODY_VALUE") {
+        if error
+            .normalized_result()
+            .to_string()
+            .contains("SECRET_UNPARSED_BODY_VALUE")
+        {
             return Err("read-only mutation error exposed caller input".to_owned());
         }
-        if !error.contains("validation") {
+        if error.code() != "validation" {
             return Err("read-only mutation did not fail before argument decoding".to_owned());
         }
         mutation_error_categories.push("validation".to_owned());
     }
     Ok(BodyReadOnlyEvidence {
         body_tools,
+        list_result,
         mutation_error_categories,
     })
 }
@@ -948,14 +1165,36 @@ fn verify_table_shape(
     let Some(row_region) = snapshot.get(&table.children[1]) else {
         return false;
     };
+    let Some(expected_subtree_count) = rows
+        .checked_mul(columns)
+        .and_then(|cells| cells.checked_add(rows))
+        .and_then(|value| value.checked_add(columns))
+        .and_then(|value| value.checked_add(3))
+    else {
+        return false;
+    };
+    let mut subtree_count = 0usize;
+    let mut stack = vec![table];
+    while let Some(block) = stack.pop() {
+        subtree_count = subtree_count.saturating_add(1);
+        if subtree_count > expected_subtree_count {
+            return false;
+        }
+        for child in block.children.iter().rev() {
+            let Some(child) = snapshot.get(child) else {
+                return false;
+            };
+            stack.push(child);
+        }
+    }
     matches!(
         column_region.content,
         BlockContent::Layout(LayoutStyle::TableColumns)
     ) && column_region.children.len() == columns
         && column_region.children.iter().all(|id| {
-            snapshot
-                .get(id)
-                .is_some_and(|block| matches!(block.content, BlockContent::TableColumn))
+            snapshot.get(id).is_some_and(|block| {
+                matches!(block.content, BlockContent::TableColumn) && block.children.is_empty()
+            })
         })
         && matches!(
             row_region.content,
@@ -968,9 +1207,60 @@ fn verify_table_shape(
                     block.content,
                     BlockContent::TableRow { is_header }
                         if is_header == (header_row && index == 0)
-                )
+                ) && block.children.len() == columns
+                    && block.children.iter().all(|cell_id| {
+                        snapshot
+                            .get(cell_id)
+                            .is_some_and(canonical_empty_table_cell)
+                    })
             })
         })
+        && subtree_count == expected_subtree_count
+}
+
+fn canonical_empty_table_cell(block: &BodyBlock) -> bool {
+    matches!(
+        &block.content,
+        BlockContent::Text(text)
+            if text.text.is_empty()
+                && text.style == TextStyle::Paragraph
+                && !text.checked
+                && text.color.is_none()
+                && text.icon.is_none()
+                && text.marks.is_empty()
+    ) && block.children.is_empty()
+        && block.align == HorizontalAlign::Left
+        && block.vertical_align == VerticalAlign::Top
+        && block.background_color.is_none()
+        && block.restrictions == BlockRestrictions::default()
+}
+
+#[test]
+fn independent_table_shape_rejects_every_noncanonical_cell_fixture() {
+    use anytype::body::test_fixtures::{TableFixtureDefect, table_snapshot};
+
+    let verify = |defect| {
+        let snapshot = table_snapshot(defect).expect("valid table fixture graph");
+        let table_id = snapshot
+            .iter()
+            .find(|block| matches!(block.content, BlockContent::Table))
+            .expect("table fixture root")
+            .id
+            .to_string();
+        verify_table_shape(&snapshot, &table_id, 2, 2, true)
+    };
+    assert!(verify(TableFixtureDefect::None));
+    for defect in [
+        TableFixtureDefect::MissingCell,
+        TableFixtureDefect::ExtraCell,
+        TableFixtureDefect::WrongCellType,
+        TableFixtureDefect::NonemptyCell,
+        TableFixtureDefect::WrongCellPresentation,
+        TableFixtureDefect::CellWithChild,
+        TableFixtureDefect::ReversedRegions,
+    ] {
+        assert!(!verify(defect), "accepted malformed fixture: {defect:?}");
+    }
 }
 
 fn verify_primary_rich_snapshot(snapshot: &BodySnapshot, ids: &[String], target: &str) -> bool {
@@ -1333,10 +1623,10 @@ async fn run_body_scenario_inner(
             }),
         )
         .await?;
-    if !stale_error.contains("conflict") {
+    if stale_error.code() != "conflict" {
         return Err("body continuation did not reject revision drift".to_owned());
     }
-    normalized_results.push(json!({"error_category":"conflict"}));
+    normalized_results.push(stale_error.normalized_result().clone());
 
     let fresh = driver
         .call_tool(
@@ -1830,7 +2120,7 @@ pub trait McpDriver {
         &'a mut self,
         name: &'static str,
         arguments: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>>;
 
     fn list_tools<'a>(
         &'a mut self,
@@ -2493,7 +2783,7 @@ pub async fn run_chats_registry_scenario(
             }),
         )
         .await?;
-    if conflict != "conflict" {
+    if conflict.code() != "conflict" {
         return Err("changed chat add replay was not a conflict".to_owned());
     }
 
@@ -2522,7 +2812,7 @@ pub async fn run_chats_registry_scenario(
             }),
         )
         .await?;
-    if absence != "not_found" {
+    if absence.code() != "not_found" {
         return Err("deleted chat message remained readable".to_owned());
     }
 
@@ -3065,7 +3355,7 @@ async fn run_discovery(
             json!({"space": ctx.space_id, "type": duplicate_name, "limit": 1}),
         )
         .await?;
-    require(ambiguity == "ambiguous", "ambiguous type resolution")
+    require(ambiguity.code() == "ambiguous", "ambiguous type resolution")
 }
 
 async fn run_documents(
@@ -3297,7 +3587,7 @@ async fn run_mutations(
             }),
         )
         .await?;
-    require(stale == "conflict", "stale edit conflict")?;
+    require(stale.code() == "conflict", "stale edit conflict")?;
     let fresh = driver
         .call_tool(
             "object_get",
@@ -3315,7 +3605,7 @@ async fn run_mutations(
             }),
         )
         .await?;
-    require(count == "conflict", "match-count conflict")?;
+    require(count.code() == "conflict", "match-count conflict")?;
     driver
         .call_tool(
             "object_edit",
@@ -3706,7 +3996,10 @@ async fn walk_pages(
             let code = driver
                 .call_tool_error(tool, Value::Object(mismatch))
                 .await?;
-            require(code == "validation", &format!("{tool} cursor binding"))?;
+            require(
+                code.code() == "validation",
+                &format!("{tool} cursor binding"),
+            )?;
             binding_checked = true;
         }
         cursor = Some(next.to_owned());
@@ -3770,7 +4063,7 @@ async fn assert_filtered_cursor_contract(
         .call_tool_error(tool, Value::Object(mismatch))
         .await?;
     require(
-        code == "validation",
+        code.code() == "validation",
         &format!("{tool} filter cursor binding"),
     )?;
 
@@ -4017,7 +4310,7 @@ mod ownership_tests {
             &'a mut self,
             _name: &'static str,
             _arguments: Value,
-        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>> {
             Box::pin(std::future::ready(Err(
                 "unexpected scripted error call".to_owned()
             )))

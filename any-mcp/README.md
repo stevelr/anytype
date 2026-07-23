@@ -168,7 +168,13 @@ page creation. It uses the typed `anytype-api` body model only. Reads return
 exact block identity, document order, and a canonical snapshot hash; mutations
 require that hash and verify their result. Rich page construction is a finite
 flat plan and reports complete, partial, or indeterminate evidence without
-claiming transactionality. Read-only mode retains only `body_block_list`.
+claiming transactionality. Generated tables count their root, two layout
+regions, rows, columns, and cells against the 256-block plan ceiling; success
+requires the exact canonical ordered subtree and empty paragraph cells.
+Read-only mode retains only `body_block_list`. Acceptance executes that read
+through stable and preview stdio and compares the complete normalized result.
+Domain error parity likewise preserves `isError`, ordered content, exact
+structured code/message/candidates, and its canonical JSON text duplicate.
 The tools never fetch caller URLs, expose protobufs, or use a mock server.
 
 ### Object-tag exclusion policy status
@@ -1282,8 +1288,11 @@ repository root:
 
 ```sh
 source .test-env
+# Prepare redacted_log and run_marker with the private derivative recipe in
+# TESTING.md.
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
-export ANY_MCP_HEADLESS_REDACTED_LOG_FILE=/absolute/path/to/reviewed-redacted-server.log
+export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
+export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
 test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
 cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
 cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- --ignored --test-threads=1
@@ -1300,8 +1309,10 @@ read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
 list filter and rejects a continuation cursor whose filter binding changes
 through both entry paths. Existing focused live regressions remain alongside
-this acceptance baseline. The direct command selects exactly 14 intended
-`headless_` cases; the spawned target contains exactly 11 ignored live cases.
+this acceptance baseline. `server::headless_integration` contains 19 ignored
+direct-router cases; the library command also selects seven focused
+cross-entry optional-registry regressions. The spawned target contains exactly
+18 ignored live cases.
 
 The shared Markdown no-op scenario independently waits for stable REST exports
 and fresh `ObjectShow` identity/type/order evidence, supplies the complete
@@ -1345,8 +1356,11 @@ than part of the portable hosted-runner matrix. Runners labeled
 repository variable `ANY_MCP_HEADLESS_ENV_FILE` to a readable, protected
 environment file with the same endpoint, keystore, and test-space settings as
 `.test-env`. It must also set `ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to an
-absolute, readable runner-produced server log with credentials and content
-removed; the job keeps that protected artifact for seven days on failure. Protect the
+absolute, readable runner-produced JSONL event file with credentials and
+content removed. The job copies it into a parent-created `0600` derivative,
+appends one fresh run marker, and the test verifies exact provenance,
+allow-listed fields, and absence of credentials loaded from the configured
+keystore; the job keeps that protected derivative for seven days on failure. Protect the
 `anytype-headless` environment so untrusted pull-request code cannot reach the
 self-hosted runner or credentials. The job runs serially on every matching
 MCP/API pull request and main/tag update; branch protection and release

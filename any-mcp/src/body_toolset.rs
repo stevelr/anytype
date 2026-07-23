@@ -5831,7 +5831,7 @@ fn rich_entry_cost(value: &NewBlockInput) -> Result<(usize, usize, usize), Handl
             let cells = usize::from(*rows)
                 .checked_mul(usize::from(*columns))
                 .ok_or_else(|| HandlerError::new(ToolError::validation()))?;
-            let materialized = 1usize
+            let materialized = 3usize
                 .checked_add(usize::from(*rows))
                 .and_then(|value| value.checked_add(usize::from(*columns)))
                 .and_then(|value| value.checked_add(cells))
@@ -6165,6 +6165,26 @@ fn verified_rich_prefix_len(
             || block.background_color != expected.block.background_color
         {
             return position;
+        }
+        if let NewBlockInput::Table {
+            rows,
+            columns,
+            header_row,
+        } = &entry.block
+        {
+            let Ok((materialized_count, _, _)) = rich_entry_cost(&entry.block) else {
+                return position;
+            };
+            if !projected_table_subtree_matches(
+                projected,
+                block,
+                *rows,
+                *columns,
+                *header_row,
+                materialized_count,
+            ) {
+                return position;
+            }
         }
         actual_ids.insert(entry.local_key.as_str(), block_id);
     }
@@ -7948,7 +7968,7 @@ mod tests {
                 "block":{"kind":"table","rows":7,"columns":9,"header_row":false}
             }),
         ];
-        table_blocks.extend((0..7).map(|index| {
+        table_blocks.extend((0..3).map(|index| {
             json!({
                 "local_key":format!("prompt_{index}"),
                 "block":{
@@ -10597,6 +10617,62 @@ mod tests {
             .content = BlockProjection::Layout {
             style: WireLayoutStyle::TableColumns,
         };
+        let mut aligned_cell = valid.clone();
+        aligned_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .align = WireHorizontalAlign::Center;
+        let mut vertical_cell = valid.clone();
+        vertical_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .vertical_align = WireVerticalAlign::Middle;
+        let mut background_cell = valid.clone();
+        background_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .background_color =
+            Some(ColorInput::new("yellow".to_owned()).expect("background color"));
+        let mut cell_with_child = valid.clone();
+        cell_with_child
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "cell-1-1")
+            .expect("cell")
+            .child_count = 1;
+        let mut extra_cell = valid.clone();
+        extra_cell
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "row-2")
+            .expect("row")
+            .child_count = 3;
+        extra_cell.items.push(summary(
+            "cell-2-3",
+            Some("row-2"),
+            2,
+            4,
+            0,
+            projected_text(""),
+        ));
+        let mut reordered_cells = valid.clone();
+        let first_cell = reordered_cells
+            .items
+            .iter()
+            .position(|block| block.id.as_str() == "cell-1-1")
+            .expect("first cell");
+        let second_cell = reordered_cells
+            .items
+            .iter()
+            .position(|block| block.id.as_str() == "cell-1-2")
+            .expect("second cell");
+        reordered_cells.items.swap(first_cell, second_cell);
         let mut reordered = valid.clone();
         let first_column = reordered
             .items
@@ -10619,6 +10695,12 @@ mod tests {
             column_cell,
             row_cell,
             layout_cell,
+            aligned_cell,
+            vertical_cell,
+            background_cell,
+            cell_with_child,
+            extra_cell,
+            reordered_cells,
             reordered,
         ] {
             assert!(!verify_create_transition(
@@ -11196,23 +11278,42 @@ mod tests {
         ]);
         assert!(validate_rich_plan(&table).is_err());
 
-        let mut exact_materialized = vec![
+        let tables = vec![
             entry(
-                "table_169",
+                "table_171",
                 None,
                 json!({"kind":"table","rows":12,"columns":12,"header_row":true}),
             ),
             entry(
-                "table_80",
+                "table_82",
                 None,
                 json!({"kind":"table","rows":7,"columns":9,"header_row":false}),
             ),
         ];
+        let mut exact_materialized = tables.clone();
         exact_materialized
-            .extend((0..7).map(|index| entry(&format!("plain_{index}"), None, text_block("x"))));
+            .extend((0..3).map(|index| entry(&format!("plain_{index}"), None, text_block("x"))));
         assert!(validate_rich_plan(&parse_rich(exact_materialized.clone())).is_ok());
         exact_materialized.push(entry("one_over", None, text_block("x")));
         assert!(validate_rich_plan(&parse_rich(exact_materialized)).is_err());
+
+        let mut formerly_under_counted = tables;
+        formerly_under_counted.extend(
+            (0..7).map(|index| entry(&format!("old_plain_{index}"), None, text_block("x"))),
+        );
+        assert_eq!(
+            rich_entry_cost(&parse_block(
+                json!({"kind":"table","rows":12,"columns":12,"header_row":true})
+            ))
+            .expect("first table cost")
+            .0 + rich_entry_cost(&parse_block(
+                json!({"kind":"table","rows":7,"columns":9,"header_row":false})
+            ))
+            .expect("second table cost")
+            .0 + 7,
+            260
+        );
+        assert!(validate_rich_plan(&parse_rich(formerly_under_counted)).is_err());
     }
 
     fn scheduler_with_prefix(total: usize, prefix: usize) -> RichScheduler {

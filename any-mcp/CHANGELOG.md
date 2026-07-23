@@ -40,12 +40,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   generated identities, snapshot/cursor tokens, and the `encoded_len`-derived
   byte estimate of explicitly unsupported blocks; opaque kind and child count,
   all typed content, presentation, restrictions, ordering, status, errors, and
-  idempotency remain exact. The independently created pagination pages now use
-  one transport-neutral title so their server-generated title blocks remain
-  semantically comparable without normalizing text. Ignored body acceptance
-  also fails closed unless
-  a reviewed absolute redacted server-log path is configured, and its
-  fixture-heavy shared workflow is heap-owned for default-stack execution.
+  idempotency remain exact. Domain tool-error evidence validates the complete
+  `isError` result, exact code/message structure, ordered content, and
+  canonical text duplicate; stale-cursor conflicts are compared across
+  direct, stable stdio, preview stdio, and raw protocol frames. Read-only
+  stable/preview processes execute the retained list tool against one
+  cleanup-owned shared page before mutation predecode rejection. The
+  independently created pagination pages use one transport-neutral title so
+  their server-generated title blocks remain semantically comparable without
+  normalizing text. Ignored body acceptance fails closed unless a
+  parent-created, owner-private reviewed JSONL derivative contains one fresh
+  run marker, at least one allow-listed event, and none of the configured HTTP
+  or gRPC credential bytes. Its fixture-heavy shared workflow is heap-owned
+  for default-stack execution.
   The production router returns optional-registry futures before constructing
   the unrelated Phase-1 aggregate, and the live 20-block pagination proof
   retains its cursor-bound limit across three exact pages. Create readback now
@@ -58,6 +65,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   that exception only to the old and new structural parents and now also
   proves exact post-move DFS order. Delete readback applies it only to the
   removed subtree's direct parent and proves the exact surviving DFS order.
+  Rich table plan accounting includes both generated layout regions, and
+  API/MCP receipt verification requires the exact table, regions, ordered
+  rows/columns/cells, and canonical empty paragraph cell presentation with no
+  missing, extra, foreign, or nested nodes.
   Value-only update readback permits only the opaque page root's derived byte
   summary to refresh while preserving its exact kind, unchanged child count,
   structure, restrictions, and presentation. Every body editor now caps the

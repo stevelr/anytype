@@ -222,6 +222,7 @@ dependencies = [
  "getrandom 0.4.3",
  "httpdate",
  "jsonschema",
+ "libc",
  "mime",
  "reqwest",
  "rmcp",
