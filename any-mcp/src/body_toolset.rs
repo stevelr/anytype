@@ -260,7 +260,45 @@ impl JsonSchema for ColorInput {
     }
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({"type":"string","minLength":1,"maxLength":32})
+        json_schema!({
+            "type":"string",
+            "minLength":1,
+            "maxLength":32,
+            "pattern":r"^[\x21-\x40\x5b-\x7e]{1,32}$"
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct OpaqueKind(String);
+
+impl OpaqueKind {
+    fn new(value: String) -> Result<Self, BodyInputError> {
+        if valid_opaque_kind(&value) {
+            Ok(Self(value))
+        } else {
+            Err(BodyInputError)
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl JsonSchema for OpaqueKind {
+    fn schema_name() -> Cow<'static, str> {
+        "OpaqueKind".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type":"string",
+            "minLength":1,
+            "maxLength":64,
+            "pattern":"^[a-z][a-z0-9_]{0,63}$"
+        })
     }
 }
 
@@ -431,6 +469,112 @@ enum WireDividerStyle {
     Dots,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WireLayoutStyle {
+    Row,
+    Column,
+    Div,
+    Header,
+    TableRows,
+    TableColumns,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WireBookmarkState {
+    Empty,
+    Fetching,
+    Done,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WireFileKind {
+    None,
+    File,
+    Image,
+    Video,
+    Audio,
+    Pdf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WireFileState {
+    Empty,
+    Uploading,
+    Done,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WireFileStyle {
+    Auto,
+    Link,
+    Embed,
+}
+
+impl WireLayoutStyle {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Row => "row",
+            Self::Column => "column",
+            Self::Div => "div",
+            Self::Header => "header",
+            Self::TableRows => "table_rows",
+            Self::TableColumns => "table_columns",
+        }
+    }
+}
+
+impl WireBookmarkState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Fetching => "fetching",
+            Self::Done => "done",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl WireFileKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::File => "file",
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Pdf => "pdf",
+        }
+    }
+}
+
+impl WireFileState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Uploading => "uploading",
+            Self::Done => "done",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl WireFileStyle {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Link => "link",
+            Self::Embed => "embed",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum WireInsertPosition {
@@ -548,8 +692,7 @@ enum WireMark {
         #[schemars(schema_with = "utf16_offset_schema")]
         end: u32,
         /// Closed Anytype color token.
-        #[schemars(length(min = 1, max = 32))]
-        color: String,
+        color: ColorInput,
     },
     BackgroundColor {
         /// Inclusive UTF-16 start offset.
@@ -559,8 +702,7 @@ enum WireMark {
         #[schemars(schema_with = "utf16_offset_schema")]
         end: u32,
         /// Closed Anytype color token.
-        #[schemars(length(min = 1, max = 32))]
-        color: String,
+        color: ColorInput,
     },
     Mention {
         /// Inclusive UTF-16 start offset.
@@ -620,68 +762,66 @@ impl WireMark {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum BlockProjection {
     Text {
-        /// Exact UTF-8 block text.
+        /// UTF-8 text.
         #[schemars(length(max = MAX_TEXT_BYTES))]
         text: String,
-        /// Closed rendered text style.
+        /// Rendered style.
         style: WireTextStyle,
-        /// Checkbox state preserved from the server.
+        /// Checkbox state.
         checked: bool,
-        /// Optional foreground color.
+        /// Foreground color.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[schemars(default, schema_with = "optional_color_schema")]
-        color: Option<String>,
-        /// Optional callout icon.
+        color: Option<ColorInput>,
+        /// Callout icon.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[schemars(default, schema_with = "optional_icon_schema")]
         icon: Option<WireIcon>,
-        /// Ordered typed UTF-16 marks.
+        /// UTF-16 marks.
         #[schemars(length(max = MAX_MARKS_PER_TEXT))]
         marks: Vec<WireMark>,
     },
     Layout {
-        /// Closed layout style label.
-        #[schemars(length(min = 1, max = 32))]
-        style: String,
+        /// Layout style.
+        style: WireLayoutStyle,
     },
     Divider {
-        /// Divider rendering style.
+        /// Divider style.
         style: WireDividerStyle,
     },
     Bookmark {
-        /// Stored bookmark URL; this tool never fetches it.
+        /// Inert bookmark URL.
         #[schemars(length(max = MAX_URL_BYTES))]
         url: String,
-        /// Optional resolved Anytype target.
+        /// Resolved target.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[schemars(default, schema_with = "optional_entity_id_schema")]
         target_object_id: Option<EntityId>,
-        /// Closed bookmark lifecycle label.
-        #[schemars(length(min = 1, max = 16))]
-        state: String,
+        /// Bookmark state.
+        state: WireBookmarkState,
     },
     Link {
-        /// Linked Anytype object.
+        /// Linked object.
         target_object_id: EntityId,
-        /// Link-card rendering style.
+        /// Card style.
         card_style: WireLinkCardStyle,
-        /// Link-card icon size.
+        /// Icon size.
         icon_size: WireLinkIconSize,
-        /// Link-card description mode.
+        /// Description mode.
         description: WireLinkDescription,
-        /// Exact ordered relation keys displayed by the card.
+        /// Ordered relation keys.
         #[schemars(length(max = MAX_RELATIONS))]
         relations: Vec<RelationKey>,
     },
     Relation {
-        /// Exact relation key rendered by this block.
+        /// Relation key.
         key: RelationKey,
     },
     FeaturedRelations,
     Embed {
-        /// Closed embed processor.
+        /// Embed processor.
         processor: WireEmbedProcessor,
-        /// Exact bounded embed source.
+        /// Embed source.
         #[schemars(length(max = MAX_TEXT_BYTES))]
         source: String,
     },
@@ -693,32 +833,28 @@ enum BlockProjection {
     },
     TableColumn,
     File {
-        /// Referenced Anytype file object.
+        /// Referenced file.
         target_object_id: EntityId,
-        /// Closed file-kind label.
-        #[schemars(length(min = 1, max = 16))]
-        file_kind: String,
+        /// File kind.
+        file_kind: WireFileKind,
         /// Validated printable MIME value.
         #[schemars(length(max = MAX_MIME_BYTES))]
         mime: String,
         /// Nonnegative JSON-safe byte size.
         #[schemars(schema_with = "json_safe_integer_schema")]
         size: u64,
-        /// Closed upload-state label.
-        #[schemars(length(min = 1, max = 16))]
-        state: String,
-        /// Closed presentation-style label.
-        #[schemars(length(min = 1, max = 16))]
-        style: String,
+        /// Upload state.
+        state: WireFileState,
+        /// Presentation style.
+        style: WireFileStyle,
     },
     Unsupported {
-        /// Content-free stable opaque kind.
-        #[schemars(length(min = 1, max = 64))]
-        opaque_kind: String,
-        /// Bounded number of direct children.
+        /// Content-free opaque kind.
+        opaque_kind: OpaqueKind,
+        /// Direct child count.
         #[schemars(schema_with = "body_child_count_schema")]
         child_count: u64,
-        /// JSON-safe coarse encoded-size evidence.
+        /// Approximate encoded bytes.
         #[schemars(schema_with = "json_safe_integer_schema")]
         approx_bytes: u64,
     },
@@ -742,32 +878,32 @@ struct RestrictionsProjection {
 #[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BlockSummary {
-    /// Exact server-assigned block identity.
+    /// Block ID.
     id: EntityId,
-    /// Exact parent identity, omitted for the root.
+    /// Parent ID; absent for root.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(default, schema_with = "optional_entity_id_schema")]
     parent_id: Option<EntityId>,
-    /// Zero-based sibling position in exact server order.
+    /// Zero-based sibling index.
     #[schemars(schema_with = "body_child_count_schema")]
     sibling_index: u64,
-    /// Tree depth with the root at zero.
+    /// Root-zero tree depth.
     #[schemars(schema_with = "body_depth_schema")]
     depth: u64,
-    /// Number of direct child blocks.
+    /// Direct child count.
     #[schemars(schema_with = "body_child_count_schema")]
     child_count: u64,
-    /// Closed server restriction flags.
+    /// Restriction flags.
     restrictions: RestrictionsProjection,
-    /// Horizontal presentation alignment.
+    /// Horizontal alignment.
     align: WireHorizontalAlign,
-    /// Vertical presentation alignment.
+    /// Vertical alignment.
     vertical_align: WireVerticalAlign,
-    /// Optional bounded background color.
+    /// Background color.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(default, schema_with = "optional_color_schema")]
-    background_color: Option<String>,
-    /// Closed typed body content.
+    background_color: Option<ColorInput>,
+    /// Typed content.
     content: BlockProjection,
 }
 
@@ -796,7 +932,12 @@ fn optional_cursor_schema(generator: &mut SchemaGenerator) -> Schema {
 }
 
 fn optional_color_schema(_: &mut SchemaGenerator) -> Schema {
-    json_schema!({"type":"string","minLength":1,"maxLength":32})
+    json_schema!({
+        "type":"string",
+        "minLength":1,
+        "maxLength":32,
+        "pattern":r"^[\x21-\x40\x5b-\x7e]{1,32}$"
+    })
 }
 
 fn optional_bool_schema(_: &mut SchemaGenerator) -> Schema {
@@ -927,12 +1068,12 @@ struct BodyBlockListOutput {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum NewBlockInput {
     Text {
-        /// Writable text rendering style.
+        /// Writable text style.
         style: WritableTextStyle,
-        /// Exact UTF-8 text payload.
+        /// UTF-8 text.
         #[schemars(length(max = MAX_TEXT_BYTES))]
         text: String,
-        /// Required for checkboxes and forbidden for other styles.
+        /// Checkbox-only required state.
         #[serde(
             default,
             skip_serializing_if = "Omittable::is_none",
@@ -940,11 +1081,11 @@ enum NewBlockInput {
         )]
         #[schemars(schema_with = "optional_bool_schema")]
         checked: Omittable<bool>,
-        /// Ordered typed UTF-16 marks.
+        /// UTF-16 marks.
         #[serde(default)]
         #[schemars(length(max = MAX_MARKS_PER_TEXT))]
         marks: Vec<WireMark>,
-        /// Optional Anytype foreground color token.
+        /// Foreground color.
         #[serde(
             default,
             skip_serializing_if = "Omittable::is_none",
@@ -952,7 +1093,7 @@ enum NewBlockInput {
         )]
         #[schemars(schema_with = "optional_color_schema")]
         text_color: Omittable<ColorInput>,
-        /// Optional callout icon, forbidden for other styles.
+        /// Callout-only icon.
         #[serde(
             default,
             skip_serializing_if = "Omittable::is_none",
@@ -960,7 +1101,7 @@ enum NewBlockInput {
         )]
         #[schemars(schema_with = "optional_icon_schema")]
         icon: Omittable<WireIcon>,
-        /// Optional horizontal presentation alignment.
+        /// Horizontal alignment.
         #[serde(
             default,
             skip_serializing_if = "Omittable::is_none",
@@ -968,7 +1109,7 @@ enum NewBlockInput {
         )]
         #[schemars(schema_with = "optional_horizontal_align_schema")]
         horizontal_align: Omittable<WireHorizontalAlign>,
-        /// Optional vertical presentation alignment.
+        /// Vertical alignment.
         #[serde(
             default,
             skip_serializing_if = "Omittable::is_none",
@@ -976,7 +1117,7 @@ enum NewBlockInput {
         )]
         #[schemars(schema_with = "optional_vertical_align_schema")]
         vertical_align: Omittable<WireVerticalAlign>,
-        /// Optional Anytype background color token.
+        /// Background color.
         #[serde(
             default,
             skip_serializing_if = "Omittable::is_none",
@@ -986,7 +1127,7 @@ enum NewBlockInput {
         background_color: Omittable<ColorInput>,
     },
     Divider {
-        /// Divider rendering style.
+        /// Divider style.
         style: WireDividerStyle,
         /// Optional horizontal presentation alignment.
         #[serde(
@@ -1014,15 +1155,15 @@ enum NewBlockInput {
         background_color: Omittable<ColorInput>,
     },
     Link {
-        /// Exact linked Anytype object.
+        /// Linked object ID.
         target_object_id: EntityId,
-        /// Link-card rendering style.
+        /// Card style.
         card_style: WireLinkCardStyle,
-        /// Link-card icon size.
+        /// Icon size.
         icon_size: WireLinkIconSize,
-        /// Link-card description mode.
+        /// Description mode.
         description: WireLinkDescription,
-        /// Exact unique relation keys displayed by the card.
+        /// Unique relation keys.
         #[serde(default)]
         #[schemars(length(max = MAX_RELATIONS))]
         relations: Vec<RelationKey>,
@@ -1052,7 +1193,7 @@ enum NewBlockInput {
         background_color: Omittable<ColorInput>,
     },
     Relation {
-        /// Exact relation key rendered by the block.
+        /// Relation key.
         key: RelationKey,
         /// Optional horizontal presentation alignment.
         #[serde(
@@ -1080,7 +1221,7 @@ enum NewBlockInput {
         background_color: Omittable<ColorInput>,
     },
     Embed {
-        /// Closed local embed processor; no caller URL is fetched.
+        /// Local embed processor.
         processor: WireEmbedProcessor,
         /// Exact source or bare eleven-character YouTube ID.
         #[schemars(length(max = MAX_TEXT_BYTES))]
@@ -1163,19 +1304,19 @@ where
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 struct BodyBlockCreateInput {
-    /// Exact space ID or bounded discovery reference.
+    /// Space reference.
     space: DiscoveryReference,
-    /// Exact object whose body is mutated.
+    /// Object ID.
     object_id: EntityId,
-    /// Canonical hash required to match the fresh preflight snapshot.
+    /// Required snapshot hash.
     expected_snapshot_hash: SnapshotHash,
-    /// Exact existing block used as the insertion target.
+    /// Insertion target ID.
     target_block_id: EntityId,
-    /// Closed insertion position relative to the target.
+    /// Insertion position.
     position: WireInsertPosition,
-    /// One closed typed block constructor.
+    /// Typed block constructor.
     block: NewBlockInput,
-    /// Process-scoped caller-generated duplicate-suppression key.
+    /// Process idempotency key.
     idempotency_key: IdempotencyKey,
 }
 
@@ -1192,15 +1333,15 @@ struct IdempotencyProjection {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BodyBlockCreateOutput {
-    /// Resolved exact space identity.
+    /// Space ID.
     space_id: EntityId,
-    /// Exact mutated object identity.
+    /// Object ID.
     object_id: EntityId,
-    /// Verified newly assigned block and content.
+    /// Verified new block.
     block: BlockSummary,
-    /// Canonical hash of the verified resulting snapshot.
+    /// Result snapshot hash.
     snapshot_hash: SnapshotHash,
-    /// Process-local duplicate-suppression evidence.
+    /// Idempotency evidence.
     idempotency: IdempotencyProjection,
 }
 
@@ -1225,8 +1366,7 @@ enum BlockChangeInput {
     },
     SetTextColor {
         /// Replacement Anytype foreground color token.
-        #[schemars(length(min = 1, max = 32))]
-        color: String,
+        color: ColorInput,
     },
     ClearTextColor,
     SetCalloutIcon {
@@ -1240,8 +1380,7 @@ enum BlockChangeInput {
     },
     SetBackgroundColor {
         /// Replacement Anytype background color token.
-        #[schemars(length(min = 1, max = 32))]
-        color: String,
+        color: ColorInput,
     },
     ClearBackgroundColor,
     SetHorizontalAlign {
@@ -1408,7 +1547,7 @@ enum RichFailureCategory {
     Indeterminate,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RichApplied {
     /// Zero-based plan entry index.
@@ -1504,6 +1643,9 @@ fn project_snapshot(snapshot: &BodySnapshot) -> Result<ProjectedSnapshot, Handle
     let space_id = EntityId::new(snapshot.space_id.clone()).map_err(upstream_domain)?;
     let object_id = EntityId::new(snapshot.object_id.clone()).map_err(upstream_domain)?;
     let root_id = EntityId::new(snapshot.root_id.as_str()).map_err(upstream_domain)?;
+    if !read_access_allowed(snapshot.iter().map(|block| block.restrictions.read)) {
+        return Err(HandlerError::new(ToolError::upstream()));
+    }
     let mut parents = HashMap::<&str, (&str, usize)>::new();
     for parent in snapshot.iter() {
         for (index, child) in parent.children.iter().enumerate() {
@@ -1516,9 +1658,6 @@ fn project_snapshot(snapshot: &BodySnapshot) -> Result<ProjectedSnapshot, Handle
     let mut aggregate_marks = 0usize;
     let mut items = Vec::with_capacity(snapshot.len());
     for block in snapshot.iter() {
-        if block.restrictions.read {
-            return Err(HandlerError::new(ToolError::upstream()));
-        }
         let (parent_id, sibling_index, depth) = if block.id == snapshot.root_id {
             (None, 0usize, 0usize)
         } else {
@@ -1556,7 +1695,9 @@ fn project_snapshot(snapshot: &BodySnapshot) -> Result<ProjectedSnapshot, Handle
             background_color: block
                 .background_color
                 .as_ref()
-                .map(|color| color.as_str().to_owned()),
+                .map(|color| ColorInput::new(color.as_str().to_owned()))
+                .transpose()
+                .map_err(upstream_input)?,
             content,
         });
     }
@@ -1571,6 +1712,10 @@ fn project_snapshot(snapshot: &BodySnapshot) -> Result<ProjectedSnapshot, Handle
         hash,
         items,
     })
+}
+
+fn read_access_allowed(restrictions: impl IntoIterator<Item = bool>) -> bool {
+    !restrictions.into_iter().any(|restricted| restricted)
 }
 
 fn validate_table_fanout(snapshot: &BodySnapshot, block: &BodyBlock) -> Result<(), HandlerError> {
@@ -1636,13 +1781,18 @@ fn project_content(
                 text: text.text.clone(),
                 style: text.style.into(),
                 checked: text.checked,
-                color: text.color.as_ref().map(|color| color.as_str().to_owned()),
+                color: text
+                    .color
+                    .as_ref()
+                    .map(|color| ColorInput::new(color.as_str().to_owned()))
+                    .transpose()
+                    .map_err(upstream_input)?,
                 icon: text.icon.as_ref().map(project_icon).transpose()?,
                 marks,
             })
         }
         BlockContent::Layout(style) => Ok(BlockProjection::Layout {
-            style: layout_style(*style).to_owned(),
+            style: layout_style(*style),
         }),
         BlockContent::Divider(style) => Ok(BlockProjection::Divider {
             style: (*style).into(),
@@ -1657,7 +1807,7 @@ fn project_content(
                     .map(EntityId::new)
                     .transpose()
                     .map_err(upstream_domain)?,
-                state: bookmark_state(bookmark.state).to_owned(),
+                state: bookmark_state(bookmark.state),
             })
         }
         BlockContent::Link(link) => Ok(BlockProjection::Link {
@@ -1703,23 +1853,18 @@ fn project_content(
             Ok(BlockProjection::File {
                 target_object_id: EntityId::new(file.target_object_id.clone())
                     .map_err(upstream_domain)?,
-                file_kind: file_kind(file.kind).to_owned(),
+                file_kind: file_kind(file.kind),
                 mime: file.mime.clone(),
                 size: json_safe_i64(file.size)?,
-                state: file_state(file.state).to_owned(),
-                style: file_style(file.style).to_owned(),
+                state: file_state(file.state),
+                style: file_style(file.style),
             })
         }
-        BlockContent::Unsupported(opaque) => {
-            if !valid_opaque_kind(&opaque.kind) {
-                return Err(HandlerError::new(ToolError::upstream()));
-            }
-            Ok(BlockProjection::Unsupported {
-                opaque_kind: opaque.kind.clone(),
-                child_count: json_safe_usize(opaque.summary.child_count)?,
-                approx_bytes: json_safe_usize(opaque.summary.approx_bytes)?,
-            })
-        }
+        BlockContent::Unsupported(opaque) => Ok(BlockProjection::Unsupported {
+            opaque_kind: OpaqueKind::new(opaque.kind.clone()).map_err(upstream_input)?,
+            child_count: json_safe_usize(opaque.summary.child_count)?,
+            approx_bytes: json_safe_usize(opaque.summary.approx_bytes)?,
+        }),
         _ => Err(HandlerError::new(ToolError::upstream())),
     }
 }
@@ -1765,7 +1910,7 @@ fn project_icon(icon: &CalloutIcon) -> Result<WireIcon, HandlerError> {
 
 fn project_mark(mark: &TextMark, text: &str) -> Result<WireMark, HandlerError> {
     let range = mark.range;
-    if range.start == range.end || range.to_byte_range(text).is_none() {
+    if range.to_byte_range(text).is_none() {
         return Err(HandlerError::new(ToolError::upstream()));
     }
     let (start, end) = (range.start, range.end);
@@ -1786,12 +1931,12 @@ fn project_mark(mark: &TextMark, text: &str) -> Result<WireMark, HandlerError> {
         MarkKind::TextColor { color } => Ok(WireMark::TextColor {
             start,
             end,
-            color: color.as_str().to_owned(),
+            color: ColorInput::new(color.as_str().to_owned()).map_err(upstream_input)?,
         }),
         MarkKind::BackgroundColor { color } => Ok(WireMark::BackgroundColor {
             start,
             end,
-            color: color.as_str().to_owned(),
+            color: ColorInput::new(color.as_str().to_owned()).map_err(upstream_input)?,
         }),
         MarkKind::Mention { object_id } => Ok(WireMark::Mention {
             start,
@@ -1961,7 +2106,7 @@ fn hash_projection(
         hash.boolean(block.restrictions.drop_on);
         hash.string(horizontal_label(block.align));
         hash.string(vertical_label(block.vertical_align));
-        hash.optional_string(block.background_color.as_deref());
+        hash.optional_string(block.background_color.as_ref().map(ColorInput::as_str));
         hash_content(&mut hash, &block.content);
     }
     hash.finish()
@@ -1981,7 +2126,7 @@ fn hash_content(hash: &mut CanonicalHasher, content: &BlockProjection) {
             hash.string(text);
             hash.string(text_style_label(*style));
             hash.boolean(*checked);
-            hash.optional_string(color.as_deref());
+            hash.optional_string(color.as_ref().map(ColorInput::as_str));
             hash.boolean(icon.is_some());
             if let Some(icon) = icon {
                 match icon {
@@ -2002,7 +2147,7 @@ fn hash_content(hash: &mut CanonicalHasher, content: &BlockProjection) {
         }
         BlockProjection::Layout { style } => {
             hash.string("layout");
-            hash.string(style);
+            hash.string(style.as_str());
         }
         BlockProjection::Divider { style } => {
             hash.string("divider");
@@ -2016,7 +2161,7 @@ fn hash_content(hash: &mut CanonicalHasher, content: &BlockProjection) {
             hash.string("bookmark");
             hash.string(url);
             hash.optional_string(target_object_id.as_ref().map(EntityId::as_str));
-            hash.string(state);
+            hash.string(state.as_str());
         }
         BlockProjection::Link {
             target_object_id,
@@ -2062,11 +2207,11 @@ fn hash_content(hash: &mut CanonicalHasher, content: &BlockProjection) {
         } => {
             hash.string("file");
             hash.string(target_object_id.as_str());
-            hash.string(file_kind);
+            hash.string(file_kind.as_str());
             hash.string(mime);
             hash.u64(*size);
-            hash.string(state);
-            hash.string(style);
+            hash.string(state.as_str());
+            hash.string(style.as_str());
         }
         BlockProjection::Unsupported {
             opaque_kind,
@@ -2074,7 +2219,7 @@ fn hash_content(hash: &mut CanonicalHasher, content: &BlockProjection) {
             approx_bytes,
         } => {
             hash.string("unsupported");
-            hash.string(opaque_kind);
+            hash.string(opaque_kind.as_str());
             hash.u64(*child_count);
             hash.u64(*approx_bytes);
         }
@@ -2097,11 +2242,11 @@ fn hash_mark(hash: &mut CanonicalHasher, mark: &WireMark) {
         }
         WireMark::TextColor { color, .. } => {
             hash.string("text_color");
-            hash.string(color);
+            hash.string(color.as_str());
         }
         WireMark::BackgroundColor { color, .. } => {
             hash.string("background_color");
-            hash.string(color);
+            hash.string(color.as_str());
         }
         WireMark::Mention { object_id, .. } => {
             hash.string("mention");
@@ -2345,51 +2490,51 @@ fn embed_label(value: WireEmbedProcessor) -> &'static str {
     }
 }
 
-fn layout_style(value: LayoutStyle) -> &'static str {
+fn layout_style(value: LayoutStyle) -> WireLayoutStyle {
     match value {
-        LayoutStyle::Row => "row",
-        LayoutStyle::Column => "column",
-        LayoutStyle::Div => "div",
-        LayoutStyle::Header => "header",
-        LayoutStyle::TableRows => "table_rows",
-        LayoutStyle::TableColumns => "table_columns",
+        LayoutStyle::Row => WireLayoutStyle::Row,
+        LayoutStyle::Column => WireLayoutStyle::Column,
+        LayoutStyle::Div => WireLayoutStyle::Div,
+        LayoutStyle::Header => WireLayoutStyle::Header,
+        LayoutStyle::TableRows => WireLayoutStyle::TableRows,
+        LayoutStyle::TableColumns => WireLayoutStyle::TableColumns,
     }
 }
 
-fn bookmark_state(value: BookmarkState) -> &'static str {
+fn bookmark_state(value: BookmarkState) -> WireBookmarkState {
     match value {
-        BookmarkState::Empty => "empty",
-        BookmarkState::Fetching => "fetching",
-        BookmarkState::Done => "done",
-        BookmarkState::Error => "error",
+        BookmarkState::Empty => WireBookmarkState::Empty,
+        BookmarkState::Fetching => WireBookmarkState::Fetching,
+        BookmarkState::Done => WireBookmarkState::Done,
+        BookmarkState::Error => WireBookmarkState::Error,
     }
 }
 
-fn file_kind(value: FileBlockKind) -> &'static str {
+fn file_kind(value: FileBlockKind) -> WireFileKind {
     match value {
-        FileBlockKind::None => "none",
-        FileBlockKind::File => "file",
-        FileBlockKind::Image => "image",
-        FileBlockKind::Video => "video",
-        FileBlockKind::Audio => "audio",
-        FileBlockKind::Pdf => "pdf",
+        FileBlockKind::None => WireFileKind::None,
+        FileBlockKind::File => WireFileKind::File,
+        FileBlockKind::Image => WireFileKind::Image,
+        FileBlockKind::Video => WireFileKind::Video,
+        FileBlockKind::Audio => WireFileKind::Audio,
+        FileBlockKind::Pdf => WireFileKind::Pdf,
     }
 }
 
-fn file_state(value: FileBlockState) -> &'static str {
+fn file_state(value: FileBlockState) -> WireFileState {
     match value {
-        FileBlockState::Empty => "empty",
-        FileBlockState::Uploading => "uploading",
-        FileBlockState::Done => "done",
-        FileBlockState::Error => "error",
+        FileBlockState::Empty => WireFileState::Empty,
+        FileBlockState::Uploading => WireFileState::Uploading,
+        FileBlockState::Done => WireFileState::Done,
+        FileBlockState::Error => WireFileState::Error,
     }
 }
 
-fn file_style(value: FileBlockStyle) -> &'static str {
+fn file_style(value: FileBlockStyle) -> WireFileStyle {
     match value {
-        FileBlockStyle::Auto => "auto",
-        FileBlockStyle::Link => "link",
-        FileBlockStyle::Embed => "embed",
+        FileBlockStyle::Auto => WireFileStyle::Auto,
+        FileBlockStyle::Link => WireFileStyle::Link,
+        FileBlockStyle::Embed => WireFileStyle::Embed,
     }
 }
 
@@ -2428,10 +2573,10 @@ fn input_mark(value: &WireMark, text: &str) -> Result<TextMark, HandlerError> {
             MarkKind::Link { url: url.clone() }
         }
         WireMark::TextColor { color: value, .. } => MarkKind::TextColor {
-            color: color(value)?,
+            color: color(value.as_str())?,
         },
         WireMark::BackgroundColor { color: value, .. } => MarkKind::BackgroundColor {
-            color: color(value)?,
+            color: color(value.as_str())?,
         },
         WireMark::Mention { object_id, .. } => MarkKind::Mention {
             object_id: object_id.as_str().to_owned(),
@@ -2597,7 +2742,7 @@ fn new_block(value: &NewBlockInput) -> Result<NewBlock, HandlerError> {
         block = block.vertical_align((*value).into());
     }
     if let Some(value) = presentation_background(value) {
-        block = block.background(color(value)?);
+        block = block.background(color(value.as_str())?);
     }
     let variable_bytes = new_block_variable_bytes(value)?;
     if variable_bytes > MAX_MUTATION_VARIABLE_BYTES {
@@ -2688,7 +2833,7 @@ fn marks_variable_bytes(marks: &[WireMark]) -> Result<usize, HandlerError> {
         let bytes = match mark {
             WireMark::Link { url, .. } => url.len(),
             WireMark::TextColor { color, .. } | WireMark::BackgroundColor { color, .. } => {
-                color.len()
+                color.as_str().len()
             }
             WireMark::Mention { object_id, .. } | WireMark::Object { object_id, .. } => {
                 object_id.as_str().len()
@@ -2760,7 +2905,7 @@ fn presentation_vertical(value: &NewBlockInput) -> Option<&WireVerticalAlign> {
     }
 }
 
-fn presentation_background(value: &NewBlockInput) -> Option<&str> {
+fn presentation_background(value: &NewBlockInput) -> Option<&ColorInput> {
     match value {
         NewBlockInput::Text {
             background_color, ..
@@ -2779,7 +2924,7 @@ fn presentation_background(value: &NewBlockInput) -> Option<&str> {
         }
         | NewBlockInput::TableOfContents {
             background_color, ..
-        } => background_color.as_ref().map(ColorInput::as_str),
+        } => background_color.as_ref(),
         NewBlockInput::Table { .. } => None,
     }
 }
@@ -2801,7 +2946,7 @@ fn block_change(
         BlockChangeInput::SetTextStyle { style } => Ok(BlockChange::TextStyle((*style).into())),
         BlockChangeInput::SetChecked { checked } => Ok(BlockChange::Checked(*checked)),
         BlockChangeInput::SetTextColor { color: value } => {
-            Ok(BlockChange::TextColor(Some(color(value)?)))
+            Ok(BlockChange::TextColor(Some(color(value.as_str())?)))
         }
         BlockChangeInput::ClearTextColor => Ok(BlockChange::TextColor(None)),
         BlockChangeInput::SetCalloutIcon { icon } => {
@@ -2812,7 +2957,7 @@ fn block_change(
             Ok(BlockChange::DividerStyle((*style).into()))
         }
         BlockChangeInput::SetBackgroundColor { color: value } => {
-            Ok(BlockChange::Background(Some(color(value)?)))
+            Ok(BlockChange::Background(Some(color(value.as_str())?)))
         }
         BlockChangeInput::ClearBackgroundColor => Ok(BlockChange::Background(None)),
         BlockChangeInput::SetHorizontalAlign { align } => {
@@ -3336,49 +3481,13 @@ impl BodyHandlers {
                 if projected.space_id != space_id || projected.object_id != input.object_id {
                     return Err(HandlerError::new(ToolError::upstream()).into());
                 }
-                if let Some(prior) = prior {
-                    let total = u64::try_from(projected.items.len())
-                        .map_err(|_| HandlerError::new(ToolError::bounded_result()))?;
-                    if prior.boundary_id() != projected.hash.as_str() || prior.total() != total {
-                        return Err(HandlerError::new(ToolError::conflict()).into());
-                    }
-                }
-                let start = usize::try_from(offset)
-                    .map_err(|_| HandlerError::new(ToolError::validation()))?;
-                if start > projected.items.len() {
-                    return Err(HandlerError::new(ToolError::conflict()).into());
-                }
-                let end = start
-                    .checked_add(usize::from(input.limit.0))
-                    .map_or(projected.items.len(), |value| {
-                        value.min(projected.items.len())
-                    });
-                let items = projected.items[start..end].to_vec();
-                let text_bytes = items.iter().try_fold(0usize, |total, block| {
-                    total
-                        .checked_add(projected_text_bytes(block))
-                        .ok_or_else(|| HandlerError::new(ToolError::bounded_result()))
-                })?;
-                if text_bytes > MAX_LIST_TEXT_BYTES {
-                    return Err(HandlerError::new(ToolError::bounded_result()).into());
-                }
-                let next_cursor = if end < projected.items.len() {
-                    let next = u32::try_from(end)
-                        .ok()
-                        .and_then(|value| PageOffset::new(value).ok())
-                        .ok_or_else(|| HandlerError::new(ToolError::bounded_result()))?;
+                let (items, next_state) =
+                    select_body_page(&projected, prior.as_ref(), offset, input.limit.0)
+                        .map_err(HandlerOperationError::from)?;
+                let next_cursor = if let Some(next_state) = next_state {
                     Some(
                         cursors
-                            .issue_evidence(
-                                EvidenceCursorState::new(
-                                    next,
-                                    u64::try_from(projected.items.len()).map_err(|_| {
-                                        HandlerError::new(ToolError::bounded_result())
-                                    })?,
-                                    projected.hash.as_str().to_owned(),
-                                ),
-                                binding,
-                            )
+                            .issue_evidence(next_state, binding)
                             .map_err(HandlerError::from)?,
                     )
                 } else {
@@ -3397,6 +3506,52 @@ impl BodyHandlers {
         )
         .await
     }
+}
+
+fn select_body_page(
+    projected: &ProjectedSnapshot,
+    prior: Option<&EvidenceCursorState>,
+    offset: u32,
+    limit: u8,
+) -> Result<(Vec<BlockSummary>, Option<EvidenceCursorState>), HandlerError> {
+    let total = u64::try_from(projected.items.len())
+        .map_err(|_| HandlerError::new(ToolError::bounded_result()))?;
+    if prior.is_some_and(|prior| {
+        prior.boundary_id() != projected.hash.as_str() || prior.total() != total
+    }) {
+        return Err(HandlerError::new(ToolError::conflict()));
+    }
+    let start = usize::try_from(offset).map_err(|_| HandlerError::new(ToolError::validation()))?;
+    if start > projected.items.len() {
+        return Err(HandlerError::new(ToolError::conflict()));
+    }
+    let end = start
+        .checked_add(usize::from(limit))
+        .map_or(projected.items.len(), |value| {
+            value.min(projected.items.len())
+        });
+    let items = projected.items[start..end].to_vec();
+    let text_bytes = items.iter().try_fold(0usize, |sum, block| {
+        sum.checked_add(projected_text_bytes(block))
+            .ok_or_else(|| HandlerError::new(ToolError::bounded_result()))
+    })?;
+    if text_bytes > MAX_LIST_TEXT_BYTES {
+        return Err(HandlerError::new(ToolError::bounded_result()));
+    }
+    let next = if end < projected.items.len() {
+        let next = u32::try_from(end)
+            .ok()
+            .and_then(|value| PageOffset::new(value).ok())
+            .ok_or_else(|| HandlerError::new(ToolError::bounded_result()))?;
+        Some(EvidenceCursorState::new(
+            next,
+            total,
+            projected.hash.as_str().to_owned(),
+        ))
+    } else {
+        None
+    };
+    Ok((items, next))
 }
 
 fn projected_text_bytes(block: &BlockSummary) -> usize {
@@ -3500,8 +3655,31 @@ fn structural_or_opaque(content: &BlockContent) -> bool {
             | BlockContent::Table
             | BlockContent::TableRow { .. }
             | BlockContent::TableColumn
+            | BlockContent::File(_)
+            | BlockContent::Text(anytype::body::TextContent {
+                style: TextStyle::Title | TextStyle::Description | TextStyle::Header4,
+                ..
+            })
             | BlockContent::Unsupported(_)
     )
+}
+
+fn subtree_is_mutable(
+    snapshot: &BodySnapshot,
+    subtree: &[BlockId],
+    operation: MutationKind,
+) -> bool {
+    subtree.iter().all(|id| {
+        snapshot.get(id).is_some_and(|block| {
+            let denied = match operation {
+                MutationKind::Edit => block.restrictions.edit,
+                MutationKind::Remove => block.restrictions.remove,
+                MutationKind::Move => block.restrictions.drag,
+                MutationKind::Target => block.restrictions.drop_on,
+            };
+            !denied && !structural_or_opaque(&block.content)
+        })
+    })
 }
 
 fn mutation_output(
@@ -3541,6 +3719,19 @@ fn intended_update_output(
         .into_iter()
         .find(|block| &block.id == block_id)
         .ok_or_else(|| HandlerError::new(ToolError::upstream()))?;
+    apply_projected_change(&mut block, change)?;
+    Ok(BodyBlockMutationOutput {
+        space_id: projected.space_id,
+        object_id: projected.object_id,
+        block,
+        snapshot_hash: intended_snapshot_hash()?,
+    })
+}
+
+fn apply_projected_change(
+    block: &mut BlockSummary,
+    change: &BlockChangeInput,
+) -> Result<(), HandlerError> {
     match change {
         BlockChangeInput::SetText { text, marks } => {
             let BlockProjection::Text {
@@ -3562,11 +3753,16 @@ fn intended_update_output(
         }
         BlockChangeInput::SetChecked { checked } => {
             let BlockProjection::Text {
-                checked: current, ..
+                style,
+                checked: current,
+                ..
             } = &mut block.content
             else {
                 return Err(HandlerError::new(ToolError::validation()));
             };
+            if *style != WireTextStyle::Checkbox {
+                return Err(HandlerError::new(ToolError::validation()));
+            }
             *current = *checked;
         }
         BlockChangeInput::SetTextColor { color } => {
@@ -3582,15 +3778,26 @@ fn intended_update_output(
             *color = None;
         }
         BlockChangeInput::SetCalloutIcon { icon } => {
-            let BlockProjection::Text { icon: current, .. } = &mut block.content else {
+            let BlockProjection::Text {
+                style,
+                icon: current,
+                ..
+            } = &mut block.content
+            else {
                 return Err(HandlerError::new(ToolError::validation()));
             };
+            if *style != WireTextStyle::Callout {
+                return Err(HandlerError::new(ToolError::validation()));
+            }
             *current = Some(icon.clone());
         }
         BlockChangeInput::ClearCalloutIcon => {
-            let BlockProjection::Text { icon, .. } = &mut block.content else {
+            let BlockProjection::Text { style, icon, .. } = &mut block.content else {
                 return Err(HandlerError::new(ToolError::validation()));
             };
+            if *style != WireTextStyle::Callout {
+                return Err(HandlerError::new(ToolError::validation()));
+            }
             *icon = None;
         }
         BlockChangeInput::SetDividerStyle { style } => {
@@ -3636,12 +3843,7 @@ fn intended_update_output(
             *current_relations = relations.clone();
         }
     }
-    Ok(BodyBlockMutationOutput {
-        space_id: projected.space_id,
-        object_id: projected.object_id,
-        block,
-        snapshot_hash: intended_snapshot_hash()?,
-    })
+    Ok(())
 }
 
 fn intended_create_output(
@@ -3662,7 +3864,7 @@ fn intended_create_output(
             text: text.clone(),
             style: WireTextStyle::from(TextStyle::from(*style)),
             checked: checked.as_ref().copied().unwrap_or(false),
-            color: text_color.as_ref().map(|color| color.as_str().to_owned()),
+            color: text_color.as_ref().cloned(),
             icon: icon.as_ref().cloned(),
             marks: marks.clone(),
         },
@@ -3719,7 +3921,7 @@ fn intended_create_output(
             vertical_align: presentation_vertical(input)
                 .copied()
                 .unwrap_or(WireVerticalAlign::Top),
-            background_color: presentation_background(input).map(str::to_owned),
+            background_color: presentation_background(input).cloned(),
             content,
         },
         snapshot_hash: intended_snapshot_hash()?,
@@ -3875,11 +4077,7 @@ impl BodyHandlers {
                 let subtree = subtree_ids(&prepared.snapshot, &block_id)
                     .map_err(HandlerOperationError::from)?;
                 if subtree.len() != usize::from(input.expected_subtree_blocks)
-                    || subtree.iter().any(|id| {
-                        prepared.snapshot.get(id).is_none_or(|block| {
-                            block.restrictions.remove || structural_or_opaque(&block.content)
-                        })
-                    })
+                    || !subtree_is_mutable(&prepared.snapshot, &subtree, MutationKind::Remove)
                 {
                     return Err(HandlerError::new(ToolError::validation()).into());
                 }
@@ -3887,6 +4085,8 @@ impl BodyHandlers {
                     .map_err(HandlerOperationError::from)?;
                 validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                     .map_err(HandlerOperationError::from)?;
+                let before =
+                    project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
                 let metrics = prepared.rpc.metrics();
                 let editor = prepared
                     .snapshot
@@ -3897,7 +4097,7 @@ impl BodyHandlers {
                         .await?;
                 let projected =
                     project_snapshot(&receipt.snapshot).map_err(HandlerOperationError::from)?;
-                if subtree.iter().any(|id| receipt.snapshot.get(id).is_some()) {
+                if !verify_delete_transition(&before, &projected, &subtree) {
                     return Err(HandlerError::new(ToolError::mutation_indeterminate()).into());
                 }
                 let output = BodyBlockDeleteOutput {
@@ -3958,13 +4158,18 @@ impl BodyHandlers {
                 }
                 let subtree = subtree_ids(&prepared.snapshot, &block_id)
                     .map_err(HandlerOperationError::from)?;
-                if block_id == target_id || subtree.contains(&target_id) {
+                if block_id == target_id
+                    || subtree.contains(&target_id)
+                    || !subtree_is_mutable(&prepared.snapshot, &subtree, MutationKind::Move)
+                {
                     return Err(HandlerError::new(ToolError::validation()).into());
                 }
                 let intended = intended_move_output(&prepared, &input.block_id)
                     .map_err(HandlerOperationError::from)?;
                 validate_intended_success(&intended_contract, &intended, PRIMITIVE_FRAME_BOUNDS)
                     .map_err(HandlerOperationError::from)?;
+                let before =
+                    project_snapshot(&prepared.snapshot).map_err(HandlerOperationError::from)?;
                 let metrics = prepared.rpc.metrics();
                 let editor = prepared
                     .snapshot
@@ -3976,9 +4181,22 @@ impl BodyHandlers {
                     operation_progress,
                 )
                 .await?;
-                Ok::<_, HandlerOperationError>((receipt, input.block_id))
+                Ok::<_, HandlerOperationError>((
+                    receipt,
+                    input.block_id,
+                    input.target_block_id,
+                    input.position,
+                    before,
+                    subtree,
+                ))
             },
-            |(receipt, block_id)| async move { mutation_output(receipt, &block_id) },
+            |(receipt, block_id, target_id, position, before, subtree)| async move {
+                let after = project_snapshot(&receipt.snapshot)?;
+                if !verify_move_transition(&before, &after, &subtree, &target_id, position) {
+                    return Err(HandlerError::new(ToolError::mutation_indeterminate()));
+                }
+                mutation_output(receipt, &block_id)
+            },
         )
         .await
     }
@@ -3998,6 +4216,133 @@ fn subtree_ids(snapshot: &BodySnapshot, root: &BlockId) -> Result<Vec<BlockId>, 
         stack.extend(block.children.iter().rev().cloned());
     }
     Ok(result)
+}
+
+fn projected_identity_set(snapshot: &ProjectedSnapshot) -> Option<HashSet<&str>> {
+    let ids = snapshot
+        .items
+        .iter()
+        .map(|block| block.id.as_str())
+        .collect::<HashSet<_>>();
+    (ids.len() == snapshot.items.len()).then_some(ids)
+}
+
+fn verify_delete_transition(
+    before: &ProjectedSnapshot,
+    after: &ProjectedSnapshot,
+    subtree: &[BlockId],
+) -> bool {
+    if before.space_id != after.space_id
+        || before.object_id != after.object_id
+        || before.root_id != after.root_id
+    {
+        return false;
+    }
+    let Some(before_ids) = projected_identity_set(before) else {
+        return false;
+    };
+    let Some(after_ids) = projected_identity_set(after) else {
+        return false;
+    };
+    let removed = subtree.iter().map(BlockId::as_str).collect::<HashSet<_>>();
+    let expected = before_ids
+        .iter()
+        .copied()
+        .filter(|id| !removed.contains(id))
+        .collect::<HashSet<_>>();
+    after_ids == expected
+        && removed
+            .iter()
+            .all(|id| before_ids.contains(id) && !after_ids.contains(id))
+}
+
+fn same_block_value(left: &BlockSummary, right: &BlockSummary) -> bool {
+    left.id == right.id
+        && left.child_count == right.child_count
+        && left.restrictions == right.restrictions
+        && left.align == right.align
+        && left.vertical_align == right.vertical_align
+        && left.background_color == right.background_color
+        && left.content == right.content
+}
+
+fn verify_move_transition(
+    before: &ProjectedSnapshot,
+    after: &ProjectedSnapshot,
+    subtree: &[BlockId],
+    target_id: &EntityId,
+    position: WireInsertPosition,
+) -> bool {
+    if before.space_id != after.space_id
+        || before.object_id != after.object_id
+        || before.root_id != after.root_id
+        || projected_identity_set(before) != projected_identity_set(after)
+    {
+        return false;
+    }
+    let subtree_ids = subtree.iter().map(BlockId::as_str).collect::<HashSet<_>>();
+    if subtree_ids.len() != subtree.len() {
+        return false;
+    }
+    let before_subtree = before
+        .items
+        .iter()
+        .filter(|block| subtree_ids.contains(block.id.as_str()))
+        .collect::<Vec<_>>();
+    let after_subtree = after
+        .items
+        .iter()
+        .filter(|block| subtree_ids.contains(block.id.as_str()))
+        .collect::<Vec<_>>();
+    if before_subtree.len() != subtree.len()
+        || after_subtree.len() != subtree.len()
+        || before_subtree
+            .iter()
+            .map(|block| block.id.as_str())
+            .ne(after_subtree.iter().map(|block| block.id.as_str()))
+    {
+        return false;
+    }
+    let Some(before_root) = before_subtree.first().copied() else {
+        return false;
+    };
+    let Some(after_root) = after_subtree.first().copied() else {
+        return false;
+    };
+    let Some(target) = after.items.iter().find(|block| &block.id == target_id) else {
+        return false;
+    };
+    let exact_position = match position {
+        WireInsertPosition::Before => {
+            after_root.parent_id == target.parent_id
+                && after_root.sibling_index.checked_add(1) == Some(target.sibling_index)
+        }
+        WireInsertPosition::After => {
+            after_root.parent_id == target.parent_id
+                && target.sibling_index.checked_add(1) == Some(after_root.sibling_index)
+        }
+        WireInsertPosition::FirstChild => {
+            after_root.parent_id.as_ref() == Some(target_id) && after_root.sibling_index == 0
+        }
+        WireInsertPosition::LastChild => {
+            after_root.parent_id.as_ref() == Some(target_id)
+                && after_root.sibling_index.checked_add(1) == Some(target.child_count)
+        }
+    };
+    if !exact_position || !same_block_value(before_root, after_root) {
+        return false;
+    }
+    let depth_delta = i128::from(after_root.depth) - i128::from(before_root.depth);
+    before_subtree
+        .iter()
+        .skip(1)
+        .zip(after_subtree.iter().skip(1))
+        .all(|(prior, current)| {
+            same_block_value(prior, current)
+                && prior.parent_id == current.parent_id
+                && prior.sibling_index == current.sibling_index
+                && i128::from(current.depth) - i128::from(prior.depth) == depth_delta
+        })
 }
 
 fn body_create_fingerprint(input: &BodyBlockCreateInput, resolved_space: &str) -> [u8; 32] {
@@ -4594,68 +4939,82 @@ fn verify_rich_applied_replay(
     value: &serde_json::Value,
     projected: &ProjectedSnapshot,
 ) -> bool {
-    let Some(applied) = value.get("applied").and_then(serde_json::Value::as_array) else {
+    let Some(applied_value) = value.get("applied") else {
+        return false;
+    };
+    let Ok(applied) = serde_json::from_value::<Vec<RichApplied>>(applied_value.clone()) else {
         return false;
     };
     if applied.len() > input.blocks.len() {
         return false;
     }
+    verified_rich_prefix_len(input, &applied, projected, None) == applied.len()
+}
+
+fn verified_rich_prefix_len(
+    input: &RichPageCreateInput,
+    applied: &[RichApplied],
+    projected: &ProjectedSnapshot,
+    root_append_baseline: Option<u64>,
+) -> usize {
     let mut actual_ids = HashMap::<&str, &str>::new();
     let mut last_sibling = HashMap::<&str, u64>::new();
+    let mut seen_ids = HashSet::<&str>::new();
     for (position, receipt) in applied.iter().enumerate() {
-        let Some(index) = receipt.get("index").and_then(serde_json::Value::as_u64) else {
-            return false;
-        };
-        if usize::try_from(index).ok() != Some(position) {
-            return false;
+        if usize::from(receipt.index) != position || position >= input.blocks.len() {
+            return position;
         }
         let entry = &input.blocks[position];
-        if receipt.get("local_key").and_then(serde_json::Value::as_str)
-            != Some(entry.local_key.as_str())
-        {
-            return false;
+        if receipt.local_key != entry.local_key {
+            return position;
         }
-        let Some(block_id) = receipt.get("block_id").and_then(serde_json::Value::as_str) else {
-            return false;
-        };
+        let block_id = receipt.block_id.as_str();
+        if !seen_ids.insert(block_id) {
+            return position;
+        }
         let Some(block) = projected
             .items
             .iter()
             .find(|candidate| candidate.id.as_str() == block_id)
         else {
-            return false;
+            return position;
         };
         let expected_parent = match entry.parent_key.as_ref() {
             Some(parent) => match actual_ids.get(parent.as_str()).copied() {
                 Some(parent) => parent,
-                None => return false,
+                None => return position,
             },
             None => projected.root_id.as_str(),
         };
         if block.parent_id.as_ref().map(EntityId::as_str) != Some(expected_parent) {
-            return false;
+            return position;
         }
-        if last_sibling
-            .insert(expected_parent, block.sibling_index)
-            .is_some_and(|prior| prior >= block.sibling_index)
-        {
-            return false;
+        if let Some(prior) = last_sibling.insert(expected_parent, block.sibling_index) {
+            if prior.checked_add(1) != Some(block.sibling_index) {
+                return position;
+            }
+        } else if entry.parent_key.as_ref().is_some() {
+            if block.sibling_index != 0 {
+                return position;
+            }
+        } else if root_append_baseline.is_some_and(|baseline| baseline != block.sibling_index) {
+            return position;
         }
         let Ok(expected) =
             intended_create_output(&projected.space_id, &projected.object_id, &entry.block)
         else {
-            return false;
+            return position;
         };
         if block.content != expected.block.content
             || block.align != expected.block.align
             || block.vertical_align != expected.block.vertical_align
             || block.background_color != expected.block.background_color
         {
-            return false;
+            return position;
         }
         actual_ids.insert(entry.local_key.as_str(), block_id);
     }
-    true
+    applied.len()
 }
 
 impl BodyHandlers {
@@ -4792,22 +5151,31 @@ impl BodyHandlers {
         let rpc = BodyRpcConfig::new(tokio::time::Instant::from_std(recovery.deadline));
         let body = tokio::select! {
             biased;
-            () = cancellation.cancelled() => None,
-            () = tokio::time::sleep_until(tokio::time::Instant::from_std(recovery.deadline)) => None,
+            () = cancellation.cancelled() => Err(RichFailureCategory::Upstream),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(recovery.deadline)) => {
+                Err(RichFailureCategory::Upstream)
+            },
             result = fetch_body(
                 runtime.client(),
                 recovery.candidate.space_id(),
                 recovery.candidate.object_id(),
                 rpc,
-            ) => result.ok(),
+            ) => match result {
+                Ok(snapshot) => match project_snapshot(&snapshot) {
+                    Ok(projected)
+                        if projected.space_id.as_str() == recovery.candidate.space_id()
+                            && projected.object_id.as_str()
+                                == recovery.candidate.object_id() => Ok(projected.hash),
+                    Ok(_) => Err(RichFailureCategory::Conflict),
+                    Err(error) => Err(tool_category(error.tool_error())),
+                },
+                Err(error) => Err(rich_category(&error)),
+            },
         };
-        let (final_hash, recovered) = body
-            .and_then(|snapshot| project_snapshot(&snapshot).ok())
-            .filter(|projected| {
-                projected.space_id.as_str() == recovery.candidate.space_id()
-                    && projected.object_id.as_str() == recovery.candidate.object_id()
-            })
-            .map_or((None, false), |projected| (Some(projected.hash), true));
+        let (final_hash, category) = match body {
+            Ok(hash) => (Some(hash), RichFailureCategory::Conflict),
+            Err(category) => (None, category),
+        };
         let space_id = match EntityId::new(recovery.candidate.space_id()) {
             Ok(value) => value,
             Err(_) => return tool_error(&ToolError::conflict()),
@@ -4821,7 +5189,7 @@ impl BodyHandlers {
             &object_id,
             input.blocks.len(),
             final_hash,
-            recovered,
+            category,
         );
         let result =
             finish_rich_result(&self.rich_create, output, CreateDisposition::Terminal).result;
@@ -5083,6 +5451,21 @@ async fn execute_rich_create(
             return finish_rich_result(contract, output, CreateDisposition::Terminal);
         }
     };
+    let root_append_baseline = match u64::try_from(initial.root().children.len()) {
+        Ok(value) => value,
+        Err(_) => {
+            let output = rich_local_failure(
+                &space_id,
+                &object_id,
+                0,
+                plan.entries.len(),
+                Vec::new(),
+                RichFailureCategory::BoundedResult,
+                None,
+            );
+            return finish_rich_result(contract, output, CreateDisposition::Terminal);
+        }
+    };
     let mut current = initial;
     let mut applied = Vec::with_capacity(plan.entries.len());
     let mut actual_ids = HashMap::<String, BlockId>::new();
@@ -5208,7 +5591,7 @@ async fn execute_rich_create(
             }
             Some(Err(error)) => {
                 let polled = rpc.metrics().snapshot().write_polls > before_polls;
-                let definitive = polled && matches!(error, AnytypeError::Validation { .. });
+                let definitive = polled && mutation_rejection_is_definitive(&error);
                 let final_hash = fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
                 let output = if polled && !definitive {
                     rich_postwrite_failure(
@@ -5217,6 +5600,16 @@ async fn execute_rich_create(
                         index,
                         plan.entries.len(),
                         applied,
+                        final_hash,
+                    )
+                } else if definitive {
+                    rich_attempted_rejection(
+                        &space_id,
+                        &object_id,
+                        index,
+                        plan.entries.len(),
+                        applied,
+                        rich_category(&error),
                         final_hash,
                     )
                 } else {
@@ -5261,6 +5654,22 @@ async fn execute_rich_create(
             return finish_rich_result(contract, output, CreateDisposition::Terminal);
         }
     };
+    let verified_prefix = verified_rich_prefix_len(
+        &input,
+        &applied,
+        &final_projected,
+        Some(root_append_baseline),
+    );
+    if verified_prefix != applied.len() {
+        let output = rich_final_drift_failure(
+            &space_id,
+            &object_id,
+            verified_prefix,
+            applied,
+            final_projected.hash,
+        );
+        return finish_rich_result(contract, output, CreateDisposition::Terminal);
+    }
     let output = RichPageCreateOutput {
         status: RichStatus::Complete,
         space_id,
@@ -5312,8 +5721,9 @@ fn rich_recovered_failure(
     object_id: &EntityId,
     total: usize,
     final_snapshot_hash: Option<SnapshotHash>,
-    recovered: bool,
+    category: RichFailureCategory,
 ) -> RichPageCreateOutput {
+    let recovered = final_snapshot_hash.is_some();
     RichPageCreateOutput {
         status: RichStatus::Partial,
         space_id: space_id.clone(),
@@ -5321,11 +5731,7 @@ fn rich_recovered_failure(
         applied: Vec::new(),
         failed: Some(RichFailure {
             index: 0,
-            category: if recovered {
-                RichFailureCategory::Conflict
-            } else {
-                RichFailureCategory::Upstream
-            },
+            category,
             message: if recovered {
                 "created page recovered; block plan was not resumed"
             } else {
@@ -5396,6 +5802,61 @@ fn rich_postwrite_failure(
     }
 }
 
+fn rich_attempted_rejection(
+    space_id: &EntityId,
+    object_id: &EntityId,
+    index: usize,
+    total: usize,
+    applied: Vec<RichApplied>,
+    category: RichFailureCategory,
+    final_snapshot_hash: Option<SnapshotHash>,
+) -> RichPageCreateOutput {
+    RichPageCreateOutput {
+        status: RichStatus::Partial,
+        space_id: space_id.clone(),
+        object_id: object_id.clone(),
+        applied,
+        failed: Some(RichFailure {
+            index: rich_index(index),
+            category,
+            message: "The page was created, but Anytype rejected this block write.",
+        }),
+        not_attempted: (index.saturating_add(1)..total).map(rich_index).collect(),
+        final_snapshot_hash,
+        idempotency: IdempotencyProjection {
+            key_reused: false,
+            scope: "process",
+        },
+    }
+}
+
+fn rich_final_drift_failure(
+    space_id: &EntityId,
+    object_id: &EntityId,
+    verified_prefix: usize,
+    mut applied: Vec<RichApplied>,
+    final_snapshot_hash: SnapshotHash,
+) -> RichPageCreateOutput {
+    applied.truncate(verified_prefix);
+    RichPageCreateOutput {
+        status: RichStatus::Partial,
+        space_id: space_id.clone(),
+        object_id: object_id.clone(),
+        applied,
+        failed: Some(RichFailure {
+            index: rich_index(verified_prefix),
+            category: RichFailureCategory::Conflict,
+            message: "The final body reread detected concurrent drift in the authored block prefix.",
+        }),
+        not_attempted: Vec::new(),
+        final_snapshot_hash: Some(final_snapshot_hash),
+        idempotency: IdempotencyProjection {
+            key_reused: false,
+            scope: "process",
+        },
+    }
+}
+
 fn rich_cancelled_at_write_boundary(
     space_id: &EntityId,
     object_id: &EntityId,
@@ -5425,17 +5886,21 @@ fn rich_index(index: usize) -> u8 {
 
 fn rich_category(error: &AnytypeError) -> RichFailureCategory {
     match ToolError::from_anytype(error) {
-        AnytypeErrorMapping::Ready(error) => match error.code() {
-            crate::error::ToolErrorCode::Authentication => RichFailureCategory::Authentication,
-            crate::error::ToolErrorCode::Validation => RichFailureCategory::Validation,
-            crate::error::ToolErrorCode::NotFound => RichFailureCategory::NotFound,
-            crate::error::ToolErrorCode::Conflict => RichFailureCategory::Conflict,
-            crate::error::ToolErrorCode::BoundedResult => RichFailureCategory::BoundedResult,
-            crate::error::ToolErrorCode::Ambiguous | crate::error::ToolErrorCode::Upstream => {
-                RichFailureCategory::Upstream
-            }
-        },
+        AnytypeErrorMapping::Ready(error) => tool_category(&error),
         AnytypeErrorMapping::AmbiguityRequiresCandidates => RichFailureCategory::Upstream,
+    }
+}
+
+fn tool_category(error: &ToolError) -> RichFailureCategory {
+    match error.code() {
+        crate::error::ToolErrorCode::Authentication => RichFailureCategory::Authentication,
+        crate::error::ToolErrorCode::Validation => RichFailureCategory::Validation,
+        crate::error::ToolErrorCode::NotFound => RichFailureCategory::NotFound,
+        crate::error::ToolErrorCode::Conflict => RichFailureCategory::Conflict,
+        crate::error::ToolErrorCode::BoundedResult => RichFailureCategory::BoundedResult,
+        crate::error::ToolErrorCode::Ambiguous | crate::error::ToolErrorCode::Upstream => {
+            RichFailureCategory::Upstream
+        }
     }
 }
 
@@ -5595,6 +6060,73 @@ mod tests {
 
     fn text_block(text: &str) -> Value {
         json!({"kind":"text","style":"paragraph","text":text,"marks":[]})
+    }
+
+    fn restrictions() -> RestrictionsProjection {
+        RestrictionsProjection {
+            read: false,
+            edit: false,
+            remove: false,
+            drag: false,
+            drop_on: false,
+        }
+    }
+
+    fn projected_text(text: &str) -> BlockProjection {
+        BlockProjection::Text {
+            text: text.to_owned(),
+            style: WireTextStyle::Paragraph,
+            checked: false,
+            color: None,
+            icon: None,
+            marks: Vec::new(),
+        }
+    }
+
+    fn summary(
+        id: &str,
+        parent: Option<&str>,
+        sibling_index: u64,
+        depth: u64,
+        child_count: u64,
+        content: BlockProjection,
+    ) -> BlockSummary {
+        BlockSummary {
+            id: EntityId::new(id).expect("fixture ID"),
+            parent_id: parent.map(|value| EntityId::new(value).expect("fixture parent ID")),
+            sibling_index,
+            depth,
+            child_count,
+            restrictions: restrictions(),
+            align: WireHorizontalAlign::Left,
+            vertical_align: WireVerticalAlign::Top,
+            background_color: None,
+            content,
+        }
+    }
+
+    fn projected(items: Vec<BlockSummary>) -> ProjectedSnapshot {
+        let space_id = EntityId::new("space").expect("space ID");
+        let object_id = EntityId::new("object").expect("object ID");
+        let root_id = EntityId::new("root").expect("root ID");
+        let hash = hash_projection(&space_id, &object_id, &root_id, &items);
+        ProjectedSnapshot {
+            space_id,
+            object_id,
+            root_id,
+            hash,
+            items,
+        }
+    }
+
+    fn rich_applied(index: u8, key: &str, id: &str) -> RichApplied {
+        RichApplied {
+            index,
+            local_key: LocalKey::new(key.to_owned()).expect("local key"),
+            block_id: EntityId::new(id).expect("block ID"),
+            snapshot_hash: SnapshotHash::new("a".repeat(MAX_SNAPSHOT_HASH_BYTES))
+                .expect("snapshot hash"),
+        }
     }
 
     fn canonical(value: Value) -> String {
@@ -5766,7 +6298,13 @@ mod tests {
         })
     }
 
-    fn paired_fixtures(tokenizer: &CoreBPE, standard_catalog_tokens: usize) -> Value {
+    fn paired_fixtures(
+        tokenizer: &CoreBPE,
+        compact_catalog_tokens: usize,
+        compact_read_only_catalog_tokens: usize,
+        standard_catalog_tokens: usize,
+        standard_read_only_catalog_tokens: usize,
+    ) -> Value {
         let hash = "a".repeat(MAX_SNAPSHOT_HASH_BYTES);
         let entity = format!("e{}", "x".repeat(255));
         let space = dense_chars(512);
@@ -5778,7 +6316,7 @@ mod tests {
         let list_items = (0..MAX_LIST_LIMIT as usize)
             .map(|index| maximum_block(index, index < 8))
             .collect::<Vec<_>>();
-        let list_success = success_frame(json!({
+        let rejected_list_success = success_frame(json!({
             "space_id":format!("s{}", "x".repeat(255)),
             "object_id":format!("o{}", "x".repeat(255)),
             "root_id":format!("r{}", "x".repeat(255)),
@@ -5799,7 +6337,7 @@ mod tests {
         });
         let mut primitive_success_block = maximum_block(0, true);
         primitive_success_block["content"]["marks"] = json!(dense_marks(MAX_MARKS_PER_TEXT));
-        let primitive_success = success_frame(json!({
+        let rejected_primitive_success = success_frame(json!({
             "space_id":format!("s{}", "x".repeat(255)),
             "object_id":format!("o{}", "x".repeat(255)),
             "block":primitive_success_block,
@@ -5818,7 +6356,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let rich_request = json!({
+        let rejected_rich_request = json!({
             "space":dense_chars(512),
             "name":dense_chars(MAX_DISPLAY_NAME_CHARS),
             "idempotency_key":dense_chars(256),
@@ -5877,17 +6415,18 @@ mod tests {
         let list_params =
             CallToolRequestParams::new(BODY_BLOCK_LIST).with_arguments(args(list_request.clone()));
         assert!(ensure_body_request_bounds(&list_params, LIST_FRAME_BOUNDS).is_ok());
-        let list_result = serde_json::from_value::<CallToolResult>(list_success.clone())
+        let list_result = serde_json::from_value::<CallToolResult>(rejected_list_success.clone())
             .expect("maximum list result frame");
         assert!(validate_body_result_bounds(&list_result, LIST_FRAME_BOUNDS).is_err());
         let primitive_params = CallToolRequestParams::new(BODY_BLOCK_UPDATE)
             .with_arguments(args(primitive_request.clone()));
         assert!(ensure_body_request_bounds(&primitive_params, PRIMITIVE_FRAME_BOUNDS).is_ok());
-        let primitive_result = serde_json::from_value::<CallToolResult>(primitive_success.clone())
-            .expect("maximum primitive result frame");
+        let primitive_result =
+            serde_json::from_value::<CallToolResult>(rejected_primitive_success.clone())
+                .expect("maximum primitive result frame");
         assert!(validate_body_result_bounds(&primitive_result, PRIMITIVE_FRAME_BOUNDS).is_err());
-        let rich_params =
-            CallToolRequestParams::new(RICH_PAGE_CREATE).with_arguments(args(rich_request.clone()));
+        let rich_params = CallToolRequestParams::new(RICH_PAGE_CREATE)
+            .with_arguments(args(rejected_rich_request.clone()));
         assert!(ensure_body_request_bounds(&rich_params, RICH_FRAME_BOUNDS).is_err());
         let rich_result = serde_json::from_value::<CallToolResult>(rich_success.clone())
             .expect("maximum rich result frame");
@@ -5914,34 +6453,134 @@ mod tests {
             panic!("maximum primitive fixture changed kind");
         };
         input_marks(marks, text).expect("maximum primitive marks are valid");
-        let rich_input = serde_json::from_value::<RichPageCreateInput>(rich_request.clone())
-            .expect("maximum rich request shape is valid");
+        let rich_input =
+            serde_json::from_value::<RichPageCreateInput>(rejected_rich_request.clone())
+                .expect("maximum rich request shape is valid");
         validate_rich_plan(&rich_input).expect("maximum rich request plan is valid");
         rich_input_bytes(&rich_input).expect("maximum rich request bytes are valid");
+        let list_success = serde_json::to_value(list_result_with_tail(7_655))
+            .expect("greatest admitted list result");
+        let primitive_success = serde_json::to_value(primitive_result_with_marks(98))
+            .expect("greatest admitted primitive result");
+        let rich_request = rich_request_with_marks(511);
         let pairs = [
-            ("list", list_request, list_success),
-            ("primitive", primitive_request, primitive_success),
-            ("rich", rich_request, rich_success),
+            ("list", list_request, list_success, LIST_FRAME_BOUNDS, true),
+            (
+                "primitive",
+                primitive_request,
+                primitive_success,
+                PRIMITIVE_FRAME_BOUNDS,
+                false,
+            ),
+            ("rich", rich_request, rich_success, RICH_FRAME_BOUNDS, false),
         ];
         let mut measurements = pairs
             .into_iter()
-            .map(|(name, request, success)| {
+            .map(|(name, request, success, bounds, read_only)| {
                 let request_tokens = tokens(tokenizer, request.clone());
                 let success_tokens = tokens(tokenizer, success.clone());
                 let error = error_frame();
                 let error_tokens = tokens(tokenizer, error.clone());
+                let result = serde_json::from_value::<CallToolResult>(success.clone())
+                    .expect("admitted result");
+                assert!(validate_body_result_bounds(&result, bounds).is_ok());
+                let params = CallToolRequestParams::new(match name {
+                    "list" => BODY_BLOCK_LIST,
+                    "primitive" => BODY_BLOCK_UPDATE,
+                    _ => RICH_PAGE_CREATE,
+                })
+                .with_arguments(args(request.clone()));
+                assert!(ensure_body_request_bounds(&params, bounds).is_ok());
+                let request_frame = json!({
+                    "jsonrpc":"2.0","id":u64::MAX,"method":"tools/call","params":params
+                });
+                let result_frame =
+                    json!({"jsonrpc":"2.0","id":u64::MAX,"result":success.clone()});
+                let request_frame_bytes = encoded_size(&request_frame).expect("request frame bytes");
+                let result_frame_bytes = encoded_size(&result_frame).expect("result frame bytes");
+                let structured_bytes = result
+                    .structured_content
+                    .as_ref()
+                    .map(encoded_size)
+                    .transpose()
+                    .expect("structured result bytes")
+                    .unwrap_or_default();
+                assert!(request_frame_bytes <= MAX_BODY_REQUEST_FRAME_BYTES);
+                assert!(result_frame_bytes <= MAX_BODY_SUCCESS_FRAME_BYTES);
+                assert!(structured_bytes <= bounds.success_bytes);
+                let contexts = json!({
+                    "compact_read_write_success":compact_catalog_tokens + request_tokens + success_tokens,
+                    "compact_read_write_error":compact_catalog_tokens + request_tokens + error_tokens,
+                    "standard_read_write_success":standard_catalog_tokens + request_tokens + success_tokens,
+                    "standard_read_write_error":standard_catalog_tokens + request_tokens + error_tokens,
+                    "compact_read_only_success":read_only.then_some(compact_read_only_catalog_tokens + request_tokens + success_tokens),
+                    "compact_read_only_error":read_only.then_some(compact_read_only_catalog_tokens + request_tokens + error_tokens),
+                    "standard_read_only_success":read_only.then_some(standard_read_only_catalog_tokens + request_tokens + success_tokens),
+                    "standard_read_only_error":read_only.then_some(standard_read_only_catalog_tokens + request_tokens + error_tokens)
+                });
+                for value in contexts.as_object().expect("context cells").values() {
+                    if let Some(value) = value.as_u64() {
+                        assert!(value < 200_000);
+                    }
+                }
+                let (compact_success, compact_error, standard_success, standard_error) =
+                    match name {
+                        "list" => (157_158, 39_158, 183_635, 65_635),
+                        "primitive" => (119_158, 97_158, 145_635, 123_635),
+                        _ => (135_158, 117_158, 161_635, 143_635),
+                    };
+                assert!(
+                    contexts["compact_read_write_success"]
+                        .as_u64()
+                        .is_some_and(|value| value <= compact_success)
+                );
+                assert!(
+                    contexts["compact_read_write_error"]
+                        .as_u64()
+                        .is_some_and(|value| value <= compact_error)
+                );
+                assert!(
+                    contexts["standard_read_write_success"]
+                        .as_u64()
+                        .is_some_and(|value| value <= standard_success)
+                );
+                assert!(
+                    contexts["standard_read_write_error"]
+                        .as_u64()
+                        .is_some_and(|value| value <= standard_error)
+                );
+                if read_only {
+                    assert!(
+                        contexts["compact_read_only_success"]
+                            .as_u64()
+                            .is_some_and(|value| value <= 134_869)
+                    );
+                    assert!(
+                        contexts["compact_read_only_error"]
+                            .as_u64()
+                            .is_some_and(|value| value <= 16_869)
+                    );
+                    assert!(
+                        contexts["standard_read_only_success"]
+                            .as_u64()
+                            .is_some_and(|value| value <= 155_380)
+                    );
+                    assert!(
+                        contexts["standard_read_only_error"]
+                            .as_u64()
+                            .is_some_and(|value| value <= 37_380)
+                    );
+                }
                 (
                     name.to_owned(),
                     json!({
                         "request":fixture_measurement(tokenizer, request),
                         "success":fixture_measurement(tokenizer, success),
                         "error":fixture_measurement(tokenizer, error),
-                        "success_complete_context_tokens":standard_catalog_tokens
-                            .saturating_add(request_tokens)
-                            .saturating_add(success_tokens),
-                        "error_complete_context_tokens":standard_catalog_tokens
-                            .saturating_add(request_tokens)
-                            .saturating_add(error_tokens)
+                        "request_full_frame_bytes":request_frame_bytes,
+                        "success_structured_bytes":structured_bytes,
+                        "success_full_frame_bytes":result_frame_bytes,
+                        "context_tokens":contexts
                     }),
                 )
             })
@@ -5949,6 +6588,14 @@ mod tests {
         measurements.insert(
             "rich_table_prompt_request".to_owned(),
             fixture_measurement(tokenizer, rich_table_request),
+        );
+        measurements.insert(
+            "rejected_over_limits".to_owned(),
+            json!({
+                "list_success":fixture_measurement(tokenizer, rejected_list_success),
+                "primitive_success":fixture_measurement(tokenizer, rejected_primitive_success),
+                "rich_request":fixture_measurement(tokenizer, rejected_rich_request)
+            }),
         );
         measurements.into()
     }
@@ -6080,6 +6727,9 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
         let standard_tokens = tokens(&tokenizer, tools_value(&standard));
+        let compact_tokens = tokens(&tokenizer, read_write_value.clone());
+        let compact_read_only_tokens = tokens(&tokenizer, read_only_value.clone());
+        let standard_read_only_tokens = tokens(&tokenizer, tools_value(&standard_read_only));
         json!({
             "tokenizer":"tiktoken o200k_base (tiktoken-rs 0.12.0)",
             "selected":[BODY_BLOCKS_TOOLSET_NAME],
@@ -6098,16 +6748,491 @@ mod tests {
                 .saturating_sub(tokens(&tokenizer, base_value)),
             "read_only_selected_contribution_tokens":tokens(&tokenizer, read_only_value.clone())
                 .saturating_sub(tokens(&tokenizer, base_read_only_value)),
-            "compact_composed_total_tokens":tokens(&tokenizer, read_write_value),
+            "compact_composed_total_tokens":compact_tokens,
             "compact_composed_ceiling_tokens":35_158,
-            "compact_read_only_total_tokens":tokens(&tokenizer, read_only_value),
+            "compact_read_only_total_tokens":compact_read_only_tokens,
             "compact_read_only_ceiling_tokens":12_869,
             "standard_composed_total_tokens":standard_tokens,
             "standard_composed_ceiling_tokens":61_635,
-            "standard_read_only_total_tokens":tokens(&tokenizer, tools_value(&standard_read_only)),
+            "standard_read_only_total_tokens":standard_read_only_tokens,
             "standard_read_only_ceiling_tokens":33_380,
-            "paired_fixtures":paired_fixtures(&tokenizer, standard_tokens)
+            "paired_fixtures":paired_fixtures(
+                &tokenizer,
+                compact_tokens,
+                compact_read_only_tokens,
+                standard_tokens,
+                standard_read_only_tokens,
+            )
         })
+    }
+
+    fn execute_scripted_scenario(id: &str) {
+        match id {
+            "body_list_ordered_pages" => {
+                let items = (0..13)
+                    .map(|index| {
+                        summary(
+                            &format!("b{index}"),
+                            Some("root"),
+                            index,
+                            1,
+                            0,
+                            projected_text("x"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let snapshot = projected(items);
+                let (first, continuation) =
+                    select_body_page(&snapshot, None, 0, 8).expect("first production page");
+                let continuation = continuation.expect("continuation evidence");
+                let (second, terminal) = select_body_page(
+                    &snapshot,
+                    Some(&continuation),
+                    continuation.offset().get(),
+                    8,
+                )
+                .expect("continuation production page");
+                assert_eq!(first.len(), 8);
+                assert_eq!(second.len(), 5);
+                assert!(terminal.is_none());
+                assert_eq!(continuation.boundary_id(), snapshot.hash.as_str());
+                let combined = first
+                    .iter()
+                    .chain(&second)
+                    .map(|block| block.id.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    combined,
+                    snapshot
+                        .items
+                        .iter()
+                        .map(|block| block.id.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+            "body_list_revision_conflict" => {
+                let before = projected(vec![summary(
+                    "root",
+                    None,
+                    0,
+                    0,
+                    0,
+                    projected_text("before"),
+                )]);
+                let after = projected(vec![summary(
+                    "root",
+                    None,
+                    0,
+                    0,
+                    0,
+                    projected_text("after"),
+                )]);
+                assert_ne!(before.hash, after.hash);
+                let prior = EvidenceCursorState::new(
+                    PageOffset::new(1).expect("page offset"),
+                    1,
+                    before.hash.as_str().to_owned(),
+                );
+                assert!(select_body_page(&after, Some(&prior), 1, 8).is_err());
+            }
+            "body_limits_fail_closed" => {
+                assert!(MAX_LIST_LIMIT <= 12);
+                assert!(MAX_BODY_BLOCKS <= 2_048);
+                assert!(MAX_TABLE_CELLS < MAX_TABLE_ROWS * MAX_TABLE_COLUMNS);
+                assert!(
+                    validate_body_result_bounds(&list_result_with_tail(7_656), LIST_FRAME_BOUNDS)
+                        .is_err()
+                );
+            }
+            "body_opaque_read_only" => {
+                let opaque = BlockProjection::Unsupported {
+                    opaque_kind: OpaqueKind::new("dataview".to_owned()).expect("opaque kind"),
+                    child_count: 2,
+                    approx_bytes: 9,
+                };
+                let encoded = serde_json::to_string(&opaque).expect("opaque JSON");
+                assert!(!encoded.contains("secret"));
+                assert!(valid_opaque_kind("dataview"));
+                assert!(!valid_opaque_kind("DataView"));
+            }
+            "body_create_idempotent" => {
+                let input = serde_json::from_value::<BodyBlockCreateInput>(json!({
+                    "space":"space","object_id":"object",
+                    "expected_snapshot_hash":"a".repeat(64),"target_block_id":"root",
+                    "position":"last_child","block":text_block("same"),
+                    "idempotency_key":"key"
+                }))
+                .expect("create input");
+                let same = body_create_fingerprint(&input, "space");
+                let mut changed = input.clone();
+                changed.block = parse_block(text_block("different"));
+                assert_eq!(same, body_create_fingerprint(&input, "space"));
+                assert_ne!(same, body_create_fingerprint(&changed, "space"));
+                run_large_future(move || async move {
+                    let store = IdempotencyStore::new(2);
+                    let key = IdempotencyKey::new("create-key").expect("idempotency key");
+                    let lead = match store.begin(key.clone(), same).await {
+                        BeginAttempt::Lead(attempt) => attempt,
+                        _ => panic!("first cohort member must lead"),
+                    };
+                    let waiter = match store.begin(key.clone(), same).await {
+                        BeginAttempt::Wait(attempt) => attempt,
+                        _ => panic!("same cohort member must wait"),
+                    };
+                    assert!(Arc::ptr_eq(&lead, &waiter));
+                    assert!(matches!(
+                        store.begin(key.clone(), [9; 32]).await,
+                        BeginAttempt::Conflict
+                    ));
+                    let receipt = CallToolResult::structured(json!({"assigned_id":"block"}));
+                    store
+                        .finish(
+                            &key,
+                            &lead,
+                            CreateExecution::new(receipt.clone(), CreateDisposition::Verified),
+                        )
+                        .await;
+                    match store.begin(key, same).await {
+                        BeginAttempt::Cached(cached) => {
+                            assert_eq!(cached.structured_content, receipt.structured_content)
+                        }
+                        _ => panic!("verified cohort must replay from cache"),
+                    }
+
+                    let uncertain_key =
+                        IdempotencyKey::new("uncertain-key").expect("uncertain key");
+                    let uncertain = match store.begin(uncertain_key.clone(), [7; 32]).await {
+                        BeginAttempt::Lead(attempt) => attempt,
+                        _ => panic!("uncertain cohort leader"),
+                    };
+                    uncertain.progress().mark_dispatched();
+                    store
+                        .finish(
+                            &uncertain_key,
+                            &uncertain,
+                            CreateExecution::new(
+                                tool_error(&ToolError::mutation_indeterminate()),
+                                CreateDisposition::Indeterminate,
+                            ),
+                        )
+                        .await;
+                    assert!(matches!(
+                        store.begin(uncertain_key, [7; 32]).await,
+                        BeginAttempt::Indeterminate
+                    ));
+                });
+            }
+            "body_update_one_change" => {
+                let arms = [
+                    json!({"kind":"set_text","text":"x","marks":[]}),
+                    json!({"kind":"set_text_style","style":"heading_1"}),
+                    json!({"kind":"set_checked","checked":true}),
+                    json!({"kind":"set_text_color","color":"red"}),
+                    json!({"kind":"clear_text_color"}),
+                    json!({"kind":"set_callout_icon","icon":{"kind":"emoji","emoji":"!"}}),
+                    json!({"kind":"clear_callout_icon"}),
+                    json!({"kind":"set_divider_style","style":"dots"}),
+                    json!({"kind":"set_background_color","color":"grey"}),
+                    json!({"kind":"clear_background_color"}),
+                    json!({"kind":"set_horizontal_align","align":"center"}),
+                    json!({"kind":"set_vertical_align","align":"middle"}),
+                    json!({"kind":"set_embed_source","source":"x+y"}),
+                    json!({"kind":"set_link_appearance","card_style":"card","icon_size":"small","description":"content","relations":[]}),
+                ];
+                assert_eq!(arms.len(), 14);
+                let decoded = arms
+                    .into_iter()
+                    .map(|arm| serde_json::from_value::<BlockChangeInput>(arm))
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("all closed update arms");
+                let mut paragraph =
+                    summary("text", Some("root"), 3, 1, 0, projected_text("before"));
+                paragraph.background_color =
+                    Some(ColorInput::new("grey".to_owned()).expect("background color"));
+                let prior = paragraph.clone();
+                apply_projected_change(&mut paragraph, &decoded[0])
+                    .expect("text projection change");
+                assert_eq!(paragraph.id, prior.id);
+                assert_eq!(paragraph.parent_id, prior.parent_id);
+                assert_eq!(paragraph.sibling_index, prior.sibling_index);
+                assert_eq!(paragraph.background_color, prior.background_color);
+                assert!(apply_projected_change(&mut paragraph, &decoded[2]).is_err());
+                assert!(apply_projected_change(&mut paragraph, &decoded[5]).is_err());
+
+                let mut checkbox = summary(
+                    "checkbox",
+                    Some("root"),
+                    0,
+                    1,
+                    0,
+                    BlockProjection::Text {
+                        text: "todo".to_owned(),
+                        style: WireTextStyle::Checkbox,
+                        checked: false,
+                        color: None,
+                        icon: None,
+                        marks: Vec::new(),
+                    },
+                );
+                apply_projected_change(&mut checkbox, &decoded[2]).expect("checkbox-only change");
+                assert!(matches!(
+                    checkbox.content,
+                    BlockProjection::Text { checked: true, .. }
+                ));
+            }
+            "body_delete_confirmed_subtree" => {
+                let before = projected(vec![
+                    summary("root", None, 0, 0, 2, projected_text("root")),
+                    summary("gone", Some("root"), 0, 1, 1, projected_text("gone")),
+                    summary("child", Some("gone"), 0, 2, 0, projected_text("child")),
+                    summary("keep", Some("root"), 1, 1, 0, projected_text("keep")),
+                ]);
+                let after = projected(vec![
+                    summary("root", None, 0, 0, 1, projected_text("root")),
+                    summary("keep", Some("root"), 0, 1, 0, projected_text("keep")),
+                ]);
+                let subtree = [
+                    BlockId::try_from("gone".to_owned()).expect("block ID"),
+                    BlockId::try_from("child".to_owned()).expect("block ID"),
+                ];
+                assert!(verify_delete_transition(&before, &after, &subtree));
+                let mut drifted = after.clone();
+                drifted.items.push(summary(
+                    "extra",
+                    Some("root"),
+                    1,
+                    1,
+                    0,
+                    projected_text("extra"),
+                ));
+                assert!(!verify_delete_transition(&before, &drifted, &subtree));
+            }
+            "body_move_same_object" => {
+                let before = projected(vec![
+                    summary("root", None, 0, 0, 2, projected_text("root")),
+                    summary("moved", Some("root"), 0, 1, 1, projected_text("moved")),
+                    summary("child", Some("moved"), 0, 2, 0, projected_text("child")),
+                    summary("target", Some("root"), 1, 1, 0, projected_text("target")),
+                ]);
+                let after = projected(vec![
+                    summary("root", None, 0, 0, 2, projected_text("root")),
+                    summary("target", Some("root"), 0, 1, 0, projected_text("target")),
+                    summary("moved", Some("root"), 1, 1, 1, projected_text("moved")),
+                    summary("child", Some("moved"), 0, 2, 0, projected_text("child")),
+                ]);
+                let subtree = [
+                    BlockId::try_from("moved".to_owned()).expect("block ID"),
+                    BlockId::try_from("child".to_owned()).expect("block ID"),
+                ];
+                let target = EntityId::new("target").expect("target ID");
+                assert!(verify_move_transition(
+                    &before,
+                    &after,
+                    &subtree,
+                    &target,
+                    WireInsertPosition::After
+                ));
+                let mut drifted = after.clone();
+                drifted.items[3].content = projected_text("drift");
+                assert!(!verify_move_transition(
+                    &before,
+                    &drifted,
+                    &subtree,
+                    &target,
+                    WireInsertPosition::After
+                ));
+            }
+            "body_relation_workflows" => {
+                assert!(RelationKey::new("relation_key-1".to_owned()).is_ok());
+                assert!(RelationKey::new("Relation".to_owned()).is_err());
+                let exact = (0..MAX_RELATIONS)
+                    .map(|index| RelationKey::new(format!("r{index}")).expect("relation key"))
+                    .collect::<Vec<_>>();
+                assert!(validate_relation_inputs(&exact).is_ok());
+            }
+            "body_targeted_heading_append" => {
+                let heading = summary("heading", Some("root"), 0, 1, 1, projected_text("Heading"));
+                let child = summary("child", Some("heading"), 0, 2, 0, projected_text("Body"));
+                assert_eq!(child.parent_id.as_ref(), Some(&heading.id));
+                assert_eq!(child.sibling_index, 0);
+            }
+            "rich_page_complete" | "rich_page_replay_drift" => {
+                let input = parse_rich(vec![
+                    entry("a", None, text_block("A")),
+                    entry("b", Some("a"), text_block("B")),
+                ]);
+                let applied = vec![rich_applied(0, "a", "a_id"), rich_applied(1, "b", "b_id")];
+                let snapshot = projected(vec![
+                    summary("root", None, 0, 0, 1, projected_text("root")),
+                    summary("a_id", Some("root"), 0, 1, 1, projected_text("A")),
+                    summary("b_id", Some("a_id"), 0, 2, 0, projected_text("B")),
+                ]);
+                assert_eq!(
+                    verified_rich_prefix_len(&input, &applied, &snapshot, Some(0)),
+                    2
+                );
+                let mut drifted = snapshot.clone();
+                drifted.items[1].content = projected_text("drift");
+                assert_eq!(
+                    verified_rich_prefix_len(&input, &applied, &drifted, Some(0)),
+                    0
+                );
+                if id == "rich_page_replay_drift" {
+                    let flat = parse_rich(vec![
+                        entry("a", None, text_block("A")),
+                        entry("b", None, text_block("B")),
+                    ]);
+                    let interleaved = projected(vec![
+                        summary("root", None, 0, 0, 3, projected_text("root")),
+                        summary("a_id", Some("root"), 0, 1, 0, projected_text("A")),
+                        summary("foreign", Some("root"), 1, 1, 0, projected_text("foreign")),
+                        summary("b_id", Some("root"), 2, 1, 0, projected_text("B")),
+                    ]);
+                    assert_eq!(
+                        verified_rich_prefix_len(&flat, &applied, &interleaved, Some(0)),
+                        1
+                    );
+                }
+            }
+            "rich_page_partial" => {
+                let output = rich_attempted_rejection(
+                    &EntityId::new("space").expect("space"),
+                    &EntityId::new("object").expect("object"),
+                    2,
+                    4,
+                    vec![rich_applied(0, "a", "a"), rich_applied(1, "b", "b")],
+                    RichFailureCategory::Validation,
+                    None,
+                );
+                assert_eq!(output.status, RichStatus::Partial);
+                assert_eq!(output.not_attempted, vec![3]);
+            }
+            "rich_page_indeterminate" => {
+                let output = rich_cancelled_at_write_boundary(
+                    &EntityId::new("space").expect("space"),
+                    &EntityId::new("object").expect("object"),
+                    1,
+                    3,
+                    vec![rich_applied(0, "a", "a")],
+                    true,
+                );
+                assert_eq!(output.status, RichStatus::Indeterminate);
+                assert_eq!(output.not_attempted, vec![2]);
+            }
+            "body_read_only_catalog" => {
+                let read_only = server(
+                    Some(BODY_BLOCKS_TOOLSET_NAME),
+                    ApplicationProfile::Compact,
+                    true,
+                );
+                assert_eq!(body_names(&read_only), vec![BODY_BLOCK_LIST]);
+            }
+            "body_read_restricted" => {
+                assert!(read_access_allowed([false, false]));
+                assert!(!read_access_allowed([false, true, false]));
+            }
+            "body_network_closed" => {
+                let schema = serde_json::to_string(
+                    &rmcp::handler::server::tool::schema_for_input::<BodyBlockCreateInput>()
+                        .expect("create schema"),
+                )
+                .expect("schema JSON");
+                for forbidden in ["mime", "base64", "host_path", "bookmark"] {
+                    assert!(!schema.contains(forbidden));
+                }
+                assert!(valid_youtube_id("a1_B2-c3D4e"));
+            }
+            "body_protocol_parity" => {
+                let stable = server(
+                    Some(BODY_BLOCKS_TOOLSET_NAME),
+                    ApplicationProfile::Compact,
+                    false,
+                );
+                let preview = server(
+                    Some(BODY_BLOCKS_TOOLSET_NAME),
+                    ApplicationProfile::Standard,
+                    false,
+                );
+                let stable_body = stable
+                    .tools()
+                    .iter()
+                    .filter(|tool| BODY_NAMES.contains(&tool.name.as_ref()))
+                    .map(|tool| serde_json::to_value(tool).expect("stable tool"))
+                    .collect::<Vec<_>>();
+                let preview_body = preview
+                    .tools()
+                    .iter()
+                    .filter(|tool| BODY_NAMES.contains(&tool.name.as_ref()))
+                    .map(|tool| serde_json::to_value(tool).expect("preview tool"))
+                    .collect::<Vec<_>>();
+                assert_eq!(stable_body, preview_body);
+            }
+            "body_redaction_and_budgets" => {
+                let secret = "SECRET_BODY_TOKEN";
+                let encoded =
+                    serde_json::to_string(&tool_error(&ToolError::upstream())).expect("error JSON");
+                assert!(!encoded.contains(secret));
+                assert!(MAX_BODY_REQUEST_FRAME_BYTES < MAX_BODY_SUCCESS_FRAME_BYTES);
+            }
+            other => panic!("unowned body scenario {other}"),
+        }
+    }
+
+    macro_rules! scripted_scenario_tests {
+        ($($name:ident),+ $(,)?) => {$(
+            #[test]
+            fn $name() {
+                execute_scripted_scenario(stringify!($name));
+            }
+        )+};
+    }
+
+    scripted_scenario_tests!(
+        body_list_ordered_pages,
+        body_list_revision_conflict,
+        body_limits_fail_closed,
+        body_opaque_read_only,
+        body_create_idempotent,
+        body_update_one_change,
+        body_delete_confirmed_subtree,
+        body_move_same_object,
+        body_relation_workflows,
+        body_targeted_heading_append,
+        rich_page_complete,
+        rich_page_partial,
+        rich_page_indeterminate,
+        rich_page_replay_drift,
+        body_read_only_catalog,
+        body_read_restricted,
+        body_network_closed,
+        body_protocol_parity,
+        body_redaction_and_budgets,
+    );
+
+    #[test]
+    fn scripted_scenario_inventory_is_executable_and_exact() {
+        let executable = [
+            "body_list_ordered_pages",
+            "body_list_revision_conflict",
+            "body_limits_fail_closed",
+            "body_opaque_read_only",
+            "body_create_idempotent",
+            "body_update_one_change",
+            "body_delete_confirmed_subtree",
+            "body_move_same_object",
+            "body_relation_workflows",
+            "body_targeted_heading_append",
+            "rich_page_complete",
+            "rich_page_partial",
+            "rich_page_indeterminate",
+            "rich_page_replay_drift",
+            "body_read_only_catalog",
+            "body_read_restricted",
+            "body_network_closed",
+            "body_protocol_parity",
+            "body_redaction_and_budgets",
+        ];
+        assert_eq!(SCRIPTED_SCENARIOS, executable);
     }
 
     #[test]
@@ -6231,6 +7356,9 @@ mod tests {
 
     #[test]
     fn text_marks_enforce_utf16_ranges_duplicates_and_emoji_bounds() {
+        let observed_zero = TextMark::new(TextRange { start: 1, end: 1 }, MarkKind::Bold);
+        assert!(project_mark(&observed_zero, "ab").is_ok());
+        assert!(input_mark(&WireMark::Bold { start: 1, end: 1 }, "ab").is_err());
         let valid = parse_block(json!({
             "kind":"text","style":"paragraph","text":"a😀b",
             "marks":[{"kind":"bold","start":1,"end":3}]
@@ -6254,6 +7382,36 @@ mod tests {
             "marks":[{"kind":"emoji","start":0,"end":1,"emoji":""}]
         }));
         assert!(new_block(&empty).is_err());
+    }
+
+    #[test]
+    fn output_enums_and_token_grammars_match_runtime_exactly() {
+        for value in ["grey", "default", "!token", "[token"] {
+            assert!(ColorInput::new(value.to_owned()).is_ok(), "{value}");
+        }
+        for value in ["Grey", "é", "has space", &"x".repeat(33)] {
+            assert!(ColorInput::new(value.to_owned()).is_err(), "{value}");
+        }
+        assert!(OpaqueKind::new("dataview_2".to_owned()).is_ok());
+        for value in ["DataView", "2dataview", "data-view", "é"] {
+            assert!(OpaqueKind::new(value.to_owned()).is_err(), "{value}");
+        }
+        let output = serde_json::to_value(
+            rmcp::handler::server::tool::schema_for_output::<BodyBlockListOutput>()
+                .expect("body list output schema"),
+        )
+        .expect("schema value");
+        let encoded = serde_json::to_string(&output).expect("schema JSON");
+        for exact_enum in [
+            r#"["row","column","div","header","table_rows","table_columns"]"#,
+            r#"["empty","fetching","done","error"]"#,
+            r#"["none","file","image","video","audio","pdf"]"#,
+            r#"["auto","link","embed"]"#,
+        ] {
+            assert!(encoded.contains(exact_enum), "missing enum {exact_enum}");
+        }
+        assert!(encoded.contains(r"^[a-z][a-z0-9_]{0,63}$"));
+        assert!(encoded.contains(r"^[\\x21-\\x40\\x5b-\\x7e]{1,32}$"));
     }
 
     #[test]
@@ -6413,6 +7571,55 @@ mod tests {
                 Some(rich_index(index))
             );
         }
+    }
+
+    #[test]
+    fn rich_prewrite_and_recovery_categories_preserve_common_mapping() {
+        let cases = [
+            (
+                ToolError::authentication(),
+                RichFailureCategory::Authentication,
+            ),
+            (ToolError::validation(), RichFailureCategory::Validation),
+            (ToolError::not_found(), RichFailureCategory::NotFound),
+            (ToolError::conflict(), RichFailureCategory::Conflict),
+            (
+                ToolError::bounded_result(),
+                RichFailureCategory::BoundedResult,
+            ),
+            (ToolError::upstream(), RichFailureCategory::Upstream),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(tool_category(&error), expected);
+            let output = rich_recovered_failure(
+                &EntityId::new("space").expect("space"),
+                &EntityId::new("object").expect("object"),
+                3,
+                None,
+                expected,
+            );
+            assert_eq!(output.status, RichStatus::Partial);
+            assert_eq!(
+                output.failed.as_ref().map(|failure| failure.category),
+                Some(expected)
+            );
+            assert_eq!(output.not_attempted, vec![0, 1, 2]);
+            assert!(output.final_snapshot_hash.is_none());
+            assert!(output.idempotency.key_reused);
+        }
+        let hash = SnapshotHash::new("a".repeat(64)).expect("snapshot hash");
+        let recovered = rich_recovered_failure(
+            &EntityId::new("space").expect("space"),
+            &EntityId::new("object").expect("object"),
+            2,
+            Some(hash.clone()),
+            RichFailureCategory::Conflict,
+        );
+        assert_eq!(recovered.final_snapshot_hash, Some(hash));
+        assert_eq!(
+            recovered.failed.as_ref().map(|failure| failure.message),
+            Some("created page recovered; block plan was not resumed")
+        );
     }
 
     #[test]
