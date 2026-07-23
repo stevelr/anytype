@@ -3999,7 +3999,7 @@ fn validate_body_result_semantics(frame: &Value) -> Result<(), BodyFrameParityFa
     if let Some(candidates) = structured.get("candidates") {
         let candidates = candidates
             .as_array()
-            .filter(|values| values.len() <= 8)
+            .filter(|values| !values.is_empty() && values.len() <= 8)
             .ok_or(BodyFrameParityFailure::ToolErrorShape)?;
         if candidates.iter().any(|candidate| {
             let Some(candidate) = candidate.as_object() else {
@@ -4009,11 +4009,11 @@ fn validate_body_result_semantics(frame: &Value) -> Result<(), BodyFrameParityFa
                 || candidate
                     .get("id")
                     .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
+                    .is_none_or(|value| value.is_empty() || value.len() > 256)
                 || candidate
                     .get("name")
                     .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
+                    .is_none_or(|value| value.is_empty() || value.len() > 256)
         }) {
             return Err(BodyFrameParityFailure::ToolErrorShape);
         }
@@ -4633,6 +4633,29 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
     for malformed in [
         body_protocol_test_frame(5, true, json!({"code":"","message":"message"})),
         body_protocol_test_frame(5, true, json!({"code":"conflict","message":""})),
+        body_protocol_test_frame(
+            5,
+            true,
+            json!({"code":"conflict","message":"message","candidates":[]}),
+        ),
+        body_protocol_test_frame(
+            5,
+            true,
+            json!({
+                "code":"conflict",
+                "message":"message",
+                "candidates":[{"id":"x".repeat(257),"name":"Candidate"}]
+            }),
+        ),
+        body_protocol_test_frame(
+            5,
+            true,
+            json!({
+                "code":"conflict",
+                "message":"message",
+                "candidates":[{"id":"candidate-1","name":"x".repeat(257)}]
+            }),
+        ),
         body_protocol_test_frame(
             5,
             true,
