@@ -418,6 +418,12 @@ envelopes receive no normalization: response IDs, versions, error
 code/message/data, and shapes remain exact. Duplicated text content, structured
 payloads, cursors, snapshot hashes, opaque summaries, and domain IDs also
 remain exact.
+The separate cross-fixture semantic comparison normalizes generated IDs,
+snapshot/cursor tokens, and only `approx_bytes` inside `kind: unsupported`
+content because that summary is the wire block's `encoded_len` and therefore
+includes generated-ID lengths. Opaque kind and child count, typed content,
+presentation, restrictions, ordering, counts, status, errors, and idempotency
+stay exact.
 
 R4 also fixes emoji and callout payloads at the current 64-byte API ceiling,
 requires both UTF-16 mark endpoints to be `u32` scalar boundaries, and gives

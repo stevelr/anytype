@@ -3997,6 +3997,159 @@ fn body_protocol_frames_match(stable: &[Value; 2], preview: &[Value; 2]) -> bool
 }
 
 #[cfg(feature = "acceptance-harness")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyScenarioMismatch {
+    ResultCount,
+    ListedBlockCount,
+    ObjectShape,
+    ArrayLength,
+    ValueType,
+    DomainId,
+    SnapshotHash,
+    Cursor,
+    UnsupportedApproxBytes,
+    OpaqueKind,
+    ChildCount,
+    Restriction,
+    Presentation,
+    Status,
+    Error,
+    Idempotency,
+    StructuralIndex,
+    OtherValue,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl BodyScenarioMismatch {
+    const fn category(self) -> &'static str {
+        match self {
+            Self::ResultCount => "result_count",
+            Self::ListedBlockCount => "listed_block_count",
+            Self::ObjectShape => "object_shape",
+            Self::ArrayLength => "array_length",
+            Self::ValueType => "value_type",
+            Self::DomainId => "domain_id",
+            Self::SnapshotHash => "snapshot_hash",
+            Self::Cursor => "cursor",
+            Self::UnsupportedApproxBytes => "unsupported_approx_bytes",
+            Self::OpaqueKind => "opaque_kind",
+            Self::ChildCount => "child_count",
+            Self::Restriction => "restriction",
+            Self::Presentation => "presentation",
+            Self::Status => "status",
+            Self::Error => "error",
+            Self::Idempotency => "idempotency",
+            Self::StructuralIndex => "structural_index",
+            Self::OtherValue => "other_value",
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn body_scenario_field_category(field: Option<&str>) -> BodyScenarioMismatch {
+    match field {
+        Some(
+            "id" | "space_id" | "object_id" | "root_id" | "parent_id" | "block_id"
+            | "target_object_id",
+        ) => BodyScenarioMismatch::DomainId,
+        Some("snapshot_hash" | "final_snapshot_hash") => BodyScenarioMismatch::SnapshotHash,
+        Some("next_cursor") => BodyScenarioMismatch::Cursor,
+        Some("approx_bytes") => BodyScenarioMismatch::UnsupportedApproxBytes,
+        Some("opaque_kind") => BodyScenarioMismatch::OpaqueKind,
+        Some("child_count" | "deleted_subtree_blocks" | "listed_block_count") => {
+            BodyScenarioMismatch::ChildCount
+        }
+        Some("read" | "edit" | "remove" | "drag" | "drop_on") => BodyScenarioMismatch::Restriction,
+        Some(
+            "align" | "vertical_align" | "background_color" | "style" | "icon" | "processor"
+            | "source",
+        ) => BodyScenarioMismatch::Presentation,
+        Some("status") => BodyScenarioMismatch::Status,
+        Some("error_category" | "category" | "message" | "failed" | "not_attempted") => {
+            BodyScenarioMismatch::Error
+        }
+        Some("idempotency" | "key_reused" | "scope") => BodyScenarioMismatch::Idempotency,
+        Some("sibling_index" | "depth" | "index" | "position") => {
+            BodyScenarioMismatch::StructuralIndex
+        }
+        _ => BodyScenarioMismatch::OtherValue,
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn first_body_value_mismatch(
+    stable: &Value,
+    preview: &Value,
+    field: Option<&str>,
+) -> Option<BodyScenarioMismatch> {
+    if stable == preview {
+        return None;
+    }
+    match (stable, preview) {
+        (Value::Object(stable), Value::Object(preview)) => {
+            if stable.keys().collect::<Vec<_>>() != preview.keys().collect::<Vec<_>>() {
+                return Some(BodyScenarioMismatch::ObjectShape);
+            }
+            stable.iter().find_map(|(key, value)| {
+                preview
+                    .get(key)
+                    .and_then(|other| first_body_value_mismatch(value, other, Some(key)))
+            })
+        }
+        (Value::Array(stable), Value::Array(preview)) => {
+            if stable.len() != preview.len() {
+                return Some(BodyScenarioMismatch::ArrayLength);
+            }
+            stable
+                .iter()
+                .zip(preview)
+                .find_map(|(value, other)| first_body_value_mismatch(value, other, field))
+        }
+        (Value::Null, Value::Null)
+        | (Value::Bool(_), Value::Bool(_))
+        | (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_)) => Some(body_scenario_field_category(field)),
+        _ => Some(BodyScenarioMismatch::ValueType),
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn first_body_scenario_mismatch(
+    stable: &BodyScenarioEvidence,
+    preview: &BodyScenarioEvidence,
+) -> Option<(Option<usize>, BodyScenarioMismatch)> {
+    if stable.normalized_results.len() != preview.normalized_results.len() {
+        return Some((None, BodyScenarioMismatch::ResultCount));
+    }
+    for (index, (stable, preview)) in stable
+        .normalized_results
+        .iter()
+        .zip(&preview.normalized_results)
+        .enumerate()
+    {
+        if let Some(category) = first_body_value_mismatch(stable, preview, None) {
+            return Some((Some(index), category));
+        }
+    }
+    (stable.listed_block_count != preview.listed_block_count)
+        .then_some((None, BodyScenarioMismatch::ListedBlockCount))
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn body_scenario_parity_diagnostic(stable: &BodyScenarioEvidence, preview: &BodyScenarioEvidence) {
+    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some()
+        && let Some((index, category)) = first_body_scenario_mismatch(stable, preview)
+    {
+        let index = index.map_or_else(|| "none".to_owned(), |index| index.to_string());
+        eprintln!(
+            "body_semantic_phase=parity event=scenario_mismatch \
+             result_index={index} pointer_category={}",
+            category.category()
+        );
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn run_direct_body_phase(
     ctx: &TestContext,
 ) -> BodyAcceptancePhaseFuture<'_, (BodyScenarioEvidence, Vec<Value>)> {
@@ -4252,6 +4405,7 @@ fn run_shared_body_callback(
         }
         body_semantic_diagnostic("parity", "frames_match");
         if stable.scenario != preview.scenario {
+            body_scenario_parity_diagnostic(&stable.scenario, &preview.scenario);
             body_semantic_diagnostic("parity", "stable preview scenario evidence diverged");
             return Err(sentinel_assertion(
                 "stable and preview normalized body result shapes diverged",
@@ -4547,6 +4701,56 @@ fn body_raw_frame_parity_rejects_protocol_shape_and_payload_drift() {
         &[success, error],
         &[preview_error, preview]
     ));
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn body_scenario_diagnostic_reports_only_first_index_and_static_category() {
+    let stable = BodyScenarioEvidence {
+        normalized_results: vec![
+            json!({"status":"complete"}),
+            json!({"content":{
+                "kind":"unsupported",
+                "opaque_kind":"page",
+                "child_count":1,
+                "approx_bytes":0
+            }}),
+        ],
+        listed_block_count: 20,
+    };
+    let preview = BodyScenarioEvidence {
+        normalized_results: vec![
+            json!({"status":"complete"}),
+            json!({"content":{
+                "kind":"unsupported",
+                "opaque_kind":"page",
+                "child_count":1,
+                "approx_bytes":1
+            }}),
+        ],
+        listed_block_count: 20,
+    };
+    assert_eq!(
+        first_body_scenario_mismatch(&stable, &preview),
+        Some((Some(1), BodyScenarioMismatch::UnsupportedApproxBytes))
+    );
+
+    let count_drift = BodyScenarioEvidence {
+        normalized_results: stable.normalized_results.clone(),
+        listed_block_count: 19,
+    };
+    assert_eq!(
+        first_body_scenario_mismatch(&stable, &count_drift),
+        Some((None, BodyScenarioMismatch::ListedBlockCount))
+    );
+    let result_count_drift = BodyScenarioEvidence {
+        normalized_results: vec![json!({"status":"complete"})],
+        listed_block_count: 20,
+    };
+    assert_eq!(
+        first_body_scenario_mismatch(&stable, &result_count_drift),
+        Some((None, BodyScenarioMismatch::ResultCount))
+    );
 }
 
 #[cfg(feature = "acceptance-harness")]

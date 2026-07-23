@@ -1122,12 +1122,24 @@ fn body_string<'a>(value: &'a Value, pointer: &str, field: &str) -> Result<&'a s
 fn normalize_body_result(value: &Value) -> Value {
     fn normalized(value: &Value, field: Option<&str>) -> Value {
         match value {
-            Value::Object(object) => Value::Object(
-                object
-                    .iter()
-                    .map(|(key, value)| (key.clone(), normalized(value, Some(key))))
-                    .collect(),
-            ),
+            Value::Object(object) => {
+                let unsupported_content = field == Some("content")
+                    && object.get("kind").and_then(Value::as_str) == Some("unsupported");
+                Value::Object(
+                    object
+                        .iter()
+                        .map(|(key, value)| {
+                            let normalized =
+                                if unsupported_content && key == "approx_bytes" && value.is_u64() {
+                                    json!(0)
+                                } else {
+                                    normalized(value, Some(key))
+                                };
+                            (key.clone(), normalized)
+                        })
+                        .collect(),
+                )
+            }
             Value::Array(values) => Value::Array(
                 values
                     .iter()
@@ -1149,6 +1161,114 @@ fn normalize_body_result(value: &Value) -> Value {
         }
     }
     normalized(value, None)
+}
+
+#[test]
+fn body_result_normalization_limits_opaque_byte_volatility_to_unsupported_content() {
+    let result = |approx_bytes, kind, opaque_kind, child_count| {
+        json!({
+            "space_id":"space-generated",
+            "object_id":"object-generated",
+            "root_id":"root-generated",
+            "snapshot_hash":"snapshot-generated",
+            "next_cursor":"cursor-generated",
+            "items":[{
+                "id":"root-generated",
+                "parent_id":"parent-generated",
+                "sibling_index":0,
+                "depth":0,
+                "child_count":child_count,
+                "restrictions":{
+                    "read":false,
+                    "edit":false,
+                    "remove":false,
+                    "drag":false,
+                    "drop_on":false
+                },
+                "align":"left",
+                "vertical_align":"top",
+                "background_color":null,
+                "content":{
+                    "kind":kind,
+                    "opaque_kind":opaque_kind,
+                    "child_count":child_count,
+                    "approx_bytes":approx_bytes
+                }
+            }]
+        })
+    };
+    let baseline = normalize_body_result(&result(917, "unsupported", "page", 1));
+    assert_eq!(
+        baseline,
+        normalize_body_result(&result(991, "unsupported", "page", 1))
+    );
+    assert_ne!(
+        baseline,
+        normalize_body_result(&result(917, "unsupported", "layout", 1))
+    );
+    assert_ne!(
+        baseline,
+        normalize_body_result(&result(917, "unsupported", "page", 2))
+    );
+    assert_ne!(
+        baseline,
+        normalize_body_result(&result(917, "file", "page", 1))
+    );
+
+    let typed = |approx_bytes| {
+        json!({
+            "content":{
+                "kind":"file",
+                "approx_bytes":approx_bytes,
+                "target_object_id":"target-generated",
+                "file_kind":"file",
+                "mime":"application/octet-stream",
+                "size":4,
+                "state":"done",
+                "style":"link"
+            }
+        })
+    };
+    assert_ne!(
+        normalize_body_result(&typed(917)),
+        normalize_body_result(&typed(991))
+    );
+    assert_eq!(baseline["space_id"], "<id>");
+    assert_eq!(baseline["object_id"], "<id>");
+    assert_eq!(baseline["root_id"], "<id>");
+    assert_eq!(baseline["snapshot_hash"], "<snapshot-hash>");
+    assert_eq!(baseline["next_cursor"], "<cursor>");
+
+    let mut inner_child_drift = result(917, "unsupported", "page", 1);
+    inner_child_drift["items"][0]["content"]["child_count"] = json!(2);
+    assert_ne!(baseline, normalize_body_result(&inner_child_drift));
+
+    for approx_bytes in [Value::String("917".to_owned()), json!(-1)] {
+        let mut malformed = result(917, "unsupported", "page", 1);
+        malformed["items"][0]["content"]["approx_bytes"] = approx_bytes;
+        assert_ne!(baseline, normalize_body_result(&malformed));
+    }
+    let mut missing = result(917, "unsupported", "page", 1);
+    missing["items"][0]["content"]
+        .as_object_mut()
+        .expect("unsupported content")
+        .remove("approx_bytes");
+    assert_ne!(baseline, normalize_body_result(&missing));
+
+    let unrelated = |approx_bytes| {
+        json!({
+            "wrapper":{
+                "kind":"unsupported",
+                "opaque_kind":"page",
+                "child_count":1,
+                "approx_bytes":approx_bytes
+            }
+        })
+    };
+    assert_ne!(
+        normalize_body_result(&unrelated(917)),
+        normalize_body_result(&unrelated(991))
+    );
 }
 
 fn rich_applied_ids(result: &Value, local_keys: &[&str]) -> Result<Vec<String>, String> {
