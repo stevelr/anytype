@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Transport-neutral scenarios and live-coverage ownership declarations.
+#![cfg_attr(not(feature = "acceptance-harness"), allow(dead_code))]
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},

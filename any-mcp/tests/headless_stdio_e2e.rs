@@ -43,10 +43,13 @@ mod support;
 
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::BodyDriverMetrics;
+#[cfg(feature = "acceptance-harness")]
+use support::live_scenario::{
+    BODY_DIAGNOSTIC_SECRET, run_body_read_only_scenario, run_body_scenario,
+};
 use support::{
     live_scenario::{
-        BODY_DIAGNOSTIC_SECRET, ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver,
-        ScenarioEvidence, ScenarioId, run_body_read_only_scenario, run_body_scenario,
+        ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
         run_chats_registry_scenario, run_live_scenario_on_large_stack,
         run_representative_layout_scenario, run_scenario, validate_live_ownership,
     },
@@ -86,6 +89,7 @@ impl DriverOptions {
         read_only: false,
         preview: true,
     };
+    #[cfg(feature = "acceptance-harness")]
     const PREVIEW_READ_ONLY: Self = Self {
         profile: "standard",
         read_only: true,
@@ -124,6 +128,7 @@ const PREVIEW_COMPACT_TOOLS: &[&str] = &[
     "server_status",
 ];
 
+#[cfg(feature = "acceptance-harness")]
 const BODY_TOOL_NAMES: &[&str] = &[
     "body_block_create",
     "body_block_delete",
@@ -934,6 +939,7 @@ fn stderr_metrics(stderr: &[u8]) -> StderrMetrics {
     metrics
 }
 
+#[cfg(feature = "acceptance-harness")]
 fn require_body_diagnostics(
     stderr: &[u8],
     secret: &[u8],
@@ -962,6 +968,7 @@ fn require_body_diagnostics(
     Ok(())
 }
 
+#[cfg(feature = "acceptance-harness")]
 fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
     inspect_reviewed_body_server_log_at(
         std::env::var_os("ANY_MCP_HEADLESS_REDACTED_LOG_FILE"),

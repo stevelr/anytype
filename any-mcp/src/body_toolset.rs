@@ -80,6 +80,7 @@ pub const BODY_BLOCK_DELETE: &str = "body_block_delete";
 pub const BODY_BLOCK_MOVE: &str = "body_block_move";
 /// Exact rich-page creation tool name.
 pub const RICH_PAGE_CREATE: &str = "rich_page_create";
+#[cfg(feature = "acceptance-harness")]
 const BODY_TOOL_NAMES: [&str; 6] = [
     BODY_BLOCK_CREATE,
     BODY_BLOCK_DELETE,
