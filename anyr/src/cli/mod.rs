@@ -35,6 +35,8 @@ pub mod view;
 
 // default keyring service and default config subdir for storing key file
 const DEFAULT_KEYRING_SERVICE: &str = "anyr"; // env!("CARGO_BIN_NAME");
+const HEADLESS_HTTP_URL: &str = "http://127.0.0.1:31012";
+const HEADLESS_GRPC_ENDPOINT: &str = "http://127.0.0.1:31010";
 
 /// date strftime-inspired format
 /// Defined in <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>
@@ -1593,7 +1595,8 @@ pub struct AppContext {
     pub date_format: String,
 }
 
-pub async fn run(cli: Cli) -> Result<()> {
+pub async fn run(mut cli: Cli) -> Result<()> {
+    apply_init_cli_endpoint_defaults(&mut cli);
     let output = Output::new(resolve_output_format(&cli), cli.output.clone());
 
     // Handle commands that don't need a client or keystore
@@ -1630,6 +1633,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::View(args) => view::handle(&ctx, args).await,
         Commands::Search(args) => search::handle(&ctx, args).await,
         Commands::List(args) => list::handle(&ctx, args).await,
+    }
+}
+
+fn apply_init_cli_endpoint_defaults(cli: &mut Cli) {
+    if matches!(cli.command, Commands::InitCli { .. }) {
+        cli.url.get_or_insert_with(|| HEADLESS_HTTP_URL.to_owned());
+        cli.grpc
+            .get_or_insert_with(|| HEADLESS_GRPC_ENDPOINT.to_owned());
     }
 }
 

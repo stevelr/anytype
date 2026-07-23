@@ -447,12 +447,26 @@ anyr ARGS ...
   invokes `anytype` to create an account key and HTTP token and stores both
   directly in the selected `anyr` keystore without displaying either
   credential. Set `ANYTYPE_CLI_BIN` to an alternate executable path when
-  `anytype` is not on `PATH`. To join a space during setup, use
+  `anytype` is not on `PATH`. The generated account name is `bot_<timestamp>`;
+  set `ANY_USER` to choose it explicitly. To join a space during setup, use
   `anyr init-cli --join "$INVITE_LINK"`.
+
+  Unless overridden globally with `--url` / `--grpc` or
+  `ANYTYPE_URL` / `ANYTYPE_GRPC_ENDPOINT`, `init-cli` uses the headless
+  endpoints `http://127.0.0.1:31012` and `http://127.0.0.1:31010`. Those
+  effective endpoints are also passed to every Anytype CLI subprocess. After
+  storing the pair, `init-cli` verifies authenticated HTTP and gRPC access
+  before reporting success. A later verification or join failure leaves the
+  newly generated credentials stored so the operator can retry without losing
+  them.
 
 The global `--keystore` and `--keystore-service` options (or their environment
 variables) select where `init-cli` stores credentials. See
 [anytype README.md](../anytype-api/README.md#keystore) for more information.
+Because the keystore API cannot atomically replace both credential families,
+`init-cli` replaces gRPC first and preserves a snapshot for rollback if the
+HTTP write fails; this keeps a pre-existing HTTP credential untouched until
+the new gRPC credential is safely stored.
 
 ## Logging
 

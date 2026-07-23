@@ -2,12 +2,13 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    future::Future,
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
-use anytype::prelude::{GrpcCredentials, HttpCredentials, KeyStore};
+use anytype::prelude::{AnytypeClient, GrpcCredentials, HttpCredentials, KeyStore};
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
 use crate::cli::AppContext;
@@ -18,6 +19,7 @@ const MAX_CREDENTIAL_LINE_BYTES: usize = 4 * 1024;
 const MAX_CREDENTIAL_BYTES: usize = 1024;
 const MIN_CREDENTIAL_BYTES: usize = 20;
 const MAX_INVITE_LINK_BYTES: usize = 8 * 1024;
+const MAX_ACCOUNT_NAME_BYTES: usize = 256;
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Initializes the selected `anyr` keystore from a running Anytype CLI.
@@ -34,24 +36,46 @@ pub async fn handle(ctx: &AppContext, join: Option<&str>) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?
         .as_secs();
-    let process = CliProcess::new(executable);
+    let account_name = account_name(std::env::var_os("ANY_USER"), timestamp)?;
+    let grpc_endpoint = ctx
+        .client
+        .get_grpc_endpoint()
+        .context("gRPC endpoint is not configured")?;
+    let process = CliProcess::new(
+        executable,
+        ctx.client.get_http_endpoint().to_owned(),
+        grpc_endpoint,
+    );
 
-    initialize_keystore(ctx.client.get_key_store(), &process, timestamp).await?;
+    let http_credentials = initialize_keystore(
+        ctx.client.get_key_store(),
+        &process,
+        timestamp,
+        &account_name,
+    )
+    .await?;
+    ctx.client.set_api_key(http_credentials);
+    let status = verify_stored_credentials(&ctx.client).await?;
 
     if let Some(invite) = join {
-        process
-            .run_status(
-                CommandKind::JoinSpace,
-                &[OsStr::new("space"), OsStr::new("join"), OsStr::new(invite)],
-            )
-            .await
-            .context("credentials were stored, but Anytype CLI space join failed")?;
+        join_space(&process, invite).await?;
     }
 
     ctx.output.emit_json(&serde_json::json!({
         "initialized": true,
         "joined": join.is_some(),
+        "status": status,
     }))
+}
+
+async fn join_space(process: &CliProcess, invite: &str) -> Result<()> {
+    process
+        .run_status(
+            CommandKind::JoinSpace,
+            &[OsStr::new("space"), OsStr::new("join"), OsStr::new(invite)],
+        )
+        .await
+        .context("credentials were stored, but Anytype CLI space join failed")
 }
 
 fn anytype_cli_executable() -> Result<OsString> {
@@ -64,19 +88,38 @@ fn anytype_cli_executable() -> Result<OsString> {
     }
 }
 
+fn account_name(value: Option<OsString>, timestamp: u64) -> Result<String> {
+    let Some(value) = value else {
+        return Ok(format!("bot_{timestamp}"));
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("ANY_USER must be valid UTF-8"))?;
+    if value.is_empty() {
+        bail!("ANY_USER must not be empty");
+    }
+    if value.len() > MAX_ACCOUNT_NAME_BYTES {
+        bail!("ANY_USER exceeds the maximum supported length");
+    }
+    if value.chars().any(char::is_control) {
+        bail!("ANY_USER must not contain control characters");
+    }
+    Ok(value)
+}
+
 async fn initialize_keystore(
-    keystore: &KeyStore,
+    keystore: &(impl CredentialStore + Sync),
     process: &CliProcess,
     timestamp: u64,
-) -> Result<()> {
-    let account_name = format!("bot_{timestamp}");
+    account_name: &str,
+) -> Result<HttpCredentials> {
     let account_output = process
         .run_capture(
             CommandKind::CreateAccount,
             &[
                 OsStr::new("auth"),
                 OsStr::new("create"),
-                OsStr::new(&account_name),
+                OsStr::new(account_name),
             ],
         )
         .await?;
@@ -96,13 +139,121 @@ async fn initialize_keystore(
         .await?;
     let http_token = parse_http_token(&token_output)?;
 
-    keystore
-        .update_grpc_credentials(&GrpcCredentials::from_account_key(account_key))
-        .context("failed to store gRPC credentials in the selected keystore")?;
-    keystore
-        .update_http_credentials(&HttpCredentials::new(http_token))
-        .context("failed to store HTTP credentials in the selected keystore")?;
+    let grpc_credentials = GrpcCredentials::from_account_key(account_key);
+    let http_credentials = HttpCredentials::new(http_token);
+    store_credential_pair(keystore, &grpc_credentials, &http_credentials)?;
+    Ok(http_credentials)
+}
+
+async fn verify_stored_credentials(client: &AnytypeClient) -> Result<serde_json::Value> {
+    verify_connectivity_checks(
+        async { client.ping_http().await.is_ok() },
+        || async { client.ping_grpc().await.is_ok() },
+        || {
+            let auth = client.auth_status().map_err(|_| ())?;
+            Ok((auth.http.is_authenticated(), auth.grpc.is_authenticated()))
+        },
+    )
+    .await
+}
+
+async fn verify_connectivity_checks<HttpPing, GrpcPing, GrpcFuture, Status>(
+    http_ping: HttpPing,
+    grpc_ping: GrpcPing,
+    status: Status,
+) -> Result<serde_json::Value>
+where
+    HttpPing: Future<Output = bool>,
+    GrpcPing: FnOnce() -> GrpcFuture,
+    GrpcFuture: Future<Output = bool>,
+    Status: FnOnce() -> std::result::Result<(bool, bool), ()>,
+{
+    if !http_ping.await {
+        bail!("credentials stored, but HTTP verification failed");
+    }
+    if !grpc_ping().await {
+        bail!("credentials stored, but gRPC verification failed");
+    }
+    let (http_present, grpc_present) = status()
+        .map_err(|()| anyhow::anyhow!("credentials stored, but status verification failed"))?;
+    if !http_present || !grpc_present {
+        bail!("credentials stored, but status verification found missing credentials");
+    }
+    Ok(serde_json::json!({
+        "http": {
+            "credentials": "stored",
+            "ping": "ok",
+        },
+        "grpc": {
+            "credentials": "stored",
+            "ping": "ok",
+        },
+    }))
+}
+
+trait CredentialStore {
+    fn snapshot_grpc(&self) -> Result<GrpcCredentials>;
+    fn replace_grpc(&self, credentials: &GrpcCredentials) -> Result<()>;
+    fn write_http(&self, credentials: &HttpCredentials) -> Result<()>;
+    fn restore_grpc(&self, credentials: &GrpcCredentials) -> Result<()>;
+}
+
+impl CredentialStore for KeyStore {
+    fn snapshot_grpc(&self) -> Result<GrpcCredentials> {
+        let credentials = self.get_grpc_credentials()?;
+        Ok(GrpcCredentials::new(
+            credentials.account_id().map(str::to_owned),
+            credentials.account_key().map(str::to_owned),
+            credentials.session_token().map(str::to_owned),
+        ))
+    }
+
+    fn replace_grpc(&self, credentials: &GrpcCredentials) -> Result<()> {
+        self.clear_grpc_credentials()?;
+        self.update_grpc_credentials(credentials)?;
+        Ok(())
+    }
+
+    fn write_http(&self, credentials: &HttpCredentials) -> Result<()> {
+        self.update_http_credentials(credentials)?;
+        Ok(())
+    }
+
+    fn restore_grpc(&self, credentials: &GrpcCredentials) -> Result<()> {
+        self.clear_grpc_credentials()?;
+        self.update_grpc_credentials(credentials)?;
+        Ok(())
+    }
+}
+
+fn store_credential_pair(
+    keystore: &impl CredentialStore,
+    grpc: &GrpcCredentials,
+    http: &HttpCredentials,
+) -> Result<()> {
+    let prior_grpc = keystore
+        .snapshot_grpc()
+        .map_err(|_| anyhow::anyhow!("failed to snapshot prior gRPC credentials"))?;
+    if keystore.replace_grpc(grpc).is_err() {
+        return credential_write_failure(keystore, &prior_grpc, "failed to store gRPC credentials");
+    }
+    if keystore.write_http(http).is_err() {
+        return credential_write_failure(keystore, &prior_grpc, "failed to store HTTP credentials");
+    }
     Ok(())
+}
+
+fn credential_write_failure(
+    keystore: &impl CredentialStore,
+    prior_grpc: &GrpcCredentials,
+    failure: &str,
+) -> Result<()> {
+    if keystore.restore_grpc(prior_grpc).is_err() {
+        bail!(
+            "{failure}; rollback also failed and the selected keystore may require manual repair"
+        );
+    }
+    bail!("{failure}; prior gRPC credentials were restored and HTTP credentials are unchanged")
 }
 
 #[derive(Clone, Copy)]
@@ -124,11 +275,25 @@ impl CommandKind {
 
 struct CliProcess {
     executable: OsString,
+    http_endpoint: String,
+    grpc_endpoint: String,
+    timeout: Duration,
 }
 
 impl CliProcess {
-    fn new(executable: OsString) -> Self {
-        Self { executable }
+    fn new(executable: OsString, http_endpoint: String, grpc_endpoint: String) -> Self {
+        Self {
+            executable,
+            http_endpoint,
+            grpc_endpoint,
+            timeout: CLI_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     fn command(&self, args: &[&OsStr]) -> Command {
@@ -137,6 +302,8 @@ impl CliProcess {
             .args(args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
+            .env("ANYTYPE_URL", &self.http_endpoint)
+            .env("ANYTYPE_GRPC_ENDPOINT", &self.grpc_endpoint)
             .kill_on_drop(true);
         command
     }
@@ -156,7 +323,7 @@ impl CliProcess {
             .context("failed to capture Anytype CLI output")?;
         let mut output = Vec::new();
         let read = timeout(
-            CLI_TIMEOUT,
+            self.timeout,
             stdout
                 .take(MAX_CREDENTIAL_OUTPUT_BYTES + 1)
                 .read_to_end(&mut output),
@@ -179,12 +346,7 @@ impl CliProcess {
                 kind.description()
             );
         }
-        let status = if let Ok(result) = timeout(CLI_TIMEOUT, child.wait()).await {
-            result.context("failed waiting for Anytype CLI")?
-        } else {
-            stop_child(&mut child).await;
-            bail!("Anytype CLI {} timed out", kind.description());
-        };
+        let status = wait_for_child(&mut child, kind, self.timeout).await?;
         if !status.success() {
             bail!(
                 "Anytype CLI {} failed with status {}; child output was withheld",
@@ -204,12 +366,7 @@ impl CliProcess {
                 kind.description()
             )
         })?;
-        let status = if let Ok(result) = timeout(CLI_TIMEOUT, child.wait()).await {
-            result.context("failed waiting for Anytype CLI")?
-        } else {
-            stop_child(&mut child).await;
-            bail!("Anytype CLI {} timed out", kind.description());
-        };
+        let status = wait_for_child(&mut child, kind, self.timeout).await?;
         if !status.success() {
             bail!(
                 "Anytype CLI {} failed with status {}; child output was withheld",
@@ -218,6 +375,24 @@ impl CliProcess {
             );
         }
         Ok(())
+    }
+}
+
+async fn wait_for_child(
+    child: &mut tokio::process::Child,
+    kind: CommandKind,
+    wait_timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    match timeout(wait_timeout, child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(_)) => {
+            stop_child(child).await;
+            bail!("failed waiting for Anytype CLI {}", kind.description());
+        }
+        Err(_) => {
+            stop_child(child).await;
+            bail!("Anytype CLI {} timed out", kind.description());
+        }
     }
 }
 
@@ -295,6 +470,7 @@ fn validate_invite_link(invite: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::{Cell, RefCell},
         fs,
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
@@ -304,7 +480,9 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::cli::{Cli, Commands};
+    use crate::cli::{
+        Cli, Commands, HEADLESS_GRPC_ENDPOINT, HEADLESS_HTTP_URL, apply_init_cli_endpoint_defaults,
+    };
 
     const ACCOUNT_KEY: &str =
         "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ==";
@@ -329,6 +507,46 @@ mod tests {
             }
             command => panic!("unexpected command: {command:?}"),
         }
+    }
+
+    #[test]
+    fn init_cli_uses_headless_endpoint_defaults() {
+        let mut cli = Cli::try_parse_from(["anyr", "init-cli"]).expect("parse init-cli");
+        // Isolate this unit from any ambient endpoint environment already
+        // resolved by clap.
+        cli.url = None;
+        cli.grpc = None;
+        apply_init_cli_endpoint_defaults(&mut cli);
+        assert_eq!(cli.url.as_deref(), Some(HEADLESS_HTTP_URL));
+        assert_eq!(cli.grpc.as_deref(), Some(HEADLESS_GRPC_ENDPOINT));
+    }
+
+    #[test]
+    fn init_cli_preserves_resolved_environment_endpoints() {
+        let mut cli = Cli::try_parse_from(["anyr", "init-cli"]).expect("parse init-cli");
+        // Clap resolves ANYTYPE_* values into these fields before `run`; model
+        // that resolved state without mutating process-global test environment.
+        cli.url = Some("http://env.test:41012".to_owned());
+        cli.grpc = Some("http://env.test:41010".to_owned());
+        apply_init_cli_endpoint_defaults(&mut cli);
+        assert_eq!(cli.url.as_deref(), Some("http://env.test:41012"));
+        assert_eq!(cli.grpc.as_deref(), Some("http://env.test:41010"));
+    }
+
+    #[test]
+    fn init_cli_preserves_explicit_endpoint_overrides() {
+        let mut cli = Cli::try_parse_from([
+            "anyr",
+            "--url",
+            "http://explicit.test:51012",
+            "--grpc",
+            "http://explicit.test:51010",
+            "init-cli",
+        ])
+        .expect("parse init-cli endpoint overrides");
+        apply_init_cli_endpoint_defaults(&mut cli);
+        assert_eq!(cli.url.as_deref(), Some("http://explicit.test:51012"));
+        assert_eq!(cli.grpc.as_deref(), Some("http://explicit.test:51010"));
     }
 
     #[test]
@@ -362,17 +580,40 @@ mod tests {
         assert!(!error.contains(sensitive));
     }
 
+    #[test]
+    fn honors_valid_any_user_exactly_and_rejects_unsafe_values() {
+        let exact = " automation user Ω ";
+        assert_eq!(
+            account_name(Some(OsString::from(exact)), 42).expect("valid ANY_USER"),
+            exact
+        );
+        assert_eq!(account_name(None, 4242).expect("fallback"), "bot_4242");
+        assert!(account_name(Some(OsString::new()), 42).is_err());
+        let sensitive = "private-user\ncredential";
+        let error = account_name(Some(OsString::from(sensitive)), 42)
+            .expect_err("control character must fail")
+            .to_string();
+        assert!(!error.contains(sensitive));
+        assert!(
+            account_name(
+                Some(OsString::from("x".repeat(MAX_ACCOUNT_NAME_BYTES + 1))),
+                42
+            )
+            .is_err()
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn fake_cli_initializes_selected_keystore_and_joins() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = TestDir::new();
         let executable = temp.path().join("fake-anytype");
         let script = format!(
             r#"#!/bin/sh
+test "$ANYTYPE_URL" = "http://headless.test:31012" || exit 19
+test "$ANYTYPE_GRPC_ENDPOINT" = "http://headless.test:31010" || exit 20
 case "$1:$2:$3" in
-  auth:create:bot_4242)
+  auth:create:configured-user)
     printf 'account\n║ {ACCOUNT_KEY} ║\n'
     ;;
   auth:apikey:create)
@@ -387,23 +628,24 @@ case "$1:$2:$3" in
 esac
 "#
         );
-        fs::write(&executable, script).expect("write fake executable");
-        let mut permissions = fs::metadata(&executable)
-            .expect("fake executable metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&executable, permissions).expect("make fake executable");
+        write_executable(&executable, &script);
 
         let key_path = temp.path().join("credentials.db");
         let mut config = ClientConfig::default().app_name("anyr-init-cli-test");
         config.keystore = Some(format!("file:path={}", key_path.display()));
         config.keystore_service = Some("anyr-init-cli-test".to_owned());
         let client = AnytypeClient::with_config(config).expect("build test client");
-        let process = CliProcess::new(executable.into_os_string());
+        let process = CliProcess::new(
+            executable.into_os_string(),
+            "http://headless.test:31012".to_owned(),
+            "http://headless.test:31010".to_owned(),
+        );
 
-        initialize_keystore(client.get_key_store(), &process, 4242)
-            .await
-            .expect("initialize keystore");
+        let http_credentials =
+            initialize_keystore(client.get_key_store(), &process, 4242, "configured-user")
+                .await
+                .expect("initialize keystore");
+        assert!(http_credentials.has_creds());
         process
             .run_status(
                 CommandKind::JoinSpace,
@@ -436,19 +678,11 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn child_failure_withholds_credential_output() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = TestDir::new();
         let executable = temp.path().join("failing-anytype");
         let script = format!("#!/bin/sh\nprintf 'Key: {HTTP_TOKEN}\\n'\nexit 7\n");
-        fs::write(&executable, script).expect("write fake executable");
-        let mut permissions = fs::metadata(&executable)
-            .expect("fake executable metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&executable, permissions).expect("make fake executable");
-
-        let process = CliProcess::new(executable.into_os_string());
+        write_executable(&executable, &script);
+        let process = test_process(&executable);
         let error = process
             .run_capture(
                 CommandKind::CreateHttpToken,
@@ -464,6 +698,319 @@ esac
             .to_string();
         assert!(!error.contains(HTTP_TOKEN));
         assert!(error.contains("status"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oversized_child_output_is_rejected_and_process_is_reaped() {
+        let temp = TestDir::new();
+        let executable = temp.path().join("overflow-anytype");
+        let pid_file = temp.path().join("overflow.pid");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nwhile :; do printf '0123456789abcdef'; done\n",
+            pid_file.display()
+        );
+        write_executable(&executable, &script);
+        let process = test_process(&executable).with_timeout(Duration::from_secs(2));
+
+        let error = process
+            .run_capture(
+                CommandKind::CreateHttpToken,
+                &[OsStr::new("auth"), OsStr::new("apikey")],
+            )
+            .await
+            .expect_err("oversized output must fail")
+            .to_string();
+        assert!(error.contains("safety limit"));
+        assert_process_reaped(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hung_child_is_terminated_and_reaped() {
+        let temp = TestDir::new();
+        let executable = temp.path().join("hung-anytype");
+        let pid_file = temp.path().join("hung.pid");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
+            pid_file.display()
+        );
+        write_executable(&executable, &script);
+        let process = test_process(&executable).with_timeout(Duration::from_millis(50));
+
+        let error = process
+            .run_capture(CommandKind::CreateAccount, &[OsStr::new("auth")])
+            .await
+            .expect_err("hung child must time out")
+            .to_string();
+        assert!(error.contains("timed out"));
+        assert_process_reaped(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_that_closes_stdout_then_hangs_is_terminated_and_reaped() {
+        let temp = TestDir::new();
+        let executable = temp.path().join("closed-stdout-anytype");
+        let pid_file = temp.path().join("closed-stdout.pid");
+        let script = format!(
+            "#!/bin/sh\nexec 1>&-\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
+            pid_file.display()
+        );
+        write_executable(&executable, &script);
+        let process = test_process(&executable).with_timeout(Duration::from_millis(50));
+
+        let error = process
+            .run_capture(CommandKind::CreateAccount, &[OsStr::new("auth")])
+            .await
+            .expect_err("child wait must time out")
+            .to_string();
+        assert!(error.contains("timed out"));
+        assert_process_reaped(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn join_failure_is_redacted_and_preserves_stored_credentials() {
+        let temp = TestDir::new();
+        let executable = temp.path().join("join-failure-anytype");
+        let invite = "https://example.test/private#join-credential";
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$3\"\nprintf '%s\\n' \"$3\" >&2\nexit 9\n";
+        write_executable(&executable, script);
+        let process = test_process(&executable);
+        let store = FakeCredentialStore::new(GrpcCredentials::from_token("prior-session-token"));
+        store_credential_pair(
+            &store,
+            &GrpcCredentials::from_account_key(ACCOUNT_KEY),
+            &HttpCredentials::new(HTTP_TOKEN),
+        )
+        .expect("store credential pair");
+
+        let error = join_space(&process, invite)
+            .await
+            .expect_err("join must fail")
+            .to_string();
+        assert!(error.contains("credentials were stored"));
+        assert!(!error.contains(invite));
+        assert!(!error.contains("join-credential"));
+        assert_eq!(store.grpc.borrow().account_key(), Some(ACCOUNT_KEY));
+        assert!(store.http_written.get());
+        assert_eq!(store.restore_calls.get(), 0);
+    }
+
+    #[test]
+    fn failed_http_write_restores_prior_grpc_credentials() {
+        let prior = GrpcCredentials::new(
+            Some("prior-account-id".to_owned()),
+            Some("prior-account-key".to_owned()),
+            Some("prior-session-token".to_owned()),
+        );
+        let store = FakeCredentialStore::new(prior);
+        store.fail_http.set(true);
+        let error = store_credential_pair(
+            &store,
+            &GrpcCredentials::from_account_key(ACCOUNT_KEY),
+            &HttpCredentials::new(HTTP_TOKEN),
+        )
+        .expect_err("HTTP write must fail")
+        .to_string();
+
+        let restored = store.grpc.borrow();
+        assert_eq!(restored.account_id(), Some("prior-account-id"));
+        assert_eq!(restored.account_key(), Some("prior-account-key"));
+        assert_eq!(restored.session_token(), Some("prior-session-token"));
+        assert_eq!(store.restore_calls.get(), 1);
+        assert!(!store.http_written.get());
+        assert!(error.contains("prior gRPC credentials were restored"));
+        assert!(!error.contains(ACCOUNT_KEY));
+        assert!(!error.contains(HTTP_TOKEN));
+    }
+
+    #[test]
+    fn failed_rollback_reports_manual_repair_without_credentials() {
+        let store = FakeCredentialStore::new(GrpcCredentials::from_token("prior-session-token"));
+        store.fail_http.set(true);
+        store.fail_restore.set(true);
+        let error = store_credential_pair(
+            &store,
+            &GrpcCredentials::from_account_key(ACCOUNT_KEY),
+            &HttpCredentials::new(HTTP_TOKEN),
+        )
+        .expect_err("write and rollback must fail")
+        .to_string();
+
+        assert!(error.contains("rollback also failed"));
+        assert!(error.contains("manual repair"));
+        assert!(!error.contains(ACCOUNT_KEY));
+        assert!(!error.contains(HTTP_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn later_verification_failure_preserves_stored_pair() {
+        let store = FakeCredentialStore::new(GrpcCredentials::from_token("prior-session-token"));
+        store_credential_pair(
+            &store,
+            &GrpcCredentials::from_account_key(ACCOUNT_KEY),
+            &HttpCredentials::new(HTTP_TOKEN),
+        )
+        .expect("store new pair");
+
+        let error = verify_connectivity_checks(
+            std::future::ready(false),
+            || std::future::ready(true),
+            || Ok((true, true)),
+        )
+        .await
+        .expect_err("HTTP ping must fail")
+        .to_string();
+        assert!(error.contains("credentials stored"));
+        assert_eq!(store.grpc.borrow().account_key(), Some(ACCOUNT_KEY));
+        assert!(store.http_written.get());
+        assert_eq!(store.restore_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn verification_reports_only_safe_status_fields() {
+        let status = verify_connectivity_checks(
+            std::future::ready(true),
+            || std::future::ready(true),
+            || Ok((true, true)),
+        )
+        .await
+        .expect("verification succeeds");
+        assert_eq!(status["http"]["credentials"], "stored");
+        assert_eq!(status["http"]["ping"], "ok");
+        assert_eq!(status["grpc"]["credentials"], "stored");
+        assert_eq!(status["grpc"]["ping"], "ok");
+        let encoded = serde_json::to_string(&status).expect("serialize safe status");
+        assert!(!encoded.contains(ACCOUNT_KEY));
+        assert!(!encoded.contains(HTTP_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn verification_requires_grpc_ping_and_present_status() {
+        let grpc_error = verify_connectivity_checks(
+            std::future::ready(true),
+            || std::future::ready(false),
+            || Ok((true, true)),
+        )
+        .await
+        .expect_err("gRPC ping must be required")
+        .to_string();
+        assert!(grpc_error.contains("credentials stored"));
+        assert!(grpc_error.contains("gRPC verification"));
+
+        let status_error = verify_connectivity_checks(
+            std::future::ready(true),
+            || std::future::ready(true),
+            || Ok((true, false)),
+        )
+        .await
+        .expect_err("credential status must be required")
+        .to_string();
+        assert!(status_error.contains("missing credentials"));
+    }
+
+    struct FakeCredentialStore {
+        grpc: RefCell<GrpcCredentials>,
+        fail_grpc: Cell<bool>,
+        fail_http: Cell<bool>,
+        fail_restore: Cell<bool>,
+        http_written: Cell<bool>,
+        restore_calls: Cell<u32>,
+    }
+
+    impl FakeCredentialStore {
+        fn new(grpc: GrpcCredentials) -> Self {
+            Self {
+                grpc: RefCell::new(grpc),
+                fail_grpc: Cell::new(false),
+                fail_http: Cell::new(false),
+                fail_restore: Cell::new(false),
+                http_written: Cell::new(false),
+                restore_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl CredentialStore for FakeCredentialStore {
+        fn snapshot_grpc(&self) -> Result<GrpcCredentials> {
+            let credentials = self.grpc.borrow();
+            Ok(GrpcCredentials::new(
+                credentials.account_id().map(str::to_owned),
+                credentials.account_key().map(str::to_owned),
+                credentials.session_token().map(str::to_owned),
+            ))
+        }
+
+        fn replace_grpc(&self, credentials: &GrpcCredentials) -> Result<()> {
+            if self.fail_grpc.get() {
+                bail!("fixture gRPC write failure");
+            }
+            *self.grpc.borrow_mut() = GrpcCredentials::new(
+                credentials.account_id().map(str::to_owned),
+                credentials.account_key().map(str::to_owned),
+                credentials.session_token().map(str::to_owned),
+            );
+            Ok(())
+        }
+
+        fn write_http(&self, credentials: &HttpCredentials) -> Result<()> {
+            if self.fail_http.get() {
+                bail!("fixture HTTP write failure");
+            }
+            self.http_written.set(credentials.has_creds());
+            Ok(())
+        }
+
+        fn restore_grpc(&self, credentials: &GrpcCredentials) -> Result<()> {
+            self.restore_calls.set(self.restore_calls.get() + 1);
+            if self.fail_restore.get() {
+                bail!("fixture rollback failure");
+            }
+            *self.grpc.borrow_mut() = GrpcCredentials::new(
+                credentials.account_id().map(str::to_owned),
+                credentials.account_key().map(str::to_owned),
+                credentials.session_token().map(str::to_owned),
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn test_process(executable: &Path) -> CliProcess {
+        CliProcess::new(
+            executable.as_os_str().to_owned(),
+            "http://127.0.0.1:31012".to_owned(),
+            "http://127.0.0.1:31010".to_owned(),
+        )
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, contents).expect("write fake executable");
+        let mut permissions = fs::metadata(path)
+            .expect("fake executable metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).expect("make fake executable");
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    fn assert_process_reaped(pid_file: &Path) {
+        let pid = fs::read_to_string(pid_file).expect("read child pid");
+        assert!(
+            !Path::new("/proc").join(pid).exists(),
+            "child process was not reaped"
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn assert_process_reaped(_pid_file: &Path) {
+        // `Child::kill` followed by `Child::wait` is the portable Unix reaping
+        // contract; Linux additionally proves PID disappearance through procfs.
     }
 
     struct TestDir {
