@@ -33,6 +33,15 @@ pub struct BodyScenarioEvidence {
     pub listed_block_count: usize,
 }
 
+/// Heap-owned future for the fixture-heavy rich-body acceptance workflow.
+pub type BodyScenarioFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BodyScenarioEvidence, String>> + 'a>>;
+
+#[test]
+fn body_scenario_future_keeps_only_a_heap_handle_inline() {
+    assert!(std::mem::size_of::<BodyScenarioFuture<'static>>() <= 2 * std::mem::size_of::<usize>());
+}
+
 /// Content-free evidence from one read-only body catalog check.
 // This shared module is also compiled into direct-router unit tests, whose
 // body slice intentionally exercises only the read-write scenario.
@@ -657,7 +666,19 @@ fn verify_supplemental_rich_snapshot(
 
 /// Runs ordinary body behavior through any direct or protocol driver while an
 /// independent `anytype-api` client owns and verifies every live fixture.
-pub async fn run_body_scenario(
+///
+/// The erased, heap-owned return type keeps the complete workflow state out of
+/// the caller's async frame so the acceptance suite fits the default test
+/// thread stack.
+pub fn run_body_scenario<'a>(
+    driver: &'a mut impl McpDriver,
+    ctx: &'a TestContext,
+    transport: &'a str,
+) -> BodyScenarioFuture<'a> {
+    Box::pin(run_body_scenario_inner(driver, ctx, transport))
+}
+
+async fn run_body_scenario_inner(
     driver: &mut impl McpDriver,
     ctx: &TestContext,
     transport: &str,
