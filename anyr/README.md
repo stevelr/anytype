@@ -16,6 +16,10 @@ anyr --help
 anyr auth status
 # authenticate with desktop and http endpoint
 anyr auth login
+# initialize HTTP and gRPC credentials from a running headless CLI
+anyr init-cli
+# optionally join a space after initialization
+anyr init-cli --join "$INVITE_LINK"
 
 # List spaces your user is authorized to access
 anyr space list -t     # output as table (-t/--table)
@@ -439,11 +443,16 @@ anyr ARGS ...
 
 - **Desktop**: If the Anytype desktop app is running, type `anyr auth login` and the app will display a 4-digit code. Enter the code into the anyr prompt, and a key is generated and stored in the KeyStore.
 
-- **Headless server**: If you are using the headless cli server, start the server, run `anytype auth apikey create anyr` to generate and display a key, then either:
-  - paste it into `anyr auth set-http` (reads from stdin), or
-  - save it in a file and set the key file path as described in [Key storage](#key-storage).
+- **Headless server**: Start the server, then run `anyr init-cli`. The command
+  invokes `anytype` to create an account key and HTTP token and stores both
+  directly in the selected `anyr` keystore without displaying either
+  credential. Set `ANYTYPE_CLI_BIN` to an alternate executable path when
+  `anytype` is not on `PATH`. To join a space during setup, use
+  `anyr init-cli --join "$INVITE_LINK"`.
 
-See [anytype README.md](../anytype-api/README.md#keystore) for more info, and the helper script [init-cli-keys.sh](../scripts/init-cli-keys.sh) for generating and saving http and gRPC credentials.
+The global `--keystore` and `--keystore-service` options (or their environment
+variables) select where `init-cli` stores credentials. See
+[anytype README.md](../anytype-api/README.md#keystore) for more information.
 
 ## Logging
 
