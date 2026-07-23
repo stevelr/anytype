@@ -23,178 +23,10 @@ use anytype::{
     test_util::{TestContext, unique_suffix},
 };
 
-/// Seeded value that must never cross into spawned diagnostics.
+/// Seeded value that must never appear in stderr or protocol errors.
 pub const BODY_DIAGNOSTIC_SECRET: &str = "SECRET_BODY_DIAGNOSTIC_SENTINEL";
 /// Exact root-inclusive DFS item count in the live pagination fixture.
 pub const BODY_PAGINATION_ITEM_COUNT: usize = 20;
-
-fn body_fixture_marker(event: &'static str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=fixture event={event}");
-    }
-}
-
-fn body_scenario_marker(event: &'static str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=scenario event={event}");
-    }
-}
-
-fn body_scenario_count(event: &'static str, count: usize) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=scenario event={event} count={count}");
-    }
-}
-
-fn body_scenario_check(event: &'static str, ok: bool) -> bool {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=scenario event={event} ok={ok}");
-    }
-    ok
-}
-
-fn body_scenario_update(index: usize, result: &'static str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=scenario event=update index={index} result={result}");
-    }
-}
-
-fn body_scenario_update_stage(event: &'static str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=scenario event={event}");
-    }
-}
-
-fn body_scenario_update_error(error: &str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_none() {
-        return;
-    }
-    let category = [
-        "mutation_indeterminate",
-        "conflict",
-        "validation",
-        "authentication",
-        "permission",
-        "not_found",
-        "bounded_result",
-        "upstream",
-    ]
-    .into_iter()
-    .find(|category| error.contains(category))
-    .unwrap_or("other");
-    eprintln!("body_semantic_phase=scenario event=update_call_error category={category}");
-}
-
-fn body_fixture_count(event: &'static str, count: usize) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=fixture event={event} count={count}");
-    }
-}
-
-fn body_fixture_plan_diagnostic(initial: usize, append: usize, planned: usize) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=fixture event=plan initial={initial} \
-             append={append} planned={planned}"
-        );
-    }
-}
-
-fn body_fixture_outcome_diagnostic(
-    category: &'static str,
-    applied: usize,
-    failed: usize,
-    not_attempted: usize,
-) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=fixture event=apply_all category={category} \
-             applied={applied} failed={failed} not_attempted={not_attempted}"
-        );
-    }
-}
-
-fn body_fixture_receipt_diagnostic(
-    index: usize,
-    affected: usize,
-    address_ok: bool,
-    block_present: bool,
-    content_ok: bool,
-    root_last_ok: bool,
-) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=fixture event=receipt index={index} affected={affected} \
-             address_ok={address_ok} block_present={block_present} \
-             content_ok={content_ok} root_last_ok={root_last_ok}"
-        );
-    }
-}
-
-fn body_fixture_shape_diagnostic(
-    snapshot: &BodySnapshot,
-    initial_blocks: &[BodyBlock],
-    created_ids: &[String],
-    expected_suffix: &[(TextStyle, String)],
-) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_none() {
-        return;
-    }
-    let blocks = snapshot.iter().collect::<Vec<_>>();
-    let suffix = blocks.get(initial_blocks.len()..);
-    let prefix_ids_ok = body_initial_prefix_ids_preserved(&blocks, initial_blocks);
-    let root_nonchild_state_ok =
-        body_initial_root_nonchild_state_preserved(&blocks, initial_blocks);
-    let nonroot_full_state_ok = body_initial_nonroot_full_state_preserved(&blocks, initial_blocks);
-    let root_children_prefix_ok = body_initial_root_children_preserved(snapshot, initial_blocks);
-    let prefix_ok = body_initial_prefix_gate(
-        prefix_ids_ok,
-        root_nonchild_state_ok,
-        nonroot_full_state_ok,
-        root_children_prefix_ok,
-    );
-    let suffix_count_ok = suffix.is_some_and(|items| {
-        items.len() == created_ids.len() && items.len() == expected_suffix.len()
-    });
-    let suffix_ids_ok = suffix.is_some_and(|items| {
-        items
-            .iter()
-            .map(|block| block.id.as_str())
-            .eq(created_ids.iter().map(String::as_str))
-    });
-    let suffix_content_ok = suffix.is_some_and(|items| {
-        items
-            .iter()
-            .zip(expected_suffix)
-            .all(|(block, (expected_style, expected_text))| {
-                matches!(
-                    &block.content,
-                    BlockContent::Text(content)
-                        if content.style == *expected_style
-                            && content.text == *expected_text
-                )
-            })
-    });
-    let direct_root_ok = snapshot.root().children.len() >= created_ids.len()
-        && snapshot
-            .root()
-            .children
-            .iter()
-            .rev()
-            .take(created_ids.len())
-            .map(|id| id.as_str())
-            .eq(created_ids.iter().rev().map(String::as_str));
-    eprintln!(
-        "body_semantic_phase=fixture event=shape total={} expected={} prefix_ok={prefix_ok} \
-         prefix_ids_ok={prefix_ids_ok} root_nonchild_state_ok={root_nonchild_state_ok} \
-         nonroot_full_state_ok={nonroot_full_state_ok} \
-         root_children_prefix_ok={root_children_prefix_ok} suffix_count_ok={suffix_count_ok} \
-         suffix_ids_ok={suffix_ids_ok} suffix_content_ok={suffix_content_ok} \
-         direct_root_ok={direct_root_ok}",
-        blocks.len(),
-        BODY_PAGINATION_ITEM_COUNT
-    );
-}
 
 fn body_block_state_except_children_matches(actual: &BodyBlock, expected: &BodyBlock) -> bool {
     actual.id == expected.id
@@ -471,23 +303,6 @@ fn expected_rich_metrics(page_create_polls: usize, blocks: usize) -> BodyDriverM
     }
 }
 
-fn expected_primitive_metrics() -> BodyDriverMetrics {
-    expected_primitive_metrics_with_verification_attempts(1)
-}
-
-fn expected_primitive_metrics_with_verification_attempts(
-    verification_attempts: usize,
-) -> BodyDriverMetrics {
-    let shows = verification_attempts.saturating_add(1);
-    BodyDriverMetrics {
-        show_attempts: shows,
-        foreground_close_attempts: shows,
-        foreground_close_confirmed: shows,
-        write_polls: 1,
-        ..BodyDriverMetrics::default()
-    }
-}
-
 #[derive(Clone, Copy)]
 enum BodyMetricExpectation {
     Exact(BodyDriverMetrics),
@@ -499,26 +314,6 @@ impl BodyMetricExpectation {
         match self {
             Self::Exact(expected) => observed == expected,
             Self::PrimitiveMutation => primitive_metrics_within_verification_budget(observed),
-        }
-    }
-
-    fn diagnose(self, label: &'static str, observed: BodyDriverMetrics) {
-        body_metric_vector_diagnostic(label, "observed", observed);
-        match self {
-            Self::Exact(expected) => body_metric_vector_diagnostic(label, "expected", expected),
-            Self::PrimitiveMutation => {
-                body_metric_vector_diagnostic(label, "expected_min", expected_primitive_metrics());
-                body_metric_vector_diagnostic(
-                    label,
-                    "expected_max",
-                    expected_primitive_metrics_with_verification_attempts(3),
-                );
-                body_primitive_metric_budget_diagnostic(
-                    label,
-                    observed,
-                    primitive_metrics_within_verification_budget(observed),
-                );
-            }
         }
     }
 }
@@ -614,119 +409,6 @@ fn expected_create_replay_metrics() -> BodyDriverMetrics {
     }
 }
 
-fn body_metric_call_marker(label: &'static str, event: &'static str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!("body_semantic_phase=metric_call label={label} event={event}");
-    }
-}
-
-fn body_driver_error_category(error: &str) -> &'static str {
-    if error.contains("mutation_indeterminate") {
-        "mutation_indeterminate"
-    } else if error.contains("authentication") {
-        "authentication"
-    } else if error.contains("validation") {
-        "validation"
-    } else if error.contains("not_found") {
-        "not_found"
-    } else if error.contains("conflict") {
-        "conflict"
-    } else if error.contains("bounded_result") {
-        "bounded_result"
-    } else if error.contains("upstream") {
-        "upstream"
-    } else if error.contains("read_only") {
-        "read_only"
-    } else {
-        "unknown"
-    }
-}
-
-fn body_metric_error_diagnostic(label: &'static str, category: &'static str) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=metric_call label={label} \
-             event=driver_error_category category={category}"
-        );
-    }
-}
-
-#[test]
-fn body_driver_error_classifier_is_closed_and_payload_free() {
-    for category in [
-        "authentication",
-        "validation",
-        "not_found",
-        "conflict",
-        "bounded_result",
-        "upstream",
-        "mutation_indeterminate",
-        "read_only",
-    ] {
-        assert_eq!(
-            body_driver_error_category(&format!("adapter error {category}")),
-            category
-        );
-    }
-    assert_eq!(
-        body_driver_error_category("SECRET_UNPARSED_BODY_VALUE"),
-        "unknown"
-    );
-}
-
-fn body_metric_availability_diagnostic(
-    label: &'static str,
-    before_available: bool,
-    after_available: bool,
-) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=metric_call label={label} event=availability \
-             before={before_available} after={after_available}"
-        );
-    }
-}
-
-fn body_metric_vector_diagnostic(
-    label: &'static str,
-    kind: &'static str,
-    metrics: BodyDriverMetrics,
-) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=metric_call label={label} event={kind} \
-             fields=page_create,show,foreground_attempt,foreground_confirmed,\
-fallback_attempt,fallback_confirmed,write,show_limit,non_show_limit,close_limit,mutation_limit \
-             values=[{},{},{},{},{},{},{},{},{},{},{}]",
-            metrics.page_create_polls,
-            metrics.show_attempts,
-            metrics.foreground_close_attempts,
-            metrics.foreground_close_confirmed,
-            metrics.fallback_close_attempts,
-            metrics.fallback_close_confirmed,
-            metrics.write_polls,
-            metrics.show_limit_rejections,
-            metrics.non_show_limit_rejections,
-            metrics.close_limit_rejections,
-            metrics.mutation_limit_rejections
-        );
-    }
-}
-
-fn body_primitive_metric_budget_diagnostic(
-    label: &'static str,
-    observed: BodyDriverMetrics,
-    bounded: bool,
-) {
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=metric_call label={label} event=primitive_budget \
-             verification_attempts={} bounded={bounded}",
-            observed.show_attempts.saturating_sub(1),
-        );
-    }
-}
-
 async fn call_body_tool_with_metrics(
     driver: &mut impl McpDriver,
     name: &'static str,
@@ -734,46 +416,15 @@ async fn call_body_tool_with_metrics(
     expected: BodyMetricExpectation,
     label: &'static str,
 ) -> Result<Value, String> {
-    body_metric_call_marker(label, "call_start");
     let before = driver.body_acceptance_metrics();
-    let call_result = driver.call_tool(name, arguments).await;
-    match &call_result {
-        Ok(_) => body_metric_call_marker(label, "call_returned"),
-        Err(error) => {
-            body_metric_call_marker(label, "driver_error");
-            body_metric_error_diagnostic(label, body_driver_error_category(error));
-        }
-    }
+    let result = driver.call_tool(name, arguments).await?;
     let after = driver.body_acceptance_metrics();
-    body_metric_availability_diagnostic(label, before.is_some(), after.is_some());
-    let delta = if let (Some(before), Some(after)) = (before, after) {
-        let delta = body_metrics_delta(before, after);
-        match &delta {
-            Ok(observed) => body_metric_vector_diagnostic(label, "delta", *observed),
-            Err(_) => body_metric_call_marker(label, "delta_underflow"),
-        }
-        Some(delta)
-    } else {
-        body_metric_call_marker(label, "metrics_unavailable");
-        None
-    };
-    let result = match call_result {
-        Ok(result) => result,
-        Err(error) => {
-            body_metric_call_marker(label, "driver_error_returned");
-            return Err(error);
-        }
-    };
-    if let Some(delta) = delta {
-        let observed = delta?;
+    if let (Some(before), Some(after)) = (before, after) {
+        let observed = body_metrics_delta(before, after)?;
         if !expected.matches(observed) {
-            body_metric_call_marker(label, "metrics_mismatch");
-            expected.diagnose(label, observed);
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
-        body_metric_call_marker(label, "metrics_match");
     }
-    body_metric_call_marker(label, "complete");
     Ok(result)
 }
 
@@ -931,29 +582,24 @@ fn exact_update_snapshot_transition(
         && before.root_id == after.root_id
         && before.len() == after.len();
     if !scope_exact {
-        body_scenario_update_stage("update_independent_scope_mismatch");
         return false;
     }
     let before_ids = before.iter().map(|block| &block.id).collect::<Vec<_>>();
     let after_ids = after.iter().map(|block| &block.id).collect::<Vec<_>>();
     let dfs_order_exact = before_ids == after_ids;
     if !dfs_order_exact {
-        body_scenario_update_stage("update_independent_dfs_mismatch");
         return false;
     }
     let mut target_exact = false;
-    let mut root_content_equal = false;
     let mut root_opaque_semantics_exact = false;
     let mut nonroot_exact = true;
     for prior in before.iter() {
         let Some(fresh) = after.get(&prior.id) else {
-            body_scenario_update_stage("update_independent_block_missing");
             return false;
         };
         if prior.id.as_str() == block_id {
             target_exact = update_target_changed_exactly(prior, fresh, expectation);
         } else if prior.id == before.root_id {
-            root_content_equal = fresh.content == prior.content;
             let mut restored = fresh.clone();
             root_opaque_semantics_exact = match (&prior.content, &mut restored.content) {
                 (
@@ -968,19 +614,6 @@ fn exact_update_snapshot_transition(
         } else if fresh != prior {
             nonroot_exact = false;
         }
-    }
-    if std::env::var_os("ANY_MCP_BODY_SEMANTIC_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "body_semantic_phase=scenario event=update_independent_transition \
-             scope={} dfs_order={} target={} root_content_equal={} \
-             root_opaque_semantics={} nonroot_exact={}",
-            scope_exact,
-            dfs_order_exact,
-            target_exact,
-            root_content_equal,
-            root_opaque_semantics_exact,
-            nonroot_exact,
-        );
     }
     target_exact && root_opaque_semantics_exact && nonroot_exact
 }
@@ -1003,9 +636,8 @@ async fn run_body_update_arm(
         .fetch()
         .await
         .map_err(|_| format!("{label} independent before read failed"))?;
-    body_scenario_update_stage("update_independent_before_ready");
     let before_metrics = driver.body_acceptance_metrics();
-    let result = match driver
+    let result = driver
         .call_tool(
             "body_block_update",
             json!({
@@ -1016,27 +648,12 @@ async fn run_body_update_arm(
                 "change":change
             }),
         )
-        .await
-    {
-        Ok(result) => {
-            body_scenario_update_stage("update_call_succeeded");
-            result
-        }
-        Err(error) => {
-            body_scenario_update_error(&error);
-            return Err(error);
-        }
-    };
+        .await?;
     if let (Some(before), Some(after)) = (before_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
-        body_metric_vector_diagnostic(label, "update_delta", observed);
-        let metrics_bounded = primitive_metrics_within_verification_budget(observed);
-        body_primitive_metric_budget_diagnostic(label, observed, metrics_bounded);
-        if !metrics_bounded {
-            body_scenario_update_stage("update_metrics_mismatch");
+        if !primitive_metrics_within_verification_budget(observed) {
             return Err(format!("{label} production metrics diverged: {observed:?}"));
         }
-        body_scenario_update_stage("update_metrics_exact");
     }
     let after = ctx
         .client
@@ -1045,14 +662,11 @@ async fn run_body_update_arm(
         .fetch()
         .await
         .map_err(|_| format!("{label} independent after read failed"))?;
-    body_scenario_update_stage("update_independent_after_ready");
     if !exact_update_snapshot_transition(&before, &after, block_id, expectation) {
-        body_scenario_update_stage("update_independent_transition_failed");
         return Err(format!(
             "{label} changed more or less than its one exact typed field"
         ));
     }
-    body_scenario_update_stage("update_independent_transition_exact");
     let next_hash = body_string(&result, "/snapshot_hash", "update snapshot hash")?.to_owned();
     Ok((normalize_body_result(&result), next_hash))
 }
@@ -1516,75 +1130,39 @@ async fn run_body_scenario_inner(
         .name(body_scenario_fixture_name())
         .create()
         .await
-        .map_err(|_| {
-            body_fixture_marker("page_create_failed");
-            "body fixture page create failed".to_owned()
-        })?;
+        .map_err(|_| "body fixture page create failed".to_owned())?;
     ctx.register_object(&page.id);
-    body_fixture_marker("page_created");
     let initial = ctx
         .client
         .blocks()
         .body(&ctx.space_id, &page.id)
         .fetch()
         .await
-        .map_err(|_| {
-            body_fixture_marker("initial_fetch_failed");
-            "body initial fixture read failed".to_owned()
-        })?;
+        .map_err(|_| "body initial fixture read failed".to_owned())?;
     let initial_blocks = initial.iter().cloned().collect::<Vec<_>>();
     let append_count = BODY_PAGINATION_ITEM_COUNT
         .checked_sub(initial_blocks.len())
         .filter(|count| *count > 0)
-        .ok_or_else(|| {
-            body_fixture_marker("initial_count_invalid");
-            "body initial fixture already contains twenty or more blocks".to_owned()
-        })?;
+        .ok_or_else(|| "body initial fixture already contains twenty or more blocks".to_owned())?;
     let expected_suffix = body_pagination_suffix_spec(append_count);
-    let fixture_operations = body_pagination_append_operations(append_count).inspect_err(|_| {
-        body_fixture_marker("append_plan_failed");
-    })?;
+    let fixture_operations = body_pagination_append_operations(append_count)?;
     let operation_count = fixture_operations.len();
-    body_fixture_plan_diagnostic(initial_blocks.len(), append_count, operation_count);
     let fixture_outcome = initial
         .edit(&ctx.client)
         .apply_all(fixture_operations)
         .await
-        .map_err(|_| {
-            body_fixture_marker("apply_all_error");
-            "body deterministic fixture batch failed".to_owned()
-        })?;
-    let outcome_category = if fixture_outcome.failed.is_some() {
-        "failed"
-    } else if fixture_outcome.not_attempted.is_empty()
-        && fixture_outcome.applied.len() == operation_count
-    {
-        "complete"
-    } else {
-        "incomplete"
-    };
-    body_fixture_outcome_diagnostic(
-        outcome_category,
-        fixture_outcome.applied.len(),
-        usize::from(fixture_outcome.failed.is_some()),
-        fixture_outcome.not_attempted.len(),
-    );
+        .map_err(|_| "body deterministic fixture batch failed".to_owned())?;
     if fixture_outcome.failed.is_some()
         || !fixture_outcome.not_attempted.is_empty()
         || fixture_outcome.applied.len() != operation_count
     {
-        body_fixture_marker("apply_all_incomplete");
         return Err("body deterministic fixture batch did not complete".to_owned());
     }
     let mut created_ids = Vec::with_capacity(operation_count);
-    for (index, (receipt, (expected_style, expected_text))) in fixture_outcome
-        .applied
-        .iter()
-        .zip(&expected_suffix)
-        .enumerate()
+    for (receipt, (expected_style, expected_text)) in
+        fixture_outcome.applied.iter().zip(&expected_suffix)
     {
         let Some(affected) = receipt.affected.first() else {
-            body_fixture_receipt_diagnostic(index, 0, false, false, false, false);
             return Err("body fixture append receipt omitted the created block".to_owned());
         };
         let address_ok = affected.space_id == ctx.space_id && affected.object_id == page.id;
@@ -1598,57 +1176,38 @@ async fn run_body_scenario_inner(
             )
         });
         let root_last_ok = receipt.snapshot.root().children.last() == Some(&affected.block_id);
-        body_fixture_receipt_diagnostic(
-            index,
-            receipt.affected.len(),
-            address_ok,
-            block_present,
-            content_ok,
-            root_last_ok,
-        );
         let receipt_is_exact = receipt.affected.len() == 1
             && address_ok
             && block_present
             && content_ok
             && root_last_ok;
         if !receipt_is_exact {
-            body_fixture_marker("receipt_invalid");
             return Err("body fixture append receipt did not prove the exact suffix".to_owned());
         }
         created_ids.push(affected.block_id.as_str().to_owned());
     }
     if created_ids.len() != expected_suffix.len() {
-        body_fixture_marker("receipt_coverage_invalid");
         return Err("body fixture append receipts did not cover the exact suffix".to_owned());
     }
-    body_fixture_count("receipts_valid", created_ids.len());
-    let heading_id = created_ids.first().cloned().ok_or_else(|| {
-        body_fixture_marker("heading_receipt_missing");
-        "body fixture omitted its created heading receipt".to_owned()
-    })?;
+    let heading_id = created_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| "body fixture omitted its created heading receipt".to_owned())?;
     let fixture = ctx
         .client
         .blocks()
         .body(&ctx.space_id, &page.id)
         .fetch()
         .await
-        .map_err(|_| {
-            body_fixture_marker("refetch_failed");
-            "body deterministic fixture read failed".to_owned()
-        })?;
-    body_fixture_shape_diagnostic(&fixture, &initial_blocks, &created_ids, &expected_suffix);
+        .map_err(|_| "body deterministic fixture read failed".to_owned())?;
     if !is_exact_body_pagination_fixture(&fixture, &initial_blocks, &created_ids, &expected_suffix)
     {
-        body_fixture_marker("shape_invalid");
         return Err(
             "body deterministic fixture did not contain the exact ordered blocks".to_owned(),
         );
     }
-    body_fixture_marker("complete");
 
-    body_scenario_marker("catalog_start");
     let tools = driver.list_tools().await?;
-    body_scenario_count("catalog_received", tools.len());
     for name in [
         "body_block_list",
         "body_block_create",
@@ -1658,36 +1217,29 @@ async fn run_body_scenario_inner(
         "rich_page_create",
     ] {
         if !tools.iter().any(|candidate| candidate == name) {
-            body_scenario_marker("catalog_missing_required_tool");
             return Err(format!("{transport} catalog omitted {name}"));
         }
     }
-    body_scenario_marker("catalog_complete");
 
-    body_scenario_marker("pagination_first_start");
     let first = driver
         .call_tool(
             "body_block_list",
             json!({"space":ctx.space_id,"object_id":page.id,"limit":8}),
         )
         .await?;
-    body_scenario_marker("pagination_first_received");
     normalized_results.push(normalize_body_result(&first));
     let root_id = body_string(&first, "/root_id", "root ID")?.to_owned();
     body_string(&first, "/snapshot_hash", "snapshot hash")?;
     let cursor = body_string(&first, "/next_cursor", "continuation cursor")?.to_owned();
-    body_scenario_marker("pagination_root_hash_cursor_extracted");
     let mut listed_block_ids = first["items"]
         .as_array()
         .ok_or_else(|| "body first page omitted items".to_owned())?
         .iter()
         .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
         .collect::<Result<Vec<_>, _>>()?;
-    body_scenario_count("pagination_first_items", listed_block_ids.len());
-    if !body_scenario_check("pagination_first_exact", listed_block_ids.len() == 8) {
+    if listed_block_ids.len() != 8 {
         return Err("body first page did not contain the exact limit of eight".to_owned());
     }
-    body_scenario_marker("pagination_second_start");
     let second = driver
         .call_tool(
             "body_block_list",
@@ -1696,12 +1248,8 @@ async fn run_body_scenario_inner(
             }),
         )
         .await?;
-    body_scenario_marker("pagination_second_received");
     normalized_results.push(normalize_body_result(&second));
-    if !body_scenario_check(
-        "pagination_second_hash_matches",
-        second["snapshot_hash"] == first["snapshot_hash"],
-    ) {
+    if second["snapshot_hash"] != first["snapshot_hash"] {
         return Err("body pages mixed snapshot hashes".to_owned());
     }
     let second_cursor =
@@ -1714,11 +1262,9 @@ async fn run_body_scenario_inner(
             .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    body_scenario_count("pagination_second_cumulative_items", listed_block_ids.len());
-    if !body_scenario_check("pagination_second_exact", listed_block_ids.len() == 16) {
+    if listed_block_ids.len() != 16 {
         return Err("body second page did not consume the next eight blocks".to_owned());
     }
-    body_scenario_marker("pagination_third_start");
     let third = driver
         .call_tool(
             "body_block_list",
@@ -1727,12 +1273,8 @@ async fn run_body_scenario_inner(
             }),
         )
         .await?;
-    body_scenario_marker("pagination_third_received");
     normalized_results.push(normalize_body_result(&third));
-    if !body_scenario_check(
-        "pagination_third_hash_matches",
-        third["snapshot_hash"] == first["snapshot_hash"],
-    ) {
+    if third["snapshot_hash"] != first["snapshot_hash"] {
         return Err("body pages mixed snapshot hashes".to_owned());
     }
     let third_ids = third["items"]
@@ -1741,25 +1283,16 @@ async fn run_body_scenario_inner(
         .iter()
         .map(|item| body_string(item, "/id", "listed block ID").map(str::to_owned))
         .collect::<Result<Vec<_>, _>>()?;
-    body_scenario_count("pagination_third_items", third_ids.len());
-    if !body_scenario_check(
-        "pagination_third_exact",
-        third_ids.len() == BODY_PAGINATION_ITEM_COUNT - 16,
-    ) {
+    if third_ids.len() != BODY_PAGINATION_ITEM_COUNT - 16 {
         return Err("body third page did not contain the final four blocks".to_owned());
     }
     listed_block_ids.extend(third_ids);
-    body_scenario_count("pagination_total_items", listed_block_ids.len());
-    if !body_scenario_check(
-        "pagination_total_exact",
-        listed_block_ids.len() == BODY_PAGINATION_ITEM_COUNT,
-    ) {
+    if listed_block_ids.len() != BODY_PAGINATION_ITEM_COUNT {
         return Err("body pagination did not contain exactly twenty blocks".to_owned());
     }
-    if !body_scenario_check("pagination_terminated", third.get("next_cursor").is_none()) {
+    if third.get("next_cursor").is_some() {
         return Err("body three-page fixture unexpectedly returned a fourth cursor".to_owned());
     }
-    body_scenario_marker("pagination_independent_start");
     let independent = ctx
         .client
         .blocks()
@@ -1771,16 +1304,10 @@ async fn run_body_scenario_inner(
         .iter()
         .map(|block| block.id.as_str().to_owned())
         .collect::<Vec<_>>();
-    body_scenario_count("pagination_independent_items", independent_ids.len());
-    if !body_scenario_check(
-        "pagination_independent_equal",
-        listed_block_ids == independent_ids,
-    ) {
+    if listed_block_ids != independent_ids {
         return Err("body pages did not preserve exact DFS order".to_owned());
     }
-    body_scenario_marker("pagination_complete");
 
-    body_scenario_marker("stale_cursor_start");
     let stale_first = driver
         .call_tool(
             "body_block_list",
@@ -1798,7 +1325,6 @@ async fn run_body_scenario_inner(
         )
         .await
         .map_err(|_| "independent revision write failed".to_owned())?;
-    body_scenario_marker("stale_cursor_revision_written");
     let stale_error = driver
         .call_tool_error(
             "body_block_list",
@@ -1807,23 +1333,19 @@ async fn run_body_scenario_inner(
             }),
         )
         .await?;
-    if !body_scenario_check("stale_cursor_conflict", stale_error.contains("conflict")) {
+    if !stale_error.contains("conflict") {
         return Err("body continuation did not reject revision drift".to_owned());
     }
     normalized_results.push(json!({"error_category":"conflict"}));
-    body_scenario_marker("stale_cursor_complete");
 
-    body_scenario_marker("primitive_start");
     let fresh = driver
         .call_tool(
             "body_block_list",
             json!({"space":ctx.space_id,"object_id":page.id,"limit":8}),
         )
         .await?;
-    body_scenario_marker("primitive_fresh_list_received");
     normalized_results.push(normalize_body_result(&fresh));
     let mut snapshot_hash = body_string(&fresh, "/snapshot_hash", "fresh hash")?.to_owned();
-    body_scenario_marker("primitive_fresh_hash_extracted");
     let create_input = json!({
         "space":ctx.space_id,"object_id":page.id,
         "expected_snapshot_hash":snapshot_hash,"target_block_id":root_id,
@@ -1839,7 +1361,6 @@ async fn run_body_scenario_inner(
         "primitive create",
     )
     .await?;
-    body_scenario_marker("primitive_create_complete");
     normalized_results.push(normalize_body_result(&created));
     let created_block_id = body_string(&created, "/block/id", "created block ID")?.to_owned();
     let replay = call_body_tool_with_metrics(
@@ -1850,16 +1371,12 @@ async fn run_body_scenario_inner(
         "primitive create replay",
     )
     .await?;
-    body_scenario_marker("primitive_replay_received");
     normalized_results.push(normalize_body_result(&replay));
     let replay_id_matches = replay["block"]["id"] == created["block"]["id"];
     let replay_key_reused = replay["idempotency"]["key_reused"] == true;
-    let replay_id_ok = body_scenario_check("primitive_replay_id_matches", replay_id_matches);
-    let replay_key_ok = body_scenario_check("primitive_replay_key_reused", replay_key_reused);
-    if !replay_id_ok || !replay_key_ok {
+    if !replay_id_matches || !replay_key_reused {
         return Err("body create replay did not retain one assigned ID".to_owned());
     }
-    body_scenario_marker("primitive_replay_complete");
     snapshot_hash = body_string(&replay, "/snapshot_hash", "replay hash")?.to_owned();
 
     let child = call_body_tool_with_metrics(
@@ -1876,7 +1393,6 @@ async fn run_body_scenario_inner(
         "heading append",
     )
     .await?;
-    body_scenario_marker("primitive_heading_append_received");
     normalized_results.push(normalize_body_result(&child));
     let child_id = body_string(&child, "/block/id", "child ID")?.to_owned();
     snapshot_hash = body_string(&child, "/snapshot_hash", "child hash")?.to_owned();
@@ -1896,10 +1412,9 @@ async fn run_body_scenario_inner(
                 .iter()
                 .any(|child| child.as_str() == child_id)
         });
-    if !body_scenario_check("primitive_heading_append_verified", appended_under_heading) {
+    if !appended_under_heading {
         return Err("targeted append did not land beneath the existing heading".to_owned());
     }
-    body_scenario_marker("primitive_heading_append_complete");
     let moved = call_body_tool_with_metrics(
         driver,
         "body_block_move",
@@ -1912,7 +1427,6 @@ async fn run_body_scenario_inner(
         "primitive move",
     )
     .await?;
-    body_scenario_marker("primitive_move_complete");
     normalized_results.push(normalize_body_result(&moved));
     snapshot_hash = body_string(&moved, "/snapshot_hash", "move hash")?.to_owned();
     let deleted = call_body_tool_with_metrics(
@@ -1927,12 +1441,8 @@ async fn run_body_scenario_inner(
         "primitive delete",
     )
     .await?;
-    body_scenario_marker("primitive_delete_complete");
     normalized_results.push(normalize_body_result(&deleted));
     snapshot_hash = body_string(&deleted, "/snapshot_hash", "delete hash")?.to_owned();
-    body_scenario_marker("primitive_complete");
-
-    body_scenario_marker("relation_start");
     let relation = call_body_tool_with_metrics(
         driver,
         "body_block_create",
@@ -1946,7 +1456,6 @@ async fn run_body_scenario_inner(
         "relation create",
     )
     .await?;
-    body_scenario_marker("relation_create_complete");
     normalized_results.push(normalize_body_result(&relation));
     let relation_id = body_string(&relation, "/block/id", "relation block ID")?.to_owned();
     snapshot_hash = body_string(&relation, "/snapshot_hash", "relation hash")?.to_owned();
@@ -1964,7 +1473,7 @@ async fn run_body_scenario_inner(
                 BlockContent::Relation(ref relation) if relation.key == "tag"
             )
     });
-    if !body_scenario_check("relation_create_verified", relation_detected) {
+    if !relation_detected {
         return Err("created relation block was not independently detected".to_owned());
     }
     let relation_deleted = call_body_tool_with_metrics(
@@ -1979,7 +1488,6 @@ async fn run_body_scenario_inner(
         "relation delete",
     )
     .await?;
-    body_scenario_marker("relation_delete_complete");
     normalized_results.push(normalize_body_result(&relation_deleted));
     snapshot_hash =
         body_string(&relation_deleted, "/snapshot_hash", "relation delete hash")?.to_owned();
@@ -1996,7 +1504,6 @@ async fn run_body_scenario_inner(
         "relation recreate",
     )
     .await?;
-    body_scenario_marker("relation_recreate_complete");
     normalized_results.push(normalize_body_result(&recreated_relation));
     let recreated_relation_id =
         body_string(&recreated_relation, "/block/id", "recreated relation ID")?.to_owned();
@@ -2018,7 +1525,6 @@ async fn run_body_scenario_inner(
         "relation move",
     )
     .await?;
-    body_scenario_marker("relation_move_received");
     normalized_results.push(normalize_body_result(&relation_moved));
     let moved_relation_snapshot = ctx
         .client
@@ -2038,17 +1544,9 @@ async fn run_body_scenario_inner(
                     BlockContent::Relation(ref relation) if relation.key == "tag"
             )
     });
-    let relation_adjacent_ok = body_scenario_check("relation_move_adjacent", adjacent);
-    let relation_content_ok = body_scenario_check(
-        "relation_move_content_verified",
-        recreated_relation_detected,
-    );
-    if !relation_adjacent_ok || !relation_content_ok {
+    if !adjacent || !recreated_relation_detected {
         return Err("relation recreation/move was not independently verified".to_owned());
     }
-    body_scenario_marker("relation_complete");
-
-    body_scenario_marker("rich_primary_start");
     let rich_input = json!({
         "space":ctx.space_id,"name":format!("Rich {transport} {suffix}"),
         "idempotency_key":format!("rich-{transport}-{suffix}"),
@@ -2093,13 +1591,9 @@ async fn run_body_scenario_inner(
     let rich = driver
         .call_tool("rich_page_create", rich_input.clone())
         .await?;
-    body_scenario_marker("rich_primary_received");
     if let (Some(before), Some(after)) = (before_rich_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
-        if !body_scenario_check(
-            "rich_primary_metrics_match",
-            observed == expected_rich_metrics(1, primary_keys.len()),
-        ) {
+        if observed != expected_rich_metrics(1, primary_keys.len()) {
             return Err(format!(
                 "primary rich production metrics diverged: {observed:?}"
             ));
@@ -2108,11 +1602,10 @@ async fn run_body_scenario_inner(
     let rich_page_id = body_string(&rich, "/object_id", "rich page ID")?.to_owned();
     ctx.register_object(&rich_page_id);
     normalized_results.push(normalize_body_result(&rich));
-    if !body_scenario_check("rich_primary_status_complete", rich["status"] == "complete") {
+    if rich["status"] != "complete" {
         return Err("rich page workflow did not complete".to_owned());
     }
     let primary_ids = rich_applied_ids(&rich, &primary_keys)?;
-    body_scenario_count("rich_primary_applied_ids", primary_ids.len());
     let rich_snapshot = ctx
         .client
         .blocks()
@@ -2120,23 +1613,14 @@ async fn run_body_scenario_inner(
         .fetch()
         .await
         .map_err(|_| "independent rich body read failed".to_owned())?;
-    if !body_scenario_check(
-        "rich_primary_snapshot_verified",
-        verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id),
-    ) {
+    if !verify_primary_rich_snapshot(&rich_snapshot, &primary_ids, &page.id) {
         return Err("independent primary rich ObjectShow verification failed".to_owned());
     }
-    body_scenario_marker("rich_primary_complete");
-    body_scenario_marker("rich_replay_start");
     let before_replay_metrics = driver.body_acceptance_metrics();
     let rich_replay = driver.call_tool("rich_page_create", rich_input).await?;
-    body_scenario_marker("rich_replay_received");
     if let (Some(before), Some(after)) = (before_replay_metrics, driver.body_acceptance_metrics()) {
         let observed = body_metrics_delta(before, after)?;
-        if !body_scenario_check(
-            "rich_replay_metrics_match",
-            observed == expected_rich_metrics(0, 0),
-        ) {
+        if observed != expected_rich_metrics(0, 0) {
             return Err(format!(
                 "rich replay production metrics diverged: {observed:?}"
             ));
@@ -2144,13 +1628,10 @@ async fn run_body_scenario_inner(
     }
     let rich_replay_id_matches = rich_replay["object_id"] == rich["object_id"];
     let rich_replay_key_reused = rich_replay["idempotency"]["key_reused"] == true;
-    let rich_replay_id_ok = body_scenario_check("rich_replay_id_matches", rich_replay_id_matches);
-    let rich_replay_key_ok = body_scenario_check("rich_replay_key_reused", rich_replay_key_reused);
-    if !rich_replay_id_ok || !rich_replay_key_ok {
+    if !rich_replay_id_matches || !rich_replay_key_reused {
         return Err("rich page replay did not retain one exact page".to_owned());
     }
     normalized_results.push(normalize_body_result(&rich_replay));
-    body_scenario_marker("rich_replay_complete");
 
     let mut rich_snapshot_hash = body_string(
         &rich_replay,
@@ -2250,12 +1731,10 @@ async fn run_body_scenario_inner(
             BodyUpdateExpectation::LinkAppearance,
         ),
     ];
-    body_scenario_count("update_cases", update_arms.len());
-    if !body_scenario_check("update_case_count_exact", update_arms.len() == 14) {
+    if update_arms.len() != 14 {
         return Err("body update matrix did not own exactly fourteen arms".to_owned());
     }
-    for (index, (label, block_id, change, expectation)) in update_arms.into_iter().enumerate() {
-        body_scenario_update(index, "start");
+    for (label, block_id, change, expectation) in update_arms {
         let (evidence, next_hash) = run_body_update_arm(
             driver,
             ctx,
@@ -2266,17 +1745,11 @@ async fn run_body_scenario_inner(
             expectation,
             label,
         )
-        .await
-        .inspect_err(|_| {
-            body_scenario_update(index, "failed");
-        })?;
+        .await?;
         normalized_results.push(evidence);
         rich_snapshot_hash = next_hash;
-        body_scenario_update(index, "complete");
     }
-    body_scenario_marker("updates_complete");
 
-    body_scenario_marker("rich_supplemental_start");
     let supplemental_input = json!({
         "space":ctx.space_id,"name":format!("Rich variants {transport} {suffix}"),
         "idempotency_key":format!("rich-variants-{transport}-{suffix}"),
@@ -2303,16 +1776,12 @@ async fn run_body_scenario_inner(
     let supplemental = driver
         .call_tool("rich_page_create", supplemental_input)
         .await?;
-    body_scenario_marker("rich_supplemental_received");
     if let (Some(before), Some(after)) = (
         before_supplemental_metrics,
         driver.body_acceptance_metrics(),
     ) {
         let observed = body_metrics_delta(before, after)?;
-        if !body_scenario_check(
-            "rich_supplemental_metrics_match",
-            observed == expected_rich_metrics(1, supplemental_keys.len()),
-        ) {
+        if observed != expected_rich_metrics(1, supplemental_keys.len()) {
             return Err(format!(
                 "supplemental rich production metrics diverged: {observed:?}"
             ));
@@ -2322,14 +1791,10 @@ async fn run_body_scenario_inner(
         body_string(&supplemental, "/object_id", "supplemental rich page ID")?.to_owned();
     ctx.register_object(&supplemental_page_id);
     normalized_results.push(normalize_body_result(&supplemental));
-    if !body_scenario_check(
-        "rich_supplemental_status_complete",
-        supplemental["status"] == "complete",
-    ) {
+    if supplemental["status"] != "complete" {
         return Err("supplemental rich workflow did not complete".to_owned());
     }
     let supplemental_ids = rich_applied_ids(&supplemental, &supplemental_keys)?;
-    body_scenario_count("rich_supplemental_applied_ids", supplemental_ids.len());
     let supplemental_snapshot = ctx
         .client
         .blocks()
@@ -2337,16 +1802,9 @@ async fn run_body_scenario_inner(
         .fetch()
         .await
         .map_err(|_| "independent supplemental rich body read failed".to_owned())?;
-    if !body_scenario_check(
-        "rich_supplemental_snapshot_verified",
-        verify_supplemental_rich_snapshot(&supplemental_snapshot, &supplemental_ids, &page.id),
-    ) {
+    if !verify_supplemental_rich_snapshot(&supplemental_snapshot, &supplemental_ids, &page.id) {
         return Err("independent supplemental rich ObjectShow verification failed".to_owned());
     }
-    body_scenario_marker("rich_supplemental_complete");
-    body_scenario_count("final_normalized_results", normalized_results.len());
-    body_scenario_count("final_listed_blocks", listed_block_ids.len());
-    body_scenario_marker("final_evidence_complete");
 
     Ok(BodyScenarioEvidence {
         normalized_results,
