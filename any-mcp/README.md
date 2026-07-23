@@ -400,7 +400,10 @@ The finite `anytype-api` body lifecycle caps decoded Show at
 4,194,304 bytes and every non-Show body gRPC response—including foreground and
 fallback ObjectClose—at 65,536 bytes, owns cancellation-resilient bounded
 cleanup, shares one absolute deadline, and exposes the exact first-write-poll
-boundary. Close overrun is cleanup failure; mutation overrun after polling is
+boundary. Live update counters accept one through three semantic-verification
+Show/confirmed-close rounds, matching the finite mutation policy, while still
+requiring one write and zero fallback or limit-rejection counters. Close
+overrun is cleanup failure; mutation overrun after polling is
 indeterminate. The design's paired maximum request-plus-result contexts remain
 below 200,000 `o200k_base` tokens. Ordinary gRPC acceptance uses only a
 cleanup-owned real Anytype server across direct, stable-stdio, and preview-stdio
