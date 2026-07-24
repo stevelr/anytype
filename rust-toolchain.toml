@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  # "aarch64-darwin",
+  # "aarch64-windows",
+  # "x86_64-windows",
+]
+profile = "minimal"
