@@ -22,6 +22,8 @@ pub mod config;
 pub(crate) mod listener;
 pub mod oauth;
 pub(crate) mod preview;
+#[cfg(test)]
+mod process_tests;
 pub mod secret;
 pub(crate) mod session;
 

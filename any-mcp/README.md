@@ -1484,6 +1484,70 @@ before and after stable initialization. See
 [stdio protocol verification](docs/STDIO_CONFORMANCE.md) for the exact
 compatibility claim and reproducible client commands.
 
+## Streamable HTTP transport
+
+Stdio is the default. `ANY_MCP_TRANSPORT=streamable-http` selects an
+authenticated loopback Streamable HTTP listener instead; one process never
+serves both. The HTTP transport exposes the same tools, schemas, structured
+results, profiles, read-only rules, and optional toolsets as stdio — the
+domain handlers are shared, and handlers never observe raw headers or bearer
+values.
+
+The listener serves one fixed `/mcp` endpoint and binds loopback only
+(default `127.0.0.1:8000`); a non-loopback bind is rejected. Remote
+deployments terminate TLS in a same-host reverse proxy that forwards to
+loopback, preserves the `Authorization`, `Origin`, `Host`, MCP session and
+version, and `Last-Event-ID` headers, disables SSE buffering, and never logs
+credentials. Forwarded-identity headers (`X-Forwarded-*`, `Forwarded`) are
+ignored and stripped.
+
+Every request passes fixed gates in order — exact `Host` allowlist, exact
+`Origin` allowlist with fail-closed CORS, a process-global request-rate
+window, bearer authentication, a 64-request concurrency bound, and 2 MiB
+bounded body collection — before any JSON decoding or handler work.
+Authentication is required on every request and is separate from the Anytype
+keystore:
+
+- `ANY_MCP_HTTP_AUTH=static-token` reads one 43..512-byte base64url token
+  from the owner-only regular file named by `ANY_MCP_HTTP_TOKEN_FILE` and
+  compares it in constant time. Intended for a single local operator or
+  debugger.
+- `ANY_MCP_HTTP_AUTH=oauth-resource-server` implements the MCP
+  protected-resource role for one configured external issuer: RFC 9728
+  metadata at the two fixed well-known paths, JWT access tokens validated
+  against a bounded, cached JWKS (`RS256`/`ES256`/`EdDSA` only), and exact
+  issuer, audience, expiry, subject, and scope checks. Requires
+  `ANY_MCP_HTTP_RESOURCE_URI`, `ANY_MCP_HTTP_ISSUER`,
+  `ANY_MCP_HTTP_AUTHORIZATION_SERVER`, `ANY_MCP_HTTP_JWKS_URI`, and
+  `ANY_MCP_HTTP_AUDIENCE`; `ANY_MCP_HTTP_REQUIRED_SCOPE` defaults to
+  `anytype.mcp`.
+
+Stable mode accepts protocol revisions `2025-03-26`, `2025-06-18`, and
+`2025-11-25` over stateful sessions with optional SSE; revision `2024-11-05`
+remains stdio-only. Sessions are bound to the authenticated principal —
+another principal presenting a stolen session ID observes exactly an unknown
+session — and the process admits at most `ANY_MCP_HTTP_MAX_SESSIONS`
+(default 32) concurrent sessions. Mutation idempotency is process-lifetime
+and partitioned by principal, so a client that loses its session can safely
+retry an uncertain create after re-initializing. With
+`ANY_MCP_PROTOCOL=experimental-2026-07-28`, `/mcp` instead serves the
+stateless preview: one bounded POST per request returning
+`application/json`, with GET and DELETE rejected.
+
+Browser clients require `ANY_MCP_HTTP_ALLOWED_ORIGINS` (exact serialized
+origins; absent means every Origin-bearing request is rejected) and must use
+a fetch-based SSE reader because native `EventSource` cannot attach the
+`Authorization` header. Cookies and query-string tokens are never accepted.
+
+Remaining settings: `ANY_MCP_HTTP_BIND`, `ANY_MCP_HTTP_ALLOWED_HOSTS`
+(exact authorities, default local names), `ANY_MCP_HTTP_REQUESTS_PER_MINUTE`
+(default 120), and `ANY_MCP_HTTP_SHUTDOWN_SECS` (drain deadline, default
+10). Configuration is validated before any Anytype credential access;
+diagnostics never echo configured values, tokens, session IDs, or bodies.
+The full contract, threat model, and deployment requirements are specified
+in the approved transport design
+(`any-mcp/designs/streamable-http-transport.md` in the private docs tree).
+
 ## License
 
 Apache License, Version 2.0
