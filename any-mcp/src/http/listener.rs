@@ -427,7 +427,7 @@ fn evaluate_origin<'a>(
     find_allowed_origin(allowed, value).map(Some).ok_or(())
 }
 
-fn fixed_response(status: StatusCode, body: &'static str) -> Response<HttpBody> {
+pub(crate) fn fixed_response(status: StatusCode, body: &'static str) -> Response<HttpBody> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")

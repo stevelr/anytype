@@ -1109,7 +1109,7 @@ async fn optional_toolset_status_direct_contract() {
 #[tokio::test]
 async fn optional_toolset_status_stdio_contract() {
     let server = server("beta,alpha", ApplicationProfile::Compact, false);
-    let response = crate::stdio::dispatch_modern(
+    let response = crate::preview::dispatch_modern(
         &server,
         json!(1),
         "tools/call",
@@ -1256,7 +1256,7 @@ async fn disabled_and_read_only_calls_reject_before_decode_or_handler_work() {
 async fn stable_and_preview_expose_identical_selected_contracts() {
     let server = server("alpha,beta", ApplicationProfile::Compact, false);
     let stable = serde_json::to_value(server.list_tools_wire(None).unwrap()).unwrap();
-    let preview = crate::stdio::dispatch_modern(
+    let preview = crate::preview::dispatch_modern(
         &server,
         json!(1),
         "tools/list",
@@ -1267,7 +1267,7 @@ async fn stable_and_preview_expose_identical_selected_contracts() {
     assert_eq!(preview["result"]["tools"], stable["tools"]);
 
     let stable_resources = serde_json::to_value(server.list_resources_wire(None).unwrap()).unwrap();
-    let preview_resources = crate::stdio::dispatch_modern(
+    let preview_resources = crate::preview::dispatch_modern(
         &server,
         json!(2),
         "resources/list",
@@ -1282,7 +1282,7 @@ async fn stable_and_preview_expose_identical_selected_contracts() {
 
     let stable_templates =
         serde_json::to_value(server.list_resource_templates_wire(None).unwrap()).unwrap();
-    let preview_templates = crate::stdio::dispatch_modern(
+    let preview_templates = crate::preview::dispatch_modern(
         &server,
         json!(3),
         "resources/templates/list",
@@ -1434,7 +1434,7 @@ async fn production_all_selected_stable_and_preview_catalogs_are_identical() {
             let stable_tools =
                 serde_json::to_value(server.list_tools_wire(None).expect("stable tools"))
                     .expect("stable tools value");
-            let preview_tools = crate::stdio::dispatch_modern(
+            let preview_tools = crate::preview::dispatch_modern(
                 &server,
                 json!(1),
                 "tools/list",
@@ -1447,7 +1447,7 @@ async fn production_all_selected_stable_and_preview_catalogs_are_identical() {
             let stable_resources =
                 serde_json::to_value(server.list_resources_wire(None).expect("stable resources"))
                     .expect("stable resources value");
-            let preview_resources = crate::stdio::dispatch_modern(
+            let preview_resources = crate::preview::dispatch_modern(
                 &server,
                 json!(2),
                 "resources/list",
@@ -1466,7 +1466,7 @@ async fn production_all_selected_stable_and_preview_catalogs_are_identical() {
                     .expect("stable templates"),
             )
             .expect("stable templates value");
-            let preview_templates = crate::stdio::dispatch_modern(
+            let preview_templates = crate::preview::dispatch_modern(
                 &server,
                 json!(3),
                 "resources/templates/list",

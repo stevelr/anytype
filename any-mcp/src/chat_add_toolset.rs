@@ -2033,7 +2033,7 @@ mod tests {
         let preview_cancelled = CancellationToken::new();
         preview_cancelled.cancel();
         let preview = preview_outcome(
-            crate::stdio::dispatch_modern(
+            crate::preview::dispatch_modern(
                 &preview_server,
                 json!(71),
                 "tools/call",

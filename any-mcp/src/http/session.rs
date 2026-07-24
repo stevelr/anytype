@@ -28,9 +28,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Response, StatusCode, header};
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use rmcp::transport::streamable_http_server::{
     SessionManager, StreamableHttpServerConfig, StreamableHttpService,
     session::local::LocalSessionManager,
@@ -43,7 +42,7 @@ use crate::{
     http::{
         auth::AuthorizedPrincipal,
         config::HttpConfig,
-        listener::{AdmittedRequest, HttpBody},
+        listener::{AdmittedRequest, HttpBody, fixed_response},
     },
     runtime::RuntimeContext,
     server::AnyMcpServer,
@@ -404,17 +403,11 @@ fn initialize_version_accepted(body: &[u8]) -> bool {
     })
 }
 
-fn fixed_response(status: StatusCode, body: &'static str) -> Response<HttpBody> {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Full::new(Bytes::from_static(body.as_bytes())).boxed())
-        .expect("fixed response")
-}
-
 #[cfg(test)]
 mod tests {
     use anytype::prelude::{AnytypeClient, ClientConfig};
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
 
     use super::*;
     use crate::{config::ApplicationProfile, runtime::StartupStatus};

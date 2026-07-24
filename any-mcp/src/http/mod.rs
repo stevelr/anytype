@@ -21,6 +21,7 @@ pub(crate) mod auth;
 pub mod config;
 pub(crate) mod listener;
 pub mod oauth;
+pub(crate) mod preview;
 pub mod secret;
 pub(crate) mod session;
 
@@ -48,8 +49,6 @@ pub enum HttpTransportError {
     StaticToken(StaticTokenError),
     /// OAuth metadata/JWKS retrieval or validation failed.
     Jwks(oauth::JwksError),
-    /// The experimental preview protocol is not yet served over HTTP.
-    PreviewUnsupported,
     /// The fixed catalog could not be constructed.
     Catalog,
     /// The loopback listener could not be bound.
@@ -63,9 +62,6 @@ impl fmt::Display for HttpTransportError {
         match self {
             Self::StaticToken(error) => error.fmt(formatter),
             Self::Jwks(error) => error.fmt(formatter),
-            Self::PreviewUnsupported => {
-                formatter.write_str("experimental preview protocol is not served over HTTP yet")
-            }
             Self::Catalog => formatter.write_str("MCP static catalog construction failed"),
             Self::Bind => formatter.write_str("HTTP listener bind failed"),
             Self::Listener => formatter.write_str("HTTP listener service failed"),
@@ -139,7 +135,8 @@ pub async fn serve_http(
             Arc::new(move |admitted| Box::pin(backend.clone().call(admitted)))
         }
         ProtocolMode::Experimental20260728 => {
-            return Err(HttpTransportError::PreviewUnsupported);
+            let backend = Arc::new(preview::PreviewBackend::new(runtime.clone()));
+            Arc::new(move |admitted| Box::pin(backend.clone().call(admitted)))
         }
     };
 

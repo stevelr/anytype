@@ -87,6 +87,7 @@ pub mod object_read;
 pub mod object_update;
 pub mod optional_toolsets;
 pub mod pagination;
+mod preview;
 pub mod protocol;
 pub mod resources;
 pub mod result;
