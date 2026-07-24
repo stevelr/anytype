@@ -13,12 +13,19 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fmt,
-    fs::File,
     io::Read,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
+
+#[cfg(any(unix, windows))]
+use std::fs::File;
+
+#[cfg(windows)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+#[cfg(windows)]
+use cap_std::fs::{Dir, OpenOptions};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use icu_properties::{CodePointSetData, props::DefaultIgnorableCodePoint};
@@ -1098,8 +1105,9 @@ fn decode_native(encoding: &str, value: &str) -> Result<OsString, ArtifactConfig
         }
         let units = decoded
             .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
-        Ok(OsString::from_wide(units))
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        Ok(OsString::from_wide(&units))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1340,34 +1348,76 @@ fn read_selected_file(path: &Path) -> Result<String, ArtifactConfigError> {
 
 #[cfg(windows)]
 fn read_selected_file(path: &Path) -> Result<String, ArtifactConfigError> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::fs::MetadataExt;
 
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    let mut options = std::fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    let mut file = options
-        .open(path)
-        .map_err(|_| ArtifactConfigError::new(ConfigProblem::File))?;
+    let file = open_windows_selected_file(path)?;
     let metadata = file
         .metadata()
         .map_err(|_| ArtifactConfigError::new(ConfigProblem::File))?;
+    let handle_metadata = crate::artifact_roots::windows_security::handle_metadata(&file)
+        .map_err(|_| ArtifactConfigError::new(ConfigProblem::File))?;
     if !metadata.is_file()
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || handle_metadata.number_of_links != 1
         || metadata.file_size() > CONFIG_BYTES
+        || !crate::artifact_roots::windows_security::owner_and_dacl_are_safe(&file).unwrap_or(false)
     {
         return Err(ArtifactConfigError::new(ConfigProblem::File));
     }
     let mut bytes = Vec::new();
-    file.take(CONFIG_BYTES + 1)
+    (&file)
+        .take(CONFIG_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ArtifactConfigError::new(ConfigProblem::File))?;
     if bytes.len() as u64 > CONFIG_BYTES {
         return Err(ArtifactConfigError::new(ConfigProblem::File));
     }
     String::from_utf8(bytes).map_err(|_| ArtifactConfigError::new(ConfigProblem::File))
+}
+
+#[cfg(windows)]
+fn open_windows_selected_file(path: &Path) -> Result<File, ArtifactConfigError> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let error = || ArtifactConfigError::new(ConfigProblem::File);
+    let anchor = path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .last()
+        .ok_or_else(error)?;
+    let relative = path.strip_prefix(anchor).map_err(|_| error())?;
+    let mut components = relative.components().peekable();
+    let mut current = Dir::open_ambient_dir(anchor, cap_std::ambient_authority())
+        .map(Dir::into_std_file)
+        .map_err(|_| error())?;
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            return Err(error());
+        };
+        let final_component = components.peek().is_none();
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .follow(FollowSymlinks::No)
+            .maybe_dir(!final_component);
+        current = Dir::from_std_file(current)
+            .open_with(Path::new(component), &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|_| error())?;
+        if !final_component {
+            let metadata = current.metadata().map_err(|_| error())?;
+            if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
+                return Err(error());
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(error());
+    }
+    Ok(current)
 }
 
 #[cfg(not(any(unix, windows)))]

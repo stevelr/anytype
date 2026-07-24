@@ -115,7 +115,7 @@ pub use artifact_config::{
     ValidatorDriver,
 };
 pub use artifact_roots::{
-    AnchoredImport, EffectiveRootRegistry, ROOTS_REQUIRED_GUIDANCE, RootAccessError,
+    AnchoredImport, AtomicExport, EffectiveRootRegistry, ROOTS_REQUIRED_GUIDANCE, RootAccessError,
     RootCapabilityKind, RootRegistry,
 };
 pub use config::{ApplicationProfile, ProtocolMode, RuntimeConfig};

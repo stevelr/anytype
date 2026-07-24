@@ -26,8 +26,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and combining marks while rejecting invisible characters. Physical roots
   and operation paths support native Unix bytes or Windows WTF-16 through
   canonical unpadded base64url. Activated roots retain directory handles,
-  enforce create-new exports and no-follow import walks on Unix, and allow MCP
-  client roots only to narrow static policy. The future `artifacts` registry
+  use capability-relative no-follow walks on Linux, macOS, and Windows, and
+  allow MCP client roots only to narrow static policy. Imports reject unsafe
+  ownership, permissions or ACLs, hard links, reparse points, and filesystem
+  boundary changes. Exports write bounded owner-private temporaries and publish
+  complete create-new destinations atomically without overwrite; cancellation
+  and failures remove the private temporary. The future `artifacts` registry
   remains unlinked, so configured roots, staging, and validators perform no
   activation I/O in the current catalog.
 - Enforce selected Anytype space policy through one frozen startup authority.

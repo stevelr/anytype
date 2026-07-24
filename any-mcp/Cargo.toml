@@ -38,6 +38,8 @@ acceptance-harness = []
 [dependencies]
 anytype.workspace = true
 base64.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
 httpdate.workspace = true
@@ -66,3 +68,6 @@ jsonschema = { version = "0.48.2", default-features = false }
 reqwest.workspace = true
 serial_test = "3.5.0"
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

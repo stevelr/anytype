@@ -115,16 +115,35 @@ pub fn init_config(path: &Path) -> Result<(), ProcessCommandError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = match options.open(path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        options.share_mode(0);
+    }
+    let mut file = match options.open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             return Err(ProcessCommandError::new(CommandProblem::Exists));
         }
         Err(_) => return Err(ProcessCommandError::new(CommandProblem::Create)),
     };
-    file.write_all(CONFIG_TEMPLATE.as_bytes())
+    if file
+        .write_all(CONFIG_TEMPLATE.as_bytes())
         .and_then(|()| file.sync_all())
-        .map_err(|_| ProcessCommandError::new(CommandProblem::Write))
+        .is_err()
+    {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(ProcessCommandError::new(CommandProblem::Write));
+    }
+    #[cfg(windows)]
+    if !crate::artifact_roots::windows_security::owner_and_dacl_are_safe(&file).unwrap_or(false) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(ProcessCommandError::new(CommandProblem::Create));
+    }
+    Ok(())
 }
 
 /// Securely opens and validates one configuration without starting Anytype.

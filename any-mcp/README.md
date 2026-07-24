@@ -235,9 +235,14 @@ Windows uses `windows-wtf16le-base64url`. The parser decodes these values
 directly into native OS strings and applies component, traversal, prefix, and
 length checks without lossy Unicode conversion. Root activation retains
 directory handles and intersects static policy with MCP client roots; client
-roots can only narrow authority. Unix file walks reject symlinks, nested mount
-redirection, unsafe permissions, hard-linked imports, traversal, over-limit
-files, and export collisions.
+roots can only narrow authority. Capability-relative file walks on Linux,
+macOS, and Windows reject links and reparse points, cross-filesystem
+redirection, unsafe permissions or ACLs, hard-linked imports, traversal,
+over-limit files, and export collisions. Export bytes remain in an
+owner-private temporary file in the destination directory until commit, which
+atomically publishes a complete create-new destination without replacing an
+existing entry. Failed, cancelled, and dropped exports remove only their
+private temporary file.
 
 Space policy is active independently of the future artifact registry. An
 omitted `spaces.allowed` permits every space that the configured Anytype

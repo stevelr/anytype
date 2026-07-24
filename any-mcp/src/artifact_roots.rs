@@ -6,17 +6,24 @@
 //! Opened filesystem capabilities for local artifact operations.
 //!
 //! Root paths are used only during activation. The registry retains opened
-//! directory handles, and Unix operations walk validated relative components
-//! with `openat` and `O_NOFOLLOW`. Absolute physical paths are never retained
-//! in errors, receipts, or debug output.
+//! directory handles, and operations walk validated relative components
+//! without following links. Absolute physical paths are never retained in
+//! errors, receipts, or debug output.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fmt,
     fs::File,
-    io,
+    io::{self, Write},
+    path::Path,
     sync::Arc,
 };
+
+#[cfg(unix)]
+use cap_fs_ext::OpenOptionsExt;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+use cap_std::fs::{Dir, OpenOptions};
 
 use crate::artifact_config::{
     AbsoluteNativePath, ArtifactConfig, LogicalRootId, RelativeNativePath, RootDefinition,
@@ -175,22 +182,27 @@ impl EffectiveRootRegistry {
         open_import_at(capability, path, maximum_bytes)
     }
 
-    /// Creates one new export file beneath an authorized retained root.
+    /// Starts one bounded, create-new atomic export.
     ///
-    /// This low-level primitive is create-new only. Higher artifact workflows
-    /// write a private same-directory temporary and atomically publish it;
-    /// callers cannot request replacement.
+    /// Bytes are written to an owner-private temporary file in the exact
+    /// destination directory. [`AtomicExport::commit`] publishes the complete
+    /// file with an atomic no-replace hard link and removes the private name.
+    /// Dropping an uncommitted export removes only its private temporary.
     ///
     /// # Errors
     ///
     /// Returns fixed guidance/authorization/containment/collision errors.
-    pub fn create_new_export(
+    pub fn begin_atomic_export(
         &self,
         root: &str,
         path: &RelativeNativePath,
-    ) -> Result<File, RootAccessError> {
+        maximum_bytes: u64,
+    ) -> Result<AtomicExport, RootAccessError> {
+        if maximum_bytes == 0 {
+            return Err(RootAccessError::new(RootProblem::TooLarge));
+        }
         let capability = self.authorize(root, RootCapabilityKind::Export)?;
-        create_export_at(capability, path)
+        begin_atomic_export_at(capability, path, maximum_bytes)
     }
 
     fn authorize(
@@ -219,6 +231,145 @@ impl EffectiveRootRegistry {
             return Err(RootAccessError::new(RootProblem::Unauthorized));
         }
         Ok(capability)
+    }
+}
+
+/// One bounded same-directory export which is invisible until commit.
+pub struct AtomicExport {
+    parent: Dir,
+    file: Option<File>,
+    temporary_name: OsString,
+    destination_name: OsString,
+    maximum_bytes: u64,
+    written: u64,
+    published: bool,
+}
+
+impl fmt::Debug for AtomicExport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AtomicExport")
+            .field("maximum_bytes", &self.maximum_bytes)
+            .field("written", &self.written)
+            .field("published", &self.published)
+            .finish()
+    }
+}
+
+impl AtomicExport {
+    /// Flushes, verifies, and atomically publishes the destination.
+    ///
+    /// The destination must still be absent. The returned byte count is the
+    /// exact length durably written before publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns collision if another entry won the destination race, a size
+    /// error if the retained file disagrees with bounded writes, or an
+    /// indeterminate publication error if publication may have completed but
+    /// durability or private-name cleanup could not be proven.
+    pub fn commit(mut self) -> Result<u64, RootAccessError> {
+        let Some(file) = self.file.take() else {
+            return Err(RootAccessError::new(RootProblem::Containment));
+        };
+        file.sync_all()
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        if !metadata.is_file()
+            || metadata.len() != self.written
+            || metadata.len() > self.maximum_bytes
+            || !safe_created_export_metadata(&file, &metadata)
+            || !safe_windows_security(&file)
+        {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        let source_identity = file_identity(&file, &metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+
+        match self.parent.hard_link(
+            Path::new(&self.temporary_name),
+            &self.parent,
+            Path::new(&self.destination_name),
+        ) {
+            Ok(()) => self.published = true,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(RootAccessError::new(RootProblem::Collision));
+            }
+            Err(_) => return Err(RootAccessError::new(RootProblem::Containment)),
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let published = self
+            .parent
+            .open_with(Path::new(&self.destination_name), &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+        let published_metadata = published
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+        let published_identity = file_identity(&published, &published_metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+        if !published_metadata.is_file()
+            || published_metadata.len() != self.written
+            || published_identity != source_identity
+            || !safe_windows_security(&published)
+        {
+            return Err(RootAccessError::new(RootProblem::Indeterminate));
+        }
+        drop(published);
+        drop(file);
+        if self
+            .parent
+            .remove_file(Path::new(&self.temporary_name))
+            .is_err()
+        {
+            return Err(RootAccessError::new(RootProblem::Indeterminate));
+        }
+        sync_parent_directory(&self.parent)
+            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+        Ok(self.written)
+    }
+}
+
+impl Write for AtomicExport {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let requested = u64::try_from(bytes.len())
+            .map_err(|_| io::Error::other("artifact write length overflow"))?;
+        let proposed = self
+            .written
+            .checked_add(requested)
+            .ok_or_else(|| io::Error::other("artifact write length overflow"))?;
+        if proposed > self.maximum_bytes {
+            return Err(io::Error::other(
+                "artifact exceeds the configured size limit",
+            ));
+        }
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("artifact export is not writable"))?;
+        let written = file.write(bytes)?;
+        self.written = self
+            .written
+            .checked_add(written as u64)
+            .ok_or_else(|| io::Error::other("artifact write length overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("artifact export is not writable"))?
+            .flush()
+    }
+}
+
+impl Drop for AtomicExport {
+    fn drop(&mut self) {
+        self.file.take();
+        let _ = self.parent.remove_file(Path::new(&self.temporary_name));
     }
 }
 
@@ -255,7 +406,7 @@ impl AnchoredImport {
             .file
             .metadata()
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
-        let snapshot = FileSnapshot::from_metadata(&metadata)
+        let snapshot = FileSnapshot::from_file(&self.file, &metadata)
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
         if snapshot != self.snapshot {
             return Err(RootAccessError::new(RootProblem::Changed));
@@ -287,7 +438,8 @@ impl fmt::Display for RootAccessError {
             RootProblem::TooLarge => "Artifact exceeds the configured size limit.",
             RootProblem::Collision => "Artifact export destination already exists.",
             RootProblem::Changed => "Artifact source changed during the operation.",
-            #[cfg(not(unix))]
+            RootProblem::Indeterminate => "Artifact export publication is indeterminate.",
+            #[cfg(not(any(unix, windows)))]
             RootProblem::Platform => "Artifact root controls are unavailable on this platform.",
         })
     }
@@ -305,7 +457,8 @@ enum RootProblem {
     TooLarge,
     Collision,
     Changed,
-    #[cfg(not(unix))]
+    Indeterminate,
+    #[cfg(not(any(unix, windows)))]
     Platform,
 }
 
@@ -319,12 +472,21 @@ struct RootCapability {
 struct OpenedDirectory {
     file: Arc<File>,
     identity: FileIdentity,
+    #[cfg(windows)]
+    ancestry: Arc<Vec<RetainedWindowsAncestor>>,
 }
 
 impl fmt::Debug for OpenedDirectory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("OpenedDirectory(<capability>)")
     }
+}
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct RetainedWindowsAncestor {
+    _file: Arc<File>,
+    identity: FileIdentity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -343,11 +505,11 @@ struct FileSnapshot {
 
 #[cfg(unix)]
 impl FileSnapshot {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
+    fn from_file(_: &File, metadata: &std::fs::Metadata) -> io::Result<Self> {
         use std::os::unix::fs::MetadataExt;
 
         Ok(Self {
-            identity: FileIdentity::from_metadata(metadata)?,
+            identity: file_identity_unix(metadata),
             length: metadata.len(),
             modified: i128::from(metadata.mtime()) * 1_000_000_000
                 + i128::from(metadata.mtime_nsec()),
@@ -359,21 +521,25 @@ impl FileSnapshot {
 
 #[cfg(windows)]
 impl FileSnapshot {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
+    fn from_file(file: &File, metadata: &std::fs::Metadata) -> io::Result<Self> {
         use std::os::windows::fs::MetadataExt;
 
+        let handle = windows_security::handle_metadata(file)?;
         Ok(Self {
-            identity: FileIdentity::from_metadata(metadata)?,
+            identity: FileIdentity {
+                volume: handle.volume,
+                file: handle.file,
+            },
             length: metadata.file_size(),
-            modified: i128::from(metadata.last_write_time()),
-            changed: i128::from(metadata.creation_time()),
+            modified: i128::from(handle.last_write),
+            changed: i128::from(handle.change),
         })
     }
 }
 
 #[cfg(not(any(unix, windows)))]
 impl FileSnapshot {
-    fn from_metadata(_: &std::fs::Metadata) -> io::Result<Self> {
+    fn from_file(_: &File, _: &std::fs::Metadata) -> io::Result<Self> {
         Err(io::Error::other("unsupported platform"))
     }
 }
@@ -395,40 +561,33 @@ fn insert_root(
 }
 
 #[cfg(unix)]
-impl FileIdentity {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
-        use std::os::unix::fs::MetadataExt;
+fn file_identity(file: &File, metadata: &std::fs::Metadata) -> io::Result<FileIdentity> {
+    let _ = file;
+    Ok(file_identity_unix(metadata))
+}
 
-        Ok(Self {
-            volume: metadata.dev(),
-            file: metadata.ino(),
-        })
+#[cfg(unix)]
+fn file_identity_unix(metadata: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
     }
 }
 
 #[cfg(windows)]
-impl FileIdentity {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
-        use std::os::windows::fs::MetadataExt;
-
-        let volume = metadata
-            .volume_serial_number()
-            .ok_or_else(|| io::Error::other("missing volume identity"))?;
-        let file = metadata
-            .file_index()
-            .ok_or_else(|| io::Error::other("missing file identity"))?;
-        Ok(Self {
-            volume: u64::from(volume),
-            file,
-        })
-    }
+fn file_identity(file: &File, _: &std::fs::Metadata) -> io::Result<FileIdentity> {
+    let metadata = windows_security::handle_metadata(file)?;
+    Ok(FileIdentity {
+        volume: metadata.volume,
+        file: metadata.file,
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
-impl FileIdentity {
-    fn from_metadata(_: &std::fs::Metadata) -> io::Result<Self> {
-        Err(io::Error::other("unsupported platform"))
-    }
+fn file_identity(_: &File, _: &std::fs::Metadata) -> io::Result<FileIdentity> {
+    Err(io::Error::other("unsupported platform"))
 }
 
 #[cfg(unix)]
@@ -475,7 +634,7 @@ fn open_root(path: &AbsoluteNativePath) -> io::Result<OpenedDirectory> {
             "unsafe root permissions",
         ));
     }
-    let identity = FileIdentity::from_metadata(&metadata)?;
+    let identity = file_identity(&current, &metadata)?;
     Ok(OpenedDirectory {
         file: Arc::new(current),
         identity,
@@ -484,28 +643,69 @@ fn open_root(path: &AbsoluteNativePath) -> io::Result<OpenedDirectory> {
 
 #[cfg(windows)]
 fn open_root(path: &AbsoluteNativePath) -> io::Result<OpenedDirectory> {
-    use std::{
-        fs::OpenOptions,
-        os::windows::fs::{MetadataExt, OpenOptionsExt},
-    };
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-    let file = options.open(path.as_path())?;
+    let (file, ancestry) = open_windows_root_chain(path.as_path())?;
     let metadata = file.metadata()?;
-    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    let identity = file_identity(&file, &metadata)?;
+    if !safe_directory_metadata(&file, &metadata, identity.volume) || !safe_windows_security(&file)
+    {
         return Err(io::Error::other("unsafe root"));
     }
-    let identity = FileIdentity::from_metadata(&metadata)?;
     Ok(OpenedDirectory {
         file: Arc::new(file),
         identity,
+        ancestry: Arc::new(ancestry),
     })
+}
+
+#[cfg(windows)]
+fn open_windows_root_chain(path: &Path) -> io::Result<(File, Vec<RetainedWindowsAncestor>)> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let anchor = path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .last()
+        .ok_or_else(|| io::Error::other("root path has no volume anchor"))?;
+    let relative = path
+        .strip_prefix(anchor)
+        .map_err(|_| io::Error::other("root path has no stable anchor"))?;
+    let mut current = Dir::open_ambient_dir(anchor, cap_std::ambient_authority())?.into_std_file();
+    let mut retained = Vec::new();
+    let anchor_metadata = current.metadata()?;
+    if !anchor_metadata.is_dir()
+        || anchor_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(io::Error::other("unsafe root anchor"));
+    }
+    retained.push(RetainedWindowsAncestor {
+        _file: Arc::new(current.try_clone()?),
+        identity: file_identity(&current, &anchor_metadata)?,
+    });
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(io::Error::other("invalid root component"));
+        };
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .follow(FollowSymlinks::No)
+            .maybe_dir(true);
+        let parent = Dir::from_std_file(current);
+        current = parent.open_with(Path::new(component), &options)?.into_std();
+        let metadata = current.metadata()?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::other("root namespace contains a reparse point"));
+        }
+        if !metadata.is_dir() {
+            return Err(io::Error::other("root component is not a directory"));
+        }
+        retained.push(RetainedWindowsAncestor {
+            _file: Arc::new(current.try_clone()?),
+            identity: file_identity(&current, &metadata)?,
+        });
+    }
+    Ok((current, retained))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -539,7 +739,8 @@ fn is_ancestor_identity(
         }
         // SAFETY: `openat` returned a new owned descriptor.
         let parent = unsafe { File::from_raw_fd(descriptor) };
-        let identity = FileIdentity::from_metadata(&parent.metadata()?)?;
+        let metadata = parent.metadata()?;
+        let identity = file_identity(&parent, &metadata)?;
         if identity == current.identity {
             return Ok(false);
         }
@@ -556,13 +757,10 @@ fn is_ancestor_identity(
     candidate: &OpenedDirectory,
     descendant: &OpenedDirectory,
 ) -> io::Result<bool> {
-    if candidate.identity == descendant.identity {
-        Ok(true)
-    } else {
-        Err(io::Error::other(
-            "secure Windows ancestry walk is unavailable",
-        ))
-    }
+    Ok(descendant
+        .ancestry
+        .iter()
+        .any(|ancestor| ancestor.identity == candidate.identity))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -570,53 +768,28 @@ fn is_ancestor_identity(_: &OpenedDirectory, _: &OpenedDirectory) -> io::Result<
     Err(io::Error::other("unsupported platform"))
 }
 
-#[cfg(unix)]
 fn open_import_at(
     root: &RootCapability,
     path: &RelativeNativePath,
     maximum_bytes: u64,
 ) -> Result<AnchoredImport, RootAccessError> {
-    use std::{
-        ffi::CString,
-        os::{
-            fd::{AsRawFd, FromRawFd},
-            unix::{ffi::OsStrExt, fs::MetadataExt},
-        },
-    };
-
     let (parent, name) = walk_parent(root, path)?;
-    let name = CString::new(name.as_bytes())
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = parent
+        .open_with(Path::new(&name), &options)
+        .map(cap_std::fs::File::into_std)
         .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-    // SAFETY: parent is a retained directory and name is one validated native
-    // component. O_NOFOLLOW rejects a substituted final symlink.
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if descriptor < 0 {
-        return Err(RootAccessError::new(RootProblem::Containment));
-    }
-    // SAFETY: `openat` returned a new owned descriptor.
-    let file = unsafe { File::from_raw_fd(descriptor) };
     let metadata = file
         .metadata()
         .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-    // SAFETY: `geteuid` has no memory or ownership preconditions.
-    let effective_user = unsafe { libc::geteuid() };
-    if !metadata.is_file()
-        || metadata.uid() != effective_user
-        || metadata.mode() & 0o022 != 0
-        || metadata.nlink() != 1
-    {
+    if !safe_import_metadata(&file, &metadata) || !safe_windows_security(&file) {
         return Err(RootAccessError::new(RootProblem::Containment));
     }
     if metadata.len() > maximum_bytes {
         return Err(RootAccessError::new(RootProblem::TooLarge));
     }
-    let snapshot = FileSnapshot::from_metadata(&metadata)
+    let snapshot = FileSnapshot::from_file(&file, &metadata)
         .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
     Ok(AnchoredImport {
         file,
@@ -625,63 +798,17 @@ fn open_import_at(
     })
 }
 
-#[cfg(unix)]
-fn create_export_at(
-    root: &RootCapability,
-    path: &RelativeNativePath,
-) -> Result<File, RootAccessError> {
-    use std::{
-        ffi::CString,
-        os::{
-            fd::{AsRawFd, FromRawFd},
-            unix::ffi::OsStrExt,
-        },
-    };
-
-    let (parent, name) = walk_parent(root, path)?;
-    let name = CString::new(name.as_bytes())
-        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-    // SAFETY: parent is a retained directory and name is one validated native
-    // component. O_EXCL makes collision handling create-new only.
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
-        )
-    };
-    if descriptor < 0 {
-        let error = io::Error::last_os_error();
-        return if error.kind() == io::ErrorKind::AlreadyExists {
-            Err(RootAccessError::new(RootProblem::Collision))
-        } else {
-            Err(RootAccessError::new(RootProblem::Containment))
-        };
-    }
-    // SAFETY: `openat` returned a new owned descriptor.
-    Ok(unsafe { File::from_raw_fd(descriptor) })
-}
-
-#[cfg(unix)]
 fn walk_parent(
     root: &RootCapability,
     path: &RelativeNativePath,
-) -> Result<(File, std::ffi::OsString), RootAccessError> {
-    use std::{
-        ffi::CString,
-        os::{
-            fd::{AsRawFd, FromRawFd},
-            unix::{ffi::OsStrExt, fs::MetadataExt},
-        },
-    };
-
+) -> Result<(Dir, OsString), RootAccessError> {
     let mut components = path.as_path().components().peekable();
-    let mut current = root
+    let root_file = root
         .directory
         .file
         .try_clone()
         .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    let mut current = Dir::from_std_file(root_file);
     while let Some(component) = components.next() {
         let std::path::Component::Normal(component) = component else {
             return Err(RootAccessError::new(RootProblem::Containment));
@@ -689,72 +816,453 @@ fn walk_parent(
         if components.peek().is_none() {
             return Ok((current, component.to_os_string()));
         }
-        let component = CString::new(component.as_bytes())
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .follow(FollowSymlinks::No)
+            .maybe_dir(true);
+        let directory = current
+            .open_with(Path::new(component), &options)
+            .map(cap_std::fs::File::into_std)
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-        // SAFETY: current is a retained directory and component is one
-        // validated NUL-terminated name.
-        let descriptor = unsafe {
-            libc::openat(
-                current.as_raw_fd(),
-                component.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if descriptor < 0 {
-            return Err(RootAccessError::new(RootProblem::Containment));
-        }
-        // SAFETY: `openat` returned a new owned descriptor.
-        current = unsafe { File::from_raw_fd(descriptor) };
-        let metadata = current
+        let metadata = directory
             .metadata()
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-        // SAFETY: `geteuid` has no memory or ownership preconditions.
-        let effective_user = unsafe { libc::geteuid() };
-        if !metadata.is_dir()
-            || metadata.dev() != root.directory.identity.volume
-            || metadata.uid() != effective_user
-            || metadata.mode() & 0o022 != 0
+        if !safe_directory_metadata(&directory, &metadata, root.directory.identity.volume)
+            || !safe_windows_security(&directory)
         {
             return Err(RootAccessError::new(RootProblem::Containment));
+        }
+        current = Dir::from_std_file(directory);
+    }
+    Err(RootAccessError::new(RootProblem::Containment))
+}
+
+fn begin_atomic_export_at(
+    root: &RootCapability,
+    path: &RelativeNativePath,
+    maximum_bytes: u64,
+) -> Result<AtomicExport, RootAccessError> {
+    let (parent, destination_name) = walk_parent(root, path)?;
+    match parent.symlink_metadata(Path::new(&destination_name)) {
+        Ok(_) => return Err(RootAccessError::new(RootProblem::Collision)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(RootAccessError::new(RootProblem::Containment)),
+    }
+
+    for _ in 0..16 {
+        let random =
+            getrandom::u64().map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let temporary_name = OsString::from(format!(".any-mcp-{random:016x}.tmp"));
+        let options = owner_private_create_options();
+        match parent.open_with(Path::new(&temporary_name), &options) {
+            Ok(file) => {
+                let file = file.into_std();
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+                if !safe_created_export_metadata(&file, &metadata) || !safe_windows_security(&file)
+                {
+                    drop(file);
+                    let _ = parent.remove_file(Path::new(&temporary_name));
+                    return Err(RootAccessError::new(RootProblem::Containment));
+                }
+                return Ok(AtomicExport {
+                    parent,
+                    file: Some(file),
+                    temporary_name,
+                    destination_name,
+                    maximum_bytes,
+                    written: 0,
+                    published: false,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(RootAccessError::new(RootProblem::Containment)),
         }
     }
     Err(RootAccessError::new(RootProblem::Containment))
 }
 
-#[cfg(windows)]
-fn open_import_at(
-    _: &RootCapability,
-    _: &RelativeNativePath,
-    _: u64,
-) -> Result<AnchoredImport, RootAccessError> {
-    Err(RootAccessError::new(RootProblem::Platform))
+fn owner_private_create_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Dir) -> io::Result<()> {
+    parent.try_clone()?.into_std_file().sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_: &Dir) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn safe_directory_metadata(_: &File, metadata: &std::fs::Metadata, root_volume: u64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` has no memory or ownership preconditions.
+    let effective_user = unsafe { libc::geteuid() };
+    metadata.is_dir()
+        && metadata.dev() == root_volume
+        && metadata.uid() == effective_user
+        && metadata.mode() & 0o022 == 0
 }
 
 #[cfg(windows)]
-fn create_export_at(_: &RootCapability, _: &RelativeNativePath) -> Result<File, RootAccessError> {
-    Err(RootAccessError::new(RootProblem::Platform))
+fn safe_directory_metadata(file: &File, metadata: &std::fs::Metadata, root_volume: u64) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.is_dir()
+        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && file_identity(file, metadata)
+            .map(|identity| identity.volume == root_volume)
+            .unwrap_or(false)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_import_at(
-    _: &RootCapability,
-    _: &RelativeNativePath,
-    _: u64,
-) -> Result<AnchoredImport, RootAccessError> {
-    Err(RootAccessError::new(RootProblem::Platform))
+fn safe_directory_metadata(_: &File, _: &std::fs::Metadata, _: u64) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn safe_import_metadata(_: &File, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` has no memory or ownership preconditions.
+    let effective_user = unsafe { libc::geteuid() };
+    metadata.is_file()
+        && metadata.uid() == effective_user
+        && metadata.mode() & 0o022 == 0
+        && metadata.nlink() == 1
+}
+
+#[cfg(windows)]
+fn safe_import_metadata(file: &File, metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.is_file()
+        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && windows_security::handle_metadata(file)
+            .map(|handle| handle.number_of_links == 1)
+            .unwrap_or(false)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn create_export_at(_: &RootCapability, _: &RelativeNativePath) -> Result<File, RootAccessError> {
-    Err(RootAccessError::new(RootProblem::Platform))
+fn safe_import_metadata(_: &File, _: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn safe_created_export_metadata(_: &File, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` has no memory or ownership preconditions.
+    let effective_user = unsafe { libc::geteuid() };
+    metadata.is_file()
+        && metadata.uid() == effective_user
+        && metadata.mode() & 0o077 == 0
+        && metadata.nlink() == 1
+}
+
+#[cfg(windows)]
+fn safe_created_export_metadata(file: &File, metadata: &std::fs::Metadata) -> bool {
+    safe_import_metadata(file, metadata)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn safe_created_export_metadata(_: &File, _: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+const fn safe_windows_security(_: &File) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn safe_windows_security(file: &File) -> bool {
+    windows_security::owner_and_dacl_are_safe(file).unwrap_or(false)
+}
+
+#[cfg(windows)]
+pub(crate) mod windows_security {
+    use std::{
+        ffi::c_void,
+        io,
+        mem::{offset_of, size_of},
+        os::windows::io::AsRawHandle,
+        ptr,
+    };
+
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GENERIC_ALL, GENERIC_WRITE, HANDLE, LocalFree},
+        Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
+            DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetTokenInformation,
+            IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        },
+        Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, DELETE, FILE_APPEND_DATA, FILE_BASIC_INFO,
+            FILE_DELETE_CHILD, FILE_WRITE_DATA, FileBasicInfo, GetFileInformationByHandle,
+            GetFileInformationByHandleEx, WRITE_DAC, WRITE_OWNER,
+        },
+        System::{
+            SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+
+    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+    const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 6;
+    const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 10;
+    const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 12;
+    const FILE_WRITE_EA: u32 = 0x0010;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const DANGEROUS_ACCESS: u32 = FILE_WRITE_DATA
+        | FILE_APPEND_DATA
+        | FILE_WRITE_EA
+        | FILE_DELETE_CHILD
+        | FILE_WRITE_ATTRIBUTES
+        | DELETE
+        | WRITE_DAC
+        | WRITE_OWNER
+        | GENERIC_WRITE
+        | GENERIC_ALL;
+
+    pub(crate) struct HandleMetadata {
+        pub(crate) volume: u64,
+        pub(crate) file: u64,
+        pub(crate) number_of_links: u32,
+        pub(crate) last_write: i64,
+        pub(crate) change: i64,
+    }
+
+    pub(crate) fn handle_metadata(file: &std::fs::File) -> io::Result<HandleMetadata> {
+        let handle = file.as_raw_handle() as HANDLE;
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the file handle is live and the output structure has the
+        // exact type required by the Win32 API.
+        if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut basic = FILE_BASIC_INFO::default();
+        // SAFETY: the file handle is live and `basic` is a correctly sized,
+        // writable buffer for `FileBasicInfo`.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileBasicInfo,
+                ptr::addr_of_mut!(basic).cast(),
+                u32::try_from(size_of::<FILE_BASIC_INFO>()).unwrap_or(u32::MAX),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(HandleMetadata {
+            volume: u64::from(information.dwVolumeSerialNumber),
+            file: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+            number_of_links: information.nNumberOfLinks,
+            last_write: basic.LastWriteTime,
+            change: basic.ChangeTime,
+        })
+    }
+
+    struct OwnedHandle(HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: the handle was returned by `OpenProcessToken` and is
+            // closed exactly once by this owner.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    struct LocalSecurityDescriptor(*mut c_void);
+
+    impl Drop for LocalSecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: `GetSecurityInfo` allocated this descriptor with the
+            // local allocator and ownership is released exactly once.
+            unsafe {
+                let _ = LocalFree(self.0);
+            }
+        }
+    }
+
+    struct TokenUserBuffer {
+        words: Vec<usize>,
+    }
+
+    impl TokenUserBuffer {
+        fn sid(&self) -> PSID {
+            // SAFETY: the buffer is aligned for `TOKEN_USER`, was initialized
+            // by `GetTokenInformation`, and remains live with this borrow.
+            unsafe { (*self.words.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        }
+    }
+
+    pub(crate) fn owner_and_dacl_are_safe(file: &std::fs::File) -> io::Result<bool> {
+        let token = current_process_token()?;
+        let token_user_buffer = token_user_buffer(token.0)?;
+        let token_user = token_user_buffer.sid();
+
+        let mut owner = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: the file handle is live for this call; output pointers are
+        // valid and the returned descriptor is immediately assigned an owner.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != 0 || descriptor.is_null() {
+            return Err(io::Error::other("Windows security query failed"));
+        }
+        let _descriptor = LocalSecurityDescriptor(descriptor);
+        if owner.is_null() || dacl.is_null() {
+            return Ok(false);
+        }
+        // SAFETY: both SIDs are owned by live token/descriptor buffers.
+        if unsafe { EqualSid(owner, token_user) } == 0 {
+            return Ok(false);
+        }
+        dacl_has_no_untrusted_writers(dacl, token_user)
+    }
+
+    fn current_process_token() -> io::Result<OwnedHandle> {
+        let mut token = ptr::null_mut();
+        // SAFETY: the pseudo-process handle is always live and `token` is a
+        // valid output pointer.
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if opened == 0 || token.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(OwnedHandle(token))
+    }
+
+    fn token_user_buffer(token: HANDLE) -> io::Result<TokenUserBuffer> {
+        let mut required = 0_u32;
+        // SAFETY: the first call intentionally supplies no buffer to obtain
+        // the exact required byte count.
+        unsafe {
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut required);
+        }
+        if required < u32::try_from(size_of::<TOKEN_USER>()).unwrap_or(u32::MAX) {
+            return Err(io::Error::other("Windows token user query failed"));
+        }
+        let words = usize::try_from(required)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(size_of::<usize>() - 1))
+            .map(|bytes| bytes / size_of::<usize>())
+            .ok_or_else(|| io::Error::other("Windows token buffer overflow"))?;
+        let mut buffer = vec![0_usize; words];
+        // SAFETY: the aligned buffer contains at least `required` writable
+        // bytes and remains live while its SID is used by the caller.
+        let success = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        };
+        if success == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(TokenUserBuffer { words: buffer })
+    }
+
+    fn dacl_has_no_untrusted_writers(dacl: *mut ACL, token_user: PSID) -> io::Result<bool> {
+        let mut information = ACL_SIZE_INFORMATION::default();
+        // SAFETY: `dacl` is retained by the live security descriptor and the
+        // output structure has the exact declared size.
+        let success = unsafe {
+            GetAclInformation(
+                dacl,
+                ptr::addr_of_mut!(information).cast(),
+                u32::try_from(size_of::<ACL_SIZE_INFORMATION>()).unwrap_or(u32::MAX),
+                AclSizeInformation,
+            )
+        };
+        if success == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for index in 0..information.AceCount {
+            let mut ace: *mut c_void = ptr::null_mut();
+            // SAFETY: the index is below the count returned for this live ACL.
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: every ACL entry begins with an `ACE_HEADER`; unaligned
+            // reads avoid assuming allocator alignment beyond the API contract.
+            let header = unsafe { ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8 {
+                if matches!(
+                    header.AceType,
+                    ACCESS_DENIED_ACE_TYPE
+                        | ACCESS_DENIED_OBJECT_ACE_TYPE
+                        | ACCESS_DENIED_CALLBACK_ACE_TYPE
+                        | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
+                ) {
+                    continue;
+                }
+                return Ok(false);
+            }
+            if usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
+                return Ok(false);
+            }
+            // SAFETY: the size check covers the fixed fields and the SID begins
+            // at the address of `SidStart` by the Windows ACL ABI.
+            let allowed = unsafe { ptr::read_unaligned(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+            let sid = unsafe {
+                ace.cast::<u8>()
+                    .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
+                    .cast::<c_void>()
+            };
+            // SAFETY: the SID lies within the validated ACE; trusted identities
+            // and the live token SID are valid for the duration of this call.
+            let trusted = unsafe {
+                EqualSid(sid, token_user) != 0
+                    || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                    || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+            };
+            if !trusted && allowed.Mask & DANGEROUS_ACCESS != 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        io::{Read, Write},
-    };
+    use std::{fs, io::Write};
 
     use super::*;
 
@@ -780,7 +1288,6 @@ mod tests {
         (base, import, export)
     }
 
-    #[cfg(unix)]
     #[test]
     fn activates_retained_roots_and_keeps_errors_path_redacted() {
         let (base, import, export) = temporary_tree();
@@ -796,7 +1303,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn import_walk_is_anchored_bounded_and_rejects_symlinks() {
-        use std::os::unix::fs::symlink;
+        use std::{io::Read, os::unix::fs::symlink};
 
         let (base, import, export) = temporary_tree();
         fs::create_dir(import.join("safe")).expect("safe directory");
@@ -838,22 +1345,22 @@ mod tests {
         fs::remove_dir_all(base).expect("cleanup");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn export_is_create_new_and_capabilities_do_not_cross() {
+    fn export_is_atomic_create_new_and_capabilities_do_not_cross() {
         let (base, import, export) = temporary_tree();
         let effective = RootRegistry::activate(&config(&import, &export))
             .expect("activate")
             .static_policy();
         let path = RelativeNativePath::from_utf8("new.bin").expect("path");
-        let mut file = effective
-            .create_new_export("outbox", &path)
-            .expect("create export");
-        file.write_all(b"new").expect("write");
-        drop(file);
+        let mut pending = effective
+            .begin_atomic_export("outbox", &path, 64)
+            .expect("begin export");
+        pending.write_all(b"new").expect("write");
+        assert!(!export.join("new.bin").exists());
+        assert_eq!(pending.commit().expect("commit"), 3);
 
-        assert!(effective.create_new_export("outbox", &path).is_err());
-        assert!(effective.create_new_export("inbox", &path).is_err());
+        assert!(effective.begin_atomic_export("outbox", &path, 64).is_err());
+        assert!(effective.begin_atomic_export("inbox", &path, 64).is_err());
         assert!(
             effective
                 .open_import("outbox", &path, 64)
@@ -865,7 +1372,85 @@ mod tests {
         fs::remove_dir_all(base).expect("cleanup");
     }
 
+    #[test]
+    fn atomic_export_cleans_partial_and_lost_collision_race() {
+        let (base, import, export) = temporary_tree();
+        let effective = RootRegistry::activate(&config(&import, &export))
+            .expect("activate")
+            .static_policy();
+        let path = RelativeNativePath::from_utf8("race.bin").expect("path");
+
+        {
+            let mut partial = effective
+                .begin_atomic_export("outbox", &path, 4)
+                .expect("begin partial");
+            partial.write_all(b"part").expect("bounded partial");
+        }
+        assert!(!export.join("race.bin").exists());
+        assert_eq!(fs::read_dir(&export).expect("list export").count(), 0);
+
+        {
+            let mut oversized = effective
+                .begin_atomic_export("outbox", &path, 4)
+                .expect("begin bounded export");
+            assert!(oversized.write_all(b"large").is_err());
+        }
+        assert_eq!(
+            fs::read_dir(&export).expect("list bounded export").count(),
+            0
+        );
+
+        let mut pending = effective
+            .begin_atomic_export("outbox", &path, 4)
+            .expect("begin race");
+        pending.write_all(b"ours").expect("write ours");
+        fs::write(export.join("race.bin"), b"other").expect("racing destination");
+        let error = pending.commit().expect_err("collision must win");
+        assert_eq!(
+            error.to_string(),
+            "Artifact export destination already exists."
+        );
+        assert_eq!(
+            fs::read(export.join("race.bin")).expect("read winner"),
+            b"other"
+        );
+        assert_eq!(fs::read_dir(&export).expect("list export").count(), 1);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
     #[cfg(unix)]
+    #[test]
+    fn retained_root_identity_survives_namespace_replacement() {
+        use std::io::Read;
+
+        let (base, import, export) = temporary_tree();
+        fs::write(import.join("source.bin"), b"retained").expect("retained source");
+        let effective = RootRegistry::activate(&config(&import, &export))
+            .expect("activate")
+            .static_policy();
+
+        let moved = base.join("moved-import");
+        fs::rename(&import, &moved).expect("rename authorized root");
+        fs::create_dir(&import).expect("replacement root");
+        fs::write(import.join("source.bin"), b"replacement").expect("replacement source");
+
+        let mut opened = effective
+            .open_import(
+                "inbox",
+                &RelativeNativePath::from_utf8("source.bin").expect("path"),
+                64,
+            )
+            .expect("open through retained root");
+        let mut bytes = Vec::new();
+        opened
+            .reader()
+            .read_to_end(&mut bytes)
+            .expect("read retained");
+        assert_eq!(bytes, b"retained");
+        opened.verify_unchanged().expect("retained identity");
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
     #[test]
     fn client_roots_only_narrow_static_authority() {
         let (base, import, export) = temporary_tree();
@@ -887,9 +1472,10 @@ mod tests {
         );
         assert!(
             narrowed
-                .create_new_export(
+                .begin_atomic_export(
                     "outbox",
                     &RelativeNativePath::from_utf8("denied.bin").expect("path"),
+                    64,
                 )
                 .is_err()
         );
