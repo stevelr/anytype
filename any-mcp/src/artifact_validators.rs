@@ -629,6 +629,28 @@ mod tests {
         assert!(parse_file_mime(b"not mime\n".to_vec()).is_err());
     }
 
+    /// Locates a native fixture executable via `PATH`, falling back to FHS
+    /// and NixOS locations. `PATH` must come first: sandboxed builds (Nix)
+    /// provide these tools only through `PATH`, never at absolute paths.
+    #[cfg(target_os = "linux")]
+    fn find_fixture_executable(name: &str) -> Option<PathBuf> {
+        let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|dir| dir.join(name))
+                    .collect()
+            })
+            .unwrap_or_default();
+        candidates.extend([
+            PathBuf::from("/bin").join(name),
+            PathBuf::from("/usr/bin").join(name),
+            PathBuf::from("/run/current-system/sw/bin").join(name),
+        ]);
+        candidates
+            .into_iter()
+            .find_map(|path| path.canonicalize().ok().filter(|target| target.is_file()))
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn pinned_executable_hash_is_rechecked_before_launch() {
@@ -638,14 +660,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("any-mcp-validator-{suffix:016x}"));
         std::fs::create_dir(&root).expect("temporary validator directory");
         let executable = root.join("validator");
-        let fixture_executable = [
-            PathBuf::from("/bin/true"),
-            PathBuf::from("/usr/bin/true"),
-            PathBuf::from("/run/current-system/sw/bin/true"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
-        .expect("platform true executable");
+        let fixture_executable = find_fixture_executable("true").expect("platform true executable");
         std::fs::copy(fixture_executable, &executable).expect("copy native executable");
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
             .expect("freeze executable");
@@ -692,14 +707,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn pinned_file_driver_runs_with_the_bounded_process_contract() {
-        let executable = [
-            PathBuf::from("/usr/bin/file"),
-            PathBuf::from("/bin/file"),
-            PathBuf::from("/run/current-system/sw/bin/file"),
-        ]
-        .into_iter()
-        .find_map(|path| path.canonicalize().ok().filter(|target| target.is_file()))
-        .expect("native file executable");
+        let executable = find_fixture_executable("file").expect("native file executable");
         let mut pinned = File::open(&executable).expect("open file executable");
         let sha256 = hash_reader(&mut pinned, EXECUTABLE_BYTES).expect("hash file executable");
         let path = executable.to_string_lossy().replace('\\', "\\\\");

@@ -19,6 +19,13 @@ use serde_json::{Value, json};
 #[allow(dead_code)]
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How long a non-graceful shutdown waits for an exiting child to become
+/// reapable. On Linux a dying process closes its descriptors (producing the
+/// stdout EOF that triggers this path) before `waitpid` can observe the exit,
+/// so an immediate single `try_wait` races the kernel and misclassifies a
+/// clean exit as a hang.
+const REAP_GRACE: Duration = Duration::from_secs(1);
 pub const FRAME_QUEUE_CAPACITY: usize = 32;
 pub const MAX_STDOUT_LINE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
@@ -232,37 +239,42 @@ impl ProtocolProcess {
                     }
                 }
             } else {
-                match child.try_wait() {
-                    Ok(Some(status)) => Some(status),
-                    Ok(None) => {
-                        terminated_by_driver = true;
-                        if let Err(error) = child.kill() {
-                            errors.push(format!("kill dropped any-mcp child: {error}"));
-                        }
-                        match child.wait() {
-                            Ok(status) => Some(status),
-                            Err(error) => {
-                                errors.push(format!("wait for dropped any-mcp child: {error}"));
-                                None
+                let deadline = Instant::now() + REAP_GRACE;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break Some(status),
+                        Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+                        Ok(None) => {
+                            terminated_by_driver = true;
+                            if let Err(error) = child.kill() {
+                                errors.push(format!("kill dropped any-mcp child: {error}"));
                             }
+                            break match child.wait() {
+                                Ok(status) => Some(status),
+                                Err(error) => {
+                                    errors
+                                        .push(format!("wait for dropped any-mcp child: {error}"));
+                                    None
+                                }
+                            };
                         }
-                    }
-                    Err(error) => {
-                        errors.push(format!("poll dropped any-mcp child: {error}"));
-                        terminated_by_driver = true;
-                        if let Err(kill_error) = child.kill() {
-                            errors.push(format!(
-                                "kill dropped any-mcp child after poll error: {kill_error}"
-                            ));
-                        }
-                        match child.wait() {
-                            Ok(status) => Some(status),
-                            Err(wait_error) => {
+                        Err(error) => {
+                            errors.push(format!("poll dropped any-mcp child: {error}"));
+                            terminated_by_driver = true;
+                            if let Err(kill_error) = child.kill() {
                                 errors.push(format!(
-                                    "wait for dropped any-mcp child after poll error: {wait_error}"
+                                    "kill dropped any-mcp child after poll error: {kill_error}"
                                 ));
-                                None
                             }
+                            break match child.wait() {
+                                Ok(status) => Some(status),
+                                Err(wait_error) => {
+                                    errors.push(format!(
+                                        "wait for dropped any-mcp child after poll error: {wait_error}"
+                                    ));
+                                    None
+                                }
+                            };
                         }
                     }
                 }
