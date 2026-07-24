@@ -4969,13 +4969,33 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                 let mut driver = OwnedStdioDriver {
                     driver: Arc::clone(&child),
                 };
+                let tools = driver
+                    .list_tools()
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact tools/list failed"))?;
+                eprintln!(
+                    "artifact workflow catalog linked={}",
+                    tools.iter().any(|name| name == "artifact_status")
+                );
+                eprintln!("artifact workflow stage=artifact_status");
                 let status = driver
                     .call_tool("artifact_status", json!({}))
                     .await
-                    .map_err(|_| sentinel_assertion("artifact status failed"))?;
+                    .map_err(|error| {
+                        eprintln!("artifact workflow artifact_status error={error}");
+                        sentinel_assertion("artifact status failed")
+                    })?;
+                eprintln!(
+                    "artifact workflow status import_roots={} export_roots={} staging_configured={} staging_active={}",
+                    status["import_root_count"],
+                    status["export_root_count"],
+                    status["staging_configured"],
+                    status["staging_active"]
+                );
                 if status["import_root_count"] != 1
                     || status["export_root_count"] != 1
-                    || status["staging_available"] != true
+                    || status["staging_configured"] != true
+                    || status["staging_active"] != true
                 {
                     return Err(sentinel_assertion(
                         "artifact status did not report configured capabilities",
@@ -4983,6 +5003,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                 }
 
                 let suffix = unique_suffix();
+                eprintln!("artifact workflow stage=file_import");
                 let imported = driver
                     .call_tool(
                         "file_import",
@@ -5010,6 +5031,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                     ));
                 }
 
+                eprintln!("artifact workflow stage=file_export");
                 let exported = driver
                     .call_tool(
                         "file_export",
@@ -5035,6 +5057,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                     ));
                 }
 
+                eprintln!("artifact workflow stage=document_import_create");
                 let created = driver
                     .call_tool(
                         "document_import_create",
@@ -5061,6 +5084,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                     })?
                     .to_owned();
 
+                eprintln!("artifact workflow stage=document_export");
                 let document_export = driver
                     .call_tool(
                         "document_export",
@@ -5084,6 +5108,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                     ));
                 }
 
+                eprintln!("artifact workflow stage=document_import_update");
                 let updated = driver
                     .call_tool(
                         "document_import_update",
@@ -5104,6 +5129,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                     ));
                 }
 
+                eprintln!("artifact workflow stage=artifact_stage_upload");
                 let staged = driver
                     .call_tool(
                         "artifact_stage_upload",
@@ -5119,6 +5145,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                 let handle = staged["handle"]
                     .as_str()
                     .ok_or_else(|| sentinel_assertion("artifact staging omitted handle"))?;
+                eprintln!("artifact workflow stage=artifact_release");
                 let released = driver
                     .call_tool("artifact_release", json!({"handle": handle}))
                     .await

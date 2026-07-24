@@ -8,6 +8,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add an explicitly selected authenticated Streamable HTTP transport on a
+  loopback-only `/mcp` listener. Stable protocol sessions support bounded SSE,
+  principal-bound session IDs, process-lifetime idempotency partitions, fixed
+  admission limits, exact Host and Origin policy, and graceful shutdown. The
+  experimental protocol remains stateless. Authentication supports an
+  owner-only static-token file or a bounded OAuth resource-server profile with
+  startup-fetched JWKS and exact issuer, audience, subject, expiry, algorithm,
+  and scope validation. Add real-socket process conformance coverage for
+  authentication, lifecycle, CORS, session isolation and termination, catalog
+  parity, limits, protocol negotiation, and secret-safe failures.
 - Link the default-off `artifacts` registry with eight payload-free workflows.
   Arbitrary MIME files and strict UTF-8 Markdown/plain text move through
   configured capability-relative roots or an authenticated loopback staging
@@ -562,8 +572,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Add an ignored serial tier-2 production-router scenario proving live numeric
   and checkbox filter matches by exact identity, with continuation derived from
   checked upstream pagination and no client-side post-pagination emulation.
-- Revise `designs/body-block-tools.md` and `designs/body-block-model.md` to R4
-  pending independent rereview. The default-off six/one `body-blocks` registry
+- Revise the rich body-block tool and API model contracts to R4 pending
+  independent rereview. The default-off six/one `body-blocks` registry
   now has exhaustive closed projection, constructor, update, and result shapes;
   explicit checkbox, alignment, background, link-relation, divider, and
   YouTube-ID rules; fail-closed read restrictions; complete structural-plan and
@@ -589,18 +599,21 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   exhaustive error and health mappings (`ToolErrorCode::Upstream`, health
   status `body_graph`). Plumbing only: no `any-mcp` tool can surface a body
   read yet.
-- Design document `designs/filters.md` (any-2f0g.4.1): bounded tagged MCP
-  filter DTO model — format/condition matrix, one-to-one anytype-api mapping,
-  excluded combinations and upstream limitations, hard bounds, cursor binding
-  rules, and the shared-module conversion strategy.
-- Design document `designs/body-block-model.md` (any-2f0g.18): typed, bounded,
-  fail-closed anytype-api body block model over ObjectShow and block RPCs —
+- Define a bounded tagged MCP filter DTO model (any-2f0g.4.1): format/condition
+  matrix, one-to-one anytype-api mapping, excluded combinations and upstream
+  limitations, hard bounds, cursor binding rules, and the shared-module
+  conversion strategy.
+- Define a typed, bounded, fail-closed anytype-api body block model
+  (any-2f0g.18) over ObjectShow and block RPCs —
   BodySnapshot/BodyBlock trees, closed v1 content/style/mark variants, opaque
   unsupported reads, graph validation, context/space ownership, verified
   mutation evidence, limits, and forward compatibility.
 
 ### Changed
 
+- Move stdio compatibility evidence under `any-mcp/docs/` and update its public
+  links while removing stale links to non-public acceptance and design
+  artifacts.
 - Reconcile numeric and checkbox filter documentation with current live
   acceptance and the workspace-wide direct-client matrix. The production MCP
   contract remains unchanged: typed filter values pass through once, checked

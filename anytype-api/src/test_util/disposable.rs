@@ -1825,6 +1825,11 @@ async fn sweep(
 ) -> TestResult<()> {
     loop {
         check_deadline(deadline)?;
+        if let Some(plan) = complete_plan_to_resume(state)? {
+            apply_plan(client, prefix, &plan, deadline).await?;
+            state.remove_plan(&plan)?;
+            continue;
+        }
         let plan = state.allocate_plan()?;
         let enumeration = enumerate_plan(client, prefix, &plan, deadline).await?;
         if enumeration == EnumerationOutcome::Unstable {
@@ -1839,6 +1844,27 @@ async fn sweep(
         }
         apply_plan(client, prefix, &plan, deadline).await?;
         state.remove_plan(&plan)?;
+    }
+}
+
+fn complete_plan_to_resume(state: &mut HarnessState) -> TestResult<Option<PathBuf>> {
+    let Some(handle) = state.ledger.plan.clone() else {
+        if state.ledger.plan_state != PlanState::None {
+            return Err(config_error("sweep plan state has no handle"));
+        }
+        return Ok(None);
+    };
+    let plan = state.root.join(handle);
+    match state.ledger.plan_state {
+        PlanState::None => Err(config_error("sweep plan handle has no state")),
+        PlanState::Allocated => {
+            state.remove_plan(&plan)?;
+            Ok(None)
+        }
+        PlanState::Complete => {
+            drop(open_private_file(&plan)?);
+            Ok(Some(plan))
+        }
     }
 }
 
@@ -3110,6 +3136,31 @@ mod tests {
         state.remove_plan(&completed_plan).unwrap();
         assert_eq!(state.ledger.plan_state, PlanState::None);
 
+        state.finish().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_discards_allocated_plan_and_resumes_complete_plan() {
+        let root = private_test_root("sweep-resume");
+        let mut state = HarnessState::create(root.clone(), "backend".to_owned()).unwrap();
+
+        let allocated = state.allocate_plan().unwrap();
+        assert_eq!(complete_plan_to_resume(&mut state).unwrap(), None);
+        assert!(!allocated.exists());
+        assert_eq!(state.ledger.plan, None);
+        assert_eq!(state.ledger.plan_state, PlanState::None);
+
+        let complete = state.allocate_plan().unwrap();
+        state.mark_plan_complete().unwrap();
+        assert_eq!(
+            complete_plan_to_resume(&mut state).unwrap(),
+            Some(complete.clone())
+        );
+        assert!(complete.exists());
+        assert_eq!(state.ledger.plan_state, PlanState::Complete);
+
+        state.remove_plan(&complete).unwrap();
         state.finish().unwrap();
         fs::remove_dir_all(root).unwrap();
     }

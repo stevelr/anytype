@@ -36,7 +36,7 @@ First off, thanks for taking the time to contribute! ❤️ All types of contrib
   - `any-edit --help`
 - **any-mcp**:
   - [README.md](./any-mcp/README.md)
-  - [Stdio protocol verification](./any-mcp/STDIO_CONFORMANCE.md)
+  - [Stdio protocol verification](./any-mcp/docs/STDIO_CONFORMANCE.md)
   - Local rustdoc: run `cargo doc -p any-mcp --no-deps`, then open
     `target/doc/any_mcp/index.html`
 

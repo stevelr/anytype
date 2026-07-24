@@ -61,15 +61,33 @@ fn production_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 async fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    // Transport and HTTP configuration are validated before any Anytype
+    // credential access, probe, or listener bind.
+    let transport = any_mcp::http::TransportSelection::from_env()?;
     let config = any_mcp::RuntimeConfig::from_process_args(arguments)?;
     let protocol_mode = config.protocol_mode;
-    let runtime = any_mcp::RuntimeContext::start(&config).await?;
-    tracing::info!(
-        http_available = runtime.startup_status().http_available,
-        grpc_available = runtime.startup_status().grpc_available,
-        "authenticated Anytype runtime ready"
-    );
-    any_mcp::serve_stdio(runtime, protocol_mode).await?;
+    match transport {
+        any_mcp::http::TransportSelection::Stdio => {
+            let runtime = any_mcp::RuntimeContext::start(&config).await?;
+            tracing::info!(
+                http_available = runtime.startup_status().http_available,
+                grpc_available = runtime.startup_status().grpc_available,
+                "authenticated Anytype runtime ready"
+            );
+            any_mcp::serve_stdio(runtime, protocol_mode).await?;
+        }
+        any_mcp::http::TransportSelection::StreamableHttp(http_config) => {
+            let auth =
+                any_mcp::http::prepare_http_auth(&http_config, config.startup_timeout).await?;
+            let runtime = any_mcp::RuntimeContext::start(&config).await?;
+            tracing::info!(
+                http_available = runtime.startup_status().http_available,
+                grpc_available = runtime.startup_status().grpc_available,
+                "authenticated Anytype runtime ready"
+            );
+            any_mcp::http::serve_http(runtime, protocol_mode, *http_config, auth).await?;
+        }
+    }
     Ok(())
 }
 

@@ -61,9 +61,7 @@ filters support `eq` and `ne`. Typed values pass through unchanged in search
 expressions and become canonical number text or lowercase boolean text only
 where a list endpoint requires URL query values. The client does not coerce
 strings to numbers or booleans, accept checkbox `1`/`0` aliases, or emulate
-server filtering after pagination. See the workspace
-[filter status](../FILTER_STATUS.md) for the live compatibility matrix and
-the disposition of the historical upstream limitation. On `anytype-cli` 0.3.6,
+server filtering after pagination. On `anytype-cli` 0.3.6,
 all eleven cleanup-owned object-list cases return HTTP 400; scoped search passes
 six exact-identity cases, while number `ne`/`lt`/`lte` and checkbox `eq false`/
 `ne true` each stably return the expected set plus one cleanup-owned fixture.

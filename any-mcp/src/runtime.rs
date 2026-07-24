@@ -210,6 +210,21 @@ impl RuntimeContext {
         &self.identity
     }
 
+    /// Returns a clone sharing every process-global resource — client,
+    /// operation permits, shutdown, correlation — under a fresh handler-state
+    /// identity.
+    ///
+    /// Identity-keyed handler state (idempotency registries, metrics) built
+    /// over the fork is isolated from every other fork. The HTTP transport
+    /// forks one runtime per authenticated principal so mutation idempotency
+    /// is process-lifetime yet principal-partitioned.
+    pub(crate) fn fork_identity(&self) -> Self {
+        Self {
+            identity: Arc::new(()),
+            ..self.clone()
+        }
+    }
+
     /// Returns the one absolute deadline for a newly admitted invocation.
     pub(crate) fn request_deadline(&self) -> Instant {
         let now = Instant::now();
