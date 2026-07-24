@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add retained-handle streaming to the unified file upload builder. The new
+  `reader` source accepts an already-open Tokio file plus its exact length,
+  constructs a length-bounded REST multipart body without reopening a path or
+  buffering the complete payload, and rejects incompatible gRPC-only rich
+  options.
 - Add an ignored, prefix-authorized real-server probe for the upstream
   `ObjectAddDiscussion` repeat-create defect. It dispatches exactly two raw
   RPCs on one cleanup-owned parent, requires the observed second

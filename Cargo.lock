@@ -337,6 +337,7 @@ dependencies = [
  "strum 0.28.0",
  "test-log",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tracing",

@@ -371,6 +371,24 @@ client
 path upload and returns a normalized `FileObject`. Adding `file_type`, `style`,
 `details`, or creation-context options selects the richer gRPC upload.
 
+Callers that already hold an authorized file handle can stream it without
+reopening a path or buffering the complete payload:
+
+```rust
+let file = tokio::fs::File::from_std(opened_file);
+let uploaded = client
+    .files()
+    .upload(space_id)
+    .reader("report.bin", file, exact_length)
+    .mime("application/octet-stream")
+    .multipart_limit_bytes(exact_length + 1024 * 1024)
+    .upload()
+    .await?;
+```
+
+The declared length participates in the complete multipart ceiling. Reader
+uploads use REST and reject gRPC-only rich options.
+
 REST uploads can apply request-local ceilings without changing the client
 configuration:
 

@@ -357,7 +357,9 @@ impl<'a> FilesClient<'a> {
     /// [`upload`](Self::upload) path.
     ///
     /// Provide the bytes with [`FileHttpUploadRequest::bytes`] or a filesystem
-    /// path with [`FileHttpUploadRequest::path`], then call
+    /// path with [`FileHttpUploadRequest::path`]. Callers that already hold an
+    /// authorized file handle can use [`FileHttpUploadRequest::reader`] to
+    /// avoid reopening a path or buffering the complete payload. Then call
     /// [`FileHttpUploadRequest::upload`].
     #[must_use]
     #[deprecated(since = "0.5.0", note = "use upload for automatic backend selection")]
@@ -369,6 +371,7 @@ impl<'a> FilesClient<'a> {
             mime: None,
             data: None,
             source_path: None,
+            source_reader: None,
             multipart_limit_bytes: None,
             response_limit_bytes: None,
             error_limit_bytes: None,
@@ -1005,6 +1008,7 @@ pub struct FileHttpUploadRequest<'a> {
     mime: Option<String>,
     data: Option<Bytes>,
     source_path: Option<PathBuf>,
+    source_reader: Option<FileUploadReader>,
     multipart_limit_bytes: Option<u64>,
     response_limit_bytes: Option<u64>,
     error_limit_bytes: Option<u64>,
@@ -1031,6 +1035,8 @@ impl FileHttpUploadRequest<'_> {
     #[must_use]
     pub fn bytes(mut self, data: impl Into<Bytes>) -> Self {
         self.data = Some(data.into());
+        self.source_path = None;
+        self.source_reader = None;
         self
     }
 
@@ -1038,7 +1044,23 @@ impl FileHttpUploadRequest<'_> {
     /// [`upload`](Self::upload) is called.
     #[must_use]
     pub fn path(mut self, path: impl AsRef<Path>) -> Self {
+        self.data = None;
         self.source_path = Some(path.as_ref().to_path_buf());
+        self.source_reader = None;
+        self
+    }
+
+    /// Upload from one already-open asynchronous file handle.
+    ///
+    /// The declared `length` is used to bound and serialize the multipart
+    /// request. The stream fails if fewer bytes are readable; callers should
+    /// independently retain and verify the source identity around the upload.
+    /// This source never reopens or formats a filesystem path.
+    #[must_use]
+    pub fn reader(mut self, file: tokio::fs::File, length: u64) -> Self {
+        self.data = None;
+        self.source_path = None;
+        self.source_reader = Some(FileUploadReader { file, length });
         self
     }
 
@@ -1067,14 +1089,19 @@ impl FileHttpUploadRequest<'_> {
     ///
     /// # Errors
     ///
-    /// Returns an error if neither [`bytes`](Self::bytes) nor [`path`](Self::path)
-    /// was set, if the source file cannot be read, or if the request fails.
+    /// Returns an error if no byte, path, or [`reader`](Self::reader) source
+    /// was set, if the source cannot be read, or if the request fails.
     pub async fn upload(self) -> Result<FileUploadResponse> {
+        let source = match (self.data, self.source_path, self.source_reader) {
+            (Some(data), None, None) => Some(HttpUploadSource::Bytes(data)),
+            (None, Some(path), None) => Some(HttpUploadSource::Path(path)),
+            (None, None, Some(reader)) => Some(HttpUploadSource::Reader(reader)),
+            _ => None,
+        };
         http_upload_file(
             self.client,
             &self.space_id,
-            self.data,
-            self.source_path,
+            source,
             self.file_name,
             self.mime,
             FileHttpUploadLimits {
@@ -1604,6 +1631,23 @@ impl FileUploadRequest<'_> {
         self
     }
 
+    /// Upload from one already-open asynchronous file handle through REST.
+    ///
+    /// The source is streamed with the exact declared `length`; no path is
+    /// reopened or formatted and the complete payload is not buffered.
+    /// Reader uploads do not support gRPC-only rich file options.
+    #[must_use]
+    pub fn reader(
+        mut self,
+        file_name: impl Into<String>,
+        file: tokio::fs::File,
+        length: u64,
+    ) -> Self {
+        self.file_name = Some(file_name.into());
+        self.source = Some(FileSource::Reader(FileUploadReader { file, length }));
+        self
+    }
+
     /// Set the MIME type used by a REST upload.
     #[must_use]
     pub fn mime(mut self, mime: impl Into<String>) -> Self {
@@ -1666,16 +1710,20 @@ impl FileUploadRequest<'_> {
     /// requested option, returning a normalized [`FileObject`].
     pub async fn upload(self) -> Result<FileObject> {
         if self.uses_rest() {
-            let (data, source_path) = match self.source {
-                Some(FileSource::Bytes(data)) => (Some(data), None),
-                Some(FileSource::Path(path)) => (None, Some(path)),
-                Some(FileSource::Url(_)) | None => unreachable!("REST backend selection"),
+            let source = match self.source {
+                Some(FileSource::Bytes(data)) => Some(HttpUploadSource::Bytes(data)),
+                Some(FileSource::Path(path)) => Some(HttpUploadSource::Path(path)),
+                Some(FileSource::Reader(reader)) => Some(HttpUploadSource::Reader(reader)),
+                Some(FileSource::Url(_)) | None => {
+                    return Err(AnytypeError::Validation {
+                        message: "REST file upload requires bytes, a path, or a reader".to_string(),
+                    });
+                }
             };
             let response = http_upload_file(
                 self.client,
                 &self.space_id,
-                data,
-                source_path,
+                source,
                 self.file_name,
                 self.mime,
                 FileHttpUploadLimits {
@@ -1816,53 +1864,77 @@ enum FileSource {
     Url(String),
     Path(PathBuf),
     Bytes(Bytes),
+    Reader(FileUploadReader),
 }
 
 fn upload_uses_rest(source: Option<&FileSource>, has_rich_options: bool) -> bool {
-    matches!(source, Some(FileSource::Path(_) | FileSource::Bytes(_))) && !has_rich_options
+    matches!(
+        source,
+        Some(FileSource::Path(_) | FileSource::Bytes(_) | FileSource::Reader(_))
+    ) && !has_rich_options
 }
 
 async fn http_upload_file(
     client: &AnytypeClient,
     space_id: &str,
-    data: Option<Bytes>,
-    source_path: Option<PathBuf>,
+    source: Option<HttpUploadSource>,
     file_name: Option<String>,
     mime: Option<String>,
     limits: FileHttpUploadLimits,
 ) -> Result<FileUploadResponse> {
-    let (bytes, name) = match (data, source_path) {
-        (Some(data), path) => (
-            data,
-            file_name.or_else(|| {
-                path.as_ref()
-                    .and_then(|path| path.file_name())
-                    .and_then(|name| name.to_str())
-                    .map(String::from)
-            }),
-        ),
-        (None, Some(path)) => {
+    let (part, name, data_bytes) = match source {
+        Some(HttpUploadSource::Bytes(data)) => {
+            let name = file_name.unwrap_or_else(|| "file".to_string());
+            let length = data.len() as u64;
+            (
+                reqwest::multipart::Part::bytes(data.to_vec()).file_name(name.clone()),
+                name,
+                length,
+            )
+        }
+        Some(HttpUploadSource::Path(path)) => {
             let data = tokio::fs::read(&path)
                 .await
-                .map_err(|err| AnytypeError::Other {
-                    message: format!("failed to read {}: {err}", path.display()),
+                .map_err(|_| AnytypeError::Other {
+                    message: "failed to read file upload source".to_string(),
                 })?;
             let name = file_name.or_else(|| {
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .map(String::from)
             });
-            (Bytes::from(data), name)
+            let name = name.unwrap_or_else(|| "file".to_string());
+            let length = data.len() as u64;
+            (
+                reqwest::multipart::Part::bytes(data).file_name(name.clone()),
+                name,
+                length,
+            )
         }
-        (None, None) => {
+        Some(HttpUploadSource::Reader(reader)) => {
+            if reader.length == 0 {
+                return Err(AnytypeError::Validation {
+                    message: "file upload reader length must be nonzero".to_string(),
+                });
+            }
+            let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(reader.file));
+            let name = file_name.unwrap_or_else(|| "file".to_string());
+            (
+                reqwest::multipart::Part::stream_with_length(body, reader.length)
+                    .file_name(name.clone()),
+                name,
+                reader.length,
+            )
+        }
+        None => {
             return Err(AnytypeError::Validation {
-                message: "file upload requires bytes or a path".to_string(),
+                message: "file upload requires exactly one byte, path, or reader source"
+                    .to_string(),
             });
         }
     };
 
-    let name = name.unwrap_or_else(|| "file".to_string());
-    let mut part = reqwest::multipart::Part::bytes(bytes.to_vec()).file_name(name.clone());
+    let mut part = part;
     if let Some(mime) = mime.as_ref() {
         part = part
             .mime_str(mime)
@@ -1872,7 +1944,7 @@ async fn http_upload_file(
     }
     let form = reqwest::multipart::Form::new().part("file", part);
     let serialized_body_bytes =
-        multipart_body_bytes(form.boundary(), &name, mime.as_deref(), bytes.len() as u64)?;
+        multipart_body_bytes(form.boundary(), &name, mime.as_deref(), data_bytes)?;
     let path = format!("/v1/spaces/{space_id}/files");
     client
         .client
@@ -1885,6 +1957,18 @@ async fn http_upload_file(
             limits.error,
         )
         .await
+}
+
+#[derive(Debug)]
+struct FileUploadReader {
+    file: tokio::fs::File,
+    length: u64,
+}
+
+enum HttpUploadSource {
+    Bytes(Bytes),
+    Path(PathBuf),
+    Reader(FileUploadReader),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2062,6 +2146,11 @@ async fn upload_file(
         FileSource::Bytes(_) => {
             return Err(AnytypeError::Validation {
                 message: "in-memory uploads are only supported by the REST backend".to_string(),
+            });
+        }
+        FileSource::Reader(_) => {
+            return Err(AnytypeError::Validation {
+                message: "reader uploads require REST without rich options".to_string(),
             });
         }
     };
@@ -2505,6 +2594,24 @@ mod tests {
 
     static NEXT_MOCK_ID: AtomicU64 = AtomicU64::new(1);
 
+    fn complete_request_length(request: &[u8]) -> Option<usize> {
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?;
+        let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+        let body_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        header_end
+            .checked_add(4)?
+            .checked_add(body_length.unwrap_or(0))
+    }
+
     async fn mock_file_client(response: &'static str) -> (AnytypeClient, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -2520,7 +2627,7 @@ mod tests {
                     break;
                 }
                 request.extend_from_slice(&chunk[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                if complete_request_length(&request).is_some_and(|length| request.len() >= length) {
                     break;
                 }
             }
@@ -2564,7 +2671,9 @@ mod tests {
                         break;
                     }
                     request.extend_from_slice(&chunk[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    if complete_request_length(&request)
+                        .is_some_and(|length| request.len() >= length)
+                    {
                         break;
                     }
                 }
@@ -2691,6 +2800,47 @@ mod tests {
 
         assert_eq!(response.object_id, "file-id");
         assert_eq!(response.extension.as_deref(), Some("png"));
+    }
+
+    #[tokio::test]
+    async fn retained_reader_upload_uses_streamed_multipart_source() {
+        let (client, server) = mock_file_client(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Connection: close\r\n\r\n\
+             {\"object_id\":\"file-id\",\"size_in_bytes\":6}",
+        )
+        .await;
+        let id = NEXT_MOCK_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "anytype-file-reader-unit-{}-{id}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"stream").expect("write stream fixture");
+        let file = tokio::fs::File::open(&path)
+            .await
+            .expect("open retained reader");
+
+        let response = client
+            .files()
+            .upload("space-1")
+            .reader("stream.bin", file, 6)
+            .mime("application/octet-stream")
+            .multipart_limit_bytes(1_024)
+            .upload()
+            .await
+            .expect("stream reader upload");
+
+        assert_eq!(response.id, "file-id");
+        assert_eq!(response.size, Some(6));
+        let request = server.await.expect("mock server task");
+        assert!(request.starts_with("POST /v1/spaces/space-1/files HTTP/1.1"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("\r\ncontent-length: ")
+        );
+        std::fs::remove_file(path).expect("cleanup");
     }
 
     #[tokio::test]
