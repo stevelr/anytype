@@ -34,17 +34,37 @@ mod output;
 use anyhow::Result;
 use clap::Parser;
 
-#[tokio::main]
-async fn main() {
-    if let Err(err) = run().await {
+fn main() {
+    let cli = cli::Cli::parse();
+
+    #[cfg(feature = "mcp")]
+    if let cli::Commands::Mcp(args) = &cli.command {
+        let status = cli::run_mcp(args);
+        if status != std::process::ExitCode::SUCCESS {
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("failed to start runtime: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(err) = runtime.block_on(run(cli)) {
         let code = error::exit_code(&err);
         eprintln!("{err}");
         std::process::exit(code);
     }
 }
 
-async fn run() -> Result<()> {
-    let cli = cli::Cli::parse();
+async fn run(cli: cli::Cli) -> Result<()> {
     init_tracing(cli.verbose)?;
     cli::run(cli).await
 }

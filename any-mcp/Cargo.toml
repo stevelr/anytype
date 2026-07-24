@@ -17,7 +17,10 @@ repository.workspace = true
 description = "Bounded, workflow-oriented Model Context Protocol server for Anytype."
 
 [[bin]]
-name = "any-mcp"
+# Process-level integration tests need a child executable without restoring a
+# production any-mcp binary. The user-facing entrypoint is `anyr mcp`.
+name = "any-mcp-process-test"
+path = "src/bin/process_test.rs"
 
 [[bin]]
 name = "any-mcp-views-write-acceptance"

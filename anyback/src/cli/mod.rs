@@ -8,11 +8,11 @@ use std::{
     time::Duration,
 };
 
-use anyback_reader::archive::{
+use crate::archive::{
     ArchiveFileEntry, ArchiveReader, infer_object_id_from_snapshot_path,
     infer_object_ids_from_files,
 };
-use anyback_reader::markdown::{SavedObjectKind, save_archive_object};
+use crate::markdown::{SavedObjectKind, save_archive_object};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use anytype::{
     prelude::*,
@@ -40,8 +40,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-pub mod auth;
 pub mod decode;
+#[cfg(feature = "tui")]
 mod inspector;
 
 use decode::{
@@ -154,11 +154,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Authentication commands
-    Auth(AuthArgs),
-
     /// Create a backup archive
-    Backup(BackupCreateArgs),
+    Create(BackupCreateArgs),
 
     /// Restore objects from an archive
     Restore(RestoreApplyArgs),
@@ -182,48 +179,11 @@ pub enum Commands {
     Import(RestoreApplyArgs),
 
     /// Interactive archive browser (TUI)
+    #[cfg(feature = "tui")]
     Inspect(InspectorArgs),
 }
 
-#[derive(Args, Debug)]
-pub struct AuthArgs {
-    #[command(subcommand)]
-    pub command: AuthCommands,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum AuthCommands {
-    /// Perform interactive login with desktop app
-    Login {
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// Log out and clear api keys from memory and keystore
-    Logout,
-
-    /// Display authentication status
-    Status,
-
-    /// Set HTTP API token (read from stdin)
-    SetHttp,
-
-    /// Set gRPC credentials
-    SetGrpc {
-        /// Import gRPC credentials from headless config.json
-        #[arg(long, value_name = "PATH")]
-        config: Option<PathBuf>,
-
-        /// Provide gRPC account key via stdin
-        #[arg(long)]
-        account_key: bool,
-
-        /// Provide gRPC session token via stdin
-        #[arg(long)]
-        token: bool,
-    },
-}
-
+#[cfg(feature = "tui")]
 #[derive(Args, Debug)]
 pub struct InspectorArgs {
     /// Archive path (directory or .zip)
@@ -485,9 +445,6 @@ fn validate_no_legacy_commands(args: &[OsString]) -> Result<()> {
     };
     let command = args[idx].to_string_lossy().to_string();
     let next = args.get(idx + 1).map(|v| v.to_string_lossy().to_string());
-    if command == "backup" && next.as_deref() == Some("create") {
-        bail!("legacy command removed: use `anyback backup ...` (without `create`)");
-    }
     if command == "restore" && next.as_deref() == Some("apply") {
         bail!("legacy command removed: use `anyback restore ...` (without `apply`)");
     }
@@ -607,26 +564,39 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Manifest(args) => return handle_manifest(cli.json, args),
         Commands::Diff(args) => return handle_diff(cli.json, args),
         Commands::Extract(args) => return handle_extract(cli.json, args),
+        #[cfg(feature = "tui")]
         Commands::Inspect(args) => return inspector::run_inspector(&args.archive, args.max_cache),
         _ => {}
     }
 
-    let ctx = AppContext {
-        client: build_client(&cli)?,
-        json: cli.json,
-    };
+    let client = build_client(&cli)?;
+    let json = cli.json;
+    let command = cli.command;
+    run_command(command, client, json).await
+}
 
-    match cli.command {
-        Commands::Auth(args) => auth::handle(&ctx, args).await,
-        Commands::Backup(args) | Commands::Export(args) => handle_backup_create(&ctx, args).await,
+/// Execute a backup command with a client configured by the parent application.
+pub async fn run_command(command: Commands, client: AnytypeClient, json: bool) -> Result<()> {
+    match &command {
+        Commands::List(args) => return handle_list(json, args),
+        Commands::Manifest(args) => return handle_manifest(json, args),
+        Commands::Diff(args) => return handle_diff(json, args),
+        Commands::Extract(args) => return handle_extract(json, args),
+        #[cfg(feature = "tui")]
+        Commands::Inspect(args) => return inspector::run_inspector(&args.archive, args.max_cache),
+        _ => {}
+    }
+
+    let ctx = AppContext { client, json };
+
+    match command {
+        Commands::Create(args) | Commands::Export(args) => handle_backup_create(&ctx, args).await,
         Commands::Restore(args) | Commands::Import(args) => handle_restore_apply(&ctx, args).await,
-        Commands::List(_)
-        | Commands::Manifest(_)
-        | Commands::Diff(_)
-        | Commands::Extract(_)
-        | Commands::Inspect(_) => {
+        Commands::List(_) | Commands::Manifest(_) | Commands::Diff(_) | Commands::Extract(_) => {
             unreachable!("handled above")
         }
+        #[cfg(feature = "tui")]
+        Commands::Inspect(_) => unreachable!("handled above"),
     }
 }
 
@@ -1298,6 +1268,7 @@ fn parse_timeout_env_secs(name: &str, default: Duration) -> Result<Duration> {
     }
 }
 
+#[cfg(feature = "tui")]
 fn parse_cache_size(raw: &str) -> Result<usize> {
     let input = raw.trim();
     ensure!(!input.is_empty(), "cache size must not be empty");
@@ -2595,7 +2566,7 @@ mod tests {
 
     fn extract_backup_create_args(command: Commands) -> BackupCreateArgs {
         match command {
-            Commands::Backup(args) | Commands::Export(args) => args,
+            Commands::Create(args) | Commands::Export(args) => args,
             _ => panic!("expected backup or export command"),
         }
     }
@@ -2626,7 +2597,7 @@ mod tests {
     fn parse_backup_and_export_alias_map_identically() {
         let backup = parse_user_cli(&[
             "anyback",
-            "backup",
+            "create",
             "--space",
             "test-space",
             "--objects",
@@ -2685,7 +2656,7 @@ mod tests {
     fn parse_backup_create_dir_dest_conflict() {
         let err = Cli::try_parse_from([
             "anyback",
-            "backup",
+            "create",
             "--space",
             "test",
             "--dir",
@@ -2702,7 +2673,7 @@ mod tests {
     fn parse_backup_create_dest_prefix_conflict() {
         let err = Cli::try_parse_from([
             "anyback",
-            "backup",
+            "create",
             "--space",
             "test",
             "--dest",
@@ -2719,7 +2690,7 @@ mod tests {
     fn parse_backup_create_incremental_requires_since() {
         let err = Cli::try_parse_from([
             "anyback",
-            "backup",
+            "create",
             "--space",
             "test",
             "--mode",
@@ -2733,7 +2704,7 @@ mod tests {
     fn parse_backup_create_types_objects_conflict() {
         let err = Cli::try_parse_from([
             "anyback",
-            "backup",
+            "create",
             "--space",
             "test",
             "--objects",
@@ -2749,14 +2720,14 @@ mod tests {
     fn parse_backup_create_types_csv() {
         let cli = Cli::try_parse_from([
             "anyback",
-            "backup",
+            "create",
             "--space",
             "test",
             "--types",
             "page,note",
         ])
         .unwrap();
-        if let Commands::Backup(args) = cli.command {
+        if let Commands::Create(args) = cli.command {
             assert_eq!(
                 args.types,
                 Some(vec!["page".to_string(), "note".to_string()])
@@ -2901,6 +2872,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn parse_inspect_command() {
         let cli = Cli::try_parse_from(["anyback", "inspect", "archive-dir"]).unwrap();
@@ -2912,6 +2884,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn parse_inspect_command_with_max_cache_units() {
         let cli = Cli::try_parse_from(["anyback", "inspect", "--max-cache", "512k", "archive-dir"])
@@ -2929,7 +2902,7 @@ mod tests {
             OsString::from("anyback"),
             OsString::from("--url"),
             OsString::from("http://127.0.0.1:31009"),
-            OsString::from("backup"),
+            OsString::from("create"),
             OsString::from("--space"),
             OsString::from("x"),
         ];
@@ -2944,7 +2917,7 @@ mod tests {
                 "anyback".to_string(),
                 "--url".to_string(),
                 "http://127.0.0.1:31009".to_string(),
-                "backup".to_string(),
+                "create".to_string(),
                 "--space".to_string(),
                 "x".to_string()
             ]
@@ -2954,7 +2927,7 @@ mod tests {
     #[test]
     fn parse_backup_create_rejects_removed_zip_flag() {
         let err =
-            Cli::try_parse_from(["anyback", "backup", "--space", "test", "--zip"]).unwrap_err();
+            Cli::try_parse_from(["anyback", "create", "--space", "test", "--zip"]).unwrap_err();
         assert!(err.to_string().contains("--zip"));
     }
 
@@ -2962,7 +2935,7 @@ mod tests {
     fn parse_backup_include_flags() {
         let cli = parse_user_cli(&[
             "anyback",
-            "backup",
+            "create",
             "--space",
             "test",
             "--include-nested",
@@ -2973,7 +2946,7 @@ mod tests {
             "--format",
             "markdown",
         ]);
-        if let Commands::Backup(args) = cli.command {
+        if let Commands::Create(args) = cli.command {
             assert!(args.include_nested);
             assert!(args.include_files);
             assert!(args.include_archived);
@@ -3066,14 +3039,13 @@ mod tests {
     }
 
     #[test]
-    fn reject_legacy_backup_create() {
-        let err = validate_no_legacy_commands(&[
+    fn accept_consolidated_create_command() {
+        validate_no_legacy_commands(&[
             OsString::from("anyback"),
-            OsString::from("backup"),
+            OsString::from("create"),
             OsString::from("create"),
         ])
-        .unwrap_err();
-        assert!(err.to_string().contains("legacy command removed"));
+        .expect("consolidated create command should be accepted");
     }
 
     #[test]
@@ -3446,11 +3418,13 @@ mod tests {
         assert!(err.to_string().contains("must be > 0"));
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn parse_cache_size_defaults_to_mib() {
         assert_eq!(parse_cache_size("200").unwrap(), 200 * 1024 * 1024);
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn parse_cache_size_accepts_units_case_insensitive() {
         assert_eq!(parse_cache_size("1k").unwrap(), 1024);
@@ -3460,12 +3434,14 @@ mod tests {
         assert_eq!(parse_cache_size("1G").unwrap(), 1024 * 1024 * 1024);
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn parse_cache_size_rejects_invalid_unit() {
         let err = parse_cache_size("10tb").unwrap_err();
         assert!(err.to_string().contains("unsupported cache size unit"));
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn parse_cache_size_rejects_zero() {
         let err = parse_cache_size("0").unwrap_err();

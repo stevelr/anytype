@@ -1,3 +1,7 @@
+//! Markdown document editing commands for the consolidated `anyr md` surface.
+//!
+//! Endpoint, keystore, and verbosity options belong to the parent `anyr` CLI.
+
 /*
  * any-edit - edit anytype objects as markdown in external editor
  * github.com/stevelr/anytype
@@ -8,7 +12,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use anytype::prelude::*;
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,113 +21,54 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-mod logging;
-use logging::init_logging;
-
-const CLI_KEY_SERVICE_NAME: &str = "any-edit";
-
-#[derive(Debug, Parser)]
-#[command(name = "any-edit")]
-#[command(author, version, about = "Edit Anytype objects as markdown in external editor", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-
-    /// API endpoint URL. Default: environment $ANYTYPE_URL or http://127.0.0.1:31009 (desktop app)
-    #[arg(short, long)]
-    url: Option<String>,
-
-    /// keystore specifier
-    #[arg(long)]
-    keystore: Option<String>,
-
-    /// service name, default "any-edit"
-    #[arg(long)]
-    keystore_service: Option<String>,
-
-    /// increase verbosity
-    #[arg(short, long)]
-    verbose: bool,
-
-    /// enable debug logging
-    #[arg(short, long)]
-    debug: bool,
-}
-
 #[derive(Debug, Subcommand)]
-enum Commands {
-    /// Authentication commands
-    Auth {
-        #[command(subcommand)]
-        command: AuthCommand,
-    },
-
+pub enum Commands {
     /// Get an object as markdown file
     Get {
         /// Space ID (required unless using --doc)
         #[arg(required_unless_present = "doc")]
         space_id: Option<String>,
-
         /// Object ID (required unless using --doc)
         #[arg(required_unless_present = "doc")]
         object_id: Option<String>,
-
         /// Output file (default: stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
-
         /// Parse document URL to get space_id and object_id
         #[arg(short, long)]
         doc: Option<String>,
     },
-
     /// Update an object from markdown file
     Update {
         /// Input file (default: stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
     },
-
     /// (macOS) Send keystroke to Anytype to copy current object link, output the URL
     #[cfg(target_os = "macos")]
     CopyLink {
         /// Delay in milliseconds after activating Anytype (default: 300)
         #[arg(long, default_value = "300")]
-        activate_delay: u64,
-
+        pub activate_delay: u64,
         /// Delay in milliseconds after sending keystroke (default: 200)
         #[arg(long, default_value = "200")]
-        keystroke_delay: u64,
+        pub keystroke_delay: u64,
     },
-
     /// Get, edit with $EDITOR, and update
     Edit {
         /// Space ID (required unless using --doc)
         #[arg(required_unless_present = "doc")]
         space_id: Option<String>,
-
         /// Object ID (required unless using --doc)
         #[arg(required_unless_present = "doc")]
         object_id: Option<String>,
-
         /// Parse document URL to get space_id and object_id
         #[arg(short, long)]
         doc: Option<String>,
     },
-
     /// Get the current visible object from the app, edit with $EDITOR, and update
     #[cfg(target_os = "macos")]
     EditCurrent {},
-}
-
-#[derive(Debug, Subcommand)]
-enum AuthCommand {
-    /// Start the authentication process
-    Login,
-    /// Remove stored credentials
-    Logout,
-    /// Show current authentication status
-    Status,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -140,28 +85,9 @@ struct YamlHeader {
     tags: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    init_logging(cli.debug, cli.verbose)?;
-
-    let base_url = Some(cli.url.unwrap_or_else(|| ANYTYPE_DESKTOP_URL.to_string()));
-
-    let client = AnytypeClient::with_config(ClientConfig {
-        base_url,
-        app_name: CLI_KEY_SERVICE_NAME.into(),
-        keystore: cli.keystore,
-        keystore_service: cli.keystore_service,
-        ..Default::default()
-    })?;
-
-    match cli.command {
-        Commands::Auth { command } => match command {
-            AuthCommand::Login => auth_login(client).await?,
-            AuthCommand::Logout => auth_logout(client).await?,
-            AuthCommand::Status => check_auth_status(client).await?,
-        },
+/// Execute one markdown-editing command with an already configured client.
+pub async fn run(command: Commands, client: AnytypeClient) -> Result<()> {
+    match command {
         Commands::Get {
             space_id,
             object_id,
@@ -176,7 +102,6 @@ async fn main() -> Result<()> {
                     object_id.ok_or_else(|| anyhow::anyhow!("object_id is required"))?,
                 )
             };
-
             get_command(
                 &client,
                 &final_space_id,
@@ -186,16 +111,13 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Update { input } => update_command(&client, input.as_deref()).await?,
-
         #[cfg(target_os = "macos")]
         Commands::CopyLink {
             activate_delay,
             keystroke_delay,
         } => copy_link_command(activate_delay, keystroke_delay)?,
-
         #[cfg(target_os = "macos")]
         Commands::EditCurrent {} => edit_command_current(client).await?,
-
         Commands::Edit {
             space_id,
             object_id,
@@ -243,44 +165,6 @@ fn parse_doc_url(url: &str) -> Result<(String, String)> {
     Ok((space_id, object_id))
 }
 
-/// Auth login: authenticate with Anytype app
-async fn auth_login(client: AnytypeClient) -> Result<(), anyhow::Error> {
-    println!("Starting authentication with local Anytype app...");
-
-    client
-        .authenticate_interactive(
-            |challenge_id| {
-                println!("Challenge ID: {}", challenge_id);
-                // Prompt user and return their code
-                print!("Enter 4-digit code displayed by app: ");
-                let mut code = String::new();
-                std::io::stdin()
-                    .read_line(&mut code)
-                    .map_err(|e| AnytypeError::Auth {
-                        message: e.to_string(),
-                    })?;
-                Ok(code.trim().to_string())
-            },
-            false,
-        )
-        .await?;
-
-    Ok(())
-}
-
-async fn auth_logout(client: AnytypeClient) -> Result<(), AnytypeError> {
-    client.logout()?;
-    Ok(())
-}
-async fn check_auth_status(client: AnytypeClient) -> Result<()> {
-    let status = client.auth_status()?;
-    let is_authenticated = status.http.is_authenticated();
-    println!("Authenticated: {is_authenticated}");
-    println!("Service:       {}", status.keystore.service);
-    println!("Keystore:      {:?}", status.keystore.id);
-    Ok(())
-}
-
 /// Get command: retrieve object and output as markdown with YAML header
 async fn get_command(
     client: &AnytypeClient,
@@ -291,7 +175,7 @@ async fn get_command(
     let status = client.auth_status()?;
     let is_authenticated = status.http.is_authenticated();
     if !is_authenticated {
-        eprintln!("Not logged in - run 'any-edit auth login' first");
+        eprintln!("Not logged in - run 'anyr auth login' first");
         return Err(AnytypeError::Auth {
             message: "Not logged in".to_string(),
         }
@@ -354,7 +238,7 @@ async fn update_command(client: &AnytypeClient, input_file: Option<&Path>) -> Re
     let status = client.auth_status()?;
     let is_authenticated = status.http.is_authenticated();
     if !is_authenticated {
-        eprintln!("Not logged in - run 'any-edit auth login' first");
+        eprintln!("Not logged in - run 'anyr auth login' first");
         return Err(AnytypeError::Auth {
             message: "Not logged in".to_string(),
         }

@@ -7,6 +7,9 @@
  */
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "mcp")]
+use std::ffi::OsString;
+
 use anyhow::{Result, bail};
 use anytype::prelude::*;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
@@ -153,6 +156,28 @@ pub enum Commands {
     /// List (collection or query) operations
     #[command(alias = "lists")]
     List(ListArgs),
+
+    /// Markdown document editing commands
+    #[command(subcommand)]
+    Md(any_edit::Commands),
+
+    /// Backup, restore, and inspect archive commands
+    #[cfg(feature = "backup")]
+    #[command(subcommand)]
+    Backup(anyback_reader::cli::Commands),
+
+    /// Run the bounded Anytype MCP server or its maintenance commands
+    #[cfg(feature = "mcp")]
+    Mcp(McpArgs),
+}
+
+/// Arguments passed through unchanged to the embedded any-mcp process.
+#[cfg(feature = "mcp")]
+#[derive(Args, Debug, Clone)]
+pub struct McpArgs {
+    /// any-mcp process arguments (`init` and `check` are aliases for `config init` and `config check`)
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub arguments: Vec<OsString>,
 }
 
 #[derive(Args, Debug)]
@@ -231,6 +256,10 @@ pub enum SpaceCommands {
         /// space description
         #[arg(long)]
         description: Option<String>,
+
+        /// create a chat space instead of a regular space
+        #[arg(long)]
+        chat: bool,
     },
     Update {
         /// space id or name
@@ -257,6 +286,80 @@ pub enum SpaceCommands {
         /// skip confirmation prompt
         #[arg(long)]
         confirm: bool,
+    },
+
+    /// Permanently delete a space after interactive confirmation
+    Delete {
+        /// space id or name
+        space: String,
+    },
+
+    /// Manage space invitations
+    Invite(InviteArgs),
+
+    /// Enable sharing for a space
+    EnableSharing {
+        /// space id or name
+        space: String,
+    },
+
+    /// Disable sharing for a space
+    DisableSharing {
+        /// space id or name
+        space: String,
+    },
+}
+
+/// Arguments for space invitation operations.
+#[derive(Args, Debug)]
+pub struct InviteArgs {
+    #[command(subcommand)]
+    pub command: InviteCommands,
+}
+
+/// Space invitation operations.
+#[derive(Subcommand, Debug)]
+pub enum InviteCommands {
+    /// Show active member and guest invitations
+    Show {
+        /// space id or name
+        space: String,
+    },
+
+    /// Create a new space invitation
+    Create {
+        /// space id or name
+        space: String,
+
+        /// Grant reader permissions
+        #[arg(long, group = "permissions")]
+        reader: bool,
+
+        /// Grant writer permissions
+        #[arg(long, group = "permissions")]
+        writer: bool,
+
+        /// Grant owner permissions
+        #[arg(long, group = "permissions")]
+        owner: bool,
+
+        /// Create a guest invitation
+        #[arg(long, group = "approval")]
+        guest: bool,
+
+        /// Require approval before a member joins
+        #[arg(long, group = "approval")]
+        with_approval: bool,
+
+        /// Allow a member to join without approval
+        #[arg(long, group = "approval")]
+        auto_approve: bool,
+    },
+
+    /// Revoke the active space invitation
+    Revoke {
+        /// space id or name
+        space: String,
     },
 }
 
@@ -1633,7 +1736,43 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         Commands::View(args) => view::handle(&ctx, args).await,
         Commands::Search(args) => search::handle(&ctx, args).await,
         Commands::List(args) => list::handle(&ctx, args).await,
+        Commands::Md(args) => any_edit::run(args, ctx.client).await,
+        #[cfg(feature = "backup")]
+        Commands::Backup(args) => {
+            let json = matches!(
+                ctx.output.format(),
+                OutputFormat::Json | OutputFormat::Pretty
+            );
+            anyback_reader::cli::run_command(args, ctx.client, json).await
+        }
+        #[cfg(feature = "mcp")]
+        Commands::Mcp(_) => unreachable!("MCP is dispatched before the standard runtime"),
     }
+}
+
+/// Dispatch the embedded MCP process before any standard Tokio runtime starts.
+#[cfg(feature = "mcp")]
+pub fn run_mcp(args: &McpArgs) -> std::process::ExitCode {
+    let mut arguments = args.arguments.clone();
+    if arguments.len() == 1
+        && arguments
+            .first()
+            .is_some_and(|value| value == "-V" || value == "--version")
+    {
+        eprintln!("use `anyr --version` for the anyr binary version");
+        return std::process::ExitCode::FAILURE;
+    }
+    let alias = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .filter(|command| matches!(*command, "init" | "check"))
+        .map(ToOwned::to_owned);
+    if let Some(command) = alias {
+        arguments.remove(0);
+        arguments.insert(0, OsString::from(command));
+        arguments.insert(0, OsString::from("config"));
+    }
+    any_mcp::run_process(arguments)
 }
 
 fn apply_init_cli_endpoint_defaults(cli: &mut Cli) {

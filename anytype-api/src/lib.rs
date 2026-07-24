@@ -79,7 +79,7 @@
 //! `list()`, or `search()`.
 //!
 //! Applies to all entity types: - Member, Object, Property, Space, Tag, Template, Type, View,
-//! (not all CRUD methods are supported for all types, for example, you can't delete spaces or members).
+//! (not all CRUD methods are supported for all types; for example, member deletion is not exposed).
 //!
 //! ### Pattern Examples
 //!
@@ -338,6 +338,7 @@ pub mod prelude {
         },
         spaces::{
             BackupExportFormat, BackupSpaceRequest, DeleteAllArchivedResult, SpaceBackupResult,
+            SpaceInvite, SpaceInvitePermission, SpaceInviteType,
         },
     };
 }

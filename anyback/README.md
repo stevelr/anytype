@@ -4,7 +4,8 @@
 [![docs.rs](https://img.shields.io/docsrs/anyback?label=docs.rs)](https://docs.rs/anyback)
 [![crates.io](https://img.shields.io/crates/v/anyback.svg)](https://crates.io/crates/anyback)
 
-`anyback` is a command-line tool for backing up and restoring Anytype spaces.
+`anyback` provides the backup and restore library used by the consolidated
+`anyr backup` command.
 
 See `anyback.1.md` for detailed CLI documentation.
 
@@ -30,17 +31,16 @@ See `anyback.1.md` for detailed CLI documentation.
 ## Commands
 
 ```
-anyback backup  --space NAME_OR_ID [OPTIONS]
-anyback restore ARCHIVE --space NAME_OR_ID [OPTIONS]
-anyback list    ARCHIVE [--brief|--expanded|--files]
-anyback manifest ARCHIVE
-anyback diff    ARCHIVE1 ARCHIVE2
-anyback extract ARCHIVE ID OUTPUT
-anyback inspect ARCHIVE [--max-cache SIZE]
-anyback auth    ...
+anyr backup create  --space NAME_OR_ID [OPTIONS]
+anyr backup restore ARCHIVE --space NAME_OR_ID [OPTIONS]
+anyr backup list    ARCHIVE [--brief|--expanded|--files]
+anyr backup manifest ARCHIVE
+anyr backup diff    ARCHIVE1 ARCHIVE2
+anyr backup extract ARCHIVE ID OUTPUT
+anyr backup inspect ARCHIVE [--max-cache SIZE]
 ```
 
-`export` and `import` are aliases for `backup` and `restore`.
+`export` and `import` remain alternate archive workflows under `anyr backup`.
 
 ## Usage Notes
 

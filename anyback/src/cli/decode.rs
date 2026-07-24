@@ -1,6 +1,4 @@
-use anyback_reader::archive::{
-    ArchiveFileEntry, ArchiveReader, infer_object_id_from_snapshot_path,
-};
+use crate::archive::{ArchiveFileEntry, ArchiveReader, infer_object_id_from_snapshot_path};
 use anyhow::{Context, Result, anyhow};
 use anytype_rpc::anytype::SnapshotWithType;
 use chrono::{DateTime, FixedOffset, Utc};

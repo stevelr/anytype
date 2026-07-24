@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 
@@ -36,6 +37,21 @@ def run_anyr(*args: str) -> subprocess.CompletedProcess[str]:
     print(f"running cmd: {cmd}")
     return subprocess.run(
         cmd, check=False, capture_output=True, text=True, env=base_env()
+    )
+
+
+def run_anyr_with_input(
+    input_text: str, *args: str
+) -> subprocess.CompletedProcess[str]:
+    cmd = [anyr_bin(), *args]
+    print(f"running cmd with stdin: {cmd}")
+    return subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        input=input_text,
+        env=base_env(),
     )
 
 
@@ -81,6 +97,42 @@ class TestAnyrCommands(unittest.TestCase):
     def test_top_level(self) -> None:
         self.assert_help_ok()
 
+    def test_consolidated_cli_surfaces(self) -> None:
+        self.assert_help_ok("md")
+        self.assert_help_ok("md", "get")
+        self.assert_help_ok("md", "update")
+        self.assert_help_ok("md", "edit")
+        self.assert_help_ok("backup")
+        for command in (
+            "create",
+            "restore",
+            "list",
+            "manifest",
+            "diff",
+            "extract",
+            "export",
+            "import",
+        ):
+            self.assert_help_ok("backup", command)
+        self.assert_help_ok("mcp")
+
+        version = run_anyr("--version")
+        self.assertEqual(version.returncode, 0, msg=version.stderr)
+        self.assertTrue(version.stdout.startswith("anyr "))
+
+        nested_version = run_anyr("mcp", "--version")
+        self.assertNotEqual(nested_version.returncode, 0)
+        self.assertIn("anyr --version", nested_version.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = os.path.join(directory, "policy.toml")
+            initialized = run_anyr("mcp", "init", "-c", config_path)
+            self.assertEqual(initialized.returncode, 0, msg=initialized.stderr)
+            checked = run_anyr("mcp", "check", "-c", config_path)
+            self.assertEqual(checked.returncode, 0, msg=checked.stderr)
+            duplicate = run_anyr("mcp", "init", "-c", config_path)
+            self.assertNotEqual(duplicate.returncode, 0)
+
     def test_auth(self) -> None:
         self.assert_help_ok("auth")
         self.assert_help_ok("auth", "login")
@@ -95,6 +147,80 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("space", "get")
         self.assert_help_ok("space", "create")
         self.assert_help_ok("space", "update")
+        self.assert_help_ok("space", "delete")
+        self.assert_help_ok("space", "invite")
+        self.assert_help_ok("space", "invite", "show")
+        self.assert_help_ok("space", "invite", "create")
+        self.assert_help_ok("space", "invite", "revoke")
+        self.assert_help_ok("space", "enable-sharing")
+        self.assert_help_ok("space", "disable-sharing")
+
+    def test_space_delete_accepts_bash_stdin_confirmation(self) -> None:
+        space_name = "xtest-123-xyz"
+        existing = run_anyr("space", "get", space_name)
+        if existing.returncode == 0:
+            self.skipTest(
+                f"refusing to operate on pre-existing disposable space {space_name}"
+            )
+
+        created_space_id: str | None = None
+        deleted = False
+        try:
+            created = run_anyr_json("space", "create", space_name)
+            created_space_id = created.get("id")
+            self.assertIsInstance(created_space_id, str)
+
+            wrong_confirmation = run_anyr_with_input(
+                f'n\ndelete:{space_name}-wrong\n',
+                "space",
+                "delete",
+                created_space_id,
+            )
+            self.assertEqual(
+                wrong_confirmation.returncode,
+                0,
+                msg=(
+                    "wrong deletion confirmation should cancel without an error:\n"
+                    f"stdout={wrong_confirmation.stdout}\n"
+                    f"stderr={wrong_confirmation.stderr}"
+                ),
+            )
+            self.assertEqual(
+                run_anyr("space", "get", created_space_id).returncode,
+                0,
+                "space still needs to exist after a wrong confirmation",
+            )
+
+            confirmation = run_anyr_with_input(
+                f'n\ndelete:{space_name}\n',
+                "space",
+                "delete",
+                created_space_id,
+                "--json",
+            )
+            self.assertEqual(
+                confirmation.returncode,
+                0,
+                msg=(
+                    "exact stdin confirmation should delete the space:\n"
+                    f"stdout={confirmation.stdout}\n"
+                    f"stderr={confirmation.stderr}"
+                ),
+            )
+            deleted = True
+            self.assertNotEqual(
+                run_anyr("space", "get", created_space_id).returncode,
+                0,
+                "deleted space should no longer be resolvable",
+            )
+        finally:
+            if created_space_id and not deleted:
+                run_anyr_with_input(
+                    f'n\ndelete:{space_name}\n',
+                    "space",
+                    "delete",
+                    created_space_id,
+                )
 
     def test_object(self) -> None:
         self.assert_help_ok("object")

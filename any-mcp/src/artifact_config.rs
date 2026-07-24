@@ -5,9 +5,10 @@
 
 //! Strict startup configuration for artifact and space policy.
 //!
-//! A configuration file is selected only through [`ConfigSelector`]. There is
-//! no filename discovery. Physical paths remain native [`OsString`] values
-//! after validation and are deliberately omitted from diagnostics.
+//! A configuration file is selected by explicit `-c`/`--config`,
+//! `ANY_MCP_CONFIG`, or an existing `any-mcp.toml` in the current directory.
+//! Physical paths remain native [`OsString`] values after validation and are
+//! deliberately omitted from diagnostics.
 
 use std::{
     collections::BTreeSet,
@@ -40,6 +41,7 @@ use crate::domain::SpaceId;
 pub const CONFIG_ENV: &str = "ANY_MCP_CONFIG";
 
 const CONFIG_BYTES: u64 = 262_144;
+const DEFAULT_CONFIG_FILE: &str = "any-mcp.toml";
 const NATIVE_ENCODED_BYTES: usize = 5_462;
 const NATIVE_PATH_UNITS: usize = 4_096;
 #[cfg(windows)]
@@ -110,8 +112,14 @@ impl ConfigSelector {
 
         let selected = if let Some(value) = command_line {
             Some(value)
+        } else if let Some(value) = environment() {
+            Some(value)
         } else {
-            environment()
+            std::env::current_dir()
+                .ok()
+                .map(|directory| directory.join(DEFAULT_CONFIG_FILE))
+                .filter(|path| path.is_file())
+                .map(|path| path.into_os_string())
         };
         let Some(selected) = selected else {
             return Ok(Self::default());
@@ -1517,13 +1525,16 @@ mod tests {
     const MINIMAL: &str = "schema_version = 1\n[spaces]\nread_only = false\n";
 
     #[test]
-    fn no_selector_uses_defaults_without_discovery() {
+    fn no_selector_uses_cwd_file_before_defaults() {
         let selector =
             ConfigSelector::from_args_and_env(Vec::<OsString>::new(), None).expect("selector");
         let config = selector.load().expect("defaults");
 
-        assert!(!selector.is_selected());
-        assert!(!config.is_selected());
+        assert_eq!(
+            selector.is_selected(),
+            Path::new(DEFAULT_CONFIG_FILE).is_file()
+        );
+        assert_eq!(config.is_selected(), selector.is_selected());
         assert_eq!(config.import_root_count(), 0);
         assert_eq!(config.export_root_count(), 0);
         assert_eq!(config.spaces.allowed, None);

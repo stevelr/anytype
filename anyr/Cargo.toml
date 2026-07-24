@@ -16,10 +16,19 @@ readme = "README.md"
 repository.workspace = true
 description = "CLI for Anytype - list, search, and perform CRUD operations on Anytype objects."
 
+[features]
+default = ["mcp", "inspect"]
+mcp = ["dep:any-mcp"]
+backup = ["dep:anyback_reader", "anyback_reader/cli"]
+inspect = ["backup", "anyback_reader/tui"]
+
 [[bin]]
 name = "anyr"
 
 [dependencies]
+any-edit.workspace = true
+any-mcp = { workspace = true, optional = true }
+anyback_reader = { workspace = true, optional = true }
 anyhow.workspace = true
 anytype.workspace = true
 base64 = "0.22"

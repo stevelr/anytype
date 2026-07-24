@@ -24,6 +24,21 @@ anyr init-cli --join "$INVITE_LINK"
 # List spaces your user is authorized to access
 anyr space list -t     # output as table (-t/--table)
 
+# Create a chat space
+anyr space create "Team Chat" --chat
+
+# Create and inspect space invitations (gRPC credentials required)
+anyr space invite create "Work" --writer
+anyr space invite show "Work"
+anyr space invite revoke "Work"
+
+# Enable or disable public space sharing
+anyr space enable-sharing "Work"
+anyr space disable-sharing "Work"
+
+# Permanently delete a space after an archive and exact-name confirmation
+anyr space delete "Old Work"
+
 # Count or delete archived objects in a space
 anyr space count-archived "Work"
 anyr space delete-archived "Work" [ --confirm ]
@@ -45,7 +60,34 @@ anyr chat create "Work" "Ops"
 anyr chat messages list "Work" "Ops" -t
 # Post message
 anyr chat messages send "Work" "Ops" --text "hello world?"
+
+# Markdown editing (the former any-edit commands)
+anyr md get "Work" OBJECT_ID -o page.md
+anyr md update -i page.md
+anyr md edit "Work" OBJECT_ID
+
+# Backup and archive workflows (the former anyback commands)
+anyr backup create --space "Work" --dir ./backups
+anyr backup list ./backups/ARCHIVE.zip
+anyr backup restore ./backups/ARCHIVE.zip --space "Work"
+
+# MCP server and maintenance commands (the former any-mcp commands)
+anyr mcp
+anyr mcp init
+anyr mcp check
 ```
+
+The consolidated binary owns shared endpoint, keystore, output, and
+verbosity options. Use `-v`, `-vv`, or `RUST_LOG` for diagnostics. `anyr -V`
+or `anyr --version` reports the anyr Cargo binary version. Version reporting
+is intentionally top-level; `anyr mcp --version` is rejected with guidance to
+use `anyr --version`. The archive inspector is included in the default anyr
+build.
+
+`anyr space delete` is deliberately interactive. It first offers to write a
+complete space backup in the current directory, then requires the exact
+confirmation string `delete:SPACE_NAME`; any other response leaves the space
+unchanged.
 
 ## Common options
 

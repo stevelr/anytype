@@ -12,7 +12,10 @@ The gRPC api isn't officially supported (by Anytype) for third party clients. Ho
 
 - We will try to follow semver versioning policy, but if you plan to use this crate directly for a production release, we recommend you pin the version of this crate in Cargo.toml and check for updates periodically with `cargo outdated`.
 
-- This crate includes some limited cli examples to list spaces and import and export objects.
+- This crate includes the `admin` example for source-built administrative
+  operations such as space management and object import/export. It is not a
+  distributed binary; run it with `cargo run -p anytype-rpc --example admin --
+  --help`.
 
 ## Compatibility
 

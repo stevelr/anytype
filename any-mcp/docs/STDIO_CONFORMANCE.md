@@ -53,7 +53,8 @@ cargo test -p any-mcp --test stdio_conformance --no-fail-fast
 
 The test harness uses only Rust standard-library process, loopback TCP, thread,
 channel, and deadline APIs. It therefore avoids shell and Unix-only process
-assumptions in the test path. Each test starts the real `any-mcp` executable
+assumptions in the test path. Each test starts the private process-test
+wrapper for the real `anyr mcp` entrypoint
 and a bounded authenticated Anytype HTTP fixture, then retains all stdout and
 stderr bytes until clean stdin EOF.
 
@@ -243,13 +244,13 @@ environment. From the repository root, substitute equivalent Anytype
 configuration for `.test-env` when necessary:
 
 ```sh
-cargo build -p any-mcp
+cargo build -p anyr
 source .test-env
 : "${ANYTYPE_URL:?required for this smoke test}"
 : "${ANYTYPE_GRPC_ENDPOINT:?required for this smoke test}"
 : "${ANYTYPE_KEYSTORE:?required for this smoke test}"
 ANYTYPE_KEYSTORE_SERVICE="${ANYTYPE_KEYSTORE_SERVICE:-anyr}"
-binary="$(realpath target/debug/any-mcp)"
+binary="$(realpath target/debug/anyr)"
 inspector_state="$(mktemp -d)"
 
 NPM_CONFIG_USERCONFIG="$inspector_state/npmrc" \
@@ -260,7 +261,7 @@ NPM_CONFIG_CACHE="$inspector_state/npm-cache" \
   ANYTYPE_KEYSTORE="$ANYTYPE_KEYSTORE" \
   ANYTYPE_KEYSTORE_SERVICE="$ANYTYPE_KEYSTORE_SERVICE" \
   ANY_MCP_PROFILE=standard \
-  "$binary" --method tools/list | jq -r '.tools | length'
+  "$binary" mcp --method tools/list | jq -r '.tools | length'
 # 14
 
 NPM_CONFIG_USERCONFIG="$inspector_state/npmrc" \
@@ -270,7 +271,7 @@ NPM_CONFIG_CACHE="$inspector_state/npm-cache" \
   ANYTYPE_GRPC_ENDPOINT="$ANYTYPE_GRPC_ENDPOINT" \
   ANYTYPE_KEYSTORE="$ANYTYPE_KEYSTORE" \
   ANYTYPE_KEYSTORE_SERVICE="$ANYTYPE_KEYSTORE_SERVICE" \
-  ANY_MCP_PROFILE=standard ANY_MCP_READ_ONLY=1 "$binary" --method tools/list \
+  ANY_MCP_PROFILE=standard ANY_MCP_READ_ONLY=1 "$binary" mcp --method tools/list \
   | jq -r '.tools | length'
 # 10
 
@@ -296,10 +297,10 @@ are separate claims. On 2026-07-20, Codex CLI 0.144.6 accepted a real stdio
 registration in a fresh isolated configuration root:
 
 ```sh
-binary="$(realpath target/debug/any-mcp)"
+binary="$(realpath target/debug/anyr)"
 codex_root="$(mktemp -d)"
 CODEX_HOME="$codex_root" codex mcp add \
-  --env ANY_MCP_READ_ONLY=1 anytype -- "$binary"
+  --env ANY_MCP_READ_ONLY=1 anytype -- "$binary" mcp
 CODEX_HOME="$codex_root" codex mcp get anytype
 CODEX_HOME="$codex_root" codex mcp list
 rm -r -- "$codex_root"
@@ -314,7 +315,7 @@ default before forwarding, while credentials remain inside the selected
 keystore:
 
 ```sh
-binary="$(realpath target/debug/any-mcp)"
+binary="$(realpath target/debug/anyr)"
 source .test-env
 : "${ANYTYPE_URL:?required for this smoke test}"
 : "${ANYTYPE_GRPC_ENDPOINT:?required for this smoke test}"
@@ -339,7 +340,8 @@ persistent setup, the supported configuration follows the official
 
 ```toml
 [mcp_servers.anytype]
-command = "/absolute/path/to/anytype/target/debug/any-mcp"
+command = "/absolute/path/to/anytype/target/debug/anyr"
+args = ["mcp"]
 env = { ANY_MCP_READ_ONLY = "1" }
 env_vars = [
   "ANYTYPE_URL",
@@ -350,11 +352,11 @@ env_vars = [
 ```
 
 Replace the command with the absolute path printed by
-`realpath target/debug/any-mcp` after the build above. On Windows, resolve
-`target\debug\any-mcp.exe` and paste the JSON/TOML-safe forward-slash form, for
-example `C:/repo/target/debug/any-mcp.exe`. If native backslashes are retained,
+`realpath target/debug/anyr` after the build above. On Windows, resolve
+`target\debug\anyr.exe` and paste the JSON/TOML-safe forward-slash form, for
+example `C:/repo/target/debug/anyr.exe`. If native backslashes are retained,
 double every backslash in the quoted TOML value, for example
-`C:\\repo\\target\\debug\\any-mcp.exe`; a single backslash can be parsed as an
+`C:\\repo\\target\\debug\\anyr.exe`; a single backslash can be parsed as an
 escape. The workspace build does not install `any-mcp` on `PATH`.
 
 Claude Code 2.1.214 was also exercised on 2026-07-20. Its official local-scope
@@ -363,7 +365,7 @@ project, so it did not touch the user's normal local or project configuration:
 
 ```sh
 repo_root="$PWD"
-binary="$(realpath target/debug/any-mcp)"
+binary="$(realpath target/debug/anyr)"
 claude_config="$(mktemp -d)"
 claude_project="$(mktemp -d)"
 source .test-env
@@ -378,7 +380,7 @@ CLAUDE_CONFIG_DIR="$claude_config" claude mcp add \
   -e ANYTYPE_GRPC_ENDPOINT="$ANYTYPE_GRPC_ENDPOINT" \
   -e ANYTYPE_KEYSTORE="$ANYTYPE_KEYSTORE" \
   -e ANYTYPE_KEYSTORE_SERVICE="$ANYTYPE_KEYSTORE_SERVICE" \
-  -e ANY_MCP_READ_ONLY=1 -- "$binary"
+  -e ANY_MCP_READ_ONLY=1 -- "$binary" mcp
 CLAUDE_CONFIG_DIR="$claude_config" claude mcp get anytype
 CLAUDE_CONFIG_DIR="$claude_config" claude mcp list
 cd "$repo_root"
@@ -390,7 +392,7 @@ inline one-server configuration, strict MCP isolation, no session persistence,
 and an allowlist containing only `mcp__anytype__server_status`:
 
 ```sh
-binary="$(realpath target/debug/any-mcp)"
+binary="$(realpath target/debug/anyr)"
 source .test-env
 : "${ANYTYPE_URL:?required for this smoke test}"
 : "${ANYTYPE_GRPC_ENDPOINT:?required for this smoke test}"
@@ -402,7 +404,7 @@ claude_mcp_config="$(jq -cn \
   --arg grpc "$ANYTYPE_GRPC_ENDPOINT" \
   --arg keystore "$ANYTYPE_KEYSTORE" \
   --arg keystore_service "$ANYTYPE_KEYSTORE_SERVICE" \
-  '{mcpServers:{anytype:{command:$command,env:{ANYTYPE_URL:$url,ANYTYPE_GRPC_ENDPOINT:$grpc,ANYTYPE_KEYSTORE:$keystore,ANYTYPE_KEYSTORE_SERVICE:$keystore_service,ANY_MCP_READ_ONLY:"1"}}}}')"
+  '{mcpServers:{anytype:{command:$command,args:["mcp"],env:{ANYTYPE_URL:$url,ANYTYPE_GRPC_ENDPOINT:$grpc,ANYTYPE_KEYSTORE:$keystore,ANYTYPE_KEYSTORE_SERVICE:$keystore_service,ANY_MCP_READ_ONLY:"1"}}}}')"
 claude -p --no-session-persistence --strict-mcp-config \
   --mcp-config "$claude_mcp_config" \
   --allowedTools mcp__anytype__server_status \

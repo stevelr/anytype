@@ -10,6 +10,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 **Changed:**
 
+- Move the former `anytype-rpc` administrative executable to the source-built
+  `admin` example. The crate no longer publishes a standalone CLI binary.
 - Simplified bootstrap example error checks and normalized its formatting.
 - View request token-attachment failures now retain their typed `AuthError`
   source instead of being encoded as an API response with numeric code zero.

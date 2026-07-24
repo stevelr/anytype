@@ -41,19 +41,19 @@ Build the current workspace prerelease and confirm that the existing `anyr`
 credentials can reach Anytype:
 
 ```sh
-cargo build -p any-mcp
+cargo build -p anyr
 anyr auth status --pretty
-realpath target/debug/any-mcp
+realpath target/debug/anyr
 ```
 
 The last command prints the absolute path to the binary built in this checkout.
-Replace `/absolute/path/to/anytype/target/debug/any-mcp` in both examples below
+Replace `/absolute/path/to/anytype/target/debug/anyr` in both examples below
 with that platform-specific absolute path; the workspace build does not install
-`any-mcp` on `PATH`. On Windows, resolve `target\debug\any-mcp.exe` and prefer
+`anyr` on `PATH`. On Windows, resolve `target\debug\anyr.exe` and prefer
 the JSON/TOML-safe forward-slash form, for example
-`C:/repo/target/debug/any-mcp.exe`. If native backslashes are retained, double
+`C:/repo/target/debug/anyr.exe`. If native backslashes are retained, double
 every backslash in either quoted format, for example
-`C:\\repo\\target\\debug\\any-mcp.exe`; a single backslash can be parsed as an
+`C:\\repo\\target\\debug\\anyr.exe`; a single backslash can be parsed as an
 escape.
 
 An MCP host starts that binary and communicates with it over stdio.
@@ -68,7 +68,8 @@ explicitly:
 {
   "mcpServers": {
     "anytype": {
-      "command": "/absolute/path/to/anytype/target/debug/any-mcp",
+      "command": "/absolute/path/to/anytype/target/debug/anyr",
+      "args": ["mcp"],
       "env": {
         "ANY_MCP_PROTOCOL": "stable",
         "ANY_MCP_PROFILE": "compact",
@@ -93,7 +94,8 @@ existing non-secret selectors:
 
 ```toml
 [mcp_servers.anytype]
-command = "/absolute/path/to/anytype/target/debug/any-mcp"
+command = "/absolute/path/to/anytype/target/debug/anyr"
+args = ["mcp"]
 env = { ANY_MCP_PROTOCOL = "stable", ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
 env_vars = [
   "ANYTYPE_URL",
@@ -200,17 +202,17 @@ owner-only starter file in the current directory, then validate it without
 starting Anytype:
 
 ```sh
-any-mcp config init
-any-mcp config check
+anyr mcp init
+anyr mcp check
 ```
 
 Both commands accept `-c FILE` or `--config FILE`. Initialization uses
 create-new behavior and never overwrites an existing file. Server startup
 accepts `-c ABSOLUTE_PATH`, `--config ABSOLUTE_PATH`, or `ANY_MCP_CONFIG`; the
-command-line value wins. The server does not search for a default filename,
-and it starts with built-in defaults when no selector is present. Print the
-installed executable and package version with `any-mcp -V` or
-`any-mcp --version`.
+command-line value wins. When neither is present, an existing `any-mcp.toml`
+in the current directory is selected, followed by built-in defaults when that
+file is absent. Print the
+the consolidated binary version with `anyr -V` or `anyr --version`.
 
 An explicitly selected file must be an owner-controlled regular UTF-8 file no
 larger than 256 KiB. The schema is closed and versioned. Unknown fields,
@@ -778,7 +780,7 @@ Authenticated disposable acceptance defines one shared scenario for the actual
 All three drivers use the same reviewed handlers as the immutable production
 descriptor. Deterministic cancellation and concurrency seams remain confined
 to a feature-gated acceptance registry; the spawned acceptance binary is not
-the shipped `any-mcp` binary and is not built by default. The child appends
+the shipped `anyr mcp` process and is not built by default. The child appends
 payload-free counter snapshots to a private metrics file. The scenario seeds
 only A, leaves B absent as the mutation target, and keeps C absent as a control.
 It applies list, add, and remove to a Set/query object, rejects limit and
@@ -1645,7 +1647,7 @@ required heart RPCs stay inside `anytype-api`, so `any-mcp` retains its
 ## Build
 
 ```sh
-cargo build -p any-mcp
+cargo build -p anyr
 ```
 
 ## Protocol channel

@@ -623,9 +623,9 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::ArchiveSourceKind;
     use crate::cli::inspector::app::App;
     use crate::cli::inspector::index::ArchiveIndex;
-    use anyback_reader::archive::ArchiveSourceKind;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn fixture_index() -> ArchiveIndex {

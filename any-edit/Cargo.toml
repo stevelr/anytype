@@ -5,7 +5,7 @@
 #
 [package]
 name = "any-edit"
-version = "0.1.6"
+version.workspace = true
 authors.workspace = true
 categories = ["command-line-utilities"]
 edition.workspace = true
@@ -16,10 +16,6 @@ readme = "README.md"
 repository.workspace = true
 description = "Edit Anytype documents in an external editor"
 
-[[bin]]
-name = "any-edit"
-path = "src/main.rs"
-
 [dependencies]
 anyhow.workspace = true
 anytype.workspace = true
@@ -29,9 +25,6 @@ regex.workspace = true
 serde.workspace = true
 serde_yaml_ng.workspace = true
 sha2.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # For keyboard input simulation

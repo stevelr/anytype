@@ -14,8 +14,8 @@
 # @raycast.author stevelr
 
 # Configuration - edit these to match your setup
-# Path to any-edit program
-ANY_EDIT="$HOME/.local/bin/any-edit"
+# Path to anyr program
+ANYR="$HOME/.local/bin/anyr"
 # EDITOR program - use absolute path
 EDITOR="/opt/homebrew/bin/hx"
 # Terminal wrapper for editor
@@ -28,14 +28,14 @@ notify() {
   osascript -e "display notification \"$1\" with title \"Anytype Edit\""
 }
 
-# Check if any-edit exists
-if [[ ! -x "$ANY_EDIT" ]]; then
-  echo "ERROR: any-edit not found at $ANY_EDIT"
+# Check if anyr exists
+if [[ ! -x "$ANYR" ]]; then
+  echo "ERROR: anyr not found at $ANYR"
   exit 1
 fi
 
 notify "Opening Anytype editor..."
-if "$ANY_EDIT" edit --current 2>&1; then
+if "$ANYR" md edit-current 2>&1; then
   notify "Changes saved to Anytype"
 else
   notify "Failed to edit Anytype object"

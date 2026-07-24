@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add typed space administration methods for chat-space creation, permanent
+  deletion, invitation creation/listing/revocation, and sharing controls.
+
 - Add retained-handle streaming to the unified file upload builder. The new
   `reader` source accepts an already-open Tokio file plus its exact length,
   constructs a length-bounded REST multipart body without reopening a path or

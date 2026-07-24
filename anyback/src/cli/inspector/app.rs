@@ -6,8 +6,8 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyback_reader::archive::ArchiveReader;
-use anyback_reader::markdown::{
+use crate::archive::ArchiveReader;
+use crate::markdown::{
     ArchiveObjectInfo, SavedObjectKind, build_archive_object_index,
     convert_snapshot_bytes_to_markdown, save_archive_object,
 };
@@ -1492,8 +1492,8 @@ fn sanitize_save_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::ArchiveSourceKind;
     use crate::cli::inspector::index::{ObjectEntry, SortColumn};
-    use anyback_reader::archive::ArchiveSourceKind;
 
     fn fixture_entry(id: &str, name: &str, type_name: &str) -> ObjectEntry {
         let short_id = if id.len() >= 5 {

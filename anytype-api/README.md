@@ -28,6 +28,8 @@ and callers do not need a direct `anytype-rpc` dependency.
 - Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
 - HTTP middleware with secret-safe metadata logging, retries, and rate limit handling
 - Client-side caching (spaces, properties, types)
+- Space administration through typed APIs for chat-space creation, deletion,
+  invitations, and sharing controls
 - Name and id resolution helpers (`resolve` module): accept a space, type,
   template, chat, view, or property by name, key, or id; ambiguous names return up to 10
   deterministic candidate ids and display names for an actionable retry, and
@@ -1096,8 +1098,9 @@ allowed to leak rather than authorize deletion of ambient state. Registration
 occurs before follow-up verification. Teardown revalidates exact ID/name/model
 provenance through the same strict inventory before Anytype's irreversible
 `SpaceDelete` RPC, then requires complete bounded REST evidence that the ID is
-gone even when the delete response is uncertain. There is intentionally no
-general test registration or production space-delete API.
+gone even when the delete response is uncertain. The test-only ownership
+registry remains separate from the explicit `AnytypeClient::delete_space` API,
+which callers must protect with their own confirmation policy.
 
 Whole live suites should prefer `with_disposable_space_context`. It creates a
 fresh cleanup-owned space under the mandatory `ANYTYPE_TEST_SPACE_PREFIX`.

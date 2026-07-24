@@ -127,7 +127,9 @@ impl RuntimeConfig {
     /// optional selection also admits the effective
     /// `ANYTYPE_RATE_LIMIT_MAX_RETRIES` policy before client construction.
     /// `ANY_MCP_CONFIG` explicitly selects the strict artifact/space TOML
-    /// policy; no file is discovered when it is absent.
+    /// policy. When neither a command-line selector nor the environment
+    /// variable is present, an existing `any-mcp.toml` in the current
+    /// directory is selected; otherwise built-in defaults are used.
     ///
     /// # Errors
     ///
@@ -142,8 +144,8 @@ impl RuntimeConfig {
     ///
     /// `arguments` contains arguments after the executable name. It accepts
     /// only `-c ABSOLUTE_PATH` or `--config ABSOLUTE_PATH`; command-line
-    /// selection takes precedence over `ANY_MCP_CONFIG`, and no conventional
-    /// filename is discovered.
+    /// selection takes precedence over `ANY_MCP_CONFIG`, followed by the
+    /// conventional current-directory filename.
     ///
     /// # Errors
     ///

@@ -1,14 +1,14 @@
 # Raycast setup and diagnostics
 
-This guide covers the Raycast script for editing the current Anytype page with `any-edit`.
+This guide covers the Raycast script for editing the current Anytype page with `anyr md`.
 
 ## Setup
 
 ### 1) Authenticate
 
 ```bash
-any-edit auth login
-any-edit auth status
+anyr auth login
+anyr auth status
 ```
 
 ### 2) Configure the script
@@ -16,7 +16,7 @@ any-edit auth status
 Edit `scripts/raycast-edit-anytype.sh`:
 
 ```bash
-ANY_EDIT="/path/to/any-edit"
+ANYR="/path/to/anyr"
 EDITOR="/opt/homebrew/bin/hx"
 EDITOR_COMMAND="/Applications/Alacritty.app/Contents/MacOS/alacritty -e $EDITOR"
 ```
@@ -24,7 +24,7 @@ EDITOR_COMMAND="/Applications/Alacritty.app/Contents/MacOS/alacritty -e $EDITOR"
 Notes:
 
 - `EDITOR_COMMAND` is split on spaces. Use `\` to escape spaces inside a path.
-- If `EDITOR_COMMAND` is unset, `any-edit` falls back to `EDITOR` and passes the file path as the only arg.
+- If `EDITOR_COMMAND` is unset, `anyr md` falls back to `EDITOR` and passes the file path as the only arg.
 - Use absolute paths for all commands (EDITOR, etc.)
 
 If your editor is terminal-based (hx, vim):
@@ -56,18 +56,18 @@ If your editor is vscode/Visual Studio Code, it should work as follows (untested
 1. System Settings -> Privacy & Security -> Accessibility
 2. Enable Raycast
 3. Click `+`
-4. Add the `any-edit` binary path you run
+4. Add the `anyr` binary path you run
 5. Enable the toggle
 
-If you rebuild `any-edit`, you may need to remove and re-add it.
+If you rebuild `anyr`, you may need to remove and re-add it.
 
 ## Diagnostics
 
-### Verify `any-edit` works
+### Verify `anyr md` works
 
 ```bash
-/path/to/any-edit auth status
-/path/to/any-edit copy-link
+/path/to/anyr auth status
+/path/to/anyr md copy-link
 ```
 
 The 'copy-link' command inserts the "Copy Deep link" keys into the Anytype desktop app to get the url of the current document, then reads it from the clipboard. It should display a url beginning with "https://object.any.coop/bafy...". The first time this runs, you'll likely be prompted to allow your terminal program to control applications. This is needed to send keystrokes to an application. Click Allow, or enable the terminal app in Settings -> Privacy and Security -> Accessibility.
@@ -79,7 +79,7 @@ If `copy-link` returns a URL, the accessibility settings are working.
 ```bash
 EDITOR="/opt/homebrew/bin/hx"
 EDITOR_COMMAND="/Applications/Alacritty.app/Contents/MacOS/alacritty -e $EDITOR" \
-  /path/to/any-edit edit SPACE_ID OBJECT_ID
+  /path/to/anyr md edit SPACE_ID OBJECT_ID
 ```
 
 If the editor opens and closes, `EDITOR_COMMAND` is valid.
@@ -94,6 +94,6 @@ If the editor opens and closes, `EDITOR_COMMAND` is valid.
   - Check the `EDITOR_COMMAND` line in `scripts/raycast-edit-anytype.sh`
   - Use escaped spaces for paths, e.g. `"/Applications/My\ App/app -e /opt/homebrew/bin/hx"`
 
-- "any-edit not found"
-  - Verify the `ANY_EDIT` path in `scripts/raycast-edit-anytype.sh` is correct and uses an absolute path that doesn't depend on environment.
+- "anyr not found"
+  - Verify the `ANYR` path in `scripts/raycast-edit-anytype.sh` is correct and uses an absolute path that doesn't depend on environment.
   - Rebuild with `cargo build --release`

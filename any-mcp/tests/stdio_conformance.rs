@@ -8,7 +8,8 @@
 //!
 //! The harness deliberately uses only portable Rust process, TCP, thread, and
 //! channel APIs. It starts a bounded local Anytype HTTP fixture, drives the
-//! real `any-mcp` executable one JSON-RPC line at a time, and retains every
+//! private process-test wrapper for the real `anyr mcp` entrypoint one JSON-RPC
+//! line at a time, and retains every
 //! stdout byte so protocol-channel purity is checked after clean EOF. Passing
 //! Tests cover both the current stateless MCP 2026-07-28 wire contract and the
 //! exact legacy lifecycle used by current Codex, Claude Code, and Inspector
@@ -373,7 +374,7 @@ impl ConformanceProcessExt for ProtocolProcess {
         read_only: bool,
         protocol: Option<&str>,
     ) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
         command
             .env("ANYTYPE_URL", &fixture.address)
             .env("ANYTYPE_KEYSTORE", "env")
@@ -436,7 +437,7 @@ fn standard_read_write_http_only_fails_before_protocol_output() {
     for protocol in [None, Some("experimental-2026-07-28")] {
         let fixture = HttpFixture::start();
         let fixture_address = fixture.address.clone();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
         command
             .env("ANYTYPE_URL", &fixture.address)
             .env("ANYTYPE_KEYSTORE", "env")

@@ -8,6 +8,13 @@
 //! - [`space`](AnytypeClient::space) - get space
 //! - [`new_space`](AnytypeClient::new_space) - create a new space
 //! - [`update_space`](AnytypeClient::space) - update space properties
+//! - [`create_chat_space`](AnytypeClient::create_chat_space) - create a chat space
+//! - [`delete_space`](AnytypeClient::delete_space) - permanently delete a space
+//! - [`list_space_invites`](AnytypeClient::list_space_invites) - list active invitations
+//! - [`create_space_invite`](AnytypeClient::create_space_invite) - create an invitation
+//! - [`revoke_space_invite`](AnytypeClient::revoke_space_invite) - revoke an invitation
+//! - [`enable_space_sharing`](AnytypeClient::enable_space_sharing) and
+//!   [`disable_space_sharing`](AnytypeClient::disable_space_sharing) - control sharing
 //! - [`backup_space`](AnytypeClient::backup_space) - back up a space (requires `grpc` feature)
 //!
 //! ## Quick Start
@@ -45,8 +52,11 @@
 //! - [`ListSpacesRequest`] - Builder for listing spaces
 //! - [`BackupSpaceRequest`] - Builder for backing up a space (requires `grpc` feature)
 //! - [`BackupExportFormat`] - Export format for backups (requires `grpc` feature)
+//! - [`SpaceInvite`] - A generated space invitation
+//! - [`SpaceInviteType`] - Invitation approval and guest mode
+//! - [`SpaceInvitePermission`] - Access granted by an invitation
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -58,6 +68,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anytype_rpc::anytype::rpc::object::list_delete;
+use anytype_rpc::anytype::{ClientCommandsClient, rpc};
 pub use anytype_rpc::backup::SpaceBackupResult;
 use anytype_rpc::backup::{ExportFormat, SpaceBackupOptions};
 use anytype_rpc::{anytype::rpc::object::search_with_meta, model};
@@ -69,6 +80,7 @@ use crate::{
     Result,
     cache::AnytypeCache,
     client::AnytypeClient,
+    error::AnytypeError,
     filters::{Query, QueryWithFilters},
     http_client::{GetPaged, HttpClient},
     prelude::*,
@@ -127,6 +139,101 @@ pub struct Space {
     /// Network ID of the space
     /// Example: `N83gJpVd9MuNRZAuJLZ7LiMntTThhPc6DtzWWVjb1M3PouVU`
     pub network_id: Option<String>,
+}
+
+/// The kind of invitation generated for a space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceInviteType {
+    /// A member invitation which may require approval.
+    Member,
+    /// An invitation for a guest account.
+    Guest,
+    /// A member invitation that does not require approval.
+    AutoApprove,
+}
+
+impl SpaceInviteType {
+    fn as_rpc(self) -> i32 {
+        match self {
+            Self::Member => model::InviteType::Member as i32,
+            Self::Guest => model::InviteType::Guest as i32,
+            Self::AutoApprove => model::InviteType::WithoutApprove as i32,
+        }
+    }
+}
+
+/// Permissions granted by a generated member invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceInvitePermission {
+    /// Read-only access.
+    Reader,
+    /// Read and write access.
+    Writer,
+    /// Owner access.
+    Owner,
+}
+
+impl SpaceInvitePermission {
+    fn as_rpc(self) -> i32 {
+        match self {
+            Self::Reader => model::ParticipantPermissions::Reader as i32,
+            Self::Writer => model::ParticipantPermissions::Writer as i32,
+            Self::Owner => model::ParticipantPermissions::Owner as i32,
+        }
+    }
+}
+
+/// A currently active invitation for a space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpaceInvite {
+    /// Human-readable invitation kind.
+    #[serde(rename = "type")]
+    pub invite_type: String,
+    /// Human-readable permissions, when the invitation has them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    /// Content identifier for the invitation file.
+    pub cid: String,
+    /// Encryption key for the invitation file.
+    pub key: String,
+    /// Shareable invitation URL.
+    pub url: String,
+}
+
+fn space_rpc_error(action: &str, code: i32, description: &str) -> AnytypeError {
+    AnytypeError::Other {
+        message: format!("{action} failed: {description} (code {code})"),
+    }
+}
+
+fn invite_type_name(value: i32) -> String {
+    match value {
+        value if value == model::InviteType::Member as i32 => "member".to_owned(),
+        value if value == model::InviteType::Guest as i32 => "guest".to_owned(),
+        value if value == model::InviteType::WithoutApprove as i32 => "auto-approve".to_owned(),
+        value => format!("unknown({value})"),
+    }
+}
+
+fn invite_permissions_name(value: i32) -> String {
+    match value {
+        value if value == model::ParticipantPermissions::Reader as i32 => "reader".to_owned(),
+        value if value == model::ParticipantPermissions::Writer as i32 => "writer".to_owned(),
+        value if value == model::ParticipantPermissions::Owner as i32 => "owner".to_owned(),
+        value => format!("unknown({value})"),
+    }
+}
+
+fn invite_url(cid: &str, key: &str) -> String {
+    format!("https://invite.any.coop/{cid}#{key}")
+}
+
+fn is_no_active_member_invite(code: i32) -> bool {
+    code == rpc::space::invite_get_current::response::error::Code::NoActiveInvite as i32
+}
+
+fn is_guest_invite_unavailable(code: i32) -> bool {
+    code == rpc::space::invite_get_guest::response::error::Code::InvalidSpaceType as i32
 }
 
 impl Space {
@@ -1078,6 +1185,316 @@ impl AnytypeClient {
         UpdateSpaceRequest::new(self.client.clone(), space_id, self.config.verify.clone())
     }
 
+    /// Creates a chat space through the authenticated gRPC workspace API.
+    ///
+    /// The ordinary [`Self::new_space`] builder creates regular spaces through
+    /// the REST API. Chat-space creation is currently only exposed by gRPC.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the name is invalid, gRPC credentials are absent,
+    /// or the workspace service rejects the request.
+    pub async fn create_chat_space(&self, name: impl Into<String>) -> Result<Space> {
+        let name = name.into();
+        self.config.limits.validate_name(&name, "space")?;
+
+        let grpc = self.grpc_client().await?;
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "name".to_owned(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue(name.clone())),
+            },
+        );
+        let request = rpc::workspace::create::Request {
+            details: Some(prost_types::Struct { fields }),
+            use_case: rpc::object::import_use_case::request::UseCase::None as i32,
+            with_chat: true,
+        };
+        let request = with_token_request(Request::new(request), grpc.token())?;
+        let response = ClientCommandsClient::new(grpc.channel())
+            .workspace_create(request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+
+        if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
+            return Err(space_rpc_error(
+                "workspace create",
+                error.code,
+                &error.description,
+            ));
+        }
+        if response.space_id.is_empty() {
+            return Err(AnytypeError::Other {
+                message: "workspace create returned an empty space id".to_owned(),
+            });
+        }
+
+        self.cache.clear_spaces();
+        Ok(Space {
+            id: response.space_id,
+            name,
+            object: SpaceModel::Chat,
+            description: None,
+            icon: None,
+            gateway_url: None,
+            network_id: None,
+        })
+    }
+
+    /// Permanently deletes a space through the authenticated gRPC space API.
+    ///
+    /// This operation is intentionally not exposed through the ordinary
+    /// `SpaceRequest` builder because it is irreversible and requires an
+    /// explicit caller-side confirmation policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the id is empty, gRPC credentials are absent, or
+    /// the space service rejects the request.
+    pub async fn delete_space(&self, space_id: impl AsRef<str>) -> Result<()> {
+        let space_id = space_id.as_ref();
+        self.config.limits.validate_id(space_id, "space_id")?;
+
+        let grpc = self.grpc_client().await?;
+        let request = rpc::space::delete::Request {
+            space_id: space_id.to_owned(),
+        };
+        let request = with_token_request(Request::new(request), grpc.token())?;
+        let response = ClientCommandsClient::new(grpc.channel())
+            .space_delete(request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+
+        if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
+            return Err(space_rpc_error(
+                "space delete",
+                error.code,
+                &error.description,
+            ));
+        }
+        self.cache.clear_spaces();
+        Ok(())
+    }
+
+    /// Lists active member and guest invitations for a space.
+    ///
+    /// A space with no active invitation, or a regular space without a guest
+    /// invitation, returns an empty entry for that invitation kind rather than
+    /// an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid credentials, transport failures, or an
+    /// upstream error other than the documented no-invite conditions.
+    pub async fn list_space_invites(&self, space_id: impl AsRef<str>) -> Result<Vec<SpaceInvite>> {
+        let space_id = space_id.as_ref();
+        self.config.limits.validate_id(space_id, "space_id")?;
+
+        let grpc = self.grpc_client().await?;
+        let mut commands = grpc.client_commands();
+        let mut invites = Vec::new();
+
+        let current_request = rpc::space::invite_get_current::Request {
+            space_id: space_id.to_owned(),
+        };
+        let current_request = with_token_request(Request::new(current_request), grpc.token())?;
+        let current = commands
+            .space_invite_get_current(current_request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+        if let Some(error) = current.error.as_ref().filter(|error| error.code != 0) {
+            if !is_no_active_member_invite(error.code) {
+                return Err(space_rpc_error(
+                    "space invite get current",
+                    error.code,
+                    &error.description,
+                ));
+            }
+        } else if !current.invite_cid.is_empty() {
+            invites.push(SpaceInvite {
+                invite_type: invite_type_name(current.invite_type),
+                permissions: Some(invite_permissions_name(current.permissions)),
+                url: invite_url(&current.invite_cid, &current.invite_file_key),
+                cid: current.invite_cid,
+                key: current.invite_file_key,
+            });
+        }
+
+        let guest_request = rpc::space::invite_get_guest::Request {
+            space_id: space_id.to_owned(),
+        };
+        let guest_request = with_token_request(Request::new(guest_request), grpc.token())?;
+        let guest = commands
+            .space_invite_get_guest(guest_request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+        if let Some(error) = guest.error.as_ref().filter(|error| error.code != 0) {
+            if !is_guest_invite_unavailable(error.code) {
+                return Err(space_rpc_error(
+                    "space invite get guest",
+                    error.code,
+                    &error.description,
+                ));
+            }
+        } else if !guest.invite_cid.is_empty() {
+            invites.push(SpaceInvite {
+                invite_type: "guest".to_owned(),
+                permissions: None,
+                url: invite_url(&guest.invite_cid, &guest.invite_file_key),
+                cid: guest.invite_cid,
+                key: guest.invite_file_key,
+            });
+        }
+
+        Ok(invites)
+    }
+
+    /// Generates a new member or guest invitation for a space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is rejected, credentials are absent,
+    /// or the generated invitation is incomplete.
+    pub async fn create_space_invite(
+        &self,
+        space_id: impl AsRef<str>,
+        invite_type: SpaceInviteType,
+        permissions: SpaceInvitePermission,
+    ) -> Result<SpaceInvite> {
+        let space_id = space_id.as_ref();
+        self.config.limits.validate_id(space_id, "space_id")?;
+
+        let grpc = self.grpc_client().await?;
+        let request = rpc::space::invite_generate::Request {
+            space_id: space_id.to_owned(),
+            invite_type: invite_type.as_rpc(),
+            permissions: permissions.as_rpc(),
+        };
+        let request = with_token_request(Request::new(request), grpc.token())?;
+        let response = ClientCommandsClient::new(grpc.channel())
+            .space_invite_generate(request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+
+        if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
+            return Err(space_rpc_error(
+                "space invite generate",
+                error.code,
+                &error.description,
+            ));
+        }
+        if response.invite_cid.is_empty() || response.invite_file_key.is_empty() {
+            return Err(AnytypeError::Other {
+                message: "space invite generate returned incomplete invitation data".to_owned(),
+            });
+        }
+
+        Ok(SpaceInvite {
+            invite_type: invite_type_name(response.invite_type),
+            permissions: Some(invite_permissions_name(response.permissions)),
+            url: invite_url(&response.invite_cid, &response.invite_file_key),
+            cid: response.invite_cid,
+            key: response.invite_file_key,
+        })
+    }
+
+    /// Revokes the active invitation for a space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is rejected, credentials are absent,
+    /// or the space has no revocable invitation.
+    pub async fn revoke_space_invite(&self, space_id: impl AsRef<str>) -> Result<()> {
+        let space_id = space_id.as_ref();
+        self.config.limits.validate_id(space_id, "space_id")?;
+
+        let grpc = self.grpc_client().await?;
+        let request = rpc::space::invite_revoke::Request {
+            space_id: space_id.to_owned(),
+        };
+        let request = with_token_request(Request::new(request), grpc.token())?;
+        let response = ClientCommandsClient::new(grpc.channel())
+            .space_invite_revoke(request)
+            .await
+            .map_err(grpc_status)?
+            .into_inner();
+
+        if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
+            return Err(space_rpc_error(
+                "space invite revoke",
+                error.code,
+                &error.description,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Enables sharing for a space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is rejected or credentials are absent.
+    pub async fn enable_space_sharing(&self, space_id: impl AsRef<str>) -> Result<()> {
+        self.set_space_sharing(space_id.as_ref(), true).await
+    }
+
+    /// Disables sharing for a space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is rejected or credentials are absent.
+    pub async fn disable_space_sharing(&self, space_id: impl AsRef<str>) -> Result<()> {
+        self.set_space_sharing(space_id.as_ref(), false).await
+    }
+
+    async fn set_space_sharing(&self, space_id: &str, enabled: bool) -> Result<()> {
+        self.config.limits.validate_id(space_id, "space_id")?;
+
+        let grpc = self.grpc_client().await?;
+        if enabled {
+            let request = rpc::space::make_shareable::Request {
+                space_id: space_id.to_owned(),
+            };
+            let request = with_token_request(Request::new(request), grpc.token())?;
+            let response = ClientCommandsClient::new(grpc.channel())
+                .space_make_shareable(request)
+                .await
+                .map_err(grpc_status)?
+                .into_inner();
+            if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
+                return Err(space_rpc_error(
+                    "space sharing enable",
+                    error.code,
+                    &error.description,
+                ));
+            }
+        } else {
+            let request = rpc::space::stop_sharing::Request {
+                space_id: space_id.to_owned(),
+            };
+            let request = with_token_request(Request::new(request), grpc.token())?;
+            let response = ClientCommandsClient::new(grpc.channel())
+                .space_stop_sharing(request)
+                .await
+                .map_err(grpc_status)?
+                .into_inner();
+            if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
+                return Err(space_rpc_error(
+                    "space sharing disable",
+                    error.code,
+                    &error.description,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a request builder for listing spaces.
     ///
     /// # Example
@@ -1654,6 +2071,80 @@ mod tests {
 
         assert!(space.is_space());
         assert!(!space.is_chat());
+    }
+
+    #[test]
+    fn space_invite_values_have_stable_names_and_url() {
+        assert_eq!(
+            SpaceInviteType::Member.as_rpc(),
+            model::InviteType::Member as i32
+        );
+        assert_eq!(
+            SpaceInviteType::Guest.as_rpc(),
+            model::InviteType::Guest as i32
+        );
+        assert_eq!(
+            SpaceInviteType::AutoApprove.as_rpc(),
+            model::InviteType::WithoutApprove as i32
+        );
+        assert_eq!(
+            SpaceInvitePermission::Reader.as_rpc(),
+            model::ParticipantPermissions::Reader as i32
+        );
+        assert_eq!(
+            SpaceInvitePermission::Writer.as_rpc(),
+            model::ParticipantPermissions::Writer as i32
+        );
+        assert_eq!(
+            SpaceInvitePermission::Owner.as_rpc(),
+            model::ParticipantPermissions::Owner as i32
+        );
+        assert_eq!(invite_type_name(model::InviteType::Member as i32), "member");
+        assert_eq!(invite_type_name(model::InviteType::Guest as i32), "guest");
+        assert_eq!(
+            invite_type_name(model::InviteType::WithoutApprove as i32),
+            "auto-approve"
+        );
+        assert_eq!(
+            invite_permissions_name(model::ParticipantPermissions::Reader as i32),
+            "reader"
+        );
+        assert_eq!(
+            invite_permissions_name(model::ParticipantPermissions::Writer as i32),
+            "writer"
+        );
+        assert_eq!(
+            invite_permissions_name(model::ParticipantPermissions::Owner as i32),
+            "owner"
+        );
+        assert_eq!(invite_url("cid", "key"), "https://invite.any.coop/cid#key");
+    }
+
+    #[test]
+    fn space_invite_serialization_uses_public_wire_names() {
+        let invite = SpaceInvite {
+            invite_type: "member".to_owned(),
+            permissions: Some("writer".to_owned()),
+            cid: "cid".to_owned(),
+            key: "key".to_owned(),
+            url: "https://invite.any.coop/cid#key".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&invite).expect("serialize invitation"),
+            r#"{"type":"member","permissions":"writer","cid":"cid","key":"key","url":"https://invite.any.coop/cid#key"}"#
+        );
+
+        let guest = SpaceInvite {
+            invite_type: "guest".to_owned(),
+            permissions: None,
+            cid: "guest-cid".to_owned(),
+            key: "guest-key".to_owned(),
+            url: "https://invite.any.coop/guest-cid#guest-key".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&guest).expect("serialize guest invitation"),
+            r#"{"type":"guest","cid":"guest-cid","key":"guest-key","url":"https://invite.any.coop/guest-cid#guest-key"}"#
+        );
     }
 
     #[test]

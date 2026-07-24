@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Consolidated the former `any-edit`, `anyback`, and `any-mcp` command
+  surfaces under `anyr md`, `anyr backup`, and `anyr mcp`. Shared endpoint,
+  keystore, output, and `-v`/`-vv` verbosity options are inherited from anyr.
+- `anyr backup` exposes create, restore, list, manifest, diff, extract, export,
+  import, and inspect workflows. The inspector is now included by default.
+- Version reporting is consolidated at `anyr -V`/`--version`; the former
+  nested MCP version command is rejected with guidance to use the top-level
+  command.
+- `anyr space create NAME --chat` creates a chat space through the gRPC
+  workspace API.
+- Added `anyr space invite show|create|revoke` for active member and guest
+  invitations, plus `anyr space enable-sharing` and
+  `anyr space disable-sharing`.
+- Added guarded `anyr space delete SPACE`, which offers a backup in the
+  current directory and requires the exact `delete:SPACE_NAME` confirmation
+  before deletion.
+
 ### Fixed
 
 - Remove the CLI integration test's legacy pre-existing space-ID input. It now

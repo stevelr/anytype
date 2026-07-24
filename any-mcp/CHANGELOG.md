@@ -6,7 +6,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- The production MCP process is now launched as `anyr mcp`; the former
+  standalone `any-mcp` executable was removed after an equivalent capability
+  review. The any-mcp crate remains the reusable server library, and its
+  spawned integration tests use a private process wrapper.
+- Maintenance commands are now `anyr mcp init` and `anyr mcp check`; version
+  reporting is consolidated at `anyr -V`/`--version`.
+
 ### Added
+
+- Configuration discovery now follows `-c`/`--config`, `ANY_MCP_CONFIG`, an
+  existing `any-mcp.toml` in the current directory, then built-in defaults.
 
 - Add an explicitly selected authenticated Streamable HTTP transport on a
   loopback-only `/mcp` listener. Stable protocol sessions support bounded SSE,

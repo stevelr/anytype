@@ -6,7 +6,7 @@
 use std::process::Command;
 
 fn unauthenticated_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
     command
         .env("RUST_LOG", "warn")
         .env("ANYTYPE_KEYSTORE", "env")

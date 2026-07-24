@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use anyback_reader::archive::{ArchiveReader, ArchiveSourceKind};
+use crate::archive::{ArchiveReader, ArchiveSourceKind};
 use anyhow::Result;
 use serde_json::Value;
 
@@ -340,7 +340,7 @@ fn load_details_for_path(
 fn infer_image_payload_path(
     object_id: &str,
     details: &serde_json::Map<String, Value>,
-    files: &[anyback_reader::archive::ArchiveFileEntry],
+    files: &[crate::archive::ArchiveFileEntry],
 ) -> Option<String> {
     let mime = detail_value(details, "fileMimeType")
         .and_then(Value::as_str)
@@ -739,7 +739,7 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyback_reader::archive::ArchiveFileEntry;
+    use crate::archive::ArchiveFileEntry;
 
     #[test]
     fn extract_links_detects_known_ids_only() {

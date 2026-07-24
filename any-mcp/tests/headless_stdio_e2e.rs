@@ -1288,7 +1288,7 @@ fn spawn_disposable_driver(
             message: "disposable callback omitted its child environment".to_owned(),
         })?
         .clone();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
     child_environment.configure(&mut command)?;
     // Only strict, non-secret MCP selectors are overlaid after the disposable
     // environment clears ambient state and installs environment credentials.
@@ -1420,7 +1420,7 @@ fn spawn_disposable_artifact_driver(
         .disposable_child_environment()
         .ok_or_else(|| sentinel_assertion("disposable callback omitted its child environment"))?
         .clone();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
     child_environment.configure(&mut command)?;
     configure_stdio_command(&mut command, DriverOptions::STANDARD, Some("artifacts"));
     command.env("ANY_MCP_CONFIG", &policy.config);
@@ -2234,7 +2234,7 @@ fn disposable_child_credential_needles(ctx: &TestContext) -> TestResult<Vec<Vec<
     let environment = ctx
         .disposable_child_environment()
         .ok_or_else(|| sentinel_assertion("workflow omitted disposable child credentials"))?;
-    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
     environment.configure(&mut command)?;
     let needles = command
         .get_envs()
@@ -6724,7 +6724,7 @@ mod keystore_tests {
         const HTTP_TOKEN: &str = "credential-like-http-token";
         const CIPHER: &str = "cipher-key-material-0011";
         const BODY: &str = "unregistered body and edit fragment";
-        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
         command
             .env("ANY_MCP_PROFILE", "invalid-profile")
             .env("ANYTYPE_KEY_HTTP_TOKEN", HTTP_TOKEN)
@@ -6774,7 +6774,7 @@ mod keystore_tests {
 
     #[test]
     fn shipped_binary_accepts_views_write_selector_before_authentication() {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
         command
             .env("ANY_MCP_TOOLSETS", "views-write")
             .env("ANYTYPE_KEYSTORE", "env")

@@ -30,7 +30,3 @@ tokio.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
-
-[[bin]]
-name = "anytype-rpc"
-path = "src/bin/anytype-rpc.rs"

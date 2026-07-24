@@ -4,6 +4,12 @@
 
 ### Changed
 
+- The standalone `anyback` executable is replaced by the `anyr backup`
+  command. Archive operations are available through the reusable CLI library;
+  authentication is provided by `anyr auth`.
+
+### Changed
+
 - Normalized Rust and spellchecker configuration formatting.
 - bumped dependencies: lru -> 0.16.4, nix -> 0.31.1, rand -> 0.10.0
 

@@ -5,10 +5,11 @@
 
 //! Bounded, workflow-oriented MCP server foundations for Anytype.
 //!
-//! The `any-mcp` binary owns one authenticated [`anytype`](https://docs.rs/anytype)
-//! client and serves strict tools and document resources over stdio. It is a
-//! curated workflow surface, not a one-for-one Anytype API mirror, and never
-//! depends directly on generated `anytype-rpc` support.
+//! The embedded MCP process owns one authenticated
+//! [`anytype`](https://docs.rs/anytype) client and serves strict tools and
+//! document resources over stdio. It is a curated workflow surface, not a
+//! one-for-one Anytype API mirror, and never depends directly on generated
+//! `anytype-rpc` support.
 //!
 //! # Production defaults
 //!
@@ -136,3 +137,167 @@ pub use server::{AnyMcpServer, ServerBuildError};
 pub use space_policy::{
     ConfigurationGeneration, PolicyClient, SpaceAuthority, SpacePolicy, SpacePolicyError,
 };
+
+const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Run the any-mcp process command and return a process exit status.
+///
+/// The `Serve` branch creates the production runtime with the historical
+/// 8 MiB worker stacks. The caller owns process termination so this entrypoint
+/// can be embedded by `anyr` without parsing or duplicating MCP flags.
+pub fn run_process<I>(arguments: I) -> std::process::ExitCode
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let command = match ProcessCommand::parse(arguments) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("any-mcp: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    match command {
+        ProcessCommand::Version => {
+            println!("{}", version_line());
+            std::process::ExitCode::SUCCESS
+        }
+        ProcessCommand::ConfigInit(path) => match init_config(&path) {
+            Ok(()) => {
+                println!("Created any-mcp configuration.");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("any-mcp: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+        ProcessCommand::ConfigCheck(path) => match check_config(&path) {
+            Ok(()) => {
+                println!("any-mcp configuration is valid.");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("any-mcp: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+        ProcessCommand::Serve(arguments) => start_server(arguments),
+    }
+}
+
+fn start_server(arguments: Vec<std::ffi::OsString>) -> std::process::ExitCode {
+    if let Err(error) = logging::init() {
+        eprintln!("any-mcp: diagnostic setup failed: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
+    let runtime = match production_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("any-mcp: runtime setup failed: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = runtime.block_on(run_server(arguments)) {
+        tracing::error!(reason = %error, "any-mcp startup or service failure");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+fn production_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .build()
+}
+
+async fn run_server(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    // Transport and HTTP configuration are validated before any Anytype
+    // credential access, probe, or listener bind.
+    let transport = http::TransportSelection::from_env()?;
+    let config = RuntimeConfig::from_process_args(arguments)?;
+    let protocol_mode = config.protocol_mode;
+    match transport {
+        http::TransportSelection::Stdio => {
+            let runtime = RuntimeContext::start(&config).await?;
+            tracing::info!(
+                http_available = runtime.startup_status().http_available,
+                grpc_available = runtime.startup_status().grpc_available,
+                "authenticated Anytype runtime ready"
+            );
+            serve_stdio(runtime, protocol_mode).await?;
+        }
+        http::TransportSelection::StreamableHttp(http_config) => {
+            let auth = http::prepare_http_auth(&http_config, config.startup_timeout).await?;
+            let runtime = RuntimeContext::start(&config).await?;
+            tracing::info!(
+                http_available = runtime.startup_status().http_available,
+                grpc_available = runtime.startup_status().grpc_available,
+                "authenticated Anytype runtime ready"
+            );
+            http::serve_http(runtime, protocol_mode, *http_config, auth).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod process_tests {
+    use std::{hint::black_box, process::Command, thread};
+
+    const STACK_PROBE_FRAME_BYTES: usize = 16 * 1024;
+    const STACK_PROBE_DEPTH: usize = 192;
+
+    #[inline(never)]
+    fn use_worker_stack(depth: usize) -> usize {
+        let frame = [depth as u8; STACK_PROBE_FRAME_BYTES];
+        black_box(&frame);
+        let nested = if depth == 0 {
+            0
+        } else {
+            use_worker_stack(depth - 1)
+        };
+        black_box(frame[depth % frame.len()] as usize).wrapping_add(nested)
+    }
+
+    #[test]
+    fn production_runtime_worker_contract_survives_isolated_stack_probe() {
+        let executable = std::env::current_exe().expect("locate any-mcp test executable");
+        let status = Command::new(executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "process_tests::production_runtime_worker_stack_probe",
+            ])
+            .env_remove("RUST_MIN_STACK")
+            .status()
+            .expect("spawn isolated production runtime stack probe");
+        assert!(status.success(), "production runtime stack probe failed");
+    }
+
+    #[test]
+    #[ignore = "runs in an isolated subprocess from the worker-contract test"]
+    fn production_runtime_worker_stack_probe() {
+        assert_eq!(super::WORKER_STACK_BYTES, 8 * 1024 * 1024);
+        let caller = thread::current().id();
+        let runtime = super::production_runtime().expect("build production runtime");
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        let (worker, used) = runtime
+            .block_on(async {
+                tokio::spawn(async move {
+                    (thread::current().id(), use_worker_stack(STACK_PROBE_DEPTH))
+                })
+                .await
+            })
+            .expect("production worker stack probe task");
+        assert_ne!(
+            worker, caller,
+            "stack probe must execute on a runtime worker"
+        );
+        assert_ne!(used, 0, "stack probe frames remain live through recursion");
+    }
+}
