@@ -14,7 +14,7 @@
 use http::{HeaderMap, header};
 use sha2::{Digest, Sha256};
 
-use crate::http::secret::StaticToken;
+use crate::http::{oauth::OAuthValidator, secret::StaticToken};
 
 /// Maximum accepted `Authorization` header length in bytes.
 pub(crate) const MAX_AUTHORIZATION_BYTES: usize = 1024;
@@ -68,6 +68,8 @@ pub(crate) enum AuthRejection {
 pub(crate) enum Authenticator {
     /// One fixed principal proved by the loaded static token.
     StaticToken(StaticToken),
+    /// MCP protected-resource role against one configured issuer.
+    OAuthResourceServer(Box<OAuthValidator>),
     /// Test seam admitting one synthetic principal for shell tests.
     #[cfg(test)]
     SyntheticAllow,
@@ -77,9 +79,10 @@ impl Authenticator {
     /// Authenticates one request from its headers.
     ///
     /// The bearer credential is extracted with the common grammar and
-    /// verified by the selected profile. No Anytype credential access,
-    /// upstream I/O, or model-visible side effect occurs here.
-    pub(crate) fn authenticate(
+    /// verified by the selected profile. No Anytype credential access or
+    /// model-visible side effect occurs here; only the OAuth profile may
+    /// perform its bounded JWKS refresh.
+    pub(crate) async fn authenticate(
         &self,
         headers: &HeaderMap,
     ) -> Result<AuthorizedPrincipal, AuthRejection> {
@@ -95,6 +98,10 @@ impl Authenticator {
                     Err(AuthRejection::Unauthorized)
                 }
             }
+            Self::OAuthResourceServer(validator) => validator
+                .authenticate_credential(credential)
+                .await
+                .map_err(|()| AuthRejection::Unauthorized),
             #[cfg(test)]
             Self::SyntheticAllow => Ok(AuthorizedPrincipal::from_identity_material(
                 "synthetic",
@@ -104,9 +111,10 @@ impl Authenticator {
     }
 
     /// Returns the fixed `WWW-Authenticate` challenge for a 401 response.
-    pub(crate) fn challenge(&self) -> &'static str {
+    pub(crate) fn challenge(&self) -> &str {
         match self {
             Self::StaticToken(_) => "Bearer",
+            Self::OAuthResourceServer(validator) => validator.challenge(),
             #[cfg(test)]
             Self::SyntheticAllow => "Bearer",
         }
@@ -154,11 +162,11 @@ mod tests {
         map
     }
 
-    #[test]
-    fn bearer_grammar_is_exact() {
+    #[tokio::test]
+    async fn bearer_grammar_is_exact() {
         let auth = Authenticator::SyntheticAllow;
-        assert!(auth.authenticate(&headers("Bearer abc123")).is_ok());
-        assert!(auth.authenticate(&headers("bearer abc123")).is_ok());
+        assert!(auth.authenticate(&headers("Bearer abc123")).await.is_ok());
+        assert!(auth.authenticate(&headers("bearer abc123")).await.is_ok());
         for invalid in [
             "Basic abc123",
             "Bearer",
@@ -169,19 +177,19 @@ mod tests {
             "",
         ] {
             assert_eq!(
-                auth.authenticate(&headers(invalid)).unwrap_err(),
+                auth.authenticate(&headers(invalid)).await.unwrap_err(),
                 AuthRejection::Unauthorized,
                 "value {invalid:?}"
             );
         }
         assert_eq!(
-            auth.authenticate(&HeaderMap::new()).unwrap_err(),
+            auth.authenticate(&HeaderMap::new()).await.unwrap_err(),
             AuthRejection::Unauthorized
         );
     }
 
-    #[test]
-    fn duplicate_authorization_headers_are_rejected() {
+    #[tokio::test]
+    async fn duplicate_authorization_headers_are_rejected() {
         let auth = Authenticator::SyntheticAllow;
         let mut map = headers("Bearer abc123");
         map.append(
@@ -189,21 +197,21 @@ mod tests {
             HeaderValue::from_static("Bearer abc124"),
         );
         assert_eq!(
-            auth.authenticate(&map).unwrap_err(),
+            auth.authenticate(&map).await.unwrap_err(),
             AuthRejection::Unauthorized
         );
     }
 
-    #[test]
-    fn oversized_authorization_returns_dedicated_category() {
+    #[tokio::test]
+    async fn oversized_authorization_returns_dedicated_category() {
         let auth = Authenticator::SyntheticAllow;
         let long = format!("Bearer {}", "a".repeat(MAX_AUTHORIZATION_BYTES));
         assert_eq!(
-            auth.authenticate(&headers(&long)).unwrap_err(),
+            auth.authenticate(&headers(&long)).await.unwrap_err(),
             AuthRejection::Oversized
         );
         let exactly = format!("Bearer {}", "a".repeat(MAX_AUTHORIZATION_BYTES - 7));
-        assert!(auth.authenticate(&headers(&exactly)).is_ok());
+        assert!(auth.authenticate(&headers(&exactly)).await.is_ok());
     }
 
     #[test]

@@ -46,7 +46,9 @@ http-body.workspace = true
 http-body-util.workspace = true
 getrandom.workspace = true
 httpdate.workspace = true
+jsonwebtoken.workspace = true
 mime.workspace = true
+reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -69,6 +71,5 @@ anytype = { workspace = true, features = ["test-fixtures"] }
 futures-util = "0.3.33"
 jsonschema = { version = "0.48.2", default-features = false }
 libc.workspace = true
-reqwest.workspace = true
 serial_test = "3.5.0"
 tokio = { workspace = true, features = ["test-util"] }

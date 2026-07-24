@@ -252,7 +252,7 @@ where
 
     // Gate 4c: bearer authentication and required authority on every other
     // route.
-    let principal = match state.authenticator.authenticate(request.headers()) {
+    let principal = match state.authenticator.authenticate(request.headers()).await {
         Ok(principal) => principal,
         Err(AuthRejection::Unauthorized) => {
             tracing::info!(target: "any_mcp::http", "http_auth_rejected");
@@ -444,12 +444,13 @@ fn rate_limited_response() -> Response<HttpBody> {
     response
 }
 
-fn unauthorized_response(challenge: &'static str) -> Response<HttpBody> {
+fn unauthorized_response(challenge: &str) -> Response<HttpBody> {
     let mut response = fixed_response(StatusCode::UNAUTHORIZED, "Unauthorized");
-    response.headers_mut().insert(
-        header::WWW_AUTHENTICATE,
-        HeaderValue::from_static(challenge),
-    );
+    let challenge =
+        HeaderValue::from_str(challenge).unwrap_or_else(|_| HeaderValue::from_static("Bearer"));
+    response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, challenge);
     response
 }
 
@@ -669,6 +670,44 @@ mod tests {
     }
 
     const AUTH: (&str, &str) = ("authorization", "Bearer synthetic-token");
+
+    #[tokio::test]
+    async fn enabled_metadata_routes_are_public_fixed_json() {
+        let (service, recorded) = recording_service();
+        let document = r#"{"resource":"https://mcp.example.com/mcp"}"#;
+        let state = Arc::new(ListenerState::new(
+            &test_config(&[]),
+            Authenticator::SyntheticAllow,
+            Some(Arc::from(document)),
+            service,
+        ));
+        for path in [METADATA_MCP_PATH, METADATA_ROOT_PATH] {
+            // No Authorization header: metadata is public after the earlier
+            // Host, Origin, rate, and method gates.
+            let response = handle_request(&state, request(Method::GET, path, &[])).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/json"
+            );
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(&body[..], document.as_bytes());
+        }
+        // Metadata routes still enforce the fixed method set and Host gate.
+        let response = handle_request(&state, request(Method::POST, METADATA_ROOT_PATH, &[])).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response.headers().get(header::ALLOW).unwrap(),
+            METADATA_ALLOW
+        );
+        let response = handle_request(
+            &state,
+            request(Method::GET, METADATA_MCP_PATH, &[("host", "evil.test")]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(recorded.calls.load(Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn unknown_paths_and_disabled_metadata_return_404() {

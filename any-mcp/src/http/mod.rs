@@ -22,6 +22,8 @@ pub(crate) mod auth;
 pub mod config;
 #[allow(dead_code, reason = "wired by the transport entry child")]
 pub(crate) mod listener;
+#[allow(dead_code, reason = "wired by the transport entry child")]
+pub(crate) mod oauth;
 pub mod secret;
 
 pub use config::{HttpAuthConfig, HttpConfig, HttpConfigError, TransportSelection};
