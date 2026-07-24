@@ -1766,6 +1766,7 @@ mod tests {
     async fn type_property_deadline_is_validated_before_transport() {
         let client = AnytypeClient::with_config(crate::client::ClientConfig {
             base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some(crate::test_util::test_keystore_spec()),
             disable_cache: true,
             ..crate::client::ClientConfig::default()
         })

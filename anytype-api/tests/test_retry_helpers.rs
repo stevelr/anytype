@@ -169,7 +169,7 @@ fn live_mutation_retry_inventory_is_current() {
             9,
         ),
         ("test_search.rs", include_str!("test_search.rs"), 7, 0, 0, 1),
-        ("test_tags.rs", include_str!("test_tags.rs"), 32, 3, 0, 6),
+        ("test_tags.rs", include_str!("test_tags.rs"), 32, 3, 0, 10),
         ("test_types.rs", include_str!("test_types.rs"), 4, 1, 0, 10),
         (
             "test_validation.rs",
@@ -227,5 +227,5 @@ fn live_mutation_retry_inventory_is_current() {
     }
 
     assert_eq!(setup_calls, 126);
-    assert_eq!(excluded_calls, 60);
+    assert_eq!(excluded_calls, 64);
 }

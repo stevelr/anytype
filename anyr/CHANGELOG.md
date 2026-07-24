@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- Remove the CLI integration test's legacy pre-existing space-ID input. It now
+  uses `ANYTYPE_TEST_SPACE_PREFIX` and requires an unambiguous matching space
+  before running mutation coverage.
+
 ### Added
 
 - `anyr init-cli [--join INVITE_LINK]` initializes the selected keystore from

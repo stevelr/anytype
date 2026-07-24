@@ -129,6 +129,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Make shared integration-test contexts require `ANYTYPE_TEST_SPACE_PREFIX`,
+  create a fresh uniquely named space for each test, and delete the exact
+  cleanup-owned space after success, callback error, or panic. Missing and
+  invalid prefixes now fail with an actionable configuration error instead of
+  falling through to legacy ambient-space selection and an opaque auth error;
+  test and example helpers no longer consult ambient space-ID variables.
+  Ownership inventories accept pre-existing spaces with empty or otherwise
+  opaque names while retaining strict validation for newly created and deleted
+  test-space identities. Ordinary test-space creation and deletion is
+  single-flight within each test process to avoid Heart returning indeterminate
+  HTTP 500 responses after committing concurrent space mutations.
+- Make validation-only and shared integration-test clients honor
+  `ANYTYPE_KEYSTORE` when configured and use the in-memory `env` keystore when
+  it is absent, so offline tests do not depend on an available platform
+  keyring.
+- Refresh the live mutation retry inventory for the four deliberately
+  single-attempt property/tag mutations that assert cache-independent physical
+  request bounds.
 - Prevent disposable-space safety sweeps from orphaning an allocated recovery
   plan after a failed inventory. A same-process retry now discards an
   incomplete plan or resumes the exact completed plan before allocating a new

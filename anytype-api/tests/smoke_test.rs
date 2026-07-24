@@ -8,8 +8,9 @@
 //!
 //! Required environment variables (see .test-env):
 //! - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
-//! - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
-//! - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
+//! - `ANYTYPE_TEST_SPACE_PREFIX` - Prefix for cleanup-owned test spaces
+//!
+//! `ANYTYPE_KEYSTORE` is optional and defaults to the environment store.
 //!
 //! ## Running
 //!
@@ -36,68 +37,58 @@ const ESTIMATED_RUNTIME_SECS: u64 = 60;
 #[tokio::test]
 #[test_log::test]
 async fn smoke_test() {
-    println!("\n========================================");
-    println!("  Anytype API Smoke Test");
-    println!("========================================");
-    println!("Estimated runtime: ~{} seconds", ESTIMATED_RUNTIME_SECS);
-    println!();
+    with_test_context_unit(|ctx| async move {
+        println!("\n========================================");
+        println!("  Anytype API Smoke Test");
+        println!("========================================");
+        println!("Estimated runtime: ~{} seconds", ESTIMATED_RUNTIME_SECS);
+        println!();
 
-    // Setup
-    let ctx = match TestContext::new().await {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            eprintln!("SMOKE TEST SETUP FAILED: {}", e);
-            eprintln!("\nPlease ensure:");
-            eprintln!("  1. Anytype server is running");
-            eprintln!("  2. Environment variables are set (source .test-env)");
-            eprintln!("  3. ANYTYPE_KEYSTORE is configured and contains valid credentials");
-            panic!("Setup failed: {}", e);
-        }
-    };
+        println!("Configuration:");
+        println!("  URL: {}", ctx.client.get_http_endpoint());
+        println!("  Space ID: {}", ctx.space_id);
+        println!("  Keystore: {:?}", ctx.client.get_key_store());
+        println!();
 
-    println!("Configuration:");
-    println!("  URL: {}", ctx.client.get_http_endpoint());
-    println!("  Space ID: {}", ctx.space_id);
-    println!("  Keystore: {:?}", ctx.client.get_key_store());
-    println!();
+        // Create timeout guard
+        let timeout = Duration::from_secs(TEST_TIMEOUT_SECS);
+        let result = tokio::time::timeout(timeout, run_smoke_tests(&ctx)).await;
 
-    // Create timeout guard
-    let timeout = Duration::from_secs(TEST_TIMEOUT_SECS);
-    let result = tokio::time::timeout(timeout, run_smoke_tests(&ctx)).await;
+        match result {
+            Ok(test_results) => {
+                let metrics = ctx.client.http_metrics();
+                println!("\n========================================");
+                println!("  Smoke Test Results");
+                println!("========================================");
+                println!("API Calls: ~{}", ctx.call_count());
+                println!("Duration: {} seconds", ctx.elapsed_secs());
+                println!("{}", test_results.summary());
+                println!();
+                println!("HTTP Metrics:");
+                println!("  {}", metrics);
 
-    match result {
-        Ok(test_results) => {
-            let metrics = ctx.client.http_metrics();
-            println!("\n========================================");
-            println!("  Smoke Test Results");
-            println!("========================================");
-            println!("API Calls: ~{}", ctx.call_count());
-            println!("Duration: {} seconds", ctx.elapsed_secs());
-            println!("{}", test_results.summary());
-            println!();
-            println!("HTTP Metrics:");
-            println!("  {}", metrics);
-
-            if !test_results.is_success() {
-                println!("\nFailed tests:");
-                for (name, error) in test_results.failures() {
-                    println!("  - {}: {}", name, error);
+                if !test_results.is_success() {
+                    println!("\nFailed tests:");
+                    for (name, error) in test_results.failures() {
+                        println!("  - {}: {}", name, error);
+                    }
                 }
-            }
 
-            assert!(
-                test_results.is_success(),
-                "Smoke test failed: {}",
-                test_results.summary()
-            );
+                assert!(
+                    test_results.is_success(),
+                    "Smoke test failed: {}",
+                    test_results.summary()
+                );
+            }
+            Err(_) => {
+                panic!(
+                    "Smoke test timed out after {} seconds. This may indicate a hang or deadlock.",
+                    TEST_TIMEOUT_SECS
+                );
+            }
         }
-        Err(_) => {
-            panic!(
-                "Smoke test timed out after {} seconds. This may indicate a hang or deadlock.",
-                TEST_TIMEOUT_SECS
-            );
-        }
-    }
+    })
+    .await;
 }
 
 async fn run_smoke_tests(ctx: &TestContext) -> TestResults {

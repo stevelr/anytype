@@ -7,8 +7,8 @@ Set environment flags
 export ANYTYPE_URL=http://127.0.0.1:31012
 # file-backed keystore database
 export ANYTYPE_KEYSTORE=file:path=$HOME/.config/anytype/keys.db
-# set space id for testing. If not set, uses first space with "test" in the name
-export ANYTYPE_SPACE_ID=
+# prefix used to resolve one existing space for examples
+export ANYTYPE_TEST_SPACE_PREFIX=xtest
 # optional: enable debug logging
 export RUST_LOG=
 # optional: disable rate limits. If not disabled, tests will take longer to run
@@ -20,6 +20,10 @@ Run an example with:
 ```sh
 cargo run --example list_spaces
 ```
+
+Examples that need a space require exactly one current space whose name begins
+with `ANYTYPE_TEST_SPACE_PREFIX`. Integration tests create and clean up their
+own uniquely named prefixed spaces instead.
 
 ## Examples
 

@@ -47,6 +47,7 @@ pub use disposable::{
     DisposableChildEnvironment, DisposableRun, DisposableSkip, DisposableTestError,
     disposable_callback_error, with_disposable_space_context,
 };
+use disposable::{required_test_space_name, required_test_space_prefix};
 
 #[allow(unused_imports)]
 use crate::prelude::{AnytypeClient, AnytypeError, ClientConfig, VerifyConfig};
@@ -71,6 +72,10 @@ const KANBAN_FIXTURE_MAX_ITEMS: usize = 32;
 const SPACE_FIXTURE_SCAN_LIMIT: u32 = 1_000;
 const SPACE_FIXTURE_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 const SPACE_FIXTURE_VERIFY_ATTEMPTS: usize = 50;
+// Heart can return an indeterminate HTTP 500 after committing one of several
+// concurrent space mutations. Keep ordinary test-space creation and deletion
+// single-flight within each integration-test process.
+static TEST_SPACE_LIFECYCLE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const TEMPLATE_FIXTURE_LIMIT: u32 = 1_000;
 const TEMPLATE_FIXTURE_GLOBAL_TEMPLATE_LIMIT: usize = 10_000;
 const TEMPLATE_FIXTURE_MAX_SOURCES: usize = 16;
@@ -327,8 +332,6 @@ pub enum DisposableFailureCategory {
     ModelMismatch,
     /// Returned name did not match.
     NameMismatch,
-    /// Returned identity collided with ambient state.
-    AmbientCollision,
     /// Environment setup failed.
     Environment,
     /// Configuration failed.
@@ -447,7 +450,6 @@ closed_diagnostic_display!(DisposableFailureCategory, {
     DisposableFailureCategory::InvalidId => "invalid_id",
     DisposableFailureCategory::ModelMismatch => "model_mismatch",
     DisposableFailureCategory::NameMismatch => "name_mismatch",
-    DisposableFailureCategory::AmbientCollision => "ambient_collision",
     DisposableFailureCategory::Environment => "environment",
     DisposableFailureCategory::Config => "config",
     DisposableFailureCategory::Readiness => "readiness",
@@ -625,14 +627,33 @@ impl TestContext {
     ///
     /// Required environment variables:
     /// - `ANYTYPE_TEST_URL` - API endpoint (default: <http://127.0.0.1:31012>)
-    /// - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
-    /// - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
+    /// - `ANYTYPE_TEST_SPACE_PREFIX` - Prefix authorizing a fresh disposable test space
     ///
+    /// `ANYTYPE_KEYSTORE` is optional and defaults to the environment store.
+    /// The returned context owns its newly created space; callers must invoke
+    /// [`Self::cleanup`] when they do not use [`with_test_context`] or
+    /// [`with_test_context_unit`].
     pub async fn new() -> TestResult<Self> {
+        let space_name = required_test_space_name()?;
         let client = test_client_named("anytype_test")?;
-        let space_id = example_space_id(&client).await?;
-
-        Ok(Self::for_space(client, space_id))
+        // The temporary empty scope is never sent to the server. It lets the
+        // existing ownership-proof helper create and register the initial
+        // space before its server-assigned ID becomes the context scope.
+        let mut context = Self::for_space(client, String::new());
+        let space = match context.create_space_fixture(space_name).await {
+            Ok(space) => space,
+            Err(error) => {
+                if let Err(cleanup_error) = context.cleanup().await {
+                    eprintln!(
+                        "test context setup cleanup failed after space creation error: \
+                         {cleanup_error}"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        context.space_id = space.id;
+        Ok(context)
     }
 
     pub(super) fn for_space(client: AnytypeClient, space_id: String) -> Self {
@@ -1620,9 +1641,10 @@ impl TestContext {
     ///
     /// The normal authenticated REST create path is used without its built-in
     /// follow-up verification. A complete bounded pre-create space inventory
-    /// validates pagination, every ID/name, and uniqueness. The returned space
-    /// must have the exact requested name, regular-space model, and a valid ID
-    /// that differs from the context space and was absent from that inventory.
+    /// validates pagination plus every ID and its uniqueness while retaining
+    /// ambient names and models as opaque identity evidence. The returned space
+    /// must have the exact requested safe name, regular-space model, and a valid
+    /// ID that differs from the context space and was absent from that inventory.
     /// Only then is its exact ID/name pair registered once for teardown, before
     /// follow-up verification.
     ///
@@ -1638,6 +1660,7 @@ impl TestContext {
     /// refuses cleanup ownership even though that can leave an unknown newly
     /// created server-side resource behind.
     pub async fn create_space_fixture(&self, name: impl Into<String>) -> TestResult<Space> {
+        let _lifecycle_guard = TEST_SPACE_LIFECYCLE_GATE.lock().await;
         let name = name.into();
         validate_space_fixture_name(&self.client.config.limits, &name, "test space")?;
         let preexisting = complete_space_inventory(&self.client).await?;
@@ -3402,7 +3425,7 @@ where
     let ctx = Arc::new(
         TestContext::new()
             .await
-            .expect("Failed to create test context"),
+            .unwrap_or_else(|error| panic!("Failed to create test context: {error}")),
     );
 
     let result = std::panic::AssertUnwindSafe(test_fn(Arc::clone(&ctx)))
@@ -3416,33 +3439,43 @@ where
     }
 }
 
-/// Get space id for tests and example programs
-/// Search order:
-///   1. environment variable "ANYTYPE_TEST_SPACE_ID"
-///   2. environment variable "ANYTYPE_SPACE_ID"
-///   3. the first space found with 'test' in the name
+/// Resolves the single prefix-authorized space available to example programs.
 ///
+/// Integration tests should use [`TestContext::new`] so they create and clean
+/// up their own space. Standalone examples require exactly one existing space
+/// whose name begins with `ANYTYPE_TEST_SPACE_PREFIX`, case-insensitively.
 #[doc(hidden)]
 #[allow(dead_code)]
 pub async fn example_space_id(client: &AnytypeClient) -> Result<String, AnytypeError> {
-    if let Ok(space_id) = std::env::var("ANYTYPE_TEST_SPACE_ID") {
-        return Ok(space_id);
-    }
-    if let Ok(space_id) = std::env::var("ANYTYPE_SPACE_ID") {
-        return Ok(space_id);
-    }
+    let prefix = required_test_space_prefix().map_err(|error| AnytypeError::Validation {
+        message: error.to_string(),
+    })?;
     let spaces = client
         .spaces()
-        .filter(Filter::text_contains("name", "test"))
-        .limit(1)
+        .filter(Filter::text_contains("name", &prefix))
+        .limit(100)
         .list()
         .await?;
-    if let Some(space) = spaces.iter().next() {
-        return Ok(space.id.clone());
+    let mut matches = spaces
+        .iter()
+        .filter(|space| {
+            space
+                .name
+                .get(..prefix.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
+        })
+        .map(|space| space.id.clone());
+    let Some(space_id) = matches.next() else {
+        return Err(AnytypeError::Other {
+            message: "No prefix-authorized space is available for examples".to_owned(),
+        });
+    };
+    if matches.next().is_some() {
+        return Err(AnytypeError::Other {
+            message: "Multiple prefix-authorized spaces are available for examples".to_owned(),
+        });
     }
-    Err(AnytypeError::Other {
-        message: "No spaces available for testing!".to_string(),
-    })
+    Ok(space_id)
 }
 
 // =============================================================================
@@ -3507,33 +3540,28 @@ pub fn test_client() -> TestResult<AnytypeClient> {
     test_client_named("anytype_test")
 }
 
+/// Returns the configured test keystore, defaulting to the in-memory environment store.
+#[doc(hidden)]
+pub(crate) fn test_keystore_spec() -> String {
+    test_keystore_spec_from(std::env::var("ANYTYPE_KEYSTORE"))
+}
+
+fn test_keystore_spec_from(configured: std::result::Result<String, VarError>) -> String {
+    configured.unwrap_or_else(|_| "env".to_owned())
+}
+
 /// Creates a new test context with a custom app name
 #[doc(hidden)]
 pub fn test_client_named(app_name: &str) -> TestResult<AnytypeClient> {
     let base_url = std::env::var(crate::config::ANYTYPE_TEST_URL_ENV)
         .unwrap_or_else(|_| crate::config::ANYTYPE_TEST_URL.to_string());
 
-    let keystore_spec = match std::env::var("ANYTYPE_KEYSTORE") {
-        Ok(spec) => spec,
-        Err(_) => {
-            let default_key_db = db_keystore::default_path()
-                .map_err(|err| TestError::Config {
-                    message: err.to_string(),
-                })?
-                .parent()
-                .context(ConfigSnafu {
-                    message: "invalid default path (check $XDG_STATE_HOME or $HOME)",
-                })?
-                .join("anytype-test-keys.db");
-            format!("file:path={}", default_key_db.display())
-        }
-    };
     let config = ClientConfig {
         base_url: Some(base_url),
         app_name: app_name.to_string(),
         rate_limit_max_retries: 0, // Don't retry on rate limit
         verify: Some(VerifyConfig::default()),
-        keystore: Some(keystore_spec),
+        keystore: Some(test_keystore_spec()),
         keystore_service: Some("anyr".into()), // TODO: temporary fix
         ..Default::default()
     };
@@ -4385,6 +4413,7 @@ async fn delete_space_fixture(
     space_id: &str,
     expected_name: &str,
 ) -> TestResult<()> {
+    let _lifecycle_guard = TEST_SPACE_LIFECYCLE_GATE.lock().await;
     client
         .config
         .limits
@@ -4526,7 +4555,6 @@ fn strict_space_inventory(
     let mut by_id = BTreeMap::new();
     for space in response.items {
         limits.validate_id(&space.id, "space inventory id")?;
-        validate_space_fixture_name(limits, &space.name, "space inventory name")?;
         if by_id
             .insert(
                 space.id,
@@ -4792,7 +4820,7 @@ mod space_tests {
     }
 
     #[test]
-    fn strict_inventory_rejects_duplicate_malformed_and_incomplete_pages() {
+    fn strict_inventory_accepts_opaque_names_and_rejects_invalid_identity_pages() {
         let limits = crate::validation::ValidationLimits::default();
         let valid = strict_space_inventory(
             &limits,
@@ -4800,6 +4828,21 @@ mod space_tests {
         )
         .unwrap();
         assert_eq!(valid.by_id.len(), 1);
+
+        for ambient_name in ["", "bad\0name"] {
+            let opaque = strict_space_inventory(
+                &limits,
+                inventory_page(vec![space(CURRENT_SPACE_ID, ambient_name)]),
+            )
+            .expect("ambient names are opaque and do not grant cleanup authority");
+            assert_eq!(
+                opaque
+                    .by_id
+                    .get(CURRENT_SPACE_ID)
+                    .map(|space| space.name.as_str()),
+                Some(ambient_name)
+            );
+        }
 
         let duplicate = inventory_page(vec![
             space(CURRENT_SPACE_ID, "Current"),
@@ -4809,9 +4852,6 @@ mod space_tests {
 
         let malformed = inventory_page(vec![space("malformed-space-id", "Malformed")]);
         assert!(strict_space_inventory(&limits, malformed).is_err());
-
-        let malformed_name = inventory_page(vec![space(CURRENT_SPACE_ID, "bad\0name")]);
-        assert!(strict_space_inventory(&limits, malformed_name).is_err());
 
         let mut incomplete = inventory_page(vec![space(CURRENT_SPACE_ID, "Current")]);
         incomplete.pagination.total += 1;
@@ -5006,6 +5046,15 @@ mod tests {
     const BLOCK_ID: &str = "dataview";
     const KANBAN_RELATION_KEY: &str = "fixture_relation";
     const ARCHIVED_SOURCE_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+
+    #[test]
+    fn test_keystore_prefers_configuration_and_defaults_to_env() {
+        assert_eq!(
+            test_keystore_spec_from(Ok("file:path=/tmp/test-keys.db".to_owned())),
+            "file:path=/tmp/test-keys.db"
+        );
+        assert_eq!(test_keystore_spec_from(Err(VarError::NotPresent)), "env");
+    }
 
     fn kanban_status_property(format: PropertyFormat) -> Property {
         serde_json::from_value(serde_json::json!({

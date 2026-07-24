@@ -61,8 +61,14 @@ class TestAnyrCommands(unittest.TestCase):
             raise unittest.SkipTest(
                 "anyr binary not found; set ANYR_BIN or add to PATH"
             )
-        if "ANYTYPE_TEST_SPACE_ID" not in os.environ:
-            raise unittest.SkipTest("ANYTYPE_TEST_SPACE_ID is not set")
+        prefix = os.environ.get("ANYTYPE_TEST_SPACE_PREFIX")
+        if not prefix:
+            raise unittest.SkipTest("ANYTYPE_TEST_SPACE_PREFIX is not set")
+        if len(prefix) > 485 or not all(
+            char.isascii() and (char.isalnum() or char in "-_") for char in prefix
+        ):
+            raise unittest.SkipTest("ANYTYPE_TEST_SPACE_PREFIX is invalid")
+        cls.space_prefix = prefix
 
     def assert_help_ok(self, *args: str) -> None:
         result = run_help(*args)
@@ -153,7 +159,22 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("list", "remove")
 
     def test_real_operations(self) -> None:
-        space_id = os.environ["ANYTYPE_TEST_SPACE_ID"]
+        spaces = run_anyr_json("space", "list", "--limit", "200").get("items", [])
+        prefix = self.space_prefix.casefold()
+        matches = [
+            item
+            for item in spaces
+            if isinstance(item.get("name"), str)
+            and item["name"][: len(self.space_prefix)].casefold() == prefix
+        ]
+        if len(matches) != 1:
+            self.skipTest(
+                "real operations require exactly one current "
+                "ANYTYPE_TEST_SPACE_PREFIX-matching space"
+            )
+        space_id = matches[0].get("id")
+        if not isinstance(space_id, str) or not space_id:
+            self.fail("prefix-matching space is missing an id")
         space = run_anyr_json("space", "get", space_id)
         space_name = space.get("name")
         suffix = str(int(time.time() * 1000))
@@ -172,13 +193,12 @@ class TestAnyrCommands(unittest.TestCase):
         created_obj_id = None
 
         try:
-            if space_name:
-                spaces = run_anyr_json("space", "list", "--limit", "200").get(
-                    "items", []
-                )
-                matches = [item for item in spaces if item.get("name") == space_name]
-                if len(matches) != 1:
-                    space_name = None
+            if (
+                space_name
+                and len([item for item in spaces if item.get("name") == space_name])
+                != 1
+            ):
+                space_name = None
 
             typ = run_anyr_json(
                 "type",

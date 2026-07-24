@@ -947,8 +947,8 @@ export ANYTYPE_URL=http://127.0.0.1:31012
 export ANYTYPE_TEST_URL=$ANYTYPE_URL
 # optional: set keystore to custom path
 export ANYTYPE_KEYSTORE=file:path=$HOME/.local/state/anytype-test-keys.db
-# optional: set space id for testing. If not set, uses first space with "test" in the name
-export ANYTYPE_TEST_SPACE_ID=
+# required: prefix for uniquely named, cleanup-owned integration-test spaces
+export ANYTYPE_TEST_SPACE_PREFIX=xtest
 # optional: enable debug logging. Default "info"
 export RUST_LOG=
 # optional: disable rate limits. If not disabled, tests will take longer to run
@@ -959,8 +959,14 @@ Keystore modifiers use `:key=value` boundaries. Path values may contain a
 Windows drive colon or ordinary colons that are not followed by another
 modifier key and `=`.
 
-`ANYTYPE_KEYSTORE=env` is also supported for the test process when its HTTP
-and optional gRPC credentials are already present in the environment.
+Test helpers honor `ANYTYPE_KEYSTORE` when it is set and use the in-memory
+`env` keystore otherwise. Set the required HTTP and optional gRPC credentials
+in the environment when tests need authenticated server access.
+Each shared integration-test context creates a fresh space whose name starts
+with `ANYTYPE_TEST_SPACE_PREFIX`, then deletes that exact space after the test,
+including callback error and panic paths. Reserve the prefix for automated
+tests. A missing or invalid prefix fails setup before authentication with a
+configuration error; no ambient space-ID environment variable is consulted.
 Unauthenticated control tests explicitly use unique empty temporary file
 keystores, so ambient `env` credentials cannot change their expected result.
 

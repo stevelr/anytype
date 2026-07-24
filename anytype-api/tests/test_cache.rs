@@ -37,7 +37,7 @@
 //! Required environment variables (see .test-env):
 //! - `ANYTYPE_TEST_URL` - API endpoint (default: http://127.0.0.1:31012)
 //! - `ANYTYPE_KEYSTORE` - Keystore specification (for example, `file:path=/path/to/keys.db`)
-//! - `ANYTYPE_TEST_SPACE_ID` - Existing space ID for testing
+//! - `ANYTYPE_TEST_SPACE_PREFIX` - Prefix for cleanup-owned test spaces
 //!
 //! ## Running
 //!
@@ -552,6 +552,7 @@ mod cache_clearing {
 
 mod cache_disabled {
     use anytype::prelude::*;
+    use anytype::test_util::with_test_context_unit;
     use serial_test::serial;
     use test_log::test;
 
@@ -560,90 +561,87 @@ mod cache_disabled {
     #[test_log::test]
     #[serial]
     async fn test_cache_disabled_via_config() {
-        // Create a client with cache disabled
-        let base_url = std::env::var("ANYTYPE_TEST_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:31012".to_string());
-        let space_id =
-            std::env::var("ANYTYPE_TEST_SPACE_ID").expect("ANYTYPE_TEST_SPACE_ID required");
-        let keystore = if let Ok(store) = std::env::var("ANYTYPE_KEYSTORE") {
-            store
-        } else {
-            panic!("set ANYTYPE_KEYSTORE");
-        };
+        with_test_context_unit(|ctx| async move {
+            // Create a second client with cache disabled, scoped to the
+            // cleanup-owned space created by the shared test context.
+            let base_url = std::env::var("ANYTYPE_TEST_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:31012".to_string());
+            let keystore = std::env::var("ANYTYPE_KEYSTORE").unwrap_or_else(|_| "env".to_owned());
+            let config = ClientConfig {
+                base_url: Some(base_url),
+                app_name: "anytype-cache-test".to_string(),
+                rate_limit_max_retries: 0,
+                disable_cache: true,
+                keystore: Some(keystore),
+                keystore_service: Some("anyr".into()),
+                ..Default::default()
+            };
+            let client = AnytypeClient::with_config(config).expect("Failed to create client");
 
-        let config = ClientConfig {
-            base_url: Some(base_url),
-            app_name: "anytype-cache-test".to_string(),
-            rate_limit_max_retries: 0,
-            disable_cache: true, // Disable cache
-            keystore: Some(keystore),
-            keystore_service: Some("anyr".into()),
-            ..Default::default()
-        };
-        let client = AnytypeClient::with_config(config).expect("Failed to create client");
+            // Verify cache is initially empty
+            assert_eq!(client.cache().num_properties(), 0);
+            assert_eq!(client.cache().num_types(), 0);
+            assert_eq!(client.cache().num_spaces(), 0);
 
-        // Verify cache is initially empty
-        assert_eq!(client.cache().num_properties(), 0);
-        assert_eq!(client.cache().num_types(), 0);
-        assert_eq!(client.cache().num_spaces(), 0);
+            // List properties - should NOT populate cache
+            let properties = client
+                .properties(&ctx.space_id)
+                .list()
+                .await
+                .expect("Failed to list properties");
 
-        // List properties - should NOT populate cache
-        let properties = client
-            .properties(&space_id)
-            .list()
-            .await
-            .expect("Failed to list properties");
+            assert!(!properties.is_empty(), "Should have properties");
 
-        assert!(!properties.is_empty(), "Should have properties");
+            // Cache should still be empty
+            assert_eq!(
+                client.cache().num_properties(),
+                0,
+                "Cache should remain empty when disabled"
+            );
 
-        // Cache should still be empty
-        assert_eq!(
-            client.cache().num_properties(),
-            0,
-            "Cache should remain empty when disabled"
-        );
+            // List types - should NOT populate cache
+            let types = client
+                .types(&ctx.space_id)
+                .list()
+                .await
+                .expect("Failed to list types");
 
-        // List types - should NOT populate cache
-        let types = client
-            .types(&space_id)
-            .list()
-            .await
-            .expect("Failed to list types");
+            assert!(!types.is_empty(), "Should have types");
 
-        assert!(!types.is_empty(), "Should have types");
+            // Cache should still be empty
+            assert_eq!(
+                client.cache().num_types(),
+                0,
+                "Cache should remain empty when disabled"
+            );
 
-        // Cache should still be empty
-        assert_eq!(
-            client.cache().num_types(),
-            0,
-            "Cache should remain empty when disabled"
-        );
+            // List spaces - should NOT populate cache
+            let spaces = client.spaces().list().await.expect("Failed to list spaces");
 
-        // List spaces - should NOT populate cache
-        let spaces = client.spaces().list().await.expect("Failed to list spaces");
+            assert!(!spaces.is_empty(), "Should have spaces");
 
-        assert!(!spaces.is_empty(), "Should have spaces");
+            // Cache should still be empty
+            assert_eq!(
+                client.cache().num_spaces(),
+                0,
+                "Cache should remain empty when disabled"
+            );
 
-        // Cache should still be empty
-        assert_eq!(
-            client.cache().num_spaces(),
-            0,
-            "Cache should remain empty when disabled"
-        );
+            // Get operations should also not use or populate cache
+            let first_property = properties.iter().next().unwrap();
+            let _property = client
+                .property(&ctx.space_id, &first_property.id)
+                .get()
+                .await
+                .expect("Failed to get property");
 
-        // Get operations should also not use or populate cache
-        let first_property = properties.iter().next().unwrap();
-        let _property = client
-            .property(&space_id, &first_property.id)
-            .get()
-            .await
-            .expect("Failed to get property");
-
-        assert_eq!(
-            client.cache().num_properties(),
-            0,
-            "Cache should remain empty after get with cache disabled"
-        );
+            assert_eq!(
+                client.cache().num_properties(),
+                0,
+                "Cache should remain empty after get with cache disabled"
+            );
+        })
+        .await;
     }
 }
 

@@ -496,12 +496,15 @@ Python CLI tests expect the same environment variables as the API tests:
 
 - `ANYTYPE_TEST_URL` (or `ANYTYPE_URL`)
 - `ANYTYPE_TEST_KEY_FILE` (or `ANYTYPE_KEY_FILE`)
-- `ANYTYPE_TEST_SPACE_ID`
+- `ANYTYPE_TEST_SPACE_PREFIX`
 
 ```sh
 source .test-env
 python tests/cli_commands.py
 ```
+
+The real-operation case discovers exactly one current space whose name begins
+with `ANYTYPE_TEST_SPACE_PREFIX`; it skips rather than selecting ambiguously.
 
 ## License
 

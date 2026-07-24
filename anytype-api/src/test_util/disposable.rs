@@ -406,6 +406,42 @@ impl DisposablePrefix {
     }
 }
 
+pub(super) fn required_test_space_prefix() -> TestResult<String> {
+    required_test_space_prefix_from(std::env::var(PREFIX_ENV)).map(|prefix| prefix.0)
+}
+
+pub(super) fn required_test_space_name() -> TestResult<String> {
+    required_test_space_prefix_from(std::env::var(PREFIX_ENV))?.generate_name()
+}
+
+fn required_test_space_prefix_from(
+    value: Result<String, std::env::VarError>,
+) -> TestResult<DisposablePrefix> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            return Err(config_error(
+                "ANYTYPE_TEST_SPACE_PREFIX is required for integration tests",
+            ));
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(config_error(
+                "ANYTYPE_TEST_SPACE_PREFIX must contain valid Unicode",
+            ));
+        }
+    };
+    DisposablePrefix::parse(value).map_err(|_| {
+        config_error(
+            "ANYTYPE_TEST_SPACE_PREFIX must contain 1..=485 ASCII letters, digits, '-' or '_'",
+        )
+    })
+}
+
+#[cfg(test)]
+fn required_test_space_name_from(value: Result<String, std::env::VarError>) -> TestResult<String> {
+    required_test_space_prefix_from(value)?.generate_name()
+}
+
 fn base32_lower_unpadded(input: [u8; RANDOM_BYTES]) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut output = String::with_capacity(RANDOM_BASE32_LEN);
@@ -1658,7 +1694,6 @@ fn validate_created_space(
     prefix: &DisposablePrefix,
     expected_name: &str,
     created: &Space,
-    ambient_space_ids: &[String],
 ) -> TestResult<()> {
     if limits.validate_id(&created.id, "disposable space").is_err() {
         return Err(setup_error(
@@ -1676,12 +1711,6 @@ fn validate_created_space(
         return Err(setup_error(
             DisposableSetupStage::CreateResponse,
             DisposableFailureCategory::NameMismatch,
-        ));
-    }
-    if ambient_space_ids.iter().any(|id| id == &created.id) {
-        return Err(setup_error(
-            DisposableSetupStage::CreateResponse,
-            DisposableFailureCategory::AmbientCollision,
         ));
     }
     Ok(())
@@ -2208,10 +2237,6 @@ where
         Err(skip) => return Ok(DisposableRun::Skipped(skip)),
     };
     let config = provisioning.config.clone();
-    let ambient_space_ids = ["ANYTYPE_TEST_SPACE_ID", "ANYTYPE_SPACE_ID"]
-        .into_iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .collect::<Vec<_>>();
     let key = guarded_sync(|| backend_key(&config))
         .or_error(&mut evidence, DisposableErrorCategory::Setup)?;
     let root =
@@ -2323,13 +2348,7 @@ where
         .await
         {
             Guarded::Value(created) => {
-                match validate_created_space(
-                    &client.get_config().limits,
-                    &prefix,
-                    name,
-                    &created,
-                    &ambient_space_ids,
-                ) {
+                match validate_created_space(&client.get_config().limits, &prefix, name, &created) {
                     Ok(()) => owned_id = Some(created.id),
                     Err(error) => primary = Some(Ok(Err(error))),
                 }
@@ -2760,6 +2779,34 @@ mod tests {
     }
 
     #[test]
+    fn required_test_space_name_reports_missing_and_invalid_prefixes() {
+        let missing = required_test_space_name_from(Err(std::env::VarError::NotPresent))
+            .expect_err("missing prefix must fail");
+        assert_eq!(
+            missing.to_string(),
+            "Configuration error: ANYTYPE_TEST_SPACE_PREFIX is required for integration tests"
+        );
+
+        let invalid = required_test_space_name_from(Ok("bad prefix".to_owned()))
+            .expect_err("invalid prefix must fail");
+        assert_eq!(
+            invalid.to_string(),
+            concat!(
+                "Configuration error: ANYTYPE_TEST_SPACE_PREFIX must contain ",
+                "1..=485 ASCII letters, digits, '-' or '_'"
+            )
+        );
+    }
+
+    #[test]
+    fn required_test_space_name_generates_an_authorized_unique_name() {
+        let name = required_test_space_name_from(Ok("xtest".to_owned()))
+            .expect("valid prefix must generate a name");
+        assert!(name.starts_with("xtest-"));
+        assert_eq!(name.len(), "xtest".len() + GENERATED_SUFFIX_LEN);
+    }
+
+    #[test]
     fn backend_key_rejects_non_loopback_and_has_no_credentials() {
         let mut config = ClientConfig {
             base_url: Some("http://127.0.0.1:31012".to_owned()),
@@ -2861,12 +2908,12 @@ mod tests {
         let expected_name = "xtest-created";
         let created = test_space(7, expected_name.to_owned());
         let limits = crate::validation::ValidationLimits::default();
-        assert!(validate_created_space(&limits, &prefix, expected_name, &created, &[]).is_ok());
+        assert!(validate_created_space(&limits, &prefix, expected_name, &created).is_ok());
 
         let mut invalid_id = created.clone();
         invalid_id.id = "secret-invalid-id".to_owned();
         let error = setup_diagnostic(
-            validate_created_space(&limits, &prefix, expected_name, &invalid_id, &[]).unwrap_err(),
+            validate_created_space(&limits, &prefix, expected_name, &invalid_id).unwrap_err(),
         );
         assert_eq!(
             error.setup_failure(),
@@ -2877,17 +2924,17 @@ mod tests {
         let mut wrong_model = created.clone();
         wrong_model.object = SpaceModel::Chat;
         let error = setup_diagnostic(
-            validate_created_space(&limits, &prefix, expected_name, &wrong_model, &[]).unwrap_err(),
+            validate_created_space(&limits, &prefix, expected_name, &wrong_model).unwrap_err(),
         );
         assert_eq!(
             error.setup_failure(),
             Some(("create_response", "model_mismatch"))
         );
 
-        let mut wrong_name = created.clone();
+        let mut wrong_name = created;
         wrong_name.name = "secret-response-name".to_owned();
         let error = setup_diagnostic(
-            validate_created_space(&limits, &prefix, expected_name, &wrong_name, &[]).unwrap_err(),
+            validate_created_space(&limits, &prefix, expected_name, &wrong_name).unwrap_err(),
         );
         assert_eq!(
             error.setup_failure(),
@@ -2897,21 +2944,6 @@ mod tests {
         assert!(rendered.contains("setup_failure: Some((\"create_response\", \"name_mismatch\"))"));
         assert!(!rendered.contains("secret-response-name"));
         assert!(!rendered.contains(expected_name));
-
-        let error = setup_diagnostic(
-            validate_created_space(
-                &limits,
-                &prefix,
-                expected_name,
-                &created,
-                std::slice::from_ref(&created.id),
-            )
-            .unwrap_err(),
-        );
-        assert_eq!(
-            error.setup_failure(),
-            Some(("create_response", "ambient_collision"))
-        );
     }
 
     #[test]

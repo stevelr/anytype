@@ -282,15 +282,58 @@ fn valid_modifier_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+/// The static default keystore backend for the current platform.
+///
+/// On Linux the effective default is resolved at runtime by
+/// [`resolve_default_store`], which prefers a running Secret Service and only
+/// falls back to this `"file"` value when none is available; keyutils is no
+/// longer used as a default because it is non-persistent and its read path is
+/// unsupported by the keyring core (`search`). Other platforms use their native
+/// store unconditionally.
 pub fn default_platform_keyring() -> &'static str {
     if cfg!(target_os = "macos") {
         "keychain"
-    } else if cfg!(target_os = "linux") {
-        "keyutils"
     } else if cfg!(target_os = "windows") {
         "windows"
     } else {
+        // Linux resolves at runtime (see `resolve_default_store`); this is the
+        // fallback for Linux and any other platform.
         "file"
+    }
+}
+
+/// Resolve the default keystore when the user has not selected one explicitly
+/// (neither a `--keystore` argument nor `ANYTYPE_KEYSTORE`).
+///
+/// On Linux this mirrors the official anytype-cli: prefer the OS Secret Service
+/// (gnome-keyring/KWallet) when a session bus is present and the provider
+/// answers, otherwise fall back to the file-based store. Constructing the
+/// Secret Service store performs the D-Bus `OpenSession` handshake, so a
+/// successful build is an authoritative availability probe and the resulting
+/// store is reused. Other platforms build their native default directly.
+fn resolve_default_store(service: &str) -> Result<(String, Arc<CredentialStore>), KeyStoreError> {
+    #[cfg(target_os = "linux")]
+    {
+        // Fast reject for headless/CI: without a session bus there is no Secret
+        // Service to talk to, so skip the connect attempt entirely.
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
+            match init_keystore("secret-service", service) {
+                Ok(store) => return Ok(("secret-service".to_string(), store)),
+                Err(err) => {
+                    debug!("secret-service unavailable, falling back to file store: {err}");
+                }
+            }
+        } else {
+            debug!("no DBUS_SESSION_BUS_ADDRESS; using file store");
+        }
+        let store = init_keystore("file", service)?;
+        Ok(("file".to_string(), store))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let spec = default_platform_keyring().to_string();
+        let store = init_keystore(&spec, service)?;
+        Ok((spec, store))
     }
 }
 
@@ -393,15 +436,23 @@ impl KeyStore {
     pub fn new(service: impl Into<String>, keystore_spec: &str) -> Result<Self, KeyStoreError> {
         let service = service.into();
         let keystore_spec = keystore_spec.trim().trim_end_matches(':');
-        // if keystore isn't specified here,
-        // try environment, otherwise default for platform
-        let spec = if keystore_spec.is_empty() {
+        // Explicit selection wins: the `--keystore` argument, then the
+        // `ANYTYPE_KEYSTORE` env var. When neither is set, resolve the platform
+        // default (which on Linux probes for a running Secret Service).
+        let explicit = if keystore_spec.is_empty() {
             std::env::var("ANYTYPE_KEYSTORE")
-                .unwrap_or_else(|_| default_platform_keyring().to_string())
+                .ok()
+                .filter(|spec| !spec.is_empty())
         } else {
-            keystore_spec.to_string()
+            Some(keystore_spec.to_string())
         };
-        let store = init_keystore(&spec, &service)?;
+        let (spec, store) = match explicit {
+            Some(spec) => {
+                let store = init_keystore(&spec, &service)?;
+                (spec, store)
+            }
+            None => resolve_default_store(&service)?,
+        };
         Ok(Self {
             service,
             store,
@@ -425,30 +476,14 @@ impl KeyStore {
 
     fn get_key(&self, name: impl AsRef<str>) -> Result<Option<String>, KeyStoreError> {
         let name = name.as_ref();
-        let mut map = HashMap::new();
-        map.insert("service", self.service.as_ref());
-        map.insert("user", name);
         debug!(service = &self.service, user = name, "get_key");
-        match self.store.search(&map) {
-            Ok(entries) => {
-                debug!("get_key found {} entries", entries.len());
-                // search results are not ambiguous: there are 0 or 1 entries,
-                // because there is no way to insert multiple keys with same (service,user)
-                entries.first().map_or_else(
-                    || Ok(None),
-                    |entry| match entry.get_password() {
-                        Ok(key) => Ok(Some(key)),
-                        Err(keyring_core::Error::NoEntry) => {
-                            debug!("get_key got entry with NoEntry !?!?");
-                            Ok(None)
-                        }
-                        Err(err) => {
-                            error!("get_key: {err}");
-                            Err(err.into())
-                        }
-                    },
-                )
-            }
+        // Read the credential directly by (service, user) via `build`, mirroring
+        // how `put_key`/`remove_key` address entries. This avoids `search()`,
+        // which some backends (e.g. keyutils) do not implement — they return
+        // `NotSupportedByStore` and break all reads even though writes succeed.
+        let entry = self.store.build(&self.service, name, None)?;
+        match entry.get_password() {
+            Ok(key) => Ok(Some(key)),
             Err(keyring_core::Error::NoEntry) => {
                 debug!(service = &self.service, user = name, "key lookup: no entry");
                 Ok(None)
