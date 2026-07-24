@@ -266,6 +266,21 @@ impl AllowedOrigin {
     }
 }
 
+/// Finds the exact allowed origin matching one request `Origin` value.
+///
+/// The candidate is parsed with the configuration grammar; malformed
+/// candidates match nothing. An empty allowlist admits no origin.
+#[must_use]
+pub(crate) fn find_allowed_origin<'a>(
+    allowed: &'a [AllowedOrigin],
+    candidate: &str,
+) -> Option<&'a AllowedOrigin> {
+    let (_, scheme, host, effective_port) = parse_origin_tuple(candidate).ok()?;
+    allowed.iter().find(|origin| {
+        origin.scheme == scheme && origin.host == host && origin.effective_port == effective_port
+    })
+}
+
 impl HttpConfig {
     fn from_lookup<F>(lookup: F) -> Result<Self, HttpConfigError>
     where
