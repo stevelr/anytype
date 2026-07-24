@@ -212,6 +212,7 @@ impl RuntimeConfig {
         if let Some(max_retries) = self.admitted_optional_max_retries {
             config.rate_limit_max_retries = max_retries;
         }
+        config.limits.markdown_max_len = self.artifact.limits.markdown_bytes;
         config
     }
 
@@ -457,7 +458,7 @@ mod tests {
 
     #[test]
     fn default_document_budget_is_routed_to_anytype_client() {
-        let config = config(&[]).expect("default configuration");
+        let mut config = config(&[]).expect("default configuration");
         let client = config.client_config();
 
         assert_eq!(
@@ -465,6 +466,16 @@ mod tests {
             MAX_DOCUMENT_RESPONSE_BYTES
         );
         assert_eq!(client.response_limits.json_bytes, 8 * 1024 * 1024);
+        assert_eq!(
+            client.limits.markdown_max_len,
+            config.artifact.limits.markdown_bytes
+        );
+
+        config.artifact.limits.markdown_bytes = 12 * 1024 * 1024;
+        assert_eq!(
+            config.client_config().limits.markdown_max_len,
+            12 * 1024 * 1024
+        );
     }
 
     #[test]

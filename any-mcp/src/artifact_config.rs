@@ -215,7 +215,7 @@ impl ArtifactConfig {
         let spaces = SpaceConfig::try_from(raw.spaces)?;
         let limits = ArtifactLimits::try_from(raw.limits.unwrap_or_default())?;
         let roots = RootDefinitions::try_from(raw.roots.unwrap_or_default())?;
-        let staging = raw.staging.map(StagingConfig::try_from).transpose()?;
+        let staging = parse_staging(raw.staging)?;
         let validators = parse_validators(raw.validators)?;
 
         validate_cross_fields(&limits, staging.as_ref(), &validators)?;
@@ -253,6 +253,18 @@ impl ArtifactConfig {
 
     pub(crate) fn export_roots(&self) -> &[RootDefinition] {
         &self.roots.export
+    }
+
+    /// Returns the validated staging declaration, when configured.
+    #[must_use]
+    pub const fn staging(&self) -> Option<&StagingConfig> {
+        self.staging.as_ref()
+    }
+
+    /// Returns the configured allowlisted validators.
+    #[must_use]
+    pub fn validators(&self) -> &[ValidatorConfig] {
+        &self.validators
     }
 }
 
@@ -348,7 +360,7 @@ impl Default for ArtifactLimits {
 pub struct StagingConfig {
     /// Whether staging is enabled when artifact authority is active.
     pub enabled: bool,
-    root: PathBuf,
+    root: AbsoluteNativePath,
     /// Loopback listener address.
     pub bind: SocketAddr,
     /// Externally usable HTTPS base URL, if enabled.
@@ -369,6 +381,12 @@ impl fmt::Debug for StagingConfig {
     }
 }
 
+impl StagingConfig {
+    pub(crate) fn root(&self) -> &AbsoluteNativePath {
+        &self.root
+    }
+}
+
 /// Validated declaration for one allowlisted validator executable.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ValidatorConfig {
@@ -385,6 +403,8 @@ pub struct ValidatorConfig {
     pub mime: Vec<String>,
     /// Per-process timeout.
     pub timeout: Duration,
+    /// Per-process virtual-memory ceiling.
+    pub memory_bytes: u64,
     /// Per-process input byte ceiling.
     pub input_bytes: u64,
     /// Captured stdout byte ceiling.
@@ -393,6 +413,8 @@ pub struct ValidatorConfig {
     pub stderr_bytes: usize,
     /// Maximum parsed result fields.
     pub fields: usize,
+    /// Maximum bytes in one parsed field.
+    pub field_bytes: usize,
 }
 
 impl fmt::Debug for ValidatorConfig {
@@ -404,6 +426,12 @@ impl fmt::Debug for ValidatorConfig {
             .field("required", &self.required)
             .field("mime_count", &self.mime.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl ValidatorConfig {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -721,12 +749,13 @@ struct RawNativePath {
     value: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawStaging {
+    #[serde(default)]
     enabled: bool,
-    root: String,
-    bind: String,
+    root: Option<String>,
+    bind: Option<String>,
     public_base_url: Option<String>,
 }
 
@@ -740,10 +769,13 @@ struct RawValidator {
     required: bool,
     mime: Vec<String>,
     timeout_secs: u64,
+    memory_bytes: u64,
     input_bytes: u64,
     stdout_bytes: usize,
     stderr_bytes: usize,
     fields: usize,
+    field_bytes: usize,
+    platform: String,
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -906,41 +938,64 @@ impl TryFrom<RawRoots> for RootDefinitions {
     }
 }
 
-impl TryFrom<RawStaging> for StagingConfig {
-    type Error = ArtifactConfigError;
-
-    fn try_from(raw: RawStaging) -> Result<Self, Self::Error> {
-        let root = AbsoluteNativePath::from_utf8(&raw.root)
-            .map_err(|_| ArtifactConfigError::new(ConfigProblem::Staging))?;
-        let bind = raw
-            .bind
-            .parse::<SocketAddr>()
-            .map_err(|_| ArtifactConfigError::new(ConfigProblem::Staging))?;
-        if !bind.ip().is_loopback() {
+fn parse_staging(raw: Option<RawStaging>) -> Result<Option<StagingConfig>, ArtifactConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if !raw.enabled {
+        if raw.root.is_some() || raw.bind.is_some() || raw.public_base_url.is_some() {
             return Err(ArtifactConfigError::new(ConfigProblem::Staging));
         }
-        if raw.enabled && raw.public_base_url.is_none() {
-            return Err(ArtifactConfigError::new(ConfigProblem::Staging));
-        }
-        if let Some(base) = &raw.public_base_url {
-            let parsed =
-                Url::parse(base).map_err(|_| ArtifactConfigError::new(ConfigProblem::Staging))?;
-            if parsed.scheme() != "https"
-                || parsed.cannot_be_a_base()
-                || parsed.query().is_some()
-                || parsed.fragment().is_some()
-                || !parsed.path().ends_with('/')
-            {
-                return Err(ArtifactConfigError::new(ConfigProblem::Staging));
-            }
-        }
-        Ok(Self {
-            enabled: raw.enabled,
-            root: root.0,
-            bind,
-            public_base_url: raw.public_base_url,
-        })
+        return Ok(None);
     }
+    let root = raw
+        .root
+        .as_deref()
+        .ok_or_else(|| ArtifactConfigError::new(ConfigProblem::Staging))
+        .and_then(AbsoluteNativePath::from_utf8)
+        .map_err(|_| ArtifactConfigError::new(ConfigProblem::Staging))?;
+    let bind = raw
+        .bind
+        .as_deref()
+        .unwrap_or("127.0.0.1:8765")
+        .parse::<SocketAddr>()
+        .map_err(|_| ArtifactConfigError::new(ConfigProblem::Staging))?;
+    if !bind.ip().is_loopback() || bind.port() < 1024 {
+        return Err(ArtifactConfigError::new(ConfigProblem::Staging));
+    }
+    let public_base_url = raw
+        .public_base_url
+        .ok_or_else(|| ArtifactConfigError::new(ConfigProblem::Staging))?;
+    if public_base_url.len() > 2_048 || !public_base_url.is_ascii() {
+        return Err(ArtifactConfigError::new(ConfigProblem::Staging));
+    }
+    let parsed = Url::parse(&public_base_url)
+        .map_err(|_| ArtifactConfigError::new(ConfigProblem::Staging))?;
+    let common_invalid = parsed.cannot_be_a_base()
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/artifacts/v1/";
+    let scheme_valid = match parsed.scheme() {
+        "https" => parsed.host_str().is_some(),
+        "http" => {
+            let host = parsed
+                .host_str()
+                .and_then(|host| host.parse::<std::net::IpAddr>().ok());
+            host == Some(bind.ip()) && parsed.port_or_known_default() == Some(bind.port())
+        }
+        _ => false,
+    };
+    if common_invalid || !scheme_valid {
+        return Err(ArtifactConfigError::new(ConfigProblem::Staging));
+    }
+    Ok(Some(StagingConfig {
+        enabled: true,
+        root,
+        bind,
+        public_base_url: Some(public_base_url),
+    }))
 }
 
 fn parse_validators(raw: Vec<RawValidator>) -> Result<Vec<ValidatorConfig>, ArtifactConfigError> {
@@ -961,10 +1016,13 @@ fn parse_validators(raw: Vec<RawValidator>) -> Result<Vec<ValidatorConfig>, Arti
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                 || validator.mime.is_empty()
                 || validator.mime.len() > 64
-                || validator.mime.iter().any(|mime| {
-                    mime.is_empty() || mime.len() > 255 || mime.chars().any(char::is_control)
-                })
+                || validator
+                    .mime
+                    .iter()
+                    .any(|mime| !valid_validator_mime(mime))
                 || validator.timeout_secs == 0
+                || !(16 * 1024 * 1024..=2_u64 * 1024 * 1024 * 1024)
+                    .contains(&validator.memory_bytes)
                 || validator.input_bytes == 0
                 || validator.stdout_bytes == 0
                 || validator.stderr_bytes == 0
@@ -972,6 +1030,9 @@ fn parse_validators(raw: Vec<RawValidator>) -> Result<Vec<ValidatorConfig>, Arti
                 || validator.stdout_bytes > 1024 * 1024
                 || validator.stderr_bytes > 1024 * 1024
                 || validator.fields > 256
+                || validator.field_bytes == 0
+                || validator.field_bytes > 64 * 1024
+                || validator.platform != "linux-retained-fd-v1"
             {
                 return Err(ArtifactConfigError::new(ConfigProblem::Validator));
             }
@@ -985,13 +1046,38 @@ fn parse_validators(raw: Vec<RawValidator>) -> Result<Vec<ValidatorConfig>, Arti
                 required: validator.required,
                 mime: validator.mime,
                 timeout: Duration::from_secs(validator.timeout_secs),
+                memory_bytes: validator.memory_bytes,
                 input_bytes: validator.input_bytes,
                 stdout_bytes: validator.stdout_bytes,
                 stderr_bytes: validator.stderr_bytes,
                 fields: validator.fields,
+                field_bytes: validator.field_bytes,
             })
         })
         .collect()
+}
+
+fn valid_validator_mime(value: &str) -> bool {
+    if value == "*/*" {
+        return true;
+    }
+    if let Some(prefix) = value.strip_suffix("/*") {
+        return !prefix.is_empty()
+            && prefix.len() <= 127
+            && prefix.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                    )
+            });
+    }
+    if value.len() > 255 || value.contains(';') || !value.is_ascii() {
+        return false;
+    }
+    value.parse::<mime::Mime>().ok().is_some_and(|parsed| {
+        format!("{}/{}", parsed.type_(), parsed.subtype()) == value.to_ascii_lowercase()
+    })
 }
 
 fn parse_roots(
@@ -1034,8 +1120,7 @@ fn validate_cross_fields(
         || validators.iter().any(|validator| {
             validator.input_bytes > limits.artifact_bytes
                 || validator.timeout > limits.operation_timeout
-        })
-        || (!validators.is_empty() && limits.validator_processes > validators.len());
+        });
     if invalid_limits {
         return Err(ArtifactConfigError::new(ConfigProblem::Limit));
     }
@@ -1609,6 +1694,29 @@ mod tests {
         assert!(ArtifactConfig::from_toml(&valid).is_ok());
         assert!(ArtifactConfig::from_toml(&valid.replace("127.0.0.1", "0.0.0.0")).is_err());
         assert!(ArtifactConfig::from_toml(&valid.replace("https://", "http://")).is_err());
+    }
+
+    #[test]
+    fn validator_policy_uses_closed_driver_and_mime_grammars() {
+        let valid = format!(
+            "{MINIMAL}\n[[validators]]\nid = \"mime\"\ndriver = \"file-mime\"\n\
+             path = \"/usr/bin/file\"\nsha256 = \"{}\"\nrequired = false\n\
+             mime = [\"*/*\", \"image/*\", \"application/json\"]\ntimeout_secs = 5\n\
+             memory_bytes = 67108864\ninput_bytes = 1048576\nstdout_bytes = 4096\n\
+             stderr_bytes = 4096\nfields = 8\nfield_bytes = 1024\n\
+             platform = \"linux-retained-fd-v1\"\n",
+            "0".repeat(64)
+        );
+        let config = ArtifactConfig::from_toml(&valid).expect("validator policy");
+        assert_eq!(config.validators().len(), 1);
+        assert!(ArtifactConfig::from_toml(&valid.replace("file-mime", "shell")).is_err());
+        assert!(ArtifactConfig::from_toml(&valid.replace("image/*", "image / *")).is_err());
+        assert!(
+            ArtifactConfig::from_toml(
+                &valid.replace("application/json", "text/plain; charset=utf-8")
+            )
+            .is_err()
+        );
     }
 
     #[test]

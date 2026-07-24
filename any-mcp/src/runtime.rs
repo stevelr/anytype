@@ -26,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     artifact_config::ArtifactConfig,
+    artifact_roots::RootRegistry,
+    artifact_staging::ArtifactStaging,
+    artifact_toolset::ArtifactOperationState,
+    artifact_validators::ValidatorRunner,
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
     optional_toolsets::OptionalToolsetSelection,
     server::AnyMcpServer,
@@ -59,6 +63,10 @@ pub struct RuntimeContext {
     read_only: bool,
     optional_toolsets: OptionalToolsetSelection,
     artifact_config: Arc<ArtifactConfig>,
+    artifact_roots: Option<RootRegistry>,
+    artifact_staging: Option<ArtifactStaging>,
+    artifact_validators: Option<ValidatorRunner>,
+    artifact_operations: ArtifactOperationState,
 }
 
 struct RuntimeParts {
@@ -84,6 +92,15 @@ impl fmt::Debug for RuntimeContext {
                 &self.optional_toolsets.names().len(),
             )
             .field("artifact_config", &self.artifact_config)
+            .field("artifact_staging_active", &self.artifact_staging.is_some())
+            .field(
+                "artifact_validator_count",
+                &self
+                    .artifact_validators
+                    .as_ref()
+                    .map_or(0, ValidatorRunner::configured_count),
+            )
+            .field("artifact_operations", &"<redacted>")
             .finish_non_exhaustive()
     }
 }
@@ -121,6 +138,15 @@ impl RuntimeContext {
         let authority = SpaceAuthority::initialize(&client, &config.artifact.spaces)
             .await
             .map_err(|_| StartupError::SpacePolicy)?;
+        let artifact_roots = if config.optional_toolsets.contains("artifacts") && !config.read_only
+        {
+            Some(
+                RootRegistry::activate(&config.artifact)
+                    .map_err(|_| StartupError::ArtifactRoots)?,
+            )
+        } else {
+            None
+        };
         let mut runtime = Self::from_parts_with_authority(
             client,
             RuntimeParts {
@@ -133,7 +159,37 @@ impl RuntimeContext {
                 space_authority: authority,
             },
         );
+        let artifact_staging = match (
+            artifact_roots.as_ref(),
+            config.artifact.staging().filter(|staging| staging.enabled),
+        ) {
+            (Some(roots), Some(staging)) => Some(
+                ArtifactStaging::activate(
+                    staging,
+                    &config.artifact.limits,
+                    roots,
+                    runtime.shutdown.clone(),
+                )
+                .await
+                .map_err(|_| StartupError::ArtifactStaging)?,
+            ),
+            _ => None,
+        };
+        let artifact_validators = if artifact_roots.is_some()
+            && !config.artifact.validators().is_empty()
+        {
+            Some(
+                ValidatorRunner::activate(config.artifact.validators(), &config.artifact.limits)
+                    .await
+                    .map_err(|_| StartupError::ArtifactValidators)?,
+            )
+        } else {
+            None
+        };
         runtime.artifact_config = Arc::new(config.artifact.clone());
+        runtime.artifact_roots = artifact_roots;
+        runtime.artifact_staging = artifact_staging;
+        runtime.artifact_validators = artifact_validators;
         Ok(runtime)
     }
 
@@ -188,6 +244,30 @@ impl RuntimeContext {
     #[must_use]
     pub fn artifact_config(&self) -> &ArtifactConfig {
         self.artifact_config.as_ref()
+    }
+
+    /// Returns activated local artifact roots for the selected writable registry.
+    #[must_use]
+    pub fn artifact_roots(&self) -> Option<&RootRegistry> {
+        self.artifact_roots.as_ref()
+    }
+
+    /// Returns activated remote staging authority for this process generation.
+    #[must_use]
+    pub(crate) fn artifact_staging(&self) -> Option<&ArtifactStaging> {
+        self.artifact_staging.as_ref()
+    }
+
+    /// Returns startup-pinned artifact validator authority.
+    #[must_use]
+    pub(crate) fn artifact_validators(&self) -> Option<&ValidatorRunner> {
+        self.artifact_validators.as_ref()
+    }
+
+    /// Returns the process-generation artifact mutation ledger.
+    #[must_use]
+    pub(crate) fn artifact_operations(&self) -> &ArtifactOperationState {
+        &self.artifact_operations
     }
 
     /// Starts process shutdown, rejects new work, and cancels running or
@@ -479,6 +559,10 @@ impl RuntimeContext {
             read_only: parts.read_only,
             optional_toolsets: parts.optional_toolsets,
             artifact_config: Arc::new(ArtifactConfig::default()),
+            artifact_roots: None,
+            artifact_staging: None,
+            artifact_validators: None,
+            artifact_operations: ArtifactOperationState::default(),
         }
     }
 }
@@ -818,6 +902,12 @@ pub enum StartupError {
     GrpcTimeout,
     /// Configured Anytype space authority could not be frozen safely.
     SpacePolicy,
+    /// Configured artifact roots could not be activated safely.
+    ArtifactRoots,
+    /// Configured private staging authority could not be activated safely.
+    ArtifactStaging,
+    /// Configured validator executables could not be pinned safely.
+    ArtifactValidators,
 }
 
 impl fmt::Display for StartupError {
@@ -841,6 +931,15 @@ impl fmt::Display for StartupError {
             Self::GrpcTimeout => formatter.write_str("authenticated Anytype gRPC ping timed out"),
             Self::SpacePolicy => {
                 formatter.write_str("unable to initialize configured Anytype space policy")
+            }
+            Self::ArtifactRoots => {
+                formatter.write_str("unable to initialize configured artifact roots")
+            }
+            Self::ArtifactStaging => {
+                formatter.write_str("unable to initialize configured artifact staging")
+            }
+            Self::ArtifactValidators => {
+                formatter.write_str("unable to initialize configured artifact validators")
             }
         }
     }

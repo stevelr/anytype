@@ -1,0 +1,735 @@
+// any-mcp - bounded, workflow-oriented MCP server for Anytype
+//
+// SPDX-FileCopyrightText: 2026 Steve Schoettler
+// SPDX-License-Identifier: Apache-2.0
+
+//! Startup-pinned, bounded artifact validator processes.
+
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+};
+
+use rmcp::schemars::JsonSchema;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    sync::Semaphore,
+};
+
+use crate::{
+    artifact_config::{ArtifactLimits, ValidatorConfig, ValidatorDriver},
+    artifact_toolset::ArtifactToolError,
+};
+
+const EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Bounded public result from one startup-configured validator.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ValidatorFinding {
+    /// Stable configured logical validator ID.
+    #[schemars(length(min = 1, max = 128))]
+    pub(crate) id: String,
+    /// Closed completion category.
+    pub(crate) status: ValidatorStatus,
+    /// Bounded detected MIME essence for a successful `file-mime` driver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 3, max = 255))]
+    pub(crate) detected_media_type: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ValidatorStatus {
+    Accepted,
+    Rejected,
+    Unavailable,
+    Skipped,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct ActivatedValidator {
+    config: ValidatorConfig,
+    available: bool,
+    executable: Option<Arc<File>>,
+}
+
+/// Immutable validator authority activated once for one process generation.
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatorRunner {
+    validators: Arc<[ActivatedValidator]>,
+    processes: Arc<Semaphore>,
+    total_input_bytes: u64,
+}
+
+impl ValidatorRunner {
+    /// Pins configured executable identities and hashes without launching them.
+    pub(crate) async fn activate(
+        configs: &[ValidatorConfig],
+        limits: &ArtifactLimits,
+    ) -> Result<Self, ValidatorActivationError> {
+        let configs = configs.to_vec();
+        let validators = tokio::task::spawn_blocking(move || {
+            configs
+                .into_iter()
+                .map(|config| {
+                    let executable = pin_executable(&config)?.map(Arc::new);
+                    let available = executable.is_some();
+                    Ok(ActivatedValidator {
+                        config,
+                        available,
+                        executable,
+                    })
+                })
+                .collect::<Result<Vec<_>, ValidatorActivationError>>()
+        })
+        .await
+        .map_err(|_| ValidatorActivationError)??;
+        Ok(Self {
+            validators: validators.into(),
+            processes: Arc::new(Semaphore::new(limits.validator_processes)),
+            total_input_bytes: limits.validator_total_input_bytes,
+        })
+    }
+
+    pub(crate) fn configured_count(&self) -> usize {
+        self.validators.len()
+    }
+
+    pub(crate) fn available_count(&self) -> usize {
+        self.validators
+            .iter()
+            .filter(|validator| validator.available)
+            .count()
+    }
+
+    /// Runs every configured validator whose fixed MIME scope admits this artifact.
+    pub(crate) async fn validate(
+        &self,
+        source: &File,
+        size: u64,
+        declared_media_type: Option<&str>,
+    ) -> Result<Vec<ValidatorFinding>, ArtifactToolError> {
+        let mut admitted_bytes = 0_u64;
+        let mut findings = Vec::with_capacity(self.validators.len());
+        for validator in self.validators.iter() {
+            if !mime_scope_matches(&validator.config.mime, declared_media_type) {
+                continue;
+            }
+            if !validator.available {
+                if validator.config.required {
+                    return Err(ArtifactToolError::Validation);
+                }
+                findings.push(finding(
+                    &validator.config,
+                    ValidatorStatus::Unavailable,
+                    None,
+                ));
+                continue;
+            }
+            if size > validator.config.input_bytes {
+                if validator.config.required {
+                    return Err(ArtifactToolError::Bounded);
+                }
+                findings.push(finding(&validator.config, ValidatorStatus::Skipped, None));
+                continue;
+            }
+            admitted_bytes = admitted_bytes
+                .checked_add(size)
+                .ok_or(ArtifactToolError::Bounded)?;
+            if admitted_bytes > self.total_input_bytes {
+                return Err(ArtifactToolError::Bounded);
+            }
+            let input = source
+                .try_clone()
+                .map_err(|_| ArtifactToolError::Upstream)?;
+            let permit = self
+                .processes
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| ArtifactToolError::Upstream)?;
+            let result = run_validator(validator, input, size).await;
+            drop(permit);
+            match result {
+                Ok(media_type) => {
+                    if declared_media_type.is_some_and(|declared| declared != media_type) {
+                        if validator.config.required {
+                            return Err(ArtifactToolError::Validation);
+                        }
+                        findings.push(finding(
+                            &validator.config,
+                            ValidatorStatus::Rejected,
+                            Some(media_type),
+                        ));
+                    } else {
+                        findings.push(finding(
+                            &validator.config,
+                            ValidatorStatus::Accepted,
+                            Some(media_type),
+                        ));
+                    }
+                }
+                Err(_) if validator.config.required => {
+                    return Err(ArtifactToolError::Validation);
+                }
+                Err(_) => findings.push(finding(&validator.config, ValidatorStatus::Failed, None)),
+            }
+        }
+        Ok(findings)
+    }
+}
+
+fn finding(
+    config: &ValidatorConfig,
+    status: ValidatorStatus,
+    detected_media_type: Option<String>,
+) -> ValidatorFinding {
+    ValidatorFinding {
+        id: config.id.as_str().to_owned(),
+        status,
+        detected_media_type,
+    }
+}
+
+fn mime_scope_matches(patterns: &[String], media_type: Option<&str>) -> bool {
+    patterns.iter().any(|pattern| {
+        if pattern == "*/*" {
+            return true;
+        }
+        let Some(media_type) = media_type else {
+            return false;
+        };
+        if pattern == media_type {
+            return true;
+        }
+        pattern.strip_suffix("/*").is_some_and(|prefix| {
+            media_type.starts_with(prefix) && media_type[prefix.len()..].starts_with('/')
+        })
+    })
+}
+
+fn pin_executable(config: &ValidatorConfig) -> Result<Option<File>, ValidatorActivationError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = config;
+        // Retained-handle execution needs a reviewed fexecve or restricted
+        // Windows Job implementation before other platforms can be enabled.
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path = config.path();
+        let link_metadata =
+            std::fs::symlink_metadata(path).map_err(|_| ValidatorActivationError)?;
+        if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+            return Err(ValidatorActivationError);
+        }
+        let mut file = open_executable_no_follow(path)?;
+        let metadata = file.metadata().map_err(|_| ValidatorActivationError)?;
+        if !safe_executable_metadata(&metadata) {
+            return Err(ValidatorActivationError);
+        }
+        let hash = hash_reader(&mut file, EXECUTABLE_BYTES)?;
+        if hash != config.sha256 {
+            return Err(ValidatorActivationError);
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| ValidatorActivationError)?;
+        let mut magic = [0_u8; 4];
+        let read = file
+            .read(&mut magic)
+            .map_err(|_| ValidatorActivationError)?;
+        if !native_binary_magic(&magic[..read]) {
+            return Err(ValidatorActivationError);
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| ValidatorActivationError)?;
+        Ok(Some(file))
+    }
+}
+
+#[cfg(unix)]
+fn open_executable_no_follow(path: &std::path::Path) -> Result<File, ValidatorActivationError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| ValidatorActivationError)
+}
+
+#[cfg(not(unix))]
+fn open_executable_no_follow(path: &std::path::Path) -> Result<File, ValidatorActivationError> {
+    File::open(path).map_err(|_| ValidatorActivationError)
+}
+
+#[cfg(unix)]
+fn safe_executable_metadata(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` has no memory or ownership preconditions.
+    let effective_user = unsafe { libc::geteuid() };
+    let owner_is_trusted_root = metadata.uid() == 0 && effective_user != 0;
+    let safe_write_mode = if owner_is_trusted_root {
+        metadata.mode() & 0o022 == 0
+    } else {
+        metadata.mode() & 0o222 == 0
+    };
+    metadata.is_file()
+        && (metadata.uid() == 0 || metadata.uid() == effective_user)
+        && safe_write_mode
+        && metadata.mode() & 0o100 != 0
+}
+
+#[cfg(not(unix))]
+fn safe_executable_metadata(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_file()
+}
+
+#[cfg(target_os = "linux")]
+fn native_binary_magic(magic: &[u8]) -> bool {
+    magic.starts_with(b"\x7fELF")
+}
+
+#[cfg(target_os = "macos")]
+fn native_binary_magic(magic: &[u8]) -> bool {
+    matches!(
+        magic,
+        [0xfe, 0xed, 0xfa, 0xce]
+            | [0xfe, 0xed, 0xfa, 0xcf]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xcf, 0xfa, 0xed, 0xfe]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [0xbe, 0xba, 0xfe, 0xca]
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn native_binary_magic(magic: &[u8]) -> bool {
+    magic.starts_with(b"MZ")
+}
+
+fn hash_reader(reader: &mut File, maximum: u64) -> Result<String, ValidatorActivationError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut observed = 0_u64;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| ValidatorActivationError)?;
+        if read == 0 {
+            break;
+        }
+        observed = observed
+            .checked_add(read as u64)
+            .ok_or(ValidatorActivationError)?;
+        if observed > maximum {
+            return Err(ValidatorActivationError);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"));
+    }
+    Ok(encoded)
+}
+
+async fn run_validator(
+    validator: &ActivatedValidator,
+    input: File,
+    size: u64,
+) -> Result<String, ValidatorExecutionError> {
+    let executable = validator
+        .executable
+        .as_ref()
+        .ok_or(ValidatorExecutionError)?;
+    let mut pinned = executable
+        .try_clone()
+        .map_err(|_| ValidatorExecutionError)?;
+    let metadata = pinned.metadata().map_err(|_| ValidatorExecutionError)?;
+    if !safe_executable_metadata(&metadata) {
+        return Err(ValidatorExecutionError);
+    }
+    pinned
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| ValidatorExecutionError)?;
+    let hash = hash_reader(&mut pinned, EXECUTABLE_BYTES).map_err(|_| ValidatorExecutionError)?;
+    if hash != validator.config.sha256 {
+        return Err(ValidatorExecutionError);
+    }
+    let executable_path = retained_executable_path(executable)?;
+    let mut command = Command::new(executable_path);
+    match validator.config.driver {
+        ValidatorDriver::FileMime => {
+            command.args(["--brief", "--mime-type", "--", "-"]);
+        }
+    }
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("HOME", platform_null_home())
+        .current_dir(platform_safe_working_directory())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_process_group(&mut command);
+    configure_process_boundary(&mut command, &validator.config)?;
+    let mut child = command.spawn().map_err(|_| ValidatorExecutionError)?;
+    let child_id = child.id();
+    let stdin = child.stdin.take().ok_or(ValidatorExecutionError)?;
+    let stdout = child.stdout.take().ok_or(ValidatorExecutionError)?;
+    let stderr = child.stderr.take().ok_or(ValidatorExecutionError)?;
+    let stdout_limit = validator.config.stdout_bytes;
+    let stderr_limit = validator.config.stderr_bytes;
+    let input_task = tokio::spawn(write_input(stdin, input, size));
+    let stdout_task = tokio::spawn(read_bounded(stdout, stdout_limit));
+    let stderr_task = tokio::spawn(read_bounded(stderr, stderr_limit));
+    let status = match tokio::time::timeout(validator.config.timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => {
+            input_task.abort();
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(ValidatorExecutionError);
+        }
+        Err(_) => {
+            terminate_process_group(child_id);
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            input_task.abort();
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(ValidatorExecutionError);
+        }
+    };
+    let input_result = input_task.await.map_err(|_| ValidatorExecutionError)?;
+    let stdout = stdout_task.await.map_err(|_| ValidatorExecutionError)??;
+    let stderr = stderr_task.await.map_err(|_| ValidatorExecutionError)??;
+    input_result?;
+    if !status.success() || !stderr.is_empty() {
+        return Err(ValidatorExecutionError);
+    }
+    let media_type = parse_file_mime(stdout)?;
+    if media_type.len() > validator.config.field_bytes || validator.config.fields == 0 {
+        return Err(ValidatorExecutionError);
+    }
+    Ok(media_type)
+}
+
+#[cfg(target_os = "linux")]
+fn retained_executable_path(executable: &File) -> Result<PathBuf, ValidatorExecutionError> {
+    use std::os::fd::AsRawFd;
+
+    let descriptor = executable.as_raw_fd();
+    if descriptor < 0 {
+        return Err(ValidatorExecutionError);
+    }
+    Ok(PathBuf::from(format!("/proc/self/fd/{descriptor}")))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn retained_executable_path(_: &File) -> Result<PathBuf, ValidatorExecutionError> {
+    Err(ValidatorExecutionError)
+}
+
+async fn write_input(
+    mut stdin: tokio::process::ChildStdin,
+    input: File,
+    size: u64,
+) -> Result<(), ValidatorExecutionError> {
+    let mut input = tokio::fs::File::from_std(input).take(size.saturating_add(1));
+    let copied = tokio::io::copy(&mut input, &mut stdin)
+        .await
+        .map_err(|_| ValidatorExecutionError)?;
+    if copied != size {
+        return Err(ValidatorExecutionError);
+    }
+    stdin.shutdown().await.map_err(|_| ValidatorExecutionError)
+}
+
+async fn read_bounded<R>(reader: R, maximum: usize) -> Result<Vec<u8>, ValidatorExecutionError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let maximum = u64::try_from(maximum).map_err(|_| ValidatorExecutionError)?;
+    let mut reader = reader.take(maximum.saturating_add(1));
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| ValidatorExecutionError)?;
+    if bytes.len() as u64 > maximum {
+        return Err(ValidatorExecutionError);
+    }
+    Ok(bytes)
+}
+
+fn parse_file_mime(bytes: Vec<u8>) -> Result<String, ValidatorExecutionError> {
+    let output = std::str::from_utf8(&bytes).map_err(|_| ValidatorExecutionError)?;
+    let value = output.trim_end_matches(['\r', '\n']);
+    if value.len() < 3
+        || value.len() > 255
+        || value.contains(';')
+        || value.chars().any(char::is_control)
+    {
+        return Err(ValidatorExecutionError);
+    }
+    let parsed = value
+        .parse::<mime::Mime>()
+        .map_err(|_| ValidatorExecutionError)?;
+    let normalized = format!("{}/{}", parsed.type_(), parsed.subtype());
+    if normalized != value.to_ascii_lowercase() {
+        return Err(ValidatorExecutionError);
+    }
+    Ok(normalized)
+}
+
+fn platform_null_home() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\Windows\Temp")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/var/empty")
+    }
+}
+
+fn platform_safe_working_directory() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\Windows")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/")
+    }
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_: &mut Command) {}
+
+#[cfg(target_os = "linux")]
+fn configure_process_boundary(
+    command: &mut Command,
+    config: &ValidatorConfig,
+) -> Result<(), ValidatorExecutionError> {
+    use std::os::unix::process::CommandExt;
+
+    let memory_bytes = config.memory_bytes;
+    let cpu_seconds = config.timeout.as_secs().saturating_add(1);
+    // SAFETY: the callback performs only async-signal-safe libc calls between
+    // fork and exec, captures plain integers, and returns the OS error directly.
+    unsafe {
+        command.as_std_mut().pre_exec(move || {
+            set_limit(libc::RLIMIT_AS, memory_bytes)?;
+            set_limit(libc::RLIMIT_CORE, 0)?;
+            set_limit(libc::RLIMIT_CPU, cpu_seconds)?;
+            set_limit(libc::RLIMIT_FSIZE, 1024 * 1024)?;
+            set_limit(libc::RLIMIT_NOFILE, 16)?;
+            set_limit(libc::RLIMIT_NPROC, 1)?;
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
+    let limit = libc::rlimit {
+        rlim_cur: value,
+        rlim_max: value,
+    };
+    // SAFETY: `limit` is a fully initialized structure for the named resource.
+    if unsafe { libc::setrlimit(resource, &limit) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_process_boundary(
+    _: &mut Command,
+    _: &ValidatorConfig,
+) -> Result<(), ValidatorExecutionError> {
+    Err(ValidatorExecutionError)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child_id: Option<u32>) {
+    let Some(child_id) = child_id.and_then(|value| i32::try_from(value).ok()) else {
+        return;
+    };
+    // SAFETY: a negative PID addresses only the private process group created
+    // for this child. Failure is handled by the subsequent direct child kill.
+    let _ = unsafe { libc::kill(-child_id, libc::SIGKILL) };
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_: Option<u32>) {}
+
+/// Fixed startup activation failure without paths or executable details.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ValidatorActivationError;
+
+/// Fixed per-invocation validator failure without subprocess output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ValidatorExecutionError;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact_config::ArtifactConfig;
+
+    #[test]
+    fn mime_scope_is_closed() {
+        assert!(mime_scope_matches(
+            &["image/*".to_owned()],
+            Some("image/png")
+        ));
+        assert!(!mime_scope_matches(
+            &["image/*".to_owned()],
+            Some("application/json")
+        ));
+        assert!(mime_scope_matches(&["*/*".to_owned()], None));
+    }
+
+    #[test]
+    fn file_mime_parser_is_bounded_and_strict() {
+        assert_eq!(
+            parse_file_mime(b"image/png\n".to_vec()).expect("MIME"),
+            "image/png"
+        );
+        assert!(parse_file_mime(b"text/plain; charset=utf-8\n".to_vec()).is_err());
+        assert!(parse_file_mime(vec![b'x'; 256]).is_err());
+        assert!(parse_file_mime(b"not mime\n".to_vec()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pinned_executable_hash_is_rechecked_before_launch() {
+        use std::{fs::OpenOptions, io::Write, os::unix::fs::PermissionsExt};
+
+        let suffix = getrandom::u64().expect("random suffix");
+        let root = std::env::temp_dir().join(format!("any-mcp-validator-{suffix:016x}"));
+        std::fs::create_dir(&root).expect("temporary validator directory");
+        let executable = root.join("validator");
+        let fixture_executable = [
+            PathBuf::from("/bin/true"),
+            PathBuf::from("/usr/bin/true"),
+            PathBuf::from("/run/current-system/sw/bin/true"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+        .expect("platform true executable");
+        std::fs::copy(fixture_executable, &executable).expect("copy native executable");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
+            .expect("freeze executable");
+        let mut pinned = File::open(&executable).expect("open pinned executable");
+        let sha256 = hash_reader(&mut pinned, EXECUTABLE_BYTES).expect("hash executable");
+        let path = executable.to_string_lossy().replace('\\', "\\\\");
+        let config = ArtifactConfig::from_toml(&format!(
+            "schema_version = 1\n[spaces]\nread_only = false\n\
+             [[validators]]\nid = \"mime\"\ndriver = \"file-mime\"\n\
+             path = \"{path}\"\nsha256 = \"{sha256}\"\nrequired = false\n\
+             mime = [\"*/*\"]\ntimeout_secs = 1\nmemory_bytes = 67108864\n\
+             input_bytes = 1024\nstdout_bytes = 1024\nstderr_bytes = 1024\n\
+             fields = 1\nfield_bytes = 256\nplatform = \"linux-retained-fd-v1\"\n"
+        ))
+        .expect("validator config");
+        let runner = ValidatorRunner::activate(config.validators(), &config.limits)
+            .await
+            .expect("activate pinned executable");
+        assert_eq!(runner.available_count(), 1);
+
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .expect("permit test tamper");
+        OpenOptions::new()
+            .append(true)
+            .open(&executable)
+            .expect("open for tamper")
+            .write_all(b"tamper")
+            .expect("tamper executable");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
+            .expect("refreeze executable");
+        let source_path = root.join("source");
+        std::fs::write(&source_path, b"hello").expect("write source");
+        let source = File::open(source_path).expect("open source");
+        let findings = runner
+            .validate(&source, 5, Some("text/plain"))
+            .await
+            .expect("optional validator failure is bounded");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].status, ValidatorStatus::Failed);
+        drop(runner);
+        std::fs::remove_dir_all(root).expect("remove validator fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pinned_file_driver_runs_with_the_bounded_process_contract() {
+        let executable = [
+            PathBuf::from("/usr/bin/file"),
+            PathBuf::from("/bin/file"),
+            PathBuf::from("/run/current-system/sw/bin/file"),
+        ]
+        .into_iter()
+        .find_map(|path| path.canonicalize().ok().filter(|target| target.is_file()))
+        .expect("native file executable");
+        let mut pinned = File::open(&executable).expect("open file executable");
+        let sha256 = hash_reader(&mut pinned, EXECUTABLE_BYTES).expect("hash file executable");
+        let path = executable.to_string_lossy().replace('\\', "\\\\");
+        let config = ArtifactConfig::from_toml(&format!(
+            "schema_version = 1\n[spaces]\nread_only = false\n\
+             [[validators]]\nid = \"mime\"\ndriver = \"file-mime\"\n\
+             path = \"{path}\"\nsha256 = \"{sha256}\"\nrequired = true\n\
+             mime = [\"*/*\"]\ntimeout_secs = 5\nmemory_bytes = 268435456\n\
+             input_bytes = 1024\nstdout_bytes = 1024\nstderr_bytes = 1024\n\
+             fields = 1\nfield_bytes = 256\nplatform = \"linux-retained-fd-v1\"\n"
+        ))
+        .expect("validator config");
+        let runner = ValidatorRunner::activate(config.validators(), &config.limits)
+            .await
+            .expect("activate file executable");
+        let suffix = getrandom::u64().expect("random suffix");
+        let source_path =
+            std::env::temp_dir().join(format!("any-mcp-validator-source-{suffix:016x}"));
+        std::fs::write(&source_path, b"hello\n").expect("write source");
+        let source = File::open(&source_path).expect("open source");
+        let findings = runner
+            .validate(&source, 6, None)
+            .await
+            .expect("run required validator");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].status, ValidatorStatus::Accepted);
+        assert_eq!(
+            findings[0].detected_media_type.as_deref(),
+            Some("text/plain")
+        );
+        std::fs::remove_file(source_path).expect("remove source");
+    }
+}

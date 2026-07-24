@@ -2154,12 +2154,13 @@ fn advertised_optional_catalog_has_exact_typed_scenario_and_space_policy_ownersh
                 .unwrap_or_else(|| panic!("missing space-policy owner for {}", tool.name))
         })
         .collect::<Vec<_>>();
-    assert_eq!(ownership.len(), 44);
+    assert_eq!(ownership.len(), 52);
     for (kind, expected) in [
-        (SpacePolicyOwnership::Global, 2),
+        (SpacePolicyOwnership::Global, 3),
         (SpacePolicyOwnership::FilteredGlobalDiscovery, 1),
         (SpacePolicyOwnership::OptionalResolvedSpace, 1),
-        (SpacePolicyOwnership::ResolvedSpace, 39),
+        (SpacePolicyOwnership::ResolvedSpace, 45),
+        (SpacePolicyOwnership::OpaqueBoundSpace, 1),
         (SpacePolicyOwnership::ConditionalSpaceCreation, 1),
     ] {
         assert_eq!(
@@ -2176,7 +2177,7 @@ fn advertised_optional_catalog_has_exact_typed_scenario_and_space_policy_ownersh
         .map(|tool| tool.name.to_string())
         .filter(|name| !phase_one.contains(name.as_str()))
         .collect::<Vec<_>>();
-    assert_eq!(optional_tools.len(), 30);
+    assert_eq!(optional_tools.len(), 38);
     let optional_tool_refs = optional_tools
         .iter()
         .map(String::as_str)
@@ -2229,7 +2230,7 @@ fn advertised_optional_catalog_has_exact_typed_scenario_and_space_policy_ownersh
                 .map(|scenario| OptionalScenarioDeclaration::real_headless(registry_id, scenario)),
         );
     }
-    assert_eq!(scenario_declarations.len(), 66);
+    assert_eq!(scenario_declarations.len(), 69);
     live_scenario::validate_optional_live_ownership(
         &optional_tool_refs,
         &optional_resource_families,

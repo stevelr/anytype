@@ -1,0 +1,1761 @@
+// any-mcp - bounded, workflow-oriented MCP server for Anytype
+//
+// SPDX-FileCopyrightText: 2026 Steve Schoettler
+// SPDX-License-Identifier: Apache-2.0
+
+//! Private, process-generation state for remote artifact staging.
+//!
+//! Visible handles are bearer credentials. This module retains only keyed
+//! digests, uses monotonic expiry, and keeps completed bytes behind retained
+//! file handles rather than reopening caller-influenced paths.
+
+use std::{
+    collections::HashMap,
+    collections::VecDeque,
+    convert::Infallible,
+    fmt,
+    fs::File,
+    io::{self, Read, Seek, SeekFrom, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
+use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
+use hyper::{
+    Method, Request, Response, StatusCode,
+    body::{Frame, Incoming},
+    header::{
+        AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HOST, ORIGIN, RANGE,
+        TRANSFER_ENCODING,
+    },
+    service::service_fn,
+};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
+
+use crate::{
+    artifact_config::{ArtifactLimits, StagingConfig},
+    artifact_roots::{AnchoredImport, AtomicExport, RootRegistry, StagingDirectory},
+    domain::SpaceId,
+};
+
+const HANDLE_VERSION: u8 = 1;
+const RECORD_BYTES: usize = 16;
+const SECRET_BYTES: usize = 32;
+const CHECKSUM_BYTES: usize = 8;
+const HANDLE_BYTES: usize = 1 + RECORD_BYTES + SECRET_BYTES + CHECKSUM_BYTES;
+
+type StagingBody = UnsyncBoxBody<Bytes, io::Error>;
+
+/// Fixed staging guidance returned when the startup policy disabled staging.
+pub const STAGING_REQUIRED_GUIDANCE: &str =
+    "Remote artifact staging is disabled. Enable it in the selected any-mcp TOML config.";
+
+/// Direction of one private staging record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StageDirection {
+    Import,
+    Export,
+}
+
+/// Bounded allocation metadata returned to an MCP tool.
+#[derive(Clone, Debug)]
+pub(crate) struct StageAllocation {
+    pub(crate) record: String,
+    pub(crate) handle: String,
+    pub(crate) url: String,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) size_bytes: u64,
+}
+
+/// Authenticated, bounded staging metadata.
+#[derive(Clone, Debug)]
+pub(crate) struct StageStatus {
+    pub(crate) direction: StageDirection,
+    pub(crate) state: &'static str,
+    pub(crate) offset: u64,
+    pub(crate) size_bytes: u64,
+    pub(crate) sha256: Option<String>,
+    pub(crate) media_type: Option<String>,
+    pub(crate) expires_at: DateTime<Utc>,
+}
+
+/// Retained staged source used by one Anytype import attempt.
+pub(crate) struct StageSource {
+    pub(crate) file: File,
+    pub(crate) length: u64,
+    pub(crate) sha256: String,
+    pub(crate) media_type: Option<String>,
+    record: [u8; RECORD_BYTES],
+}
+
+/// Exclusive write lease for one receiving staging record.
+pub(crate) struct StageWriteLease {
+    destination: Option<AtomicExport>,
+    pub(crate) offset: u64,
+    pub(crate) size_bytes: u64,
+    record: Arc<StageRecord>,
+}
+
+impl fmt::Debug for StageWriteLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StageWriteLease")
+            .field("offset", &self.offset)
+            .field("size_bytes", &self.size_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StageWriteLease {
+    pub(crate) fn take_destination(&mut self) -> Result<AtomicExport, StagingError> {
+        self.destination.take().ok_or(StagingError::Conflict)
+    }
+}
+
+impl fmt::Debug for StageSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StageSource")
+            .field("length", &self.length)
+            .field("media_type_configured", &self.media_type.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl StageSource {
+    pub(crate) fn record(&self) -> String {
+        record_hex(&self.record)
+    }
+}
+
+/// Fixed, credential-free staging failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StagingError {
+    Disabled,
+    NotFound,
+    Conflict,
+    Bounded,
+    Timeout,
+    Upstream,
+    Indeterminate,
+}
+
+impl fmt::Display for StagingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("artifact staging operation failed")
+    }
+}
+
+impl std::error::Error for StagingError {}
+
+#[derive(Debug)]
+enum RecordState {
+    Receiving {
+        destination: Option<AtomicExport>,
+        offset: u64,
+    },
+    Ready {
+        source: AnchoredImport,
+        sha256: String,
+    },
+    Available {
+        source: AnchoredImport,
+        sha256: String,
+    },
+    Consumed,
+}
+
+#[derive(Debug)]
+struct StageRecord {
+    record_name: String,
+    bearer_digest: [u8; 32],
+    direction: StageDirection,
+    space_id: SpaceId,
+    size_bytes: u64,
+    media_type: Option<String>,
+    expected_sha256: Option<String>,
+    expires: Instant,
+    expires_at: DateTime<Utc>,
+    state: tokio::sync::Mutex<RecordState>,
+}
+
+#[derive(Debug)]
+struct StagingState {
+    directory: StagingDirectory,
+    generation_key: [u8; 32],
+    public_base_url: String,
+    limits: ArtifactLimits,
+    records: tokio::sync::RwLock<HashMap<[u8; RECORD_BYTES], Arc<StageRecord>>>,
+    allowed_hosts: Vec<String>,
+    request_permits: Arc<tokio::sync::Semaphore>,
+    connection_permits: Arc<tokio::sync::Semaphore>,
+    rate_window: tokio::sync::Mutex<VecDeque<Instant>>,
+    active: AtomicBool,
+    shutdown: CancellationToken,
+}
+
+/// Activated private staging authority for one process generation.
+#[derive(Clone, Debug)]
+pub(crate) struct ArtifactStaging {
+    state: Arc<StagingState>,
+}
+
+#[derive(Clone, Copy)]
+struct ParsedHandle {
+    record: [u8; RECORD_BYTES],
+    secret: [u8; SECRET_BYTES],
+}
+
+fn digest(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn record_hex(record: &[u8; RECORD_BYTES]) -> String {
+    let mut encoded = String::with_capacity(RECORD_BYTES * 2);
+    for byte in record {
+        let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn make_handle(
+    generation_key: &[u8; 32],
+) -> Result<([u8; RECORD_BYTES], String, [u8; 32]), StagingError> {
+    let mut record = [0_u8; RECORD_BYTES];
+    let mut secret = [0_u8; SECRET_BYTES];
+    getrandom::fill(&mut record).map_err(|_| StagingError::Upstream)?;
+    getrandom::fill(&mut secret).map_err(|_| StagingError::Upstream)?;
+    let checksum = digest(&[b"any-mcp/artifact-handle/v1", &record, &secret]);
+    let mut bytes = Vec::with_capacity(HANDLE_BYTES);
+    bytes.push(HANDLE_VERSION);
+    bytes.extend_from_slice(&record);
+    bytes.extend_from_slice(&secret);
+    let checksum = checksum
+        .get(..CHECKSUM_BYTES)
+        .ok_or(StagingError::Upstream)?;
+    bytes.extend_from_slice(checksum);
+    let handle = URL_SAFE_NO_PAD.encode(bytes);
+    let bearer = digest(&[
+        b"any-mcp/artifact-bearer/v1",
+        generation_key,
+        &record,
+        &secret,
+    ]);
+    Ok((record, handle, bearer))
+}
+
+fn parse_handle(value: &str) -> Result<ParsedHandle, StagingError> {
+    if !(64..=128).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(StagingError::NotFound);
+    }
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| StagingError::NotFound)?;
+    if decoded.len() != HANDLE_BYTES || URL_SAFE_NO_PAD.encode(&decoded) != value {
+        return Err(StagingError::NotFound);
+    }
+    let version = decoded.first().copied().ok_or(StagingError::NotFound)?;
+    let record: [u8; RECORD_BYTES] = decoded
+        .get(1..1 + RECORD_BYTES)
+        .and_then(|value| value.try_into().ok())
+        .ok_or(StagingError::NotFound)?;
+    let secret: [u8; SECRET_BYTES] = decoded
+        .get(1 + RECORD_BYTES..1 + RECORD_BYTES + SECRET_BYTES)
+        .and_then(|value| value.try_into().ok())
+        .ok_or(StagingError::NotFound)?;
+    let supplied_checksum = decoded
+        .get(1 + RECORD_BYTES + SECRET_BYTES..)
+        .ok_or(StagingError::NotFound)?;
+    let expected = digest(&[b"any-mcp/artifact-handle/v1", &record, &secret]);
+    let expected_checksum = expected
+        .get(..CHECKSUM_BYTES)
+        .ok_or(StagingError::NotFound)?;
+    if version != HANDLE_VERSION || !constant_time_equal(supplied_checksum, expected_checksum) {
+        return Err(StagingError::NotFound);
+    }
+    Ok(ParsedHandle { record, secret })
+}
+
+impl ArtifactStaging {
+    /// Activates private root authority and a fresh handle generation.
+    pub(crate) async fn activate(
+        config: &StagingConfig,
+        limits: &ArtifactLimits,
+        local_roots: &RootRegistry,
+        shutdown: CancellationToken,
+    ) -> Result<Self, StagingError> {
+        if !config.enabled {
+            return Err(StagingError::Disabled);
+        }
+        let directory = StagingDirectory::activate(config.root(), local_roots)
+            .map_err(|_| StagingError::Upstream)?;
+        let mut generation_key = [0_u8; 32];
+        getrandom::fill(&mut generation_key).map_err(|_| StagingError::Upstream)?;
+        let public_base_url = config
+            .public_base_url
+            .clone()
+            .ok_or(StagingError::Upstream)?;
+        let listener = tokio::net::TcpListener::bind(config.bind)
+            .await
+            .map_err(|_| StagingError::Upstream)?;
+        let staging = Self {
+            state: Arc::new(StagingState {
+                directory,
+                generation_key,
+                public_base_url,
+                limits: limits.clone(),
+                records: tokio::sync::RwLock::new(HashMap::new()),
+                allowed_hosts: allowed_hosts(config)?,
+                request_permits: Arc::new(tokio::sync::Semaphore::new(limits.staging_requests)),
+                connection_permits: Arc::new(tokio::sync::Semaphore::new(
+                    limits.staging_connections,
+                )),
+                rate_window: tokio::sync::Mutex::new(VecDeque::new()),
+                active: AtomicBool::new(true),
+                shutdown,
+            }),
+        };
+        staging.spawn_listener(listener);
+        staging.spawn_cleanup();
+        Ok(staging)
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.active.load(Ordering::Acquire) && !self.state.shutdown.is_cancelled()
+    }
+
+    fn spawn_listener(&self, listener: tokio::net::TcpListener) {
+        let staging = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    biased;
+                    () = staging.state.shutdown.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(_) => {
+                        staging.state.shutdown.cancel();
+                        break;
+                    }
+                };
+                let permit = match Arc::clone(&staging.state.connection_permits).try_acquire_owned()
+                {
+                    Ok(permit) => permit,
+                    Err(_) => continue,
+                };
+                let connection_staging = staging.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let service_staging = connection_staging.clone();
+                    let service = service_fn(move |request| {
+                        let request_staging = service_staging.clone();
+                        async move { Ok::<_, Infallible>(request_staging.handle_http(request).await) }
+                    });
+                    let mut builder = hyper::server::conn::http1::Builder::new();
+                    builder
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(connection_staging.state.limits.staging_header_timeout)
+                        .max_headers(32)
+                        .max_buf_size(
+                            connection_staging
+                                .state
+                                .limits
+                                .staging_header_bytes
+                                .max(8 * 1024),
+                        );
+                    let _ = builder
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+            staging.state.active.store(false, Ordering::Release);
+        });
+    }
+
+    fn spawn_cleanup(&self) {
+        let staging = self.clone();
+        tokio::spawn(async move {
+            let cadence = staging
+                .state
+                .limits
+                .staging_ttl
+                .min(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    biased;
+                    () = staging.state.shutdown.cancelled() => break,
+                    () = tokio::time::sleep(cadence) => {
+                        let mut records = staging.state.records.write().await;
+                        staging.cleanup_expired_locked(&mut records).await;
+                    }
+                }
+            }
+            let records = {
+                let mut records = staging.state.records.write().await;
+                records
+                    .drain()
+                    .map(|(_, record)| record)
+                    .collect::<Vec<_>>()
+            };
+            for record in records {
+                let name = record.record_name.clone();
+                let directory = staging.state.directory.clone();
+                let _ = tokio::task::spawn_blocking(move || directory.remove_record(&name)).await;
+            }
+        });
+    }
+
+    async fn handle_http(&self, request: Request<Incoming>) -> Response<StagingBody> {
+        let request_permit = match Arc::clone(&self.state.request_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return fixed_response(StatusCode::SERVICE_UNAVAILABLE),
+        };
+        let _request_permit = request_permit;
+        if !valid_header_block(&request, &self.state.limits)
+            || request.headers().contains_key(ORIGIN)
+            || request.headers().contains_key(TRANSFER_ENCODING)
+        {
+            return fixed_response(StatusCode::BAD_REQUEST);
+        }
+        let host = match single_header(request.headers(), HOST, 255) {
+            Ok(Some(host))
+                if self
+                    .state
+                    .allowed_hosts
+                    .iter()
+                    .any(|allowed| allowed == host) =>
+            {
+                host
+            }
+            _ => return fixed_response(StatusCode::FORBIDDEN),
+        };
+        let _ = host;
+        let path = request.uri().path();
+        if request.uri().query().is_some()
+            || path.len() > 256
+            || path.contains('%')
+            || !path.starts_with("/artifacts/v1/")
+        {
+            return fixed_response(StatusCode::NOT_FOUND);
+        }
+        let record = match path.strip_prefix("/artifacts/v1/") {
+            Some(record)
+                if record.len() == 32
+                    && record
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+            {
+                record.to_owned()
+            }
+            _ => return fixed_response(StatusCode::NOT_FOUND),
+        };
+        if !self.admit_rate().await {
+            return fixed_response(StatusCode::TOO_MANY_REQUESTS);
+        }
+        let authorization = match single_header(request.headers(), AUTHORIZATION, 160) {
+            Ok(Some(value)) => value,
+            _ => return fixed_response(StatusCode::UNAUTHORIZED),
+        };
+        let handle = match authorization.strip_prefix("Bearer ") {
+            Some(handle)
+                if !handle.is_empty() && !handle.bytes().any(|byte| byte.is_ascii_whitespace()) =>
+            {
+                handle.to_owned()
+            }
+            _ => return fixed_response(StatusCode::UNAUTHORIZED),
+        };
+        match *request.method() {
+            Method::HEAD => self.http_head(&handle, &record).await,
+            Method::PUT => self.http_put(request, &handle, &record).await,
+            Method::GET => self.http_get(request, &handle, &record).await,
+            Method::DELETE => self.http_delete(&handle, &record).await,
+            _ => fixed_response(StatusCode::METHOD_NOT_ALLOWED),
+        }
+    }
+
+    async fn admit_rate(&self) -> bool {
+        let now = Instant::now();
+        let cutoff = now.checked_sub(Duration::from_secs(60)).unwrap_or(now);
+        let mut window = self.state.rate_window.lock().await;
+        while window.front().is_some_and(|entry| *entry <= cutoff) {
+            window.pop_front();
+        }
+        if window.len() >= self.state.limits.staging_requests_per_minute as usize {
+            return false;
+        }
+        window.push_back(now);
+        true
+    }
+
+    async fn http_head(&self, handle: &str, record: &str) -> Response<StagingBody> {
+        match self.inspect_route(handle, record).await {
+            Ok(status) => status_response(StatusCode::OK, &status, true),
+            Err(error) => staging_http_error(error),
+        }
+    }
+
+    async fn http_delete(&self, handle: &str, record: &str) -> Response<StagingBody> {
+        if let Err(error) = self.authenticate(handle, Some(record)).await {
+            return staging_http_error(error);
+        }
+        match self.release(handle).await {
+            Ok(()) => fixed_response(StatusCode::NO_CONTENT),
+            Err(error) => staging_http_error(error),
+        }
+    }
+
+    async fn http_put(
+        &self,
+        request: Request<Incoming>,
+        handle: &str,
+        record: &str,
+    ) -> Response<StagingBody> {
+        let status = match self.inspect_route(handle, record).await {
+            Ok(status) if status.direction == StageDirection::Import => status,
+            Ok(_) => return fixed_response(StatusCode::NOT_FOUND),
+            Err(error) => return staging_http_error(error),
+        };
+        let content_length = match parse_single_u64(request.headers(), CONTENT_LENGTH, 128) {
+            Ok(Some(length)) if length > 0 => length,
+            _ => return fixed_response(StatusCode::BAD_REQUEST),
+        };
+        let (offset, expected_request_bytes) =
+            match single_header(request.headers(), CONTENT_RANGE, 128) {
+                Ok(Some(range)) => match parse_content_range(range, status.size_bytes) {
+                    Some((offset, length)) if length == content_length => (offset, length),
+                    _ => return fixed_response(StatusCode::BAD_REQUEST),
+                },
+                Ok(None) if content_length == status.size_bytes => (0, content_length),
+                _ => return fixed_response(StatusCode::BAD_REQUEST),
+            };
+        if offset != status.offset {
+            return fixed_response(StatusCode::CONFLICT);
+        }
+        let supplied_media = match single_header(request.headers(), CONTENT_TYPE, 255) {
+            Ok(value) => value,
+            Err(_) => return fixed_response(StatusCode::BAD_REQUEST),
+        };
+        if supplied_media != status.media_type.as_deref() {
+            return fixed_response(StatusCode::BAD_REQUEST);
+        }
+        let mut lease = match self
+            .begin_write(handle, Some(record), StageDirection::Import, offset)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => return staging_http_error(error),
+        };
+        let destination = match lease.take_destination() {
+            Ok(destination) => destination,
+            Err(error) => return staging_http_error(error),
+        };
+        let (_, body) = request.into_parts();
+        let outcome = write_incoming(
+            body,
+            destination,
+            expected_request_bytes,
+            self.state.limits.staging_no_progress_timeout,
+            &self.state.shutdown,
+        )
+        .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => return staging_http_error(error),
+        };
+        let cumulative = match lease.offset.checked_add(outcome.written) {
+            Some(cumulative) => cumulative,
+            None => {
+                return fixed_response(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+        };
+        if let Some(error) = outcome.error {
+            let _ = self
+                .restore_write(lease, outcome.destination, cumulative)
+                .await;
+            return staging_http_error(error);
+        }
+        if outcome.written != expected_request_bytes {
+            let _ = self
+                .restore_write(lease, outcome.destination, cumulative)
+                .await;
+            return fixed_response(StatusCode::BAD_REQUEST);
+        }
+        if cumulative < status.size_bytes {
+            return match self
+                .restore_write(lease, outcome.destination, cumulative)
+                .await
+            {
+                Ok(()) => offset_response(StatusCode::NO_CONTENT, cumulative),
+                Err(error) => staging_http_error(error),
+            };
+        }
+        if cumulative != status.size_bytes {
+            return fixed_response(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        match self
+            .finish_import(lease, outcome.destination, cumulative)
+            .await
+        {
+            Ok(()) => offset_response(StatusCode::CREATED, cumulative),
+            Err(error) => staging_http_error(error),
+        }
+    }
+
+    async fn http_get(
+        &self,
+        request: Request<Incoming>,
+        handle: &str,
+        record: &str,
+    ) -> Response<StagingBody> {
+        let (file, status) = match self.export_reader(handle, Some(record)).await {
+            Ok(reader) => reader,
+            Err(error) => return staging_http_error(error),
+        };
+        let requested = match single_header(request.headers(), RANGE, 128) {
+            Ok(Some(range)) => match parse_download_range(range, status.size_bytes) {
+                Some(range) => Some(range),
+                None => return fixed_response(StatusCode::RANGE_NOT_SATISFIABLE),
+            },
+            Ok(None) => None,
+            Err(_) => return fixed_response(StatusCode::BAD_REQUEST),
+        };
+        let (offset, length, response_status) = match requested {
+            Some((offset, length)) => (offset, length, StatusCode::PARTIAL_CONTENT),
+            None => (0, status.size_bytes, StatusCode::OK),
+        };
+        let mut file = tokio::fs::File::from_std(file);
+        if file.seek(SeekFrom::Start(offset)).await.is_err() {
+            return fixed_response(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let reader = file.take(length);
+        let stream = ReaderStream::with_capacity(
+            reader,
+            self.state.limits.transfer_chunk_bytes.min(1024 * 1024) as usize,
+        )
+        .map_ok(Frame::data);
+        let body = StreamBody::new(stream).boxed_unsync();
+        let mut response = Response::new(body);
+        *response.status_mut() = response_status;
+        if set_header(&mut response, CONTENT_LENGTH, &length.to_string()).is_err()
+            || status
+                .media_type
+                .as_deref()
+                .is_some_and(|media| set_header(&mut response, CONTENT_TYPE, media).is_err())
+            || status.sha256.as_deref().is_some_and(|sha256| {
+                set_header(&mut response, hyper::header::ETAG, &format!("\"{sha256}\"")).is_err()
+            })
+        {
+            return fixed_response(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        if response_status == StatusCode::PARTIAL_CONTENT {
+            let end = match offset.checked_add(length.saturating_sub(1)) {
+                Some(end) => end,
+                None => return fixed_response(StatusCode::INTERNAL_SERVER_ERROR),
+            };
+            let value = format!("bytes {offset}-{end}/{}", status.size_bytes);
+            if set_header(&mut response, CONTENT_RANGE, &value).is_err() {
+                return fixed_response(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+        response
+    }
+
+    /// Allocates one exact-size remote upload record.
+    pub(crate) async fn allocate_import(
+        &self,
+        space_id: SpaceId,
+        size_bytes: u64,
+        media_type: Option<String>,
+        expected_sha256: Option<String>,
+    ) -> Result<StageAllocation, StagingError> {
+        self.allocate(
+            StageDirection::Import,
+            space_id,
+            size_bytes,
+            media_type,
+            expected_sha256,
+        )
+        .await
+    }
+
+    /// Allocates one exact-size remote export record.
+    pub(crate) async fn allocate_export(
+        &self,
+        space_id: SpaceId,
+        size_bytes: u64,
+        media_type: Option<String>,
+    ) -> Result<StageAllocation, StagingError> {
+        self.allocate(
+            StageDirection::Export,
+            space_id,
+            size_bytes,
+            media_type,
+            None,
+        )
+        .await
+    }
+
+    async fn allocate(
+        &self,
+        direction: StageDirection,
+        space_id: SpaceId,
+        size_bytes: u64,
+        media_type: Option<String>,
+        expected_sha256: Option<String>,
+    ) -> Result<StageAllocation, StagingError> {
+        if (size_bytes == 0 && direction == StageDirection::Import)
+            || size_bytes > self.state.limits.artifact_bytes
+        {
+            return Err(StagingError::Bounded);
+        }
+        let mut records = self.state.records.write().await;
+        self.cleanup_expired_locked(&mut records).await;
+        if records.len() >= self.state.limits.staging_entries {
+            return Err(StagingError::Bounded);
+        }
+        let reserved = records
+            .values()
+            .try_fold(0_u64, |total, record| total.checked_add(record.size_bytes));
+        if reserved
+            .and_then(|reserved| reserved.checked_add(size_bytes))
+            .is_none_or(|total| total > self.state.limits.staging_total_bytes)
+        {
+            return Err(StagingError::Bounded);
+        }
+
+        let (record, handle, bearer_digest) = make_handle(&self.state.generation_key)?;
+        if records.contains_key(&record) {
+            return Err(StagingError::Upstream);
+        }
+        let record_id = record_hex(&record);
+        let record_name = format!("{record_id}.bin");
+        let directory = self.state.directory.clone();
+        let name = record_name.clone();
+        let maximum = self.state.limits.artifact_bytes;
+        let destination =
+            tokio::task::spawn_blocking(move || directory.begin_record(&name, maximum))
+                .await
+                .map_err(|_| StagingError::Upstream)?
+                .map_err(|_| StagingError::Upstream)?;
+        let ttl = self.state.limits.staging_ttl;
+        let expires = Instant::now()
+            .checked_add(ttl)
+            .ok_or(StagingError::Upstream)?;
+        let expires_at = wall_expiry(ttl)?;
+        records.insert(
+            record,
+            Arc::new(StageRecord {
+                record_name,
+                bearer_digest,
+                direction,
+                space_id,
+                size_bytes,
+                media_type,
+                expected_sha256,
+                expires,
+                expires_at,
+                state: tokio::sync::Mutex::new(RecordState::Receiving {
+                    destination: Some(destination),
+                    offset: 0,
+                }),
+            }),
+        );
+        Ok(StageAllocation {
+            record: record_id.clone(),
+            handle,
+            url: format!("{}{record_id}", self.state.public_base_url),
+            expires_at,
+            size_bytes,
+        })
+    }
+
+    async fn authenticate(
+        &self,
+        handle: &str,
+        route_record: Option<&str>,
+    ) -> Result<([u8; RECORD_BYTES], Arc<StageRecord>), StagingError> {
+        let parsed = parse_handle(handle)?;
+        if route_record.is_some_and(|route| route != record_hex(&parsed.record)) {
+            return Err(StagingError::NotFound);
+        }
+        let record = self
+            .state
+            .records
+            .read()
+            .await
+            .get(&parsed.record)
+            .cloned()
+            .ok_or(StagingError::NotFound)?;
+        let supplied = digest(&[
+            b"any-mcp/artifact-bearer/v1",
+            &self.state.generation_key,
+            &parsed.record,
+            &parsed.secret,
+        ]);
+        if record.expires <= Instant::now()
+            || !constant_time_equal(&record.bearer_digest, &supplied)
+        {
+            return Err(StagingError::NotFound);
+        }
+        Ok((parsed.record, record))
+    }
+
+    /// Returns bounded state for one authenticated handle.
+    #[cfg(test)]
+    pub(crate) async fn inspect(&self, handle: &str) -> Result<StageStatus, StagingError> {
+        let (_, record) = self.authenticate(handle, None).await?;
+        let state = record.state.lock().await;
+        Ok(status_for(&record, &state))
+    }
+
+    async fn inspect_route(
+        &self,
+        handle: &str,
+        route_record: &str,
+    ) -> Result<StageStatus, StagingError> {
+        let (_, record) = self.authenticate(handle, Some(route_record)).await?;
+        let state = record.state.lock().await;
+        Ok(status_for(&record, &state))
+    }
+
+    /// Leases one receiving record at its exact committed offset.
+    pub(crate) async fn begin_write(
+        &self,
+        handle: &str,
+        route_record: Option<&str>,
+        direction: StageDirection,
+        offset: u64,
+    ) -> Result<StageWriteLease, StagingError> {
+        let (_, record) = self.authenticate(handle, route_record).await?;
+        if record.direction != direction {
+            return Err(StagingError::NotFound);
+        }
+        let mut state = record.state.lock().await;
+        let RecordState::Receiving {
+            destination,
+            offset: committed,
+        } = &mut *state
+        else {
+            return Err(StagingError::Conflict);
+        };
+        if *committed != offset {
+            return Err(StagingError::Conflict);
+        }
+        let destination = destination.take().ok_or(StagingError::Conflict)?;
+        Ok(StageWriteLease {
+            destination: Some(destination),
+            offset,
+            size_bytes: record.size_bytes,
+            record: Arc::clone(&record),
+        })
+    }
+
+    /// Restores an incomplete sequential upload at a proven offset.
+    pub(crate) async fn restore_write(
+        &self,
+        lease: StageWriteLease,
+        destination: AtomicExport,
+        offset: u64,
+    ) -> Result<(), StagingError> {
+        if offset < lease.offset || offset > lease.size_bytes {
+            return Err(StagingError::Conflict);
+        }
+        let mut state = lease.record.state.lock().await;
+        let RecordState::Receiving {
+            destination: slot,
+            offset: committed,
+        } = &mut *state
+        else {
+            return Err(StagingError::Conflict);
+        };
+        if slot.is_some() {
+            return Err(StagingError::Conflict);
+        }
+        *slot = Some(destination);
+        *committed = offset;
+        Ok(())
+    }
+
+    /// Publishes a complete import upload as a retained ready source.
+    pub(crate) async fn finish_import(
+        &self,
+        lease: StageWriteLease,
+        mut destination: AtomicExport,
+        observed_size: u64,
+    ) -> Result<(), StagingError> {
+        if lease.record.direction != StageDirection::Import || observed_size != lease.size_bytes {
+            return Err(StagingError::Conflict);
+        }
+        destination.flush().map_err(|_| StagingError::Upstream)?;
+        let mut pending = destination
+            .try_clone_reader()
+            .map_err(|_| StagingError::Upstream)?;
+        let prepublication_sha256 =
+            hash_file(&mut pending, observed_size).map_err(|_| StagingError::Upstream)?;
+        if lease
+            .record
+            .expected_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &prepublication_sha256)
+        {
+            return Err(StagingError::Conflict);
+        }
+        let (source, sha256) = tokio::task::spawn_blocking(move || {
+            let source = destination
+                .commit_retained()
+                .map_err(|_| StagingError::Indeterminate)?;
+            let sha256 = hash_source(&source)?;
+            Ok::<_, StagingError>((source, sha256))
+        })
+        .await
+        .map_err(|_| StagingError::Indeterminate)??;
+        if sha256 != prepublication_sha256 {
+            let name = lease.record.record_name.clone();
+            let directory = self.state.directory.clone();
+            let _ = tokio::task::spawn_blocking(move || directory.remove_record(&name)).await;
+            return Err(StagingError::Indeterminate);
+        }
+        let mut state = lease.record.state.lock().await;
+        *state = RecordState::Ready { source, sha256 };
+        Ok(())
+    }
+
+    /// Publishes a complete Anytype export as an immutable staged download.
+    pub(crate) async fn finish_export(
+        &self,
+        lease: StageWriteLease,
+        destination: AtomicExport,
+        observed_size: u64,
+        sha256: String,
+    ) -> Result<(), StagingError> {
+        if lease.record.direction != StageDirection::Export || observed_size != lease.size_bytes {
+            return Err(StagingError::Conflict);
+        }
+        let source = tokio::task::spawn_blocking(move || destination.commit_retained())
+            .await
+            .map_err(|_| StagingError::Indeterminate)?
+            .map_err(|_| StagingError::Indeterminate)?;
+        let mut state = lease.record.state.lock().await;
+        *state = RecordState::Available { source, sha256 };
+        Ok(())
+    }
+
+    /// Clones the retained file behind one authenticated available export.
+    pub(crate) async fn export_reader(
+        &self,
+        handle: &str,
+        route_record: Option<&str>,
+    ) -> Result<(File, StageStatus), StagingError> {
+        let (_, record) = self.authenticate(handle, route_record).await?;
+        if record.direction != StageDirection::Export {
+            return Err(StagingError::NotFound);
+        }
+        let state = record.state.lock().await;
+        let RecordState::Available { source, .. } = &*state else {
+            return Err(StagingError::NotFound);
+        };
+        source
+            .verify_unchanged()
+            .map_err(|_| StagingError::Conflict)?;
+        let reader = source
+            .try_clone_reader()
+            .map_err(|_| StagingError::Upstream)?;
+        Ok((reader, status_for(&record, &state)))
+    }
+
+    /// Returns a retained source for one ready import record.
+    pub(crate) async fn import_source(
+        &self,
+        handle: &str,
+        space_id: &SpaceId,
+    ) -> Result<StageSource, StagingError> {
+        let (record_id, record) = self.authenticate(handle, None).await?;
+        if record.direction != StageDirection::Import || &record.space_id != space_id {
+            return Err(StagingError::NotFound);
+        }
+        let state = record.state.lock().await;
+        let RecordState::Ready { source, sha256 } = &*state else {
+            return Err(StagingError::NotFound);
+        };
+        source
+            .verify_unchanged()
+            .map_err(|_| StagingError::Conflict)?;
+        Ok(StageSource {
+            file: source
+                .try_clone_reader()
+                .map_err(|_| StagingError::Upstream)?,
+            length: source.length,
+            sha256: sha256.clone(),
+            media_type: record.media_type.clone(),
+            record: record_id,
+        })
+    }
+
+    /// Marks one verified import source consumed.
+    pub(crate) async fn consume(&self, source: &StageSource) -> Result<(), StagingError> {
+        let record = self
+            .state
+            .records
+            .read()
+            .await
+            .get(&source.record)
+            .cloned()
+            .ok_or(StagingError::NotFound)?;
+        let mut state = record.state.lock().await;
+        if !matches!(*state, RecordState::Ready { .. }) {
+            return Err(StagingError::NotFound);
+        }
+        *state = RecordState::Consumed;
+        Ok(())
+    }
+
+    /// Releases one exact authenticated record and removes its private file.
+    pub(crate) async fn release(&self, handle: &str) -> Result<(), StagingError> {
+        let (record_id, record) = self.authenticate(handle, None).await?;
+        self.state.records.write().await.remove(&record_id);
+        let published = {
+            let state = record.state.lock().await;
+            !matches!(*state, RecordState::Receiving { .. })
+        };
+        if !published {
+            return Ok(());
+        }
+        let name = record.record_name.clone();
+        let directory = self.state.directory.clone();
+        tokio::task::spawn_blocking(move || directory.remove_record(&name))
+            .await
+            .map_err(|_| StagingError::Upstream)?
+            .map_err(|_| StagingError::Upstream)
+    }
+
+    async fn cleanup_expired_locked(
+        &self,
+        records: &mut HashMap<[u8; RECORD_BYTES], Arc<StageRecord>>,
+    ) {
+        let now = Instant::now();
+        let expired = records
+            .iter()
+            .filter_map(|(id, record)| (record.expires <= now).then_some(*id))
+            .take(self.state.limits.cleanup_batch)
+            .collect::<Vec<_>>();
+        for id in expired {
+            if let Some(record) = records.remove(&id) {
+                let name = record.record_name.clone();
+                let directory = self.state.directory.clone();
+                let _ = tokio::task::spawn_blocking(move || directory.remove_record(&name)).await;
+            }
+        }
+    }
+}
+
+struct IncomingWrite {
+    destination: AtomicExport,
+    written: u64,
+    error: Option<StagingError>,
+}
+
+async fn write_incoming(
+    mut body: Incoming,
+    destination: AtomicExport,
+    maximum: u64,
+    no_progress_timeout: Duration,
+    shutdown: &CancellationToken,
+) -> Result<IncomingWrite, StagingError> {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Bytes>(1);
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut destination = destination;
+        let mut written = 0_u64;
+        let mut error = None;
+        while let Some(chunk) = receiver.blocking_recv() {
+            if destination.write_all(&chunk).is_err() {
+                error = Some(StagingError::Upstream);
+                break;
+            }
+            let Some(total) = written.checked_add(chunk.len() as u64) else {
+                error = Some(StagingError::Bounded);
+                break;
+            };
+            written = total;
+        }
+        IncomingWrite {
+            destination,
+            written,
+            error,
+        }
+    });
+    let mut admitted = 0_u64;
+    let mut receive_error = None;
+    loop {
+        let frame = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                receive_error = Some(StagingError::Timeout);
+                break;
+            }
+            frame = tokio::time::timeout(no_progress_timeout, body.frame()) => frame,
+        };
+        let frame = match frame {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(Some(Err(_))) => {
+                receive_error = Some(StagingError::Upstream);
+                break;
+            }
+            Ok(None) => break,
+            Err(_) => {
+                receive_error = Some(StagingError::Timeout);
+                break;
+            }
+        };
+        let data = match frame.into_data() {
+            Ok(data) => data,
+            Err(_) => {
+                receive_error = Some(StagingError::Conflict);
+                break;
+            }
+        };
+        let Some(proposed) = admitted.checked_add(data.len() as u64) else {
+            receive_error = Some(StagingError::Bounded);
+            break;
+        };
+        if proposed > maximum {
+            receive_error = Some(StagingError::Bounded);
+            break;
+        }
+        if sender.send(data).await.is_err() {
+            receive_error = Some(StagingError::Upstream);
+            break;
+        }
+        admitted = proposed;
+    }
+    drop(sender);
+    let mut outcome = writer.await.map_err(|_| StagingError::Upstream)?;
+    if outcome.error.is_none() {
+        outcome.error = receive_error;
+    }
+    Ok(outcome)
+}
+
+fn allowed_hosts(config: &StagingConfig) -> Result<Vec<String>, StagingError> {
+    let mut hosts = vec![config.bind.to_string()];
+    let base = config
+        .public_base_url
+        .as_deref()
+        .ok_or(StagingError::Upstream)?;
+    let parsed = url::Url::parse(base).map_err(|_| StagingError::Upstream)?;
+    let host = parsed.host_str().ok_or(StagingError::Upstream)?;
+    let authority = match (host.contains(':'), parsed.port()) {
+        (true, Some(port)) => format!("[{host}]:{port}"),
+        (true, None) => format!("[{host}]"),
+        (false, Some(port)) => format!("{host}:{port}"),
+        (false, None) => host.to_owned(),
+    };
+    if !hosts.iter().any(|existing| existing == &authority) {
+        hosts.push(authority);
+    }
+    Ok(hosts)
+}
+
+fn valid_header_block(request: &Request<Incoming>, limits: &ArtifactLimits) -> bool {
+    if request.headers().len() > 32 {
+        return false;
+    }
+    let retained = request
+        .headers()
+        .iter()
+        .try_fold(0_usize, |total, (name, value)| {
+            total
+                .checked_add(name.as_str().len())
+                .and_then(|total| total.checked_add(value.as_bytes().len()))
+                .and_then(|total| total.checked_add(4))
+        });
+    retained.is_some_and(|retained| retained <= limits.staging_header_bytes)
+}
+
+fn single_header(
+    headers: &hyper::HeaderMap,
+    name: hyper::header::HeaderName,
+    maximum: usize,
+) -> Result<Option<&str>, StagingError> {
+    let values = headers.get_all(name).iter().collect::<Vec<_>>();
+    if values.len() > 1 {
+        return Err(StagingError::Conflict);
+    }
+    values
+        .first()
+        .map(|value| {
+            if value.as_bytes().len() > maximum {
+                return Err(StagingError::Bounded);
+            }
+            value.to_str().map_err(|_| StagingError::Conflict)
+        })
+        .transpose()
+}
+
+fn parse_single_u64(
+    headers: &hyper::HeaderMap,
+    name: hyper::header::HeaderName,
+    maximum: usize,
+) -> Result<Option<u64>, StagingError> {
+    single_header(headers, name, maximum)?
+        .map(|value| {
+            if value.len() > 1 && value.starts_with('0') {
+                return Err(StagingError::Conflict);
+            }
+            value.parse::<u64>().map_err(|_| StagingError::Conflict)
+        })
+        .transpose()
+}
+
+fn parse_content_range(value: &str, expected_total: u64) -> Option<(u64, u64)> {
+    let range = value.strip_prefix("bytes ")?;
+    let (bounds, total) = range.split_once('/')?;
+    if total.parse::<u64>().ok()? != expected_total {
+        return None;
+    }
+    let (start, end) = bounds.split_once('-')?;
+    let start = start.parse::<u64>().ok()?;
+    let end = end.parse::<u64>().ok()?;
+    let length = end.checked_sub(start)?.checked_add(1)?;
+    Some((start, length))
+}
+
+fn parse_download_range(value: &str, total: u64) -> Option<(u64, u64)> {
+    let range = value.strip_prefix("bytes=")?;
+    if range.contains(',') {
+        return None;
+    }
+    let (start, end) = range.split_once('-')?;
+    let (start, end) = match (start.is_empty(), end.is_empty()) {
+        (false, false) => (start.parse::<u64>().ok()?, end.parse::<u64>().ok()?),
+        (false, true) => (start.parse::<u64>().ok()?, total.checked_sub(1)?),
+        (true, false) => {
+            let suffix = end.parse::<u64>().ok()?;
+            if suffix == 0 {
+                return None;
+            }
+            (total.saturating_sub(suffix), total.checked_sub(1)?)
+        }
+        (true, true) => return None,
+    };
+    if start > end || end >= total {
+        return None;
+    }
+    Some((start, end.checked_sub(start)?.checked_add(1)?))
+}
+
+fn full_body(bytes: Bytes) -> StagingBody {
+    Full::new(bytes)
+        .map_err(|never: Infallible| match never {})
+        .boxed_unsync()
+}
+
+fn fixed_response(status: StatusCode) -> Response<StagingBody> {
+    let body = match status {
+        StatusCode::NO_CONTENT => Bytes::new(),
+        StatusCode::UNAUTHORIZED => Bytes::from_static(b"unauthorized\n"),
+        StatusCode::FORBIDDEN => Bytes::from_static(b"forbidden\n"),
+        StatusCode::NOT_FOUND => Bytes::from_static(b"not found\n"),
+        StatusCode::METHOD_NOT_ALLOWED => Bytes::from_static(b"method not allowed\n"),
+        StatusCode::CONFLICT => Bytes::from_static(b"conflict\n"),
+        StatusCode::PAYLOAD_TOO_LARGE => Bytes::from_static(b"payload too large\n"),
+        StatusCode::TOO_MANY_REQUESTS => Bytes::from_static(b"rate limited\n"),
+        StatusCode::SERVICE_UNAVAILABLE => Bytes::from_static(b"unavailable\n"),
+        StatusCode::REQUEST_TIMEOUT => Bytes::from_static(b"timeout\n"),
+        StatusCode::RANGE_NOT_SATISFIABLE => Bytes::from_static(b"invalid range\n"),
+        StatusCode::INSUFFICIENT_STORAGE => Bytes::from_static(b"quota exhausted\n"),
+        StatusCode::INTERNAL_SERVER_ERROR => Bytes::from_static(b"internal error\n"),
+        _ => Bytes::from_static(b"invalid request\n"),
+    };
+    let mut response = Response::new(full_body(body));
+    *response.status_mut() = status;
+    response
+}
+
+fn staging_http_error(error: StagingError) -> Response<StagingBody> {
+    fixed_response(match error {
+        StagingError::Disabled | StagingError::NotFound => StatusCode::NOT_FOUND,
+        StagingError::Conflict => StatusCode::CONFLICT,
+        StagingError::Bounded => StatusCode::INSUFFICIENT_STORAGE,
+        StagingError::Timeout => StatusCode::REQUEST_TIMEOUT,
+        StagingError::Upstream | StagingError::Indeterminate => StatusCode::INTERNAL_SERVER_ERROR,
+    })
+}
+
+fn set_header(
+    response: &mut Response<StagingBody>,
+    name: hyper::header::HeaderName,
+    value: &str,
+) -> Result<(), StagingError> {
+    let value = hyper::header::HeaderValue::from_str(value).map_err(|_| StagingError::Upstream)?;
+    response.headers_mut().insert(name, value);
+    Ok(())
+}
+
+fn offset_response(status: StatusCode, offset: u64) -> Response<StagingBody> {
+    let mut response = fixed_response(status);
+    if set_header(
+        &mut response,
+        hyper::header::HeaderName::from_static("upload-offset"),
+        &offset.to_string(),
+    )
+    .is_err()
+    {
+        return fixed_response(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    response
+}
+
+fn status_response(code: StatusCode, status: &StageStatus, head: bool) -> Response<StagingBody> {
+    let mut response = if head {
+        fixed_response(code)
+    } else {
+        fixed_response(StatusCode::NO_CONTENT)
+    };
+    *response.status_mut() = code;
+    let direction = match status.direction {
+        StageDirection::Import => "import",
+        StageDirection::Export => "export",
+    };
+    for (name, value) in [
+        ("x-artifact-direction", direction.to_owned()),
+        ("x-artifact-state", status.state.to_owned()),
+        ("upload-offset", status.offset.to_string()),
+        ("x-artifact-size", status.size_bytes.to_string()),
+        ("x-artifact-expires", status.expires_at.to_rfc3339()),
+    ] {
+        if set_header(
+            &mut response,
+            hyper::header::HeaderName::from_static(name),
+            &value,
+        )
+        .is_err()
+        {
+            return fixed_response(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+    response
+}
+
+fn hash_source(source: &AnchoredImport) -> Result<String, StagingError> {
+    let mut reader = source
+        .try_clone_reader()
+        .map_err(|_| StagingError::Upstream)?;
+    hash_file(&mut reader, source.length)
+}
+
+fn hash_file(reader: &mut File, expected_length: u64) -> Result<String, StagingError> {
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| StagingError::Upstream)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut observed = 0_u64;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| StagingError::Upstream)?;
+        if read == 0 {
+            break;
+        }
+        observed = observed
+            .checked_add(read as u64)
+            .ok_or(StagingError::Bounded)?;
+        if observed > expected_length {
+            return Err(StagingError::Conflict);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if observed != expected_length {
+        return Err(StagingError::Conflict);
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"));
+    }
+    Ok(encoded)
+}
+
+fn status_for(record: &StageRecord, state: &RecordState) -> StageStatus {
+    let (state_name, offset, sha256) = match state {
+        RecordState::Receiving { offset, .. } => ("receiving", *offset, None),
+        RecordState::Ready { sha256, .. } => ("ready", record.size_bytes, Some(sha256.clone())),
+        RecordState::Available { sha256, .. } => {
+            ("available", record.size_bytes, Some(sha256.clone()))
+        }
+        RecordState::Consumed => ("consumed", record.size_bytes, None),
+    };
+    StageStatus {
+        direction: record.direction,
+        state: state_name,
+        offset,
+        size_bytes: record.size_bytes,
+        sha256,
+        media_type: record.media_type.clone(),
+        expires_at: record.expires_at,
+    }
+}
+
+fn wall_expiry(ttl: Duration) -> Result<DateTime<Utc>, StagingError> {
+    let ttl = chrono::Duration::from_std(ttl).map_err(|_| StagingError::Upstream)?;
+    Utc::now()
+        .checked_add_signed(ttl)
+        .ok_or(StagingError::Upstream)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HOST, ORIGIN, RANGE};
+
+    use super::*;
+    use crate::{artifact_config::ArtifactConfig, artifact_roots::RootRegistry};
+
+    struct TestStaging {
+        staging: ArtifactStaging,
+        shutdown: CancellationToken,
+        root: PathBuf,
+    }
+
+    impl Drop for TestStaging {
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    async fn test_staging() -> TestStaging {
+        let suffix = getrandom::u64().expect("test randomness");
+        let root = std::env::temp_dir().join(format!("any-mcp-stage-{suffix:016x}"));
+        std::fs::create_dir(&root).expect("create staging root");
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port probe");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+        let base = format!("http://127.0.0.1:{port}/artifacts/v1/");
+        let root_toml = root.to_string_lossy().replace('\\', "\\\\");
+        let config = ArtifactConfig::from_toml(&format!(
+            "schema_version = 1\n\
+             [spaces]\n\
+             read_only = false\n\
+             [staging]\n\
+             enabled = true\n\
+             root = \"{root_toml}\"\n\
+             bind = \"127.0.0.1:{port}\"\n\
+             public_base_url = \"{base}\"\n"
+        ))
+        .expect("staging config");
+        let roots = RootRegistry::activate(&config).expect("activate empty local roots");
+        let shutdown = CancellationToken::new();
+        let staging = ArtifactStaging::activate(
+            config.staging().expect("staging declaration"),
+            &config.limits,
+            &roots,
+            shutdown.clone(),
+        )
+        .await
+        .expect("activate staging");
+        TestStaging {
+            staging,
+            shutdown,
+            root,
+        }
+    }
+
+    fn space_id() -> SpaceId {
+        SpaceId::new("bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7")
+            .expect("space id")
+    }
+
+    #[tokio::test]
+    async fn staged_import_accepts_sequential_ranges_and_consumes_once() {
+        let test = test_staging().await;
+        let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let allocation = test
+            .staging
+            .allocate_import(
+                space_id(),
+                5,
+                Some("text/plain".to_owned()),
+                Some(expected.to_owned()),
+            )
+            .await
+            .expect("allocate import");
+        let client = reqwest::Client::new();
+        let first = client
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_RANGE, "bytes 0-1/5")
+            .body("he")
+            .send()
+            .await
+            .expect("first ranged upload");
+        assert_eq!(first.status(), StatusCode::NO_CONTENT);
+        assert_eq!(first.headers()["upload-offset"], "2");
+
+        let second = client
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_RANGE, "bytes 2-4/5")
+            .body("llo")
+            .send()
+            .await
+            .expect("second ranged upload");
+        assert_eq!(second.status(), StatusCode::CREATED);
+
+        let status = test
+            .staging
+            .inspect(&allocation.handle)
+            .await
+            .expect("ready status");
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.sha256.as_deref(), Some(expected));
+        let source = test
+            .staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("retained import source");
+        assert_eq!(source.length, 5);
+        test.staging.consume(&source).await.expect("consume source");
+        assert!(
+            test.staging
+                .import_source(&allocation.handle, &space_id())
+                .await
+                .is_err()
+        );
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release consumed source");
+    }
+
+    #[tokio::test]
+    async fn staged_export_streams_exact_full_and_single_range_bytes() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_export(space_id(), 5, Some("application/octet-stream".to_owned()))
+            .await
+            .expect("allocate export");
+        let mut lease = test
+            .staging
+            .begin_write(
+                &allocation.handle,
+                Some(&allocation.record),
+                StageDirection::Export,
+                0,
+            )
+            .await
+            .expect("lease export");
+        let mut destination = lease.take_destination().expect("export destination");
+        destination.write_all(b"hello").expect("write export");
+        test.staging
+            .finish_export(
+                lease,
+                destination,
+                5,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_owned(),
+            )
+            .await
+            .expect("publish export");
+
+        let client = reqwest::Client::new();
+        let full = client
+            .get(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .send()
+            .await
+            .expect("full staged download");
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(full.bytes().await.expect("full bytes"), b"hello".as_slice());
+
+        let range = client
+            .get(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(RANGE, "bytes=1-3")
+            .send()
+            .await
+            .expect("ranged staged download");
+        assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(range.bytes().await.expect("range bytes"), b"ell".as_slice());
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release export");
+    }
+
+    #[tokio::test]
+    async fn staging_http_rejects_ambient_browser_and_bearer_confusion() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate import");
+        let client = reqwest::Client::new();
+
+        let unauthenticated = client
+            .head(&allocation.url)
+            .send()
+            .await
+            .expect("unauthenticated request");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let browser = client
+            .head(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(ORIGIN, "https://attacker.invalid")
+            .send()
+            .await
+            .expect("browser-origin request");
+        assert_eq!(browser.status(), StatusCode::BAD_REQUEST);
+
+        let wrong_host = client
+            .head(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(HOST, "attacker.invalid")
+            .send()
+            .await
+            .expect("wrong-host request");
+        assert_eq!(wrong_host.status(), StatusCode::FORBIDDEN);
+
+        let query = client
+            .head(format!("{}?handle={}", allocation.url, allocation.handle))
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .send()
+            .await
+            .expect("query-bearing request");
+        assert_eq!(query.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn expected_hash_mismatch_never_publishes_or_orphans_bytes() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(
+                space_id(),
+                5,
+                Some("text/plain".to_owned()),
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()),
+            )
+            .await
+            .expect("allocate import");
+        let response = reqwest::Client::new()
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "5")
+            .body("hello")
+            .send()
+            .await
+            .expect("upload mismatched bytes");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release rejected upload");
+        let names = std::fs::read_dir(&test.root)
+            .expect("read staging root")
+            .map(|entry| {
+                entry
+                    .expect("staging entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![".any-mcp-staging.lock"]);
+    }
+
+    #[tokio::test]
+    async fn empty_document_export_is_an_immutable_zero_byte_stage() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_export(space_id(), 0, Some("text/markdown".to_owned()))
+            .await
+            .expect("allocate empty export");
+        let mut lease = test
+            .staging
+            .begin_write(
+                &allocation.handle,
+                Some(&allocation.record),
+                StageDirection::Export,
+                0,
+            )
+            .await
+            .expect("empty export lease");
+        let destination = lease.take_destination().expect("empty destination");
+        test.staging
+            .finish_export(
+                lease,
+                destination,
+                0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+            )
+            .await
+            .expect("publish empty export");
+        let response = reqwest::Client::new()
+            .get(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .send()
+            .await
+            .expect("empty download");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.content_length(), Some(0));
+        assert!(response.bytes().await.expect("empty bytes").is_empty());
+    }
+
+    #[test]
+    fn handles_are_canonical_and_tampering_is_uniformly_rejected() {
+        let key = [7_u8; 32];
+        let (_, handle, _) = make_handle(&key).expect("handle");
+        assert!((64..=128).contains(&handle.len()));
+        assert!(parse_handle(&handle).is_ok());
+        let mut tampered = handle.into_bytes();
+        if let Some(first) = tampered.first_mut() {
+            *first = if *first == b'A' { b'B' } else { b'A' };
+        }
+        let tampered = String::from_utf8(tampered).expect("ASCII handle");
+        assert!(matches!(
+            parse_handle(&tampered),
+            Err(StagingError::NotFound)
+        ));
+    }
+}

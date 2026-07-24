@@ -62,6 +62,9 @@
 
 pub mod artifact_config;
 pub mod artifact_roots;
+mod artifact_staging;
+pub mod artifact_toolset;
+mod artifact_validators;
 pub mod body_toolset;
 pub mod chat_add_toolset;
 pub mod chat_delete_toolset;
@@ -116,7 +119,7 @@ pub use artifact_config::{
 };
 pub use artifact_roots::{
     AnchoredImport, AtomicExport, EffectiveRootRegistry, ROOTS_REQUIRED_GUIDANCE, RootAccessError,
-    RootCapabilityKind, RootRegistry,
+    RootAccessErrorKind, RootCapabilityKind, RootRegistry,
 };
 pub use config::{ApplicationProfile, ProtocolMode, RuntimeConfig};
 pub use optional_toolsets::{OptionalToolsetSelection, ToolsetName};

@@ -38,11 +38,17 @@ acceptance-harness = []
 [dependencies]
 anytype.workspace = true
 base64.workspace = true
+bytes.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 chrono.workspace = true
+fs2.workspace = true
+futures.workspace = true
 getrandom.workspace = true
+http-body-util.workspace = true
 httpdate.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 icu_properties.workspace = true
 libc.workspace = true
 mime.workspace = true

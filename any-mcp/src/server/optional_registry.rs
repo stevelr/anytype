@@ -63,9 +63,11 @@ const STANDARD_CATALOG_SNAPSHOT: &str = include_str!("../../tests/snapshots/cata
 const STANDARD_READ_ONLY_CATALOG_SNAPSHOT: &str =
     include_str!("../../tests/snapshots/catalog-read-only.snap");
 
-const PRODUCTION_SELECTOR: &str = "body-blocks,chats,files,members,schema,views-write";
-const REVERSE_PRODUCTION_SELECTOR: &str = "views-write,schema,members,files,chats,body-blocks";
-const PRODUCTION_TOOLSET_NAMES: [&str; 6] = [
+const PRODUCTION_SELECTOR: &str = "artifacts,body-blocks,chats,files,members,schema,views-write";
+const REVERSE_PRODUCTION_SELECTOR: &str =
+    "views-write,schema,members,files,chats,body-blocks,artifacts";
+const PRODUCTION_TOOLSET_NAMES: [&str; 7] = [
+    "artifacts",
     "body-blocks",
     "chats",
     "files",
@@ -73,7 +75,10 @@ const PRODUCTION_TOOLSET_NAMES: [&str; 6] = [
     "schema",
     "views-write",
 ];
-const PRODUCTION_READ_WRITE_TOOLS: [&str; 30] = [
+const PRODUCTION_READ_WRITE_TOOLS: [&str; 38] = [
+    "artifact_release",
+    "artifact_stage_upload",
+    "artifact_status",
     "body_block_create",
     "body_block_delete",
     "body_block_list",
@@ -88,6 +93,11 @@ const PRODUCTION_READ_WRITE_TOOLS: [&str; 30] = [
     "collection_member_add",
     "collection_member_list",
     "collection_member_remove",
+    "document_export",
+    "document_import_create",
+    "document_import_update",
+    "file_export",
+    "file_import",
     "file_metadata",
     "file_read",
     "file_upload",
@@ -105,7 +115,8 @@ const PRODUCTION_READ_WRITE_TOOLS: [&str; 30] = [
     "type_get",
     "type_update",
 ];
-const PRODUCTION_READ_ONLY_TOOLS: [&str; 12] = [
+const PRODUCTION_READ_ONLY_TOOLS: [&str; 13] = [
+    "artifact_status",
     "body_block_list",
     "chat_list",
     "chat_message_get",
@@ -119,7 +130,9 @@ const PRODUCTION_READ_ONLY_TOOLS: [&str; 12] = [
     "optional_toolset_status",
     "type_get",
 ];
-const PRODUCTION_MUTATION_TOOLS: [&str; 18] = [
+const PRODUCTION_MUTATION_TOOLS: [&str; 25] = [
+    "artifact_release",
+    "artifact_stage_upload",
     "body_block_create",
     "body_block_delete",
     "body_block_move",
@@ -128,6 +141,11 @@ const PRODUCTION_MUTATION_TOOLS: [&str; 18] = [
     "chat_message_delete",
     "collection_member_add",
     "collection_member_remove",
+    "document_export",
+    "document_import_create",
+    "document_import_update",
+    "file_export",
+    "file_import",
     "file_upload",
     "property_create",
     "property_update",
@@ -163,6 +181,10 @@ fn optional_status_fast_runner() -> OptionalFastWorkflowFuture {
     ))
 }
 
+fn artifacts_fast_runner() -> OptionalFastWorkflowFuture {
+    Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::Artifacts))
+}
+
 fn body_blocks_fast_runner() -> OptionalFastWorkflowFuture {
     Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::BodyBlocks))
 }
@@ -187,11 +209,12 @@ fn views_write_fast_runner() -> OptionalFastWorkflowFuture {
     Box::pin(run_optional_fast_workflow(OptionalFastWorkflow::ViewsWrite))
 }
 
-const OPTIONAL_FAST_WORKFLOWS: [OptionalFastWorkflowRegistration; 7] = [
+const OPTIONAL_FAST_WORKFLOWS: [OptionalFastWorkflowRegistration; 8] = [
     fast_registration(
         OptionalFastWorkflow::OptionalStatus,
         optional_status_fast_runner,
     ),
+    fast_registration(OptionalFastWorkflow::Artifacts, artifacts_fast_runner),
     fast_registration(OptionalFastWorkflow::BodyBlocks, body_blocks_fast_runner),
     fast_registration(OptionalFastWorkflow::Chats, chats_fast_runner),
     fast_registration(OptionalFastWorkflow::Files, files_fast_runner),
@@ -517,6 +540,7 @@ fn production_server(
 const fn fast_workflow_selector(workflow: OptionalFastWorkflow) -> &'static str {
     match workflow {
         OptionalFastWorkflow::OptionalStatus | OptionalFastWorkflow::Members => "members",
+        OptionalFastWorkflow::Artifacts => "artifacts",
         OptionalFastWorkflow::BodyBlocks => "body-blocks",
         OptionalFastWorkflow::Chats => "chats",
         OptionalFastWorkflow::Files => "files",
@@ -875,8 +899,8 @@ fn production_budget_json() -> String {
     let pretty = serde_json::to_string_pretty(&production_token_budget())
         .expect("serialize production token budget")
         .replace(
-            "[\n    \"body-blocks\",\n    \"chats\",\n    \"files\",\n    \"members\",\n    \"schema\",\n    \"views-write\"\n  ]",
-            "[\"body-blocks\", \"chats\", \"files\", \"members\", \"schema\", \"views-write\"]",
+            "[\n    \"artifacts\",\n    \"body-blocks\",\n    \"chats\",\n    \"files\",\n    \"members\",\n    \"schema\",\n    \"views-write\"\n  ]",
+            "[\"artifacts\", \"body-blocks\", \"chats\", \"files\", \"members\", \"schema\", \"views-write\"]",
         );
     format!("{pretty}\n")
 }
@@ -1342,6 +1366,7 @@ async fn production_optional_fast_workflow_registration_is_exact_and_executable(
 
     let expected_counts = [
         (OptionalFastWorkflow::OptionalStatus, 1_usize),
+        (OptionalFastWorkflow::Artifacts, 8),
         (OptionalFastWorkflow::BodyBlocks, 6),
         (OptionalFastWorkflow::Chats, 6),
         (OptionalFastWorkflow::Files, 4),
@@ -1359,7 +1384,7 @@ async fn production_optional_fast_workflow_registration_is_exact_and_executable(
             assert!(tool_names.insert(name), "duplicate optional tool {name}");
         }
     }
-    assert_eq!(OptionalOperation::ALL.len(), 31);
+    assert_eq!(OptionalOperation::ALL.len(), 39);
     assert_eq!(
         partition,
         expected_counts.into_iter().collect::<BTreeMap<_, _>>()
@@ -1914,6 +1939,7 @@ fn production_optional_transport_union_is_exact() {
             .map(|entry| (entry.name, entry.requires_grpc))
             .collect::<Vec<_>>(),
         [
+            ("artifacts", false),
             ("body-blocks", true),
             ("chats", false),
             ("members", false),

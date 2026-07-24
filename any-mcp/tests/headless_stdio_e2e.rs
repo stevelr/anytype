@@ -155,6 +155,11 @@ impl OptionalRealWorkflowRegistration {
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn artifacts_real_runner() -> OptionalRealWorkflowFuture {
+    Box::pin(run_artifacts_real_workflow())
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn body_blocks_real_runner() -> OptionalRealWorkflowFuture {
     Box::pin(run_body_blocks_real_workflow())
 }
@@ -185,7 +190,11 @@ fn views_write_real_runner() -> OptionalRealWorkflowFuture {
 }
 
 #[cfg(feature = "acceptance-harness")]
-const OPTIONAL_REAL_WORKFLOWS: [OptionalRealWorkflowRegistration; 6] = [
+const OPTIONAL_REAL_WORKFLOWS: [OptionalRealWorkflowRegistration; 7] = [
+    OptionalRealWorkflowRegistration {
+        workflow: OptionalRealWorkflow::Artifacts,
+        runner: artifacts_real_runner,
+    },
     OptionalRealWorkflowRegistration {
         workflow: OptionalRealWorkflow::BodyBlocks,
         runner: body_blocks_real_runner,
@@ -1305,6 +1314,143 @@ fn spawn_disposable_driver(
                     Err(TestError::Assertion {
                         message: "registered stdio child did not stop cleanly".to_owned(),
                     })
+                }
+            }
+        })
+    })
+}
+
+#[cfg(feature = "acceptance-harness")]
+struct TemporaryArtifactPolicy {
+    base: PathBuf,
+    config: PathBuf,
+    import: PathBuf,
+    export: PathBuf,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl TemporaryArtifactPolicy {
+    fn create(space_id: &str) -> Result<Self, TestError> {
+        let base =
+            std::env::temp_dir().join(format!("any-mcp-artifact-acceptance-{}", unique_suffix()));
+        let import = base.join("import");
+        let export = base.join("export");
+        let staging = base.join("staging");
+        std::fs::create_dir(&base)
+            .and_then(|()| std::fs::create_dir(&import))
+            .and_then(|()| std::fs::create_dir(&export))
+            .and_then(|()| std::fs::create_dir(&staging))
+            .map_err(|_| sentinel_assertion("create artifact acceptance directories"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in [&base, &import, &export, &staging] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|_| sentinel_assertion("secure artifact acceptance directory"))?;
+            }
+        }
+        std::fs::write(import.join("file.bin"), b"artifact-file-payload")
+            .and_then(|()| std::fs::write(import.join("create.md"), b"# Artifact create\n"))
+            .and_then(|()| std::fs::write(import.join("update.md"), b"# Artifact update\n"))
+            .map_err(|_| sentinel_assertion("write artifact acceptance sources"))?;
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .map_err(|_| sentinel_assertion("reserve artifact acceptance port"))?
+            .port();
+        let config = base.join("policy.toml");
+        let contents = format!(
+            "schema_version = 1\n\
+             [spaces]\n\
+             read_only = false\n\
+             allowed = [{{ id = \"{space_id}\" }}]\n\
+             [[roots.import]]\n\
+             id = \"inbox\"\n\
+             path = \"{}\"\n\
+             [[roots.export]]\n\
+             id = \"outbox\"\n\
+             path = \"{}\"\n\
+             [staging]\n\
+             enabled = true\n\
+             root = \"{}\"\n\
+             bind = \"127.0.0.1:{port}\"\n\
+             public_base_url = \"http://127.0.0.1:{port}/artifacts/v1/\"\n",
+            import.display(),
+            export.display(),
+            staging.display()
+        );
+        std::fs::write(&config, contents)
+            .map_err(|_| sentinel_assertion("write artifact acceptance policy"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+                .map_err(|_| sentinel_assertion("secure artifact acceptance policy"))?;
+            for source in ["file.bin", "create.md", "update.md"] {
+                std::fs::set_permissions(
+                    import.join(source),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .map_err(|_| sentinel_assertion("secure artifact acceptance source"))?;
+            }
+        }
+        Ok(Self {
+            base,
+            config,
+            import,
+            export,
+        })
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl Drop for TemporaryArtifactPolicy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn spawn_disposable_artifact_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    policy: TemporaryArtifactPolicy,
+) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
+    let child_environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| sentinel_assertion("disposable callback omitted its child environment"))?
+        .clone();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp"));
+    child_environment.configure(&mut command)?;
+    configure_stdio_command(&mut command, DriverOptions::STANDARD, Some("artifacts"));
+    command.env("ANY_MCP_CONFIG", &policy.config);
+    ctx.spawn_owned_child(move || {
+        let mut retained_policy = Some(policy);
+        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(
+            command,
+            DriverOptions::STANDARD,
+            None,
+        ))));
+        let stopped = Arc::clone(&driver);
+        (driver, move || {
+            *cleanup_record.lock().expect("child cleanup record lock") =
+                ChildCleanupRecord::Attempted;
+            let result = lock_driver(&stopped)
+                .take()
+                .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
+            drop(retained_policy.take());
+            match result {
+                Ok(()) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Stopped;
+                    Ok(())
+                }
+                Err(_) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Failed;
+                    Err(sentinel_assertion(
+                        "registered artifact stdio child did not stop cleanly",
+                    ))
                 }
             }
         })
@@ -4801,6 +4947,214 @@ fn body_tool_value(
     driver
         .call_tool_sync(name, arguments)
         .map_err(|_| sentinel_assertion("spawned body-block call failed"))
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
+    let cleanup = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let callback_cleanup = Arc::clone(&cleanup);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-local",
+        move |ctx| {
+            Box::pin(async move {
+                let policy = TemporaryArtifactPolicy::create(&ctx.space_id)?;
+                let import_root = policy.import.clone();
+                let export_root = policy.export.clone();
+                let child =
+                    spawn_disposable_artifact_driver(ctx.as_ref(), callback_cleanup, policy)?;
+                lock_driver(&child)
+                    .as_mut()
+                    .ok_or_else(|| sentinel_assertion("registered artifact child disappeared"))?
+                    .initialize();
+                let mut driver = OwnedStdioDriver {
+                    driver: Arc::clone(&child),
+                };
+                let status = driver
+                    .call_tool("artifact_status", json!({}))
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact status failed"))?;
+                if status["import_root_count"] != 1
+                    || status["export_root_count"] != 1
+                    || status["staging_available"] != true
+                {
+                    return Err(sentinel_assertion(
+                        "artifact status did not report configured capabilities",
+                    ));
+                }
+
+                let suffix = unique_suffix();
+                let imported = driver
+                    .call_tool(
+                        "file_import",
+                        json!({
+                            "space": ctx.space_id,
+                            "source": {"local": {"root": "inbox", "path": "file.bin"}},
+                            "name": format!("artifact-{suffix}.bin"),
+                            "media_type": "application/octet-stream",
+                            "idempotency_key": format!("artifact-file-import-{suffix}")
+                        }),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact file import failed"))?;
+                let file_id = imported["file_id"]
+                    .as_str()
+                    .ok_or_else(|| sentinel_assertion("artifact file import omitted ID"))?
+                    .to_owned();
+                ctx.register_file(&file_id);
+                let expected_file_hash = file_sha256(b"artifact-file-payload");
+                if imported.pointer("/receipt/sha256").and_then(Value::as_str)
+                    != Some(expected_file_hash.as_str())
+                {
+                    return Err(sentinel_assertion(
+                        "artifact file import returned the wrong hash",
+                    ));
+                }
+
+                let exported = driver
+                    .call_tool(
+                        "file_export",
+                        json!({
+                            "space": ctx.space_id,
+                            "file_id": file_id,
+                            "destination": {
+                                "local": {"root": "outbox", "path": "file-export.bin"}
+                            },
+                            "idempotency_key": format!("artifact-file-export-{suffix}")
+                        }),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact file export failed"))?;
+                if exported.pointer("/receipt/sha256").and_then(Value::as_str)
+                    != Some(expected_file_hash.as_str())
+                    || std::fs::read(export_root.join("file-export.bin"))
+                        .map_err(|_| sentinel_assertion("read artifact file export"))?
+                        != b"artifact-file-payload"
+                {
+                    return Err(sentinel_assertion(
+                        "artifact file export verification diverged",
+                    ));
+                }
+
+                let created = driver
+                    .call_tool(
+                        "document_import_create",
+                        json!({
+                            "space": ctx.space_id,
+                            "source": {"local": {"root": "inbox", "path": "create.md"}},
+                            "source_format": "markdown",
+                            "object_type": "page",
+                            "name": format!("Artifact document {suffix}"),
+                            "idempotency_key": format!("artifact-document-create-{suffix}")
+                        }),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact document create failed"))?;
+                let object_id = created["object_id"]
+                    .as_str()
+                    .ok_or_else(|| sentinel_assertion("artifact document create omitted ID"))?
+                    .to_owned();
+                ctx.register_object(&object_id);
+                let create_hash = created["canonical_sha256"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        sentinel_assertion("artifact document create omitted canonical hash")
+                    })?
+                    .to_owned();
+
+                let document_export = driver
+                    .call_tool(
+                        "document_export",
+                        json!({
+                            "space": ctx.space_id,
+                            "object_id": object_id,
+                            "destination": {
+                                "local": {"root": "outbox", "path": "document-export.md"}
+                            },
+                            "expected_body_sha256": create_hash,
+                            "idempotency_key": format!("artifact-document-export-{suffix}")
+                        }),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact document export failed"))?;
+                let exported_document = std::fs::read(export_root.join("document-export.md"))
+                    .map_err(|_| sentinel_assertion("read artifact document export"))?;
+                if document_export["sha256"] != file_sha256(&exported_document) {
+                    return Err(sentinel_assertion(
+                        "artifact document export returned the wrong hash",
+                    ));
+                }
+
+                let updated = driver
+                    .call_tool(
+                        "document_import_update",
+                        json!({
+                            "space": ctx.space_id,
+                            "object_id": object_id,
+                            "source": {"local": {"root": "inbox", "path": "update.md"}},
+                            "source_format": "markdown",
+                            "expected_body_sha256": create_hash,
+                            "idempotency_key": format!("artifact-document-update-{suffix}")
+                        }),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact document update failed"))?;
+                if updated["canonical_sha256"] == create_hash || updated["no_op"] != false {
+                    return Err(sentinel_assertion(
+                        "artifact document update did not verify a changed body",
+                    ));
+                }
+
+                let staged = driver
+                    .call_tool(
+                        "artifact_stage_upload",
+                        json!({
+                            "space": ctx.space_id,
+                            "size_bytes": 4,
+                            "media_type": "application/octet-stream",
+                            "expected_sha256": file_sha256(b"test")
+                        }),
+                    )
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact staging allocation failed"))?;
+                let handle = staged["handle"]
+                    .as_str()
+                    .ok_or_else(|| sentinel_assertion("artifact staging omitted handle"))?;
+                let released = driver
+                    .call_tool("artifact_release", json!({"handle": handle}))
+                    .await
+                    .map_err(|_| sentinel_assertion("artifact staging release failed"))?;
+                if released["released"] != true || !import_root.join("file.bin").is_file() {
+                    return Err(sentinel_assertion(
+                        "artifact staging release or import retention diverged",
+                    ));
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned artifact workflow");
+    match outcome {
+        DisposableRun::Completed(()) => {
+            assert_eq!(
+                *cleanup.lock().expect("artifact cleanup record"),
+                ChildCleanupRecord::Stopped
+            );
+            OptionalRealWorkflowRun::Executed
+        }
+        DisposableRun::Skipped(reason) => {
+            eprintln!("artifact workflow skipped before callback: {reason:?}");
+            OptionalRealWorkflowRun::Skipped
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_local_stdio_scenario() {
+    let _ = run_artifacts_real_workflow().await;
 }
 
 #[tokio::test]

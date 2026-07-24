@@ -24,6 +24,7 @@ use std::{
 use cap_fs_ext::OpenOptionsExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::fs::{Dir, OpenOptions};
+use fs2::FileExt;
 
 use crate::artifact_config::{
     AbsoluteNativePath, ArtifactConfig, LogicalRootId, RelativeNativePath, RootDefinition,
@@ -234,6 +235,154 @@ impl EffectiveRootRegistry {
     }
 }
 
+/// Private capability used by the supervised artifact staging service.
+#[derive(Clone)]
+pub(crate) struct StagingDirectory {
+    root: RootCapability,
+    _instance_lock: Arc<File>,
+}
+
+impl fmt::Debug for StagingDirectory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StagingDirectory(<capability>)")
+    }
+}
+
+impl StagingDirectory {
+    /// Activates an owner-private staging root which does not overlap a local
+    /// import or export root.
+    pub(crate) fn activate(
+        path: &AbsoluteNativePath,
+        local_roots: &RootRegistry,
+    ) -> Result<Self, RootAccessError> {
+        let directory =
+            open_root(path).map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        for capability in local_roots.roots.values() {
+            let overlaps = is_ancestor_identity(&directory, &capability.directory)
+                .and_then(|left| {
+                    is_ancestor_identity(&capability.directory, &directory)
+                        .map(|right| left || right)
+                })
+                .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+            if overlaps {
+                return Err(RootAccessError::new(RootProblem::Activation));
+            }
+        }
+        let root = RootCapability {
+            kind: RootCapabilityKind::Export,
+            directory,
+        };
+        let instance_lock = acquire_staging_lock(&root)?;
+        cleanup_stale_staging_files(&root)?;
+        Ok(Self {
+            root,
+            _instance_lock: Arc::new(instance_lock),
+        })
+    }
+
+    /// Reserves one private create-new record destination.
+    pub(crate) fn begin_record(
+        &self,
+        record_name: &str,
+        maximum_bytes: u64,
+    ) -> Result<AtomicExport, RootAccessError> {
+        let path = RelativeNativePath::from_utf8(record_name)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        begin_atomic_export_at(&self.root, &path, maximum_bytes)
+    }
+
+    /// Removes one exact completed record.
+    pub(crate) fn remove_record(&self, record_name: &str) -> Result<(), RootAccessError> {
+        let path = RelativeNativePath::from_utf8(record_name)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let (parent, name) = walk_parent(&self.root, &path)?;
+        parent
+            .remove_file(Path::new(&name))
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        sync_parent_directory(&parent).map_err(|_| RootAccessError::new(RootProblem::Containment))
+    }
+}
+
+const STAGING_LOCK_NAME: &str = ".any-mcp-staging.lock";
+
+fn acquire_staging_lock(root: &RootCapability) -> Result<File, RootAccessError> {
+    let directory = retained_directory(&root.directory)?;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = directory
+        .open_with(Path::new(STAGING_LOCK_NAME), &options)
+        .map(cap_std::fs::File::into_std)
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    if !safe_created_export_metadata(&file, &metadata) || !safe_windows_security(&file) {
+        return Err(RootAccessError::new(RootProblem::Activation));
+    }
+    file.try_lock_exclusive()
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    Ok(file)
+}
+
+fn cleanup_stale_staging_files(root: &RootCapability) -> Result<(), RootAccessError> {
+    let directory = retained_directory(&root.directory)?;
+    let entries = directory
+        .entries()
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    for entry in entries {
+        let entry = entry.map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        let name = entry.file_name();
+        if name == STAGING_LOCK_NAME {
+            continue;
+        }
+        let Some(name_utf8) = name.to_str() else {
+            return Err(RootAccessError::new(RootProblem::Activation));
+        };
+        if !stale_staging_name(name_utf8) {
+            return Err(RootAccessError::new(RootProblem::Activation));
+        }
+        let metadata = directory
+            .symlink_metadata(Path::new(&name))
+            .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        if !metadata.is_file() {
+            return Err(RootAccessError::new(RootProblem::Activation));
+        }
+        directory
+            .remove_file(Path::new(&name))
+            .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    }
+    sync_parent_directory(&directory).map_err(|_| RootAccessError::new(RootProblem::Activation))
+}
+
+fn retained_directory(directory: &OpenedDirectory) -> Result<Dir, RootAccessError> {
+    directory
+        .file
+        .try_clone()
+        .map(Dir::from_std_file)
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))
+}
+
+fn stale_staging_name(name: &str) -> bool {
+    let record = name
+        .strip_suffix(".bin")
+        .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(lowercase_hex));
+    let temporary = name
+        .strip_prefix(".any-mcp-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .is_some_and(|stem| stem.len() == 16 && stem.bytes().all(lowercase_hex));
+    record || temporary
+}
+
+fn lowercase_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
+}
+
 /// One bounded same-directory export which is invisible until commit.
 pub struct AtomicExport {
     parent: Dir,
@@ -257,6 +406,14 @@ impl fmt::Debug for AtomicExport {
 }
 
 impl AtomicExport {
+    /// Clones a read handle for pre-publication verification.
+    pub(crate) fn try_clone_reader(&self) -> io::Result<File> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| io::Error::other("artifact export is not readable"))?
+            .try_clone()
+    }
+
     /// Flushes, verifies, and atomically publishes the destination.
     ///
     /// The destination must still be absent. The returned byte count is the
@@ -268,7 +425,15 @@ impl AtomicExport {
     /// error if the retained file disagrees with bounded writes, or an
     /// indeterminate publication error if publication may have completed but
     /// durability or private-name cleanup could not be proven.
-    pub fn commit(mut self) -> Result<u64, RootAccessError> {
+    pub fn commit(self) -> Result<u64, RootAccessError> {
+        self.commit_retained().map(|published| published.length)
+    }
+
+    /// Publishes the destination and retains its verified read handle.
+    ///
+    /// This is used by private staging so completed bytes never need to be
+    /// reopened through a mutable namespace before upload or download.
+    pub(crate) fn commit_retained(mut self) -> Result<AnchoredImport, RootAccessError> {
         let Some(file) = self.file.take() else {
             return Err(RootAccessError::new(RootProblem::Containment));
         };
@@ -318,7 +483,6 @@ impl AtomicExport {
         {
             return Err(RootAccessError::new(RootProblem::Indeterminate));
         }
-        drop(published);
         drop(file);
         if self
             .parent
@@ -329,7 +493,16 @@ impl AtomicExport {
         }
         sync_parent_directory(&self.parent)
             .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
-        Ok(self.written)
+        let settled_metadata = published
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+        let snapshot = FileSnapshot::from_file(&published, &settled_metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+        Ok(AnchoredImport {
+            file: published,
+            length: self.written,
+            snapshot,
+        })
     }
 }
 
@@ -396,6 +569,18 @@ impl AnchoredImport {
         &mut self.file
     }
 
+    /// Clones the retained source handle without reopening its path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed containment error when the operating system cannot
+    /// duplicate the live handle.
+    pub fn try_clone_reader(&self) -> Result<File, RootAccessError> {
+        self.file
+            .try_clone()
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))
+    }
+
     /// Rechecks stable identity and size after streaming.
     ///
     /// # Errors
@@ -425,6 +610,24 @@ impl RootAccessError {
     const fn new(problem: RootProblem) -> Self {
         Self { problem }
     }
+
+    /// Returns the stable, path-free failure classification.
+    #[must_use]
+    pub const fn kind(&self) -> RootAccessErrorKind {
+        match self.problem {
+            RootProblem::Missing => RootAccessErrorKind::Missing,
+            RootProblem::Unauthorized => RootAccessErrorKind::Unauthorized,
+            RootProblem::Activation => RootAccessErrorKind::Activation,
+            RootProblem::ClientRoots => RootAccessErrorKind::ClientRoots,
+            RootProblem::Containment => RootAccessErrorKind::Containment,
+            RootProblem::TooLarge => RootAccessErrorKind::TooLarge,
+            RootProblem::Collision => RootAccessErrorKind::Collision,
+            RootProblem::Changed => RootAccessErrorKind::Changed,
+            RootProblem::Indeterminate => RootAccessErrorKind::Indeterminate,
+            #[cfg(not(any(unix, windows)))]
+            RootProblem::Platform => RootAccessErrorKind::Platform,
+        }
+    }
 }
 
 impl fmt::Display for RootAccessError {
@@ -446,6 +649,35 @@ impl fmt::Display for RootAccessError {
 }
 
 impl std::error::Error for RootAccessError {}
+
+/// Stable classification for a root-capability failure.
+///
+/// Callers use this classification instead of parsing human-readable
+/// diagnostics, which remain fixed and path-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootAccessErrorKind {
+    /// No root of the required capability was configured.
+    Missing,
+    /// The requested logical root or capability is not authorized.
+    Unauthorized,
+    /// A configured root could not be securely activated.
+    Activation,
+    /// The client-root intersection could not be securely frozen.
+    ClientRoots,
+    /// The relative path could not be safely contained.
+    Containment,
+    /// The artifact exceeded its configured byte ceiling.
+    TooLarge,
+    /// The create-new destination already exists.
+    Collision,
+    /// An anchored source or destination changed during the operation.
+    Changed,
+    /// Publication may have completed but could not be proven.
+    Indeterminate,
+    /// Secure root controls are unavailable on this target.
+    #[cfg(not(any(unix, windows)))]
+    Platform,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RootProblem {
@@ -887,6 +1119,7 @@ fn begin_atomic_export_at(
 fn owner_private_create_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options
+        .read(true)
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
@@ -1415,6 +1648,39 @@ mod tests {
             b"other"
         );
         assert_eq!(fs::read_dir(&export).expect("list export").count(), 1);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn staging_activation_locks_one_generation_and_reconciles_private_files() {
+        let (base, import, export) = temporary_tree();
+        let staging = base.join("staging");
+        fs::create_dir(&staging).expect("staging directory");
+        fs::write(
+            staging.join("0123456789abcdef0123456789abcdef.bin"),
+            b"stale",
+        )
+        .expect("stale record");
+        fs::write(staging.join(".any-mcp-0123456789abcdef.tmp"), b"partial")
+            .expect("stale temporary");
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
+        let path = AbsoluteNativePath::from_utf8(
+            staging.to_str().expect("temporary staging path is UTF-8"),
+        )
+        .expect("staging path");
+        let first = StagingDirectory::activate(&path, &registry).expect("first generation");
+        assert!(
+            !staging
+                .join("0123456789abcdef0123456789abcdef.bin")
+                .exists()
+        );
+        assert!(!staging.join(".any-mcp-0123456789abcdef.tmp").exists());
+        assert!(staging.join(STAGING_LOCK_NAME).is_file());
+        assert!(StagingDirectory::activate(&path, &registry).is_err());
+        drop(first);
+        let second = StagingDirectory::activate(&path, &registry).expect("next generation");
+        drop(second);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 

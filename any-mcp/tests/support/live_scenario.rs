@@ -4340,6 +4340,16 @@ impl OptionalExecutableWorkflow {
 }
 
 const STATUS_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::OptionalToolsetStatus];
+const ARTIFACT_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::ArtifactRelease,
+    OptionalOperation::ArtifactStageUpload,
+    OptionalOperation::ArtifactStatus,
+    OptionalOperation::DocumentExport,
+    OptionalOperation::DocumentImportCreate,
+    OptionalOperation::DocumentImportUpdate,
+    OptionalOperation::FileExport,
+    OptionalOperation::FileImport,
+];
 const BODY_READ_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockList];
 const BODY_CREATE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockCreate];
 const BODY_UPDATE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockUpdate];
@@ -4428,8 +4438,8 @@ pub struct OptionalScenarioId {
 
 impl OptionalScenarioId {
     /// Exact executable scenario inventory owned by the common foundation and
-    /// the six linked production descriptors.
-    pub const EXECUTABLE: [Self; 66] = [
+    /// the seven linked production descriptors.
+    pub const EXECUTABLE: [Self; 69] = [
         define_fast_with_owner(
             "optional_toolset_status_direct_contract",
             OptionalRegistry::CommonFoundation,
@@ -4447,6 +4457,21 @@ impl OptionalScenarioId {
             OptionalRegistry::CommonFoundation,
             OptionalRealWorkflow::Members,
             STATUS_OPERATIONS,
+        ),
+        define_fast(
+            "artifact_local_direct",
+            OptionalFastWorkflow::Artifacts,
+            ARTIFACT_OPERATIONS,
+        ),
+        define_fast(
+            "artifact_local_stdio",
+            OptionalFastWorkflow::Artifacts,
+            ARTIFACT_OPERATIONS,
+        ),
+        define_real(
+            "artifact_local_real_headless",
+            OptionalRealWorkflow::Artifacts,
+            ARTIFACT_OPERATIONS,
         ),
         define_fast(
             "body_list_ordered_pages",
@@ -4907,7 +4932,7 @@ const fn optional_owner(
 }
 
 /// Exact fast and real-headless ownership for every optional operation.
-pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 62] = &[
+pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 78] = &[
     optional_owner(
         OptionalOperation::OptionalToolsetStatus,
         optional_fast("optional_toolset_status_direct_contract"),
@@ -4915,6 +4940,70 @@ pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 62] = &[
     optional_owner(
         OptionalOperation::OptionalToolsetStatus,
         optional_real("common_optional_status_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ArtifactRelease,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ArtifactRelease,
+        optional_real("artifact_local_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ArtifactStageUpload,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ArtifactStageUpload,
+        optional_real("artifact_local_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::ArtifactStatus,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::ArtifactStatus,
+        optional_real("artifact_local_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::DocumentExport,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::DocumentExport,
+        optional_real("artifact_local_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::DocumentImportCreate,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::DocumentImportCreate,
+        optional_real("artifact_local_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::DocumentImportUpdate,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::DocumentImportUpdate,
+        optional_real("artifact_local_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::FileExport,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::FileExport,
+        optional_real("artifact_local_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::FileImport,
+        optional_fast("artifact_local_direct"),
+    ),
+    optional_owner(
+        OptionalOperation::FileImport,
+        optional_real("artifact_local_real_headless"),
     ),
     optional_owner(
         OptionalOperation::BodyBlockList,
@@ -5190,6 +5279,14 @@ fn parse_resource(name: &str) -> Option<LiveOperation> {
 fn parse_optional_tool(name: &str) -> Option<OptionalOperation> {
     Some(match name {
         "optional_toolset_status" => OptionalOperation::OptionalToolsetStatus,
+        "artifact_release" => OptionalOperation::ArtifactRelease,
+        "artifact_stage_upload" => OptionalOperation::ArtifactStageUpload,
+        "artifact_status" => OptionalOperation::ArtifactStatus,
+        "document_export" => OptionalOperation::DocumentExport,
+        "document_import_create" => OptionalOperation::DocumentImportCreate,
+        "document_import_update" => OptionalOperation::DocumentImportUpdate,
+        "file_export" => OptionalOperation::FileExport,
+        "file_import" => OptionalOperation::FileImport,
         "body_block_list" => OptionalOperation::BodyBlockList,
         "body_block_create" => OptionalOperation::BodyBlockCreate,
         "body_block_update" => OptionalOperation::BodyBlockUpdate,
@@ -5687,7 +5784,7 @@ mod ownership_tests {
             optional_scenario_inventory(&declarations)
                 .expect("exact typed optional scenario inventory")
                 .len(),
-            66
+            69
         );
 
         let mut duplicate = declarations.clone();
@@ -5725,7 +5822,7 @@ mod ownership_tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 38);
         assert_eq!(resources.len(), 1);
         validate_optional_live_ownership(&tools, &resources, &scenarios)
             .expect("closed optional catalog parser inventory");
@@ -5891,13 +5988,13 @@ mod ownership_tests {
     }
 
     #[test]
-    fn optional_ownership_has_exact_two_tiers_for_thirty_one_operations() {
-        assert_eq!(OPTIONAL_LIVE_OWNERSHIP.len(), 62);
+    fn optional_ownership_has_exact_two_tiers_for_every_operation() {
+        assert_eq!(OPTIONAL_LIVE_OWNERSHIP.len(), 78);
         let operations = OPTIONAL_LIVE_OWNERSHIP
             .iter()
             .map(|owner| owner.operation)
             .collect::<HashSet<_>>();
-        assert_eq!(operations.len(), 31);
+        assert_eq!(operations.len(), 39);
         assert!(operations.iter().all(|operation| {
             OPTIONAL_LIVE_OWNERSHIP
                 .iter()

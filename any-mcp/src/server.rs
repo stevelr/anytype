@@ -772,15 +772,19 @@ enum SpacePolicyOwnership {
     FilteredGlobalDiscovery,
     OptionalResolvedSpace,
     ResolvedSpace,
+    OpaqueBoundSpace,
     ConditionalSpaceCreation,
 }
 
 fn tool_space_policy_ownership(name: &str) -> Option<SpacePolicyOwnership> {
     match name {
-        "server_status" | "optional_toolset_status" => Some(SpacePolicyOwnership::Global),
+        "server_status" | "optional_toolset_status" | "artifact_status" => {
+            Some(SpacePolicyOwnership::Global)
+        }
         "space_list" => Some(SpacePolicyOwnership::FilteredGlobalDiscovery),
         "object_search" => Some(SpacePolicyOwnership::OptionalResolvedSpace),
         "space_create" => Some(SpacePolicyOwnership::ConditionalSpaceCreation),
+        "artifact_release" => Some(SpacePolicyOwnership::OpaqueBoundSpace),
         "object_archive"
         | "object_create"
         | "object_edit"
@@ -809,6 +813,12 @@ fn tool_space_policy_ownership(name: &str) -> Option<SpacePolicyOwnership> {
         | "file_metadata"
         | "file_read"
         | "file_upload"
+        | "file_import"
+        | "file_export"
+        | "artifact_stage_upload"
+        | "document_export"
+        | "document_import_create"
+        | "document_import_update"
         | "collection_member_add"
         | "collection_member_list"
         | "collection_member_remove"
@@ -923,7 +933,8 @@ mod tests {
     const REPRESENTATIVE_RESULTS_SNAPSHOT: &str =
         include_str!("../tests/snapshots/result-representatives.json");
     const TOKEN_BUDGET_SNAPSHOT: &str = include_str!("../tests/snapshots/token-budget.json");
-    const OPTIONAL_READ_TOOL_NAMES: [&str; 12] = [
+    const OPTIONAL_READ_TOOL_NAMES: [&str; 13] = [
+        "artifact_status",
         "body_block_list",
         "chat_list",
         "chat_message_get",
@@ -937,9 +948,12 @@ mod tests {
         "optional_toolset_status",
         "type_get",
     ];
-    const OPTIONAL_CREATE_TOOL_NAMES: [&str; 8] = [
+    const OPTIONAL_CREATE_TOOL_NAMES: [&str; 11] = [
+        "artifact_stage_upload",
         "body_block_create",
         "chat_message_add",
+        "document_import_create",
+        "file_import",
         "file_upload",
         "property_create",
         "rich_page_create",
@@ -947,13 +961,17 @@ mod tests {
         "tag_create",
         "type_create",
     ];
-    const OPTIONAL_UPDATE_TOOL_NAMES: [&str; 10] = [
+    const OPTIONAL_UPDATE_TOOL_NAMES: [&str; 14] = [
+        "artifact_release",
         "body_block_delete",
         "body_block_move",
         "body_block_update",
         "chat_message_delete",
         "collection_member_add",
         "collection_member_remove",
+        "document_export",
+        "document_import_update",
+        "file_export",
         "property_update",
         "space_update",
         "tag_update",

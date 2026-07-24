@@ -154,7 +154,8 @@ stated maximum.
   comma-separated list of at most 16 linked optional registry names, sorted
   canonically at startup. Malformed, duplicate, unknown, and unfinished names
   fail closed without being echoed. The linked production names are
-  `body-blocks`, `chats`, `files`, `members`, `schema`, and `views-write`;
+  `artifacts`, `body-blocks`, `chats`, `files`, `members`, `schema`, and
+  `views-write`;
   acceptance-blocked
   `discussions` remains rejected;
 - `ANY_MCP_JSON_RESPONSE_BYTES` defaults to 8 MiB and has a maximum of 64 MiB;
@@ -171,8 +172,8 @@ Phase 1 startup retains the existing `anytype-api` behavior.
 
 ### Artifact policy file
 
-The optional artifact policy file reserves filesystem and space authority for
-the artifact workflow roadmap without adding ambient path access. Generate an
+The optional artifact policy file grants filesystem and space authority to the
+artifact workflows without adding ambient path access. Generate an
 owner-only starter file in the current directory, then validate it without
 starting Anytype:
 
@@ -215,6 +216,12 @@ path = "/absolute/operator-owned/import"
 [[roots.export]]
 id = "outbox"
 path = "/absolute/operator-owned/export"
+
+[staging]
+enabled = true
+root = "/absolute/operator-owned/private-staging"
+bind = "127.0.0.1:8765"
+public_base_url = "http://127.0.0.1:8765/artifacts/v1/"
 ```
 
 Import roots grant existing-file reads. Export roots grant create-new writes,
@@ -244,7 +251,75 @@ atomically publishes a complete create-new destination without replacing an
 existing entry. Failed, cancelled, and dropped exports remove only their
 private temporary file.
 
-Space policy is active independently of the future artifact registry. An
+Container bind mounts, Docker volumes, Nix bind mounts, and locally mounted
+encrypted or object-backed filesystems can be used when they satisfy the same
+capability checks. Mount type labels are advisory and are often hidden by a
+container or sandbox. Avoid NFS and other network mounts for active artifact
+roots because network stalls can cause unpredictable filesystem delays.
+
+### Token-free artifact workflows
+
+Select `ANY_MCP_TOOLSETS=artifacts` to move file and document payloads without
+putting their bytes in MCP messages:
+
+- `artifact_status` reports capability counts and availability;
+- `artifact_stage_upload` allocates an exact-size remote upload and returns the
+  bearer separately from its URL;
+- `artifact_release` removes one authenticated staged artifact;
+- `file_import` and `file_export` stream arbitrary MIME files between Anytype
+  and an authorized local root or remote stage; and
+- `document_import_create`, `document_import_update`, and `document_export`
+  transfer strict UTF-8 Markdown or plain text and return identities, counts,
+  hashes, and bounded receipts. Document creation can also apply up to 50 typed
+  properties validated against the resolved Anytype type.
+
+Local paths contain a logical root ID and relative path. If no roots are
+declared, root-based calls explain that you must select a policy file with
+`ANY_MCP_CONFIG` or `--config`. Imports verify source identity, size, and
+SHA-256 before mutation. Exports use create-new publication and never overwrite
+an existing destination. Document update requires the current canonical body
+hash and skips the mutation when the replacement is already canonical.
+
+Remote staging binds only a configured loopback address. An external deployment
+terminates HTTPS in a separately managed reverse proxy and points
+`public_base_url` at that proxy. Bearers remain in the `Authorization` header
+and are never embedded in URLs. The server does not fetch URLs. A workflow that
+downloads a user-supplied link must do that outside any-mcp before staging the
+result.
+
+Configured `file-mime` validators use a pinned native executable, fixed
+arguments, a cleared environment, bounded input and output, a process deadline,
+and a process-group boundary. Required validator failures block the operation;
+optional failures produce a bounded receipt category. MCP callers cannot
+provide executable paths, flags, environment variables, or validator command
+templates.
+
+Validator execution is currently available on Linux. macOS and Windows retain
+the validated configuration but report the validator unavailable until their
+retained-handle sandbox implementations land; a required validator therefore
+blocks matching operations on those platforms.
+
+```toml
+[[validators]]
+id = "mime"
+driver = "file-mime"
+path = "/absolute/path/to/native-file-executable"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+required = false
+mime = ["*/*"]
+timeout_secs = 5
+memory_bytes = 268435456
+input_bytes = 268435456
+stdout_bytes = 65536
+stderr_bytes = 65536
+fields = 32
+field_bytes = 4096
+platform = "linux-retained-fd-v1"
+```
+
+Replace the zero digest with the lowercase SHA-256 of the admitted executable.
+
+Space policy is active independently of the artifact registry. An
 omitted `spaces.allowed` permits every space that the configured Anytype
 account can otherwise access. An explicit empty array permits none. ID entries
 are validated directly; name entries resolve once during authenticated
@@ -265,23 +340,19 @@ filtered-global, optional-resolved, resolved-space, or conditional-create
 policy owner. It rejects an unclassified tool or resource family, so adding a
 new catalog operation cannot silently omit the space boundary.
 
-The `artifacts` registry and its transfer tools remain roadmap work. Until that
-registry is linked, the server validates and retains this policy but does not
-open roots, bind staging, or inspect validator executables.
-
-The offline production integration matrix composes all six linked registries
+The offline production integration matrix composes all seven linked registries
 together in compact and standard, read-write and read-only configurations. It
 locks their exact catalogs and canonical status, stable/preview contract
 identity, gRPC requirement union, disabled stale-call rejection, and aggregate
 `o200k_base` catalog cost. The same matrix proves that an absent selector leaves
 all four reviewed Phase 1 catalog snapshots and `server_status` unchanged. A
 leave-one-registry-out sweep also proves that every omitted registry remains
-unreachable while the other five are active.
-The production ownership audit independently binds each of the 29 domain tools,
+unreachable while the other six are active.
+The production ownership audit independently binds each of the 37 domain tools,
 `optional_toolset_status`, and the file byte-resource family to one fast and one
 real-headless executable scenario. It rejects missing, duplicate, unknown, or
 untyped catalog and scenario entries. Compile-bound runner tables execute all
-seven fast workflow groups and all six spawned real-headless registry
+eight fast workflow groups and all seven spawned real-headless registry
 workflows. The files workflow verifies real upload, metadata, bounded reads,
 resources, independent download, diagnostics, and cleanup. A separate
 all-selected sentinel composes stable read-write and preview read-only children

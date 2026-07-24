@@ -7,6 +7,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptionalRegistry {
     CommonFoundation,
+    Artifacts,
     BodyBlocks,
     Chats,
     Files,
@@ -20,7 +21,8 @@ impl OptionalRegistry {
     ///
     /// The common foundation is an owner, not a selectable descriptor.
     #[allow(dead_code)] // Shared support targets do not all enumerate runners.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::Artifacts,
         Self::BodyBlocks,
         Self::Chats,
         Self::Files,
@@ -33,6 +35,7 @@ impl OptionalRegistry {
     #[allow(dead_code)] // This shared support module is compiled by targets without descriptors.
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
+            "artifacts" => Self::Artifacts,
             "body-blocks" => Self::BodyBlocks,
             "chats" => Self::Chats,
             "files" => Self::Files,
@@ -47,6 +50,7 @@ impl OptionalRegistry {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CommonFoundation => "common-foundation",
+            Self::Artifacts => "artifacts",
             Self::BodyBlocks => "body-blocks",
             Self::Chats => "chats",
             Self::Files => "files",
@@ -61,6 +65,14 @@ impl OptionalRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptionalOperation {
     OptionalToolsetStatus,
+    ArtifactRelease,
+    ArtifactStageUpload,
+    ArtifactStatus,
+    DocumentExport,
+    DocumentImportCreate,
+    DocumentImportUpdate,
+    FileExport,
+    FileImport,
     BodyBlockList,
     BodyBlockCreate,
     BodyBlockUpdate,
@@ -95,8 +107,16 @@ pub enum OptionalOperation {
 
 impl OptionalOperation {
     /// Every production optional tool and resource-family operation.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 39] = [
         Self::OptionalToolsetStatus,
+        Self::ArtifactRelease,
+        Self::ArtifactStageUpload,
+        Self::ArtifactStatus,
+        Self::DocumentExport,
+        Self::DocumentImportCreate,
+        Self::DocumentImportUpdate,
+        Self::FileExport,
+        Self::FileImport,
         Self::BodyBlockList,
         Self::BodyBlockCreate,
         Self::BodyBlockUpdate,
@@ -133,6 +153,14 @@ impl OptionalOperation {
     pub const fn tool_name(self) -> Option<&'static str> {
         Some(match self {
             Self::OptionalToolsetStatus => "optional_toolset_status",
+            Self::ArtifactRelease => "artifact_release",
+            Self::ArtifactStageUpload => "artifact_stage_upload",
+            Self::ArtifactStatus => "artifact_status",
+            Self::DocumentExport => "document_export",
+            Self::DocumentImportCreate => "document_import_create",
+            Self::DocumentImportUpdate => "document_import_update",
+            Self::FileExport => "file_export",
+            Self::FileImport => "file_import",
             Self::BodyBlockList => "body_block_list",
             Self::BodyBlockCreate => "body_block_create",
             Self::BodyBlockUpdate => "body_block_update",
@@ -180,6 +208,14 @@ impl OptionalOperation {
     pub const fn registry(self) -> OptionalRegistry {
         match self {
             Self::OptionalToolsetStatus => OptionalRegistry::CommonFoundation,
+            Self::ArtifactRelease
+            | Self::ArtifactStageUpload
+            | Self::ArtifactStatus
+            | Self::DocumentExport
+            | Self::DocumentImportCreate
+            | Self::DocumentImportUpdate
+            | Self::FileExport
+            | Self::FileImport => OptionalRegistry::Artifacts,
             Self::MemberList | Self::MemberGet => OptionalRegistry::Members,
             Self::BodyBlockList
             | Self::BodyBlockCreate
@@ -215,6 +251,14 @@ impl OptionalOperation {
     pub const fn fast_workflow(self) -> OptionalFastWorkflow {
         match self {
             Self::OptionalToolsetStatus => OptionalFastWorkflow::OptionalStatus,
+            Self::ArtifactRelease
+            | Self::ArtifactStageUpload
+            | Self::ArtifactStatus
+            | Self::DocumentExport
+            | Self::DocumentImportCreate
+            | Self::DocumentImportUpdate
+            | Self::FileExport
+            | Self::FileImport => OptionalFastWorkflow::Artifacts,
             Self::BodyBlockList
             | Self::BodyBlockCreate
             | Self::BodyBlockUpdate
@@ -249,6 +293,14 @@ impl OptionalOperation {
     /// Production registry whose spawned workflow owns this operation's real evidence.
     pub const fn real_workflow(self) -> OptionalRealWorkflow {
         match self {
+            Self::ArtifactRelease
+            | Self::ArtifactStageUpload
+            | Self::ArtifactStatus
+            | Self::DocumentExport
+            | Self::DocumentImportCreate
+            | Self::DocumentImportUpdate
+            | Self::FileExport
+            | Self::FileImport => OptionalRealWorkflow::Artifacts,
             Self::OptionalToolsetStatus | Self::MemberList | Self::MemberGet => {
                 OptionalRealWorkflow::Members
             }
@@ -287,6 +339,7 @@ impl OptionalOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptionalFastWorkflow {
     OptionalStatus,
+    Artifacts,
     BodyBlocks,
     Chats,
     Files,
@@ -296,9 +349,10 @@ pub enum OptionalFastWorkflow {
 }
 
 impl OptionalFastWorkflow {
-    /// The common status workflow followed by all six production registries.
-    pub const ALL: [Self; 7] = [
+    /// The common status workflow followed by all seven production registries.
+    pub const ALL: [Self; 8] = [
         Self::OptionalStatus,
+        Self::Artifacts,
         Self::BodyBlocks,
         Self::Chats,
         Self::Files,
@@ -314,6 +368,7 @@ impl OptionalFastWorkflow {
     pub const fn carrier_registry(self) -> OptionalRegistry {
         match self {
             Self::OptionalStatus | Self::Members => OptionalRegistry::Members,
+            Self::Artifacts => OptionalRegistry::Artifacts,
             Self::BodyBlocks => OptionalRegistry::BodyBlocks,
             Self::Chats => OptionalRegistry::Chats,
             Self::Files => OptionalRegistry::Files,
@@ -326,6 +381,7 @@ impl OptionalFastWorkflow {
 /// Closed inventory of production registries with executable real-headless workflows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptionalRealWorkflow {
+    Artifacts,
     BodyBlocks,
     Chats,
     Files,
@@ -336,7 +392,8 @@ pub enum OptionalRealWorkflow {
 
 impl OptionalRealWorkflow {
     /// Every production registry that must run through a spawned headless process.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::Artifacts,
         Self::BodyBlocks,
         Self::Chats,
         Self::Files,
@@ -348,6 +405,7 @@ impl OptionalRealWorkflow {
     /// Registry whose spawned production routing carries this workflow.
     pub const fn carrier_registry(self) -> OptionalRegistry {
         match self {
+            Self::Artifacts => OptionalRegistry::Artifacts,
             Self::BodyBlocks => OptionalRegistry::BodyBlocks,
             Self::Chats => OptionalRegistry::Chats,
             Self::Files => OptionalRegistry::Files,

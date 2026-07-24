@@ -8,6 +8,23 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Link the default-off `artifacts` registry with eight payload-free workflows.
+  Arbitrary MIME files and strict UTF-8 Markdown/plain text move through
+  configured capability-relative roots or an authenticated loopback staging
+  service; MCP arguments and results contain only logical locations, opaque
+  handles, identities, counts, hashes, MIME evidence, and bounded receipts.
+  Imports retain and revalidate source handles before one non-replayed Anytype
+  mutation. Exports stream into create-new atomic destinations. Document create
+  supports bounded typed properties; update requires the current canonical body
+  hash and recognizes verified no-ops.
+  Staging uses exact-size quota reservations, expiring secret handles,
+  sequential resumable upload ranges, immutable full or single-range downloads,
+  fixed Host/Origin/header policy, and explicit release. On Linux, optional
+  startup-pinned `file-mime` validators run a fixed native-binary contract with cleared
+  environment, bounded I/O, process and aggregate input limits, timeout, and
+  required or optional failure policy. Add closed schemas, catalog token
+  snapshots, strict text, handle, staging HTTP, idempotency, and typed
+  fast/real-headless ownership tests.
 - Add `any-mcp config init` to create an owner-only, valid starter policy with
   create-new semantics, and `any-mcp config check` to apply normal secure-file
   and schema validation without starting Anytype. Both accept `-c FILE` or
@@ -31,9 +48,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   ownership, permissions or ACLs, hard links, reparse points, and filesystem
   boundary changes. Exports write bounded owner-private temporaries and publish
   complete create-new destinations atomically without overwrite; cancellation
-  and failures remove the private temporary. The future `artifacts` registry
-  remains unlinked, so configured roots, staging, and validators perform no
-  activation I/O in the current catalog.
+  and failures remove the private temporary. Roots, staging, and validators
+  activate only when the `artifacts` registry is selected in writable mode.
 - Enforce selected Anytype space policy through one frozen startup authority.
   Omitted and explicit-empty allowlists remain distinct; configured names
   resolve once to canonical IDs, and post-resolution aliases or duplicates

@@ -5,33 +5,39 @@
     "compact_read_only": {
       "base_sha256": "a48ad91bbadf5998424432022add295fa273ac6584dc87032925c1ec303e452c",
       "base_tokens": 8369,
-      "selected_contribution_tokens": 12235,
-      "selected_sha256": "d724a7020dd510023eed2afd084c0d4ad92a3b0b0495f0a4299b867dcda542ee",
-      "selected_tokens": 20604
+      "selected_contribution_tokens": 12564,
+      "selected_sha256": "a8939fea2d3c9ebcdf549053021cb27cf60262641f6b24884fc81d9ae8417e65",
+      "selected_tokens": 20933
     },
     "compact_read_write": {
       "base_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
       "base_tokens": 9658,
-      "selected_contribution_tokens": 43598,
-      "selected_sha256": "91066f6662965729e19e2f3850300195779c35862796d335abd1978e32dfc0a4",
-      "selected_tokens": 53256
+      "selected_contribution_tokens": 52158,
+      "selected_sha256": "54bbe98822fd78b83dad9000412f3dc40b544f740091f3007c67dc2b544b5725",
+      "selected_tokens": 61816
     },
     "standard_read_only": {
       "base_sha256": "c1bef45de82bc2614a4981f1da260d01e29008d4ca1f7e41470803733f12a7e3",
       "base_tokens": 28880,
-      "selected_contribution_tokens": 12235,
-      "selected_sha256": "289a1bb0ce7e157a1d45d76ec0e435b20964c7c5f84321b47a4799b71f9cf8dd",
-      "selected_tokens": 41115
+      "selected_contribution_tokens": 12564,
+      "selected_sha256": "0f6f8e34c35519a0302cb2e1b15b3ca9c5eee4df8b01cbd4a9968172b98ca3f8",
+      "selected_tokens": 41444
     },
     "standard_read_write": {
       "base_sha256": "4e03af8ea8a70e14b4d75cb4f3a979e3c871f0e784888b79a0ff38b820812342",
       "base_tokens": 36135,
-      "selected_contribution_tokens": 43598,
-      "selected_sha256": "ffd93895e2c6525127eb9e819486952091c5cfa6a2d12abb10afab3f77083e48",
-      "selected_tokens": 79733
+      "selected_contribution_tokens": 52158,
+      "selected_sha256": "84bb28206cf8fece1a1cc042ace8f3605145cc928c5682efd5296a286d74935f",
+      "selected_tokens": 88293
     }
   },
   "registry_budgets": {
+    "artifacts": {
+      "catalog_ceiling_tokens": 12000,
+      "domain_tokens": 8560,
+      "selected_contribution_tokens": 8816,
+      "tool_count": 8
+    },
     "body-blocks": {
       "catalog_ceiling_tokens": 25108,
       "domain_tokens": 24394,
@@ -69,7 +75,7 @@
       "tool_count": 3
     }
   },
-  "registry_ceiling_tokens": 51008,
-  "selected": ["body-blocks", "chats", "files", "members", "schema", "views-write"],
+  "registry_ceiling_tokens": 63008,
+  "selected": ["artifacts", "body-blocks", "chats", "files", "members", "schema", "views-write"],
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }
