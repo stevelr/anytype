@@ -39,6 +39,24 @@ permissions:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch or tag to build
+        required: true
+        default: main
+        type: string
+      architecture:
+        description: Architecture to build
+        required: true
+        default: All
+        type: choice
+        options:
+          - All
+          - aarch64-apple-darwin
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
   pull_request:
   push:
     tags:
@@ -50,16 +68,18 @@ jobs:
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
-      publishing: ${{ !github.event.pull_request }}
+      tag: ${{ github.event_name == 'push' && github.ref_name || '' }}
+      tag-flag: ${{ github.event_name == 'push' && format('--tag={0}', github.ref_name) || '' }}
+      publishing: ${{ github.event_name == 'push' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SELECTED_ARCHITECTURE: ${{ inputs.architecture || 'All' }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -77,7 +97,14 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         run: |
-          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          dist ${{ (github.event_name == 'push' && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          if [[ "$SELECTED_ARCHITECTURE" != "All" ]]; then
+            jq --arg target "$SELECTED_ARCHITECTURE" \
+              '.ci.github.artifacts_matrix.include |= map(select(.targets | index($target)))' \
+              plan-dist-manifest.json > selected-plan-dist-manifest.json
+            test "$(jq '.ci.github.artifacts_matrix.include | length' selected-plan-dist-manifest.json)" -gt 0
+            mv selected-plan-dist-manifest.json plan-dist-manifest.json
+          fi
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -93,7 +120,7 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (github.event_name == 'workflow_dispatch' || needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -120,6 +147,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -171,6 +199,7 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.architecture == 'All' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -179,6 +208,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
       - name: Install cached dist
         uses: actions/download-artifact@v4
         with:

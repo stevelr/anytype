@@ -13,6 +13,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and schema validation without starting Anytype. Both accept `-c FILE` or
   `--config FILE`. Add `-V` and `--version` for the executable and Cargo
   package version, and accept `-c ABSOLUTE_PATH` as the server selector alias.
+- Add a build-only manual release-workflow trigger with an explicit source
+  branch or tag and a choice of every supported cargo-dist target or all
+  targets. Manual runs cannot enter release or Homebrew publication jobs.
 - Add the startup artifact policy foundation. `--config ABSOLUTE_PATH` takes
   precedence over `ANY_MCP_CONFIG`, with no filename discovery and safe
   no-file defaults. Selected owner-controlled TOML files use a closed version

@@ -1383,6 +1383,11 @@ Windows. The process harness uses only portable Rust process, TCP, path,
 environment, thread, and channel APIs; it does not depend on Unix signals,
 `/tmp`, executable suffixes, or shell scripts.
 
+The release workflow can also be started manually for a selected branch or
+tag. Manual runs build either all cargo-dist targets or one selected target
+from the supported architecture list. They upload build artifacts for
+inspection but never publish a GitHub release or Homebrew formula.
+
 The test harness treats transport and upstream backend as independent axes.
 Ordinary tests use the in-process router or the real stdio binary with a
 scripted HTTP fixture for deterministic protocol and handler feedback. The
