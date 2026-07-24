@@ -1,12 +1,11 @@
 {
   description = "Anytype rust tools and client library";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     fenix = {
       url = "github:nix-community/fenix";
-      #inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
@@ -30,82 +29,39 @@
             sha256 = "sha256-A1abGIbOtcBSdrUMhDGrER3pRM1hQP4fp9gh3Y4PKc8=";
           };
           toolchainNightly = inputs.fenix.packages.${system}.latest.toolchain;
-          mkAnytypeBin =
+          workspace-version = (fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+          mkAnytypeToolbox =
             {
-              name,
-              version,
-              packageSet ? pkgs,
-              rustNightlyToolchain ? toolchainNightly,
-              rustToolchain ? toolchain,
-              buildFeatures ? [ ],
+              version ? workspace-version,
               doCheck ? true,
               cargoBuildFlags ? [ ],
               nightly ? false,
             }:
-            let
-              buildProtobuf = packageSet.buildPackages.protobuf;
-            in
-            (packageSet.makeRustPlatform {
-              cargo = if nightly then rustNightlyToolchain else rustToolchain;
-              rustc = if nightly then rustNightlyToolchain else rustToolchain;
+            (pkgs.makeRustPlatform {
+              cargo = if nightly then toolchainNightly else toolchain;
+              rustc = if nightly then toolchainNightly else toolchain;
             }).buildRustPackage
               {
                 inherit
-                  name
                   version
-                  buildFeatures
                   cargoBuildFlags
                   doCheck
                   ;
+                name = "Anytype Toolbox";
                 #postInstall = lib.optionalString installManPages manPagesPostInstall + postInstall;
                 cargoLock.lockFile = ./Cargo.lock;
                 src = ./.;
-                nativeBuildInputs = [ buildProtobuf ];
-                PROTOC = "${buildProtobuf}/bin/protoc";
-                PROTOC_INCLUDE = "${buildProtobuf}/include";
+                nativeBuildInputs = [ pkgs.protobuf ];
+                PROTOC = "${pkgs.protobuf}/bin/protoc";
+                PROTOC_INCLUDE = "${pkgs.protobuf}/include";
                 SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-                meta = with packageSet.lib; {
-                  description = "anytype FIXME";
+                meta = with pkgs.lib; {
+                  description = "anytype Rust Tools";
                   homepage = "https://github.com/stevelr/anytype";
                   license = licenses.asl20;
                   mainProgram = "anyr";
                 };
               };
-          anyr-version = (fromTOML (builtins.readFile ./anyr/Cargo.toml)).package.version;
-          any-mcp-version = (fromTOML (builtins.readFile ./anyr/Cargo.toml)).package.version;
-          #lib-version = (fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-          any-mcp = mkAnytypeBin {
-            name = "any-mcp";
-            version = any-mcp-version;
-            cargoBuildFlags = [
-              "--package"
-              "any-mcp"
-            ];
-          };
-          anyr = mkAnytypeBin {
-            name = "anyr";
-            version = anyr-version;
-            cargoBuildFlags = [
-              "--package"
-              "anyr"
-            ];
-          };
-          any-edit = mkAnytypeBin {
-            name = "any-edit";
-            version = (fromTOML (builtins.readFile ./any-edit/Cargo.toml)).package.version;
-            cargoBuildFlags = [
-              "--package"
-              "any-edit"
-            ];
-          };
-          anyback = mkAnytypeBin {
-            name = "anyback";
-            version = (fromTOML (builtins.readFile ./anyback/Cargo.toml)).package.version;
-            cargoBuildFlags = [
-              "--package"
-              "anyback"
-            ];
-          };
           anytype-cli = pkgs.stdenv.mkDerivation (
             let
               version = "0.3.6";
@@ -139,31 +95,14 @@
               };
             }
           );
+          anytype-toolbox = mkAnytypeToolbox {
+            version = workspace-version;
+            nightly = false;
+          };
+
         in
         {
-          packages.any-edit = any-edit;
-          packages.anyr = anyr;
-          packages.anyback = anyback;
-          packages.any-mcp = pkgs.symlinkJoin {
-            name = "any-mcp";
-            version = any-mcp-version;
-            paths = [
-              any-mcp
-              anyr
-              anytype-cli
-            ];
-          };
-          #packages.anytype-cli = anytype-cli;
-          packages.default = pkgs.symlinkJoin {
-            name = "anytype";
-            version = anyr-version;
-            paths = [
-              any-mcp
-              any-edit
-              anyr
-              anyback
-            ];
-          };
+          packages.default = anytype-toolbox;
           devShells.default = pkgs.mkShell {
             nativeBuildInputs = [
               pkgs.jq
