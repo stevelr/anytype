@@ -161,12 +161,20 @@ impl AnyMcpServer {
     /// or if a typed schema, cursor store, or exact static inventory cannot be
     /// constructed safely.
     pub fn new(runtime: RuntimeContext) -> Result<Self, ServerBuildError> {
-        Self::new_with_optional_registries(runtime, production_optional_registries())
+        Self::build_with_optional_registries(runtime, production_optional_registries(), true)
     }
 
     pub(crate) fn new_with_optional_registries(
         runtime: RuntimeContext,
         linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],
+    ) -> Result<Self, ServerBuildError> {
+        Self::build_with_optional_registries(runtime, linked_optional_registries, false)
+    }
+
+    fn build_with_optional_registries(
+        runtime: RuntimeContext,
+        linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],
+        validate_production_space_policy: bool,
     ) -> Result<Self, ServerBuildError> {
         let availability = runtime.startup_status();
         if !availability.http_available
@@ -285,6 +293,17 @@ impl AnyMcpServer {
             &optional_tool_names,
             optional_catalog.is_selected(),
         )?;
+        let resource_uris = resource_instances
+            .iter()
+            .map(|resource| resource.uri.as_ref())
+            .collect::<Vec<_>>();
+        let resource_template_uris = resource_templates
+            .iter()
+            .map(|template| template.uri_template.as_ref())
+            .collect::<Vec<_>>();
+        if validate_production_space_policy {
+            validate_space_policy_ownership(&tools, &resource_uris, &resource_template_uris)?;
+        }
 
         Ok(Self {
             runtime: runtime.clone(),
@@ -741,6 +760,86 @@ fn validate_catalog(
             .iter()
             .map(|tool| tool.name.as_ref())
             .ne(expected.iter().map(String::as_str))
+    {
+        return Err(ServerBuildError);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpacePolicyOwnership {
+    Global,
+    FilteredGlobalDiscovery,
+    OptionalResolvedSpace,
+    ResolvedSpace,
+    ConditionalSpaceCreation,
+}
+
+fn tool_space_policy_ownership(name: &str) -> Option<SpacePolicyOwnership> {
+    match name {
+        "server_status" | "optional_toolset_status" => Some(SpacePolicyOwnership::Global),
+        "space_list" => Some(SpacePolicyOwnership::FilteredGlobalDiscovery),
+        "object_search" => Some(SpacePolicyOwnership::OptionalResolvedSpace),
+        "space_create" => Some(SpacePolicyOwnership::ConditionalSpaceCreation),
+        "object_archive"
+        | "object_create"
+        | "object_edit"
+        | "object_get"
+        | "object_update"
+        | "property_list"
+        | "tag_list"
+        | "template_list"
+        | "type_list"
+        | "view_list"
+        | "view_object_list"
+        | "body_block_create"
+        | "body_block_delete"
+        | "body_block_list"
+        | "body_block_move"
+        | "body_block_update"
+        | "rich_page_create"
+        | "chat_list"
+        | "chat_message_add"
+        | "chat_message_delete"
+        | "chat_message_get"
+        | "chat_message_list"
+        | "chat_message_search"
+        | "member_get"
+        | "member_list"
+        | "file_metadata"
+        | "file_read"
+        | "file_upload"
+        | "collection_member_add"
+        | "collection_member_list"
+        | "collection_member_remove"
+        | "property_create"
+        | "property_update"
+        | "space_update"
+        | "tag_create"
+        | "tag_update"
+        | "type_create"
+        | "type_get"
+        | "type_update" => Some(SpacePolicyOwnership::ResolvedSpace),
+        _ => None,
+    }
+}
+
+fn validate_space_policy_ownership(
+    tools: &[Tool],
+    resource_uris: &[&str],
+    resource_template_uris: &[&str],
+) -> Result<(), ServerBuildError> {
+    if tools
+        .iter()
+        .any(|tool| tool_space_policy_ownership(tool.name.as_ref()).is_none())
+        || !resource_uris.is_empty()
+        || resource_template_uris.iter().any(|uri| {
+            !matches!(
+                *uri,
+                "anytype://spaces/{space_id}/objects/{object_id}"
+                    | "anytype-file://bytes/{space_id}/{file_id}/{offset}/{length}/{sha256}"
+            )
+        })
     {
         return Err(ServerBuildError);
     }

@@ -399,6 +399,9 @@ impl SchemaSpaceHandlers {
             if let Err(error) = require_mutation_access(access) {
                 return tool_error(error.tool_error());
             }
+            if !runtime.space_authority().permits_space_creation() {
+                return tool_error(&ToolError::authentication());
+            }
             let normalized = NormalizedSpaceCreate::from(input);
             let Some(key) = normalized.idempotency_key.clone() else {
                 let progress = MutationProgress::new();
@@ -768,6 +771,7 @@ mod tests {
         },
         runtime::StartupStatus,
         server::AnyMcpServer,
+        space_policy::{SpaceAuthority, SpacePolicy},
     };
 
     const SPACE_ID: &str =
@@ -882,6 +886,28 @@ mod tests {
         .expect("schema-space no-I/O client");
         client.set_api_key(HttpCredentials::new("unused-no-io-token"));
         runtime(client, read_only)
+    }
+
+    fn restricted_no_io_runtime() -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("schema-space-policy-test".to_owned()),
+            app_name: "schema-space-policy-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("schema-space policy client");
+        client.set_api_key(HttpCredentials::new("unused-policy-token"));
+        RuntimeContext::from_parts_with_space_authority(
+            client,
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+            SpaceAuthority::from_policy_for_tests(SpacePolicy::None),
+        )
     }
 
     fn server(runtime: RuntimeContext, handlers: SchemaSpaceHandlers) -> AnyMcpServer {
@@ -1200,6 +1226,28 @@ mod tests {
                 0
             );
         }
+    });
+
+    large_async_test!(restricted_policy_rejects_space_create_before_io, {
+        let runtime = restricted_no_io_runtime();
+        let metrics = runtime.clone();
+        let input =
+            serde_json::from_value(json!({"name":"Denied create"})).expect("valid create input");
+        let result = handlers()
+            .space_create(
+                &runtime,
+                MutationAccess::Allowed,
+                input,
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.as_ref().expect("error")["code"],
+            "authentication"
+        );
+        assert_eq!(metrics.client().http_metrics().total_requests, 0);
     });
 
     large_async_test!(preview_stdio_rejects_invalid_and_read_only_before_io, {

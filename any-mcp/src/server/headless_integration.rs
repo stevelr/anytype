@@ -2115,7 +2115,7 @@ fn advertised_catalog_has_exact_live_scenario_ownership() {
 }
 
 #[test]
-fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
+fn advertised_optional_catalog_has_exact_typed_scenario_and_space_policy_ownership() {
     let metadata = production_optional_metadata();
     let selector = metadata
         .iter()
@@ -2146,6 +2146,28 @@ fn advertised_optional_catalog_has_exact_typed_scenario_ownership() {
         selection,
     );
     let server = AnyMcpServer::new(runtime).expect("all-selected production optional catalog");
+    let ownership = server
+        .tools()
+        .iter()
+        .map(|tool| {
+            tool_space_policy_ownership(tool.name.as_ref())
+                .unwrap_or_else(|| panic!("missing space-policy owner for {}", tool.name))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ownership.len(), 44);
+    for (kind, expected) in [
+        (SpacePolicyOwnership::Global, 2),
+        (SpacePolicyOwnership::FilteredGlobalDiscovery, 1),
+        (SpacePolicyOwnership::OptionalResolvedSpace, 1),
+        (SpacePolicyOwnership::ResolvedSpace, 39),
+        (SpacePolicyOwnership::ConditionalSpaceCreation, 1),
+    ] {
+        assert_eq!(
+            ownership.iter().filter(|actual| **actual == kind).count(),
+            expected,
+            "{kind:?}"
+        );
+    }
 
     let phase_one = ALL_TOOL_NAMES.iter().copied().collect::<HashSet<_>>();
     let optional_tools = server

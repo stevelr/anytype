@@ -52,6 +52,7 @@ use crate::{
         ControlledOperationError, OperationContext, OperationFailureDiagnostic, RuntimeContext,
     },
     schema::SchemaContractError,
+    space_policy::PolicyClient,
     validation::{Omittable, optional_non_null_schema},
 };
 
@@ -1514,6 +1515,14 @@ impl FileContentHandlers {
     ) -> Result<ReadResourceResult, ErrorData> {
         let parsed = FileResourceUri::parse(&request.uri)
             .map_err(|_| ErrorData::invalid_params(INVALID_RESOURCE_URI, None))?;
+        if self
+            .runtime
+            .space_authority()
+            .authorize_id(&parsed.space_id)
+            .is_err()
+        {
+            return Err(ErrorData::internal_error(RESOURCE_UPSTREAM, None));
+        }
         let client = self.runtime.client();
         let result = self
             .runtime
@@ -1947,7 +1956,7 @@ fn decode_arguments<T: for<'de> Deserialize<'de>>(
 }
 
 async fn exact_space_and_preflight(
-    client: &anytype::prelude::AnytypeClient,
+    client: &PolicyClient,
     space: &SpaceRef,
     file_id: &EntityId,
 ) -> Result<(SpaceId, EntityId), FileOperationError> {
@@ -2650,6 +2659,7 @@ mod tests {
         optional_toolsets::{OptionalToolsetSelection, production_optional_metadata},
         runtime::StartupStatus,
         server::AnyMcpServer,
+        space_policy::{SpaceAuthority, SpacePolicy},
     };
 
     const SPACE_ID: &str =
@@ -2693,6 +2703,19 @@ mod tests {
         .expect("catalog client");
         client.set_api_key(HttpCredentials::new("catalog-test-token"));
         client
+    }
+
+    fn restricted_runtime() -> RuntimeContext {
+        RuntimeContext::from_parts_with_space_authority(
+            catalog_client(),
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+            SpaceAuthority::from_policy_for_tests(SpacePolicy::None),
+        )
     }
 
     fn production_files_server(client: AnytypeClient, read_only: bool) -> AnyMcpServer {
@@ -3249,6 +3272,34 @@ mod tests {
         let empty_hash = FileSha256::digest(&[]);
         assert!(FileResourceUri::new(&space, &file, JsonSafeInteger(0), 0, &empty_hash).is_ok());
         assert!(FileResourceUri::new(&space, &file, JsonSafeInteger(1), 0, &empty_hash).is_err());
+    }
+
+    #[tokio::test]
+    async fn restricted_policy_rejects_exact_file_resource_before_io() {
+        let runtime = restricted_runtime();
+        let metrics = runtime.clone();
+        let handlers = FileContentHandlers::new(runtime).expect("handlers");
+        let space = SpaceId::new(SPACE_ID).expect("space");
+        let file = EntityId::new(FILE_ID).expect("file");
+        let uri = FileResourceUri::new(
+            &space,
+            &file,
+            JsonSafeInteger(0),
+            1,
+            &FileSha256::digest(b"x"),
+        )
+        .expect("resource URI");
+
+        let error = handlers
+            .read_resource(
+                ReadResourceRequestParams::new(uri.as_str()),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("policy denial");
+
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(metrics.client().http_metrics().total_requests, 0);
     }
 
     #[test]

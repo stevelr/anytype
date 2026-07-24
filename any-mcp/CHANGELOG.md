@@ -38,11 +38,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Omitted and explicit-empty allowlists remain distinct; configured names
   resolve once to canonical IDs, and post-resolution aliases or duplicates
   fail closed. The runtime's policy-aware client checks every ordinary
-  `resolve_space_id` result before domain I/O, while exact-ID document
-  resources check the same authority before HTTP. Restricted `space_list`
-  scans under finite page and row ceilings, removes disallowed and malformed
-  evidence before result construction, ignores upstream totals, and issues a
-  cursor only after observing another permitted row.
+  or response-bounded resolver result before domain I/O, while exact-ID
+  document and file resources check the same authority before HTTP.
+  Restricted policy rejects unscoped object search and creation of an
+  identifier not knowable at startup. Restricted `space_list` scans under
+  finite page and row ceilings, removes disallowed and malformed evidence
+  before result construction, ignores upstream totals, and issues a cursor
+  only after observing another permitted row. Catalog construction also
+  rejects every tool or resource family without an explicit policy owner.
 - Complete the terminal v1 acceptance matrix with 27 ignored library
   real-headless cases, all using prefix-authorized disposable spaces, and 21
   ignored spawned-stdio cases. The files workflow now proves native

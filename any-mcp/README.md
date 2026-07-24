@@ -249,13 +249,21 @@ omitted `spaces.allowed` permits every space that the configured Anytype
 account can otherwise access. An explicit empty array permits none. ID entries
 are validated directly; name entries resolve once during authenticated
 startup, and the resulting canonical ID set stays fixed for the process.
-Every ordinary space resolver checks that set before constructing a domain
-request. Exact-ID document resources perform the same check before HTTP.
+Every ordinary or response-bounded space resolver checks that set before
+constructing a domain request. Exact-ID document and file resources perform
+the same check before HTTP. A restricted policy rejects global
+`object_search` unless a space is supplied, and only an omitted allowlist may
+create a new space whose identifier was not knowable at startup.
 `space_list` filters disallowed rows before output and, under a restricted
 policy, scans at most 10 upstream pages and the configured
 `limits.discovery_rows` ceiling. Its opaque cursor is issued only when another
 permitted row was observed, so disallowed identities, totals, and continuation
 hints do not enter the result.
+
+Catalog construction assigns every advertised tool to an explicit global,
+filtered-global, optional-resolved, resolved-space, or conditional-create
+policy owner. It rejects an unclassified tool or resource family, so adding a
+new catalog operation cannot silently omit the space boundary.
 
 The `artifacts` registry and its transfer tools remain roadmap work. Until that
 registry is linked, the server validates and retains this policy but does not

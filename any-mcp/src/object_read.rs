@@ -31,6 +31,7 @@ use crate::{
     object_output::{ObjectOutput, ProjectionMode, normalized_projection_keys, object_output},
     pagination::{Page, PageLimit},
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
+    result::tool_error,
     runtime::{OperationContext, RuntimeContext},
     schema::SchemaContractError,
     validation::{
@@ -183,6 +184,9 @@ impl ObjectReadHandlers {
         input: ObjectSearchInput,
         cancellation: &CancellationToken,
     ) -> CallToolResult {
+        if input.space.is_none() && !self.runtime.space_authority().permits_unscoped_discovery() {
+            return tool_error(&ToolError::authentication());
+        }
         let client = self.runtime.client();
         let cursors = self.cursors.as_ref();
         execute_prepared_handler(
@@ -460,6 +464,7 @@ mod tests {
     use crate::{
         runtime::StartupStatus,
         schema::{input_schema, output_schema},
+        space_policy::{SpaceAuthority, SpacePolicy},
         validation::{BodyCharLimit, BodyOffset},
     };
 
@@ -750,6 +755,28 @@ mod tests {
         runtime_at("http://127.0.0.1:1")
     }
 
+    fn restricted_runtime() -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("object-read-policy-test".to_owned()),
+            app_name: "object-read-policy-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("offline client");
+        client.set_api_key(HttpCredentials::new("test-token"));
+        RuntimeContext::from_parts_with_space_authority(
+            client,
+            1,
+            Duration::from_millis(50),
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+            SpaceAuthority::from_policy_for_tests(SpacePolicy::None),
+        )
+    }
+
     async fn mock_http(
         responses: Vec<String>,
     ) -> (
@@ -864,6 +891,25 @@ mod tests {
                 .is_err()
             );
         }
+        assert_eq!(metrics.client().http_metrics().total_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn restricted_policy_rejects_unscoped_search_before_io() {
+        let runtime = restricted_runtime();
+        let metrics = runtime.clone();
+        let handlers =
+            ObjectReadHandlers::new(runtime, Arc::new(CursorStore::new().expect("cursor store")))
+                .expect("handlers");
+        let result = decode_and_dispatch_search(&handlers, json!({}))
+            .await
+            .expect("valid search input");
+
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.as_ref().expect("error")["code"],
+            "authentication"
+        );
         assert_eq!(metrics.client().http_metrics().total_requests, 0);
     }
 

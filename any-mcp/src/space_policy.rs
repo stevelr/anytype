@@ -190,12 +190,24 @@ impl SpaceAuthority {
             SpacePolicy::OnlyReadWrite(identifiers) => identifiers.contains(identifier),
         }
     }
+
+    /// Returns whether an operation may discover objects without a space.
+    #[must_use]
+    pub const fn permits_unscoped_discovery(&self) -> bool {
+        matches!(self.policy, SpacePolicy::AllReadWrite)
+    }
+
+    /// Returns whether an operation may create a previously unknown space.
+    #[must_use]
+    pub const fn permits_space_creation(&self) -> bool {
+        matches!(self.policy, SpacePolicy::AllReadWrite)
+    }
 }
 
-/// Anytype client whose reference resolver enforces frozen space policy.
+/// Anytype client whose ordinary and bounded resolvers enforce space policy.
 ///
 /// Other `AnytypeClient` methods remain available through [`Deref`]. Handlers
-/// use this type so every ordinary `resolve_space_id` call performs the common
+/// use this type so every declared resolver call performs the common
 /// authorization check before a domain builder can be constructed.
 #[derive(Clone)]
 pub struct PolicyClient {
@@ -231,10 +243,25 @@ impl PolicyClient {
     /// rejects its canonical result.
     pub async fn resolve_space_id(&self, reference: &str) -> Result<String, AnytypeError> {
         let resolved = self.inner.resolve_space_id(reference).await?;
-        self.authority
-            .authorize_resolved(resolved)
-            .map(|identifier| identifier.as_str().to_owned())
-            .map_err(|_| AnytypeError::Forbidden)
+        self.authorize_resolver_result(resolved)
+    }
+
+    /// Resolves one name or ID with a bounded page and checks its canonical ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns the bounded resolver error or [`AnytypeError::Forbidden`] when
+    /// the frozen policy rejects the canonical result.
+    pub async fn resolve_space_id_bounded(
+        &self,
+        reference: &str,
+        page_response_limit: u64,
+    ) -> Result<String, AnytypeError> {
+        let resolved = self
+            .inner
+            .resolve_space_id_bounded(reference, page_response_limit)
+            .await?;
+        self.authorize_resolver_result(resolved)
     }
 
     /// Returns the frozen central authorization gate.
@@ -245,6 +272,13 @@ impl PolicyClient {
 
     pub(crate) fn raw_clone(&self) -> AnytypeClient {
         self.inner.as_ref().clone()
+    }
+
+    fn authorize_resolver_result(&self, resolved: String) -> Result<String, AnytypeError> {
+        self.authority
+            .authorize_resolved(resolved)
+            .map(|identifier| identifier.as_str().to_owned())
+            .map_err(|_| AnytypeError::Forbidden)
     }
 }
 
@@ -373,6 +407,10 @@ mod tests {
         );
         assert!(matches!(
             client.resolve_space_id(DENIED).await,
+            Err(AnytypeError::Forbidden)
+        ));
+        assert!(matches!(
+            client.resolve_space_id_bounded(DENIED, 1_024).await,
             Err(AnytypeError::Forbidden)
         ));
     }
