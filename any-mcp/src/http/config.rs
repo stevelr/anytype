@@ -213,6 +213,19 @@ pub struct HostAuthority {
 }
 
 impl HostAuthority {
+    /// Serializes the exact authority for defense-in-depth mirroring into
+    /// the wrapped transport's own `Host` validation.
+    #[must_use]
+    pub(crate) fn serialized(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        self.port
+            .map_or_else(|| host.clone(), |port| format!("{host}:{port}"))
+    }
+
     /// Returns whether an already-normalized request authority matches.
     ///
     /// `host` must be lowercase with IPv6 brackets removed; `port` is the

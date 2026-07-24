@@ -63,8 +63,10 @@ pub(crate) type HttpBody = BoxBody<Bytes, Infallible>;
 /// and forwarded-identity headers are already removed: the service and the
 /// domain handlers behind it never observe a bearer value.
 pub(crate) struct AdmittedRequest {
-    /// The request with a bounded, fully collected body.
-    pub request: Request<Full<Bytes>>,
+    /// Sanitized request head.
+    pub parts: Parts,
+    /// Bounded, fully collected request body.
+    pub body: Bytes,
     /// The authenticated principal for this request.
     pub principal: AuthorizedPrincipal,
 }
@@ -297,19 +299,24 @@ where
             return with_cors(response, origin);
         }
     };
-    let request = rebuild_sanitized(parts, collected);
+    let parts = sanitize_parts(parts);
 
     // Dispatch to the selected MCP service. The admission permit covers the
     // service call; streaming response bodies are bounded separately by
     // session, queue, deadline, and shutdown limits.
-    let response = (state.service)(AdmittedRequest { request, principal }).await;
+    let response = (state.service)(AdmittedRequest {
+        parts,
+        body: collected,
+        principal,
+    })
+    .await;
     drop(permit);
     with_cors(response, origin)
 }
 
-/// Rebuilds the admitted request and removes credential and
-/// forwarded-identity headers so no downstream code can observe them.
-fn rebuild_sanitized(mut parts: Parts, body: Bytes) -> Request<Full<Bytes>> {
+/// Removes credential and forwarded-identity headers from the admitted
+/// request head so no downstream code can observe them.
+fn sanitize_parts(mut parts: Parts) -> Parts {
     const REMOVED: [&str; 8] = [
         "authorization",
         "proxy-authorization",
@@ -323,7 +330,7 @@ fn rebuild_sanitized(mut parts: Parts, body: Bytes) -> Request<Full<Bytes>> {
     for name in REMOVED {
         while parts.headers.remove(name).is_some() {}
     }
-    Request::from_parts(parts, Full::new(body))
+    parts
 }
 
 fn host_allowed<B>(request: &Request<B>, allowed: &[HostAuthority]) -> bool {
@@ -508,8 +515,6 @@ fn insert_cors_headers(headers: &mut HeaderMap, origin: &AllowedOrigin) {
 /// A safe HTTP service failure without addresses or payloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpServeError {
-    /// The configured loopback listener could not be bound.
-    Bind,
     /// The listener or a connection task failed fatally.
     Listener,
 }
@@ -517,7 +522,6 @@ pub enum HttpServeError {
 impl fmt::Display for HttpServeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bind => formatter.write_str("HTTP listener bind failed"),
             Self::Listener => formatter.write_str("HTTP listener service failed"),
         }
     }
@@ -575,7 +579,7 @@ pub(crate) async fn run_listener(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{Mutex, atomic::AtomicUsize};
 
     use super::*;
@@ -597,16 +601,15 @@ mod tests {
             calls.fetch_add(1, Ordering::SeqCst);
             let last = last.clone();
             Box::pin(async move {
-                let (parts, body) = admitted.request.into_parts();
-                let body = body.collect().await.expect("test body").to_bytes();
-                *last.lock().expect("test lock") = Some((parts.headers, admitted.principal, body));
+                *last.lock().expect("test lock") =
+                    Some((admitted.parts.headers, admitted.principal, admitted.body));
                 fixed_response(StatusCode::OK, "ok")
             })
         });
         (service, recorded)
     }
 
-    fn test_config(extra: &[(&str, &str)]) -> HttpConfig {
+    pub(crate) fn test_config(extra: &[(&str, &str)]) -> HttpConfig {
         let mut values = vec![
             ("ANY_MCP_TRANSPORT".to_owned(), "streamable-http".to_owned()),
             ("ANY_MCP_HTTP_AUTH".to_owned(), "static-token".to_owned()),

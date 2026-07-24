@@ -45,7 +45,7 @@ prost-types = "0.14.4"
 ratatui = "0.30.2"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", features = ["json", "multipart", "stream", "rustls", "query"] }
-rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1.2.1"
 serde = { version = "1.0.229", features = ["derive"] }

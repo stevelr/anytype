@@ -19,12 +19,6 @@ use crate::http::{oauth::OAuthValidator, secret::StaticToken};
 /// Maximum accepted `Authorization` header length in bytes.
 pub(crate) const MAX_AUTHORIZATION_BYTES: usize = 1024;
 
-/// The single authority grantable over this transport.
-///
-/// Its maximum capability is the process's already selected
-/// profile/toolsets/read-only catalog; it cannot enable hidden tools.
-pub(crate) const ANYTYPE_MCP_AUTHORITY: &str = "anytype.mcp";
-
 /// One authenticated request principal reduced to an internal key.
 ///
 /// The key is a keyed digest of profile-specific identity material; raw

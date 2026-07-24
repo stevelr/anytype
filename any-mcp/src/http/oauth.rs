@@ -64,7 +64,7 @@ struct JwksCache {
 
 /// Fixed JWKS handling failure categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum JwksError {
+pub enum JwksError {
     /// The document exceeds the fixed byte bound.
     Oversized,
     /// The document is not a JWK set.
@@ -99,7 +99,7 @@ enum VerifyRejection {
 }
 
 /// OAuth resource-server validator for one configured issuer.
-pub(crate) struct OAuthValidator {
+pub struct OAuthValidator {
     config: OAuthResourceConfig,
     challenge: String,
     metadata_document: Arc<str>,
