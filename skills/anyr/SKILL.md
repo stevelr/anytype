@@ -225,7 +225,8 @@ done
 
 One-shot reads/writes and small scripted loops: use `anyr`. Bulk scans or
 multi-document rewrites that need state across many calls are better served by
-the Anytype MCP server (when available) or the `anytype` Rust crate directly.
+the Anytype MCP server (started as `anyr mcp`, when available) or the `anytype`
+Rust crate directly.
 
 ## Gotchas
 

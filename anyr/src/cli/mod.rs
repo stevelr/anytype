@@ -87,7 +87,7 @@ pub struct Cli {
     pub verbose: u8,
 
     /// keystore type or configuration
-    #[arg(long, env = "ANYTYPE_KEYSTORE")]
+    #[arg(long, env = "ANYTYPE_KEYSTORE", global = true)]
     pub keystore: Option<String>,
 
     /// Override service name (default "anyr")
@@ -1752,7 +1752,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
 /// Dispatch the embedded MCP process before any standard Tokio runtime starts.
 #[cfg(feature = "mcp")]
-pub fn run_mcp(args: &McpArgs) -> std::process::ExitCode {
+pub fn run_mcp(args: &McpArgs, keystore: Option<String>) -> std::process::ExitCode {
     let mut arguments = args.arguments.clone();
     if arguments.len() == 1
         && arguments
@@ -1772,7 +1772,41 @@ pub fn run_mcp(args: &McpArgs) -> std::process::ExitCode {
         arguments.insert(0, OsString::from(command));
         arguments.insert(0, OsString::from("config"));
     }
-    any_mcp::run_process(arguments)
+    any_mcp::run_process_with_keystore_override(arguments, keystore)
+}
+
+#[cfg(all(test, feature = "mcp"))]
+mod mcp_tests {
+    use clap::Parser;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn mcp_accepts_keystore_options_before_and_after_the_subcommand() {
+        for arguments in [
+            [
+                "anyr",
+                "--keystore=file:path=/tmp/keys.db",
+                "mcp",
+                "--config",
+                "/tmp/config.toml",
+            ],
+            [
+                "anyr",
+                "mcp",
+                "--keystore=file:path=/tmp/keys.db",
+                "--config",
+                "/tmp/config.toml",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(arguments).expect("MCP command parses");
+            assert_eq!(cli.keystore.as_deref(), Some("file:path=/tmp/keys.db"));
+            let Commands::Mcp(mcp) = cli.command else {
+                panic!("expected MCP command");
+            };
+            assert_eq!(mcp.arguments, ["--config", "/tmp/config.toml"]);
+        }
+    }
 }
 
 fn apply_init_cli_endpoint_defaults(cli: &mut Cli) {

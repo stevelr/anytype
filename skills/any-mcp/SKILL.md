@@ -5,6 +5,10 @@ description: Use when an agent needs to read, search, create, edit, organize, up
 
 # Anytype MCP
 
+The MCP server is started with `anyr mcp`. Once connected, agents call its
+advertised tools rather than starting another server or issuing equivalent CLI
+commands.
+
 Use any-mcp for verified, bounded Anytype workflows. Prefer its tools over shell
 commands whenever the required capability is advertised.
 

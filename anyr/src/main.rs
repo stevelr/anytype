@@ -39,7 +39,7 @@ fn main() {
 
     #[cfg(feature = "mcp")]
     if let cli::Commands::Mcp(args) = &cli.command {
-        let status = cli::run_mcp(args);
+        let status = cli::run_mcp(args, cli.keystore.clone());
         if status != std::process::ExitCode::SUCCESS {
             std::process::exit(1);
         }

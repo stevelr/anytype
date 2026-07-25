@@ -59,10 +59,11 @@ escape.
 An MCP host starts that binary and communicates with it over stdio.
 The server does not perform login or print credentials. It reuses the endpoint
 and keystore selected by `ANYTYPE_URL`, `ANYTYPE_GRPC_ENDPOINT`,
-`ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE` (default `anyr`). The default
-startup is the stable `2025-11-25` protocol, the four-tool compact profile, and
-read-write access. For a safer first registration, select compact read-only
-explicitly:
+`ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE` (default `anyr`). It also
+accepts `anyr --keystore SPEC mcp ...`; that explicit option wins over the
+selected MCP TOML file and environment. The default startup is the stable
+`2025-11-25` protocol, the four-tool compact profile, and read-write access.
+For a safer first registration, select compact read-only explicitly:
 
 ```json
 {
@@ -227,6 +228,12 @@ schema_version = 1
 [spaces]
 read_only = false
 allowed = [{ name = "Personal" }]
+
+[auth]
+# Select exactly one. File selectors are platform-independent.
+keystore.file = "/absolute/path/to/keystore.db"
+# On Linux, use this instead of `keystore.file` to select Secret Service.
+# keystore.secret-service = true
 
 [limits]
 artifact_bytes = 268435456

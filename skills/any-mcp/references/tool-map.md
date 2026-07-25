@@ -2,8 +2,9 @@
 
 ## Startup
 
-An MCP host launches `any-mcp`; agents call the advertised tools and do not
-launch another server. For broad PKM work the host typically uses:
+An MCP host launches the server with `anyr mcp`; agents call the advertised
+tools and do not launch another server. For broad PKM work the host typically
+uses:
 
 ```text
 ANY_MCP_PROFILE=standard

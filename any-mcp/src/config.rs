@@ -155,6 +155,21 @@ impl RuntimeConfig {
     where
         I: IntoIterator<Item = OsString>,
     {
+        Self::from_process_args_with_keystore_override(arguments, None)
+    }
+
+    /// Loads environment configuration plus explicit process arguments and
+    /// non-secret keystore selectors supplied by an embedding application.
+    ///
+    /// Explicit selectors take precedence over `[auth]` in the selected TOML
+    /// file, which in turn takes precedence over `ANYTYPE_KEYSTORE`.
+    pub(crate) fn from_process_args_with_keystore_override<I>(
+        arguments: I,
+        keystore_override: Option<String>,
+    ) -> Result<Self, ConfigError>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
         let selector =
             ConfigSelector::from_args_and_env_lookup(arguments, || std::env::var_os(CONFIG_ENV))
                 .map_err(|error| ConfigError::fixed(error.to_string()))?;
@@ -166,6 +181,7 @@ impl RuntimeConfig {
             Err(std::env::VarError::NotPresent) => Ok(None),
             Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::non_unicode(name)),
         })?;
+        config.apply_keystore_override(artifact.keystore_spec(), keystore_override);
         config.artifact = artifact;
         Ok(config)
     }
@@ -190,6 +206,7 @@ impl RuntimeConfig {
             },
             optional_metadata,
         )?;
+        config.apply_keystore_override(artifact.keystore_spec(), None);
         config.artifact = artifact;
         Ok(config)
     }
@@ -224,6 +241,16 @@ impl RuntimeConfig {
     {
         let metadata = production_optional_metadata();
         Self::from_lookup_with_optional_metadata(lookup, &metadata)
+    }
+
+    fn apply_keystore_override(
+        &mut self,
+        config_keystore: Option<String>,
+        keystore_override: Option<String>,
+    ) {
+        if let Some(keystore) = keystore_override.or(config_keystore) {
+            self.keystore = Some(keystore);
+        }
     }
 
     pub(crate) fn from_lookup_with_optional_metadata<F>(
@@ -510,6 +537,26 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_secs(45));
         assert_eq!(client.response_limits.json_bytes, 1_048_576);
         assert_eq!(client.response_limits.document_bytes, 2_097_152);
+    }
+
+    #[test]
+    fn keystore_overrides_take_precedence_over_toml_and_environment() {
+        let artifact = ArtifactConfig::from_toml(
+            "schema_version = 1\n[spaces]\nread_only = false\n\
+             [auth]\nkeystore.file = \"/tmp/from-config.db\"\n",
+        )
+        .expect("artifact configuration");
+        let mut config = config(&[("ANYTYPE_KEYSTORE", "env")]).expect("environment config");
+
+        config.apply_keystore_override(artifact.keystore_spec(), None);
+        assert_eq!(
+            config.client_config().keystore.as_deref(),
+            Some("file:path=/tmp/from-config.db")
+        );
+
+        config.apply_keystore_override(artifact.keystore_spec(), Some("secret-service".to_owned()));
+        let client = config.client_config();
+        assert_eq!(client.keystore.as_deref(), Some("secret-service"));
     }
 
     #[test]

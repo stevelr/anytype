@@ -170,6 +170,7 @@ pub struct ArtifactConfig {
     pub staging: Option<StagingConfig>,
     /// Admitted validator declarations. Executables are not opened here.
     pub validators: Vec<ValidatorConfig>,
+    auth: AuthConfig,
 }
 
 impl fmt::Debug for ArtifactConfig {
@@ -183,6 +184,7 @@ impl fmt::Debug for ArtifactConfig {
             .field("export_root_count", &self.roots.export.len())
             .field("staging_configured", &self.staging.is_some())
             .field("validator_count", &self.validators.len())
+            .field("auth_keystore_configured", &self.auth.keystore.is_some())
             .finish()
     }
 }
@@ -225,6 +227,7 @@ impl ArtifactConfig {
         let roots = RootDefinitions::try_from(raw.roots.unwrap_or_default())?;
         let staging = parse_staging(raw.staging)?;
         let validators = parse_validators(raw.validators)?;
+        let auth = AuthConfig::try_from(raw.auth)?;
 
         validate_cross_fields(&limits, staging.as_ref(), &validators)?;
         Ok(Self {
@@ -234,6 +237,7 @@ impl ArtifactConfig {
             roots,
             staging,
             validators,
+            auth,
         })
     }
 
@@ -274,6 +278,31 @@ impl ArtifactConfig {
     pub fn validators(&self) -> &[ValidatorConfig] {
         &self.validators
     }
+
+    pub(crate) fn keystore_spec(&self) -> Option<String> {
+        self.auth.resolved_keystore_spec()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct AuthConfig {
+    keystore: Option<KeystoreConfig>,
+}
+
+impl AuthConfig {
+    fn resolved_keystore_spec(&self) -> Option<String> {
+        match self.keystore.as_ref() {
+            Some(KeystoreConfig::File(path)) => Some(format!("file:path={path}")),
+            Some(KeystoreConfig::SecretService) => Some("secret-service".to_owned()),
+            None => None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum KeystoreConfig {
+    File(String),
+    SecretService,
 }
 
 /// Startup space access declaration.
@@ -665,6 +694,7 @@ impl fmt::Display for ArtifactConfigError {
             ConfigProblem::RelativePath => "invalid any-mcp relative artifact path",
             ConfigProblem::Staging => "invalid any-mcp staging policy",
             ConfigProblem::Validator => "invalid any-mcp validator policy",
+            ConfigProblem::Auth => "invalid any-mcp authentication policy",
         })
     }
 }
@@ -687,6 +717,7 @@ enum ConfigProblem {
     RelativePath,
     Staging,
     Validator,
+    Auth,
 }
 
 #[derive(Deserialize)]
@@ -697,8 +728,44 @@ struct RawConfig {
     limits: Option<RawLimits>,
     roots: Option<RawRoots>,
     staging: Option<RawStaging>,
+    auth: Option<RawAuth>,
     #[serde(default)]
     validators: Vec<RawValidator>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuth {
+    keystore: Option<RawKeystore>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKeystore {
+    file: Option<String>,
+    #[serde(rename = "secret-service")]
+    secret_service: Option<bool>,
+}
+
+impl TryFrom<Option<RawAuth>> for AuthConfig {
+    type Error = ArtifactConfigError;
+
+    fn try_from(raw: Option<RawAuth>) -> Result<Self, Self::Error> {
+        let Some(RawAuth {
+            keystore: Some(keystore),
+        }) = raw
+        else {
+            return Ok(Self::default());
+        };
+        let selected = match (keystore.file, keystore.secret_service) {
+            (Some(path), None) if !path.is_empty() => KeystoreConfig::File(path),
+            (None, Some(true)) => KeystoreConfig::SecretService,
+            _ => return Err(ArtifactConfigError::new(ConfigProblem::Auth)),
+        };
+        Ok(Self {
+            keystore: Some(selected),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -1603,6 +1670,40 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn auth_keystore_selectors_are_closed_and_path_safe_in_diagnostics() {
+        let path = "/tmp/operator-keystore.db";
+        let file =
+            ArtifactConfig::from_toml(&format!("{MINIMAL}\n[auth]\nkeystore.file = \"{path}\"\n"))
+                .expect("file keystore configuration");
+        assert_eq!(
+            file.keystore_spec().as_deref(),
+            Some("file:path=/tmp/operator-keystore.db")
+        );
+        assert!(!format!("{file:?}").contains(path));
+
+        let secret_service = ArtifactConfig::from_toml(
+            "schema_version = 1\n[spaces]\nread_only = false\n\
+             [auth]\nkeystore.secret-service = true\n",
+        )
+        .expect("secret-service configuration");
+        assert_eq!(
+            secret_service.keystore_spec().as_deref(),
+            Some("secret-service")
+        );
+
+        for auth in [
+            "keystore.file = \"\"",
+            "keystore.secret-service = false",
+            "keystore.file = \"/tmp/keys.db\"\nkeystore.secret-service = true",
+        ] {
+            let error = ArtifactConfig::from_toml(&format!("{MINIMAL}\n[auth]\n{auth}\n"))
+                .expect_err("invalid auth configuration");
+            assert_eq!(error.to_string(), "invalid any-mcp authentication policy");
+            assert!(!error.to_string().contains("/tmp/keys.db"));
+        }
     }
 
     #[test]

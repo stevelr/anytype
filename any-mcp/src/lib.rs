@@ -149,6 +149,21 @@ pub fn run_process<I>(arguments: I) -> std::process::ExitCode
 where
     I: IntoIterator<Item = std::ffi::OsString>,
 {
+    run_process_with_keystore_override(arguments, None)
+}
+
+/// Run the any-mcp process while overriding the selected Anytype keystore.
+///
+/// This is used by `anyr` to forward its global `--keystore` option. The
+/// explicit selector takes precedence over the selected MCP TOML configuration
+/// and environment.
+pub fn run_process_with_keystore_override<I>(
+    arguments: I,
+    keystore: Option<String>,
+) -> std::process::ExitCode
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
     let command = match ProcessCommand::parse(arguments) {
         Ok(command) => command,
         Err(error) => {
@@ -182,11 +197,14 @@ where
                 std::process::ExitCode::FAILURE
             }
         },
-        ProcessCommand::Serve(arguments) => start_server(arguments),
+        ProcessCommand::Serve(arguments) => start_server(arguments, keystore),
     }
 }
 
-fn start_server(arguments: Vec<std::ffi::OsString>) -> std::process::ExitCode {
+fn start_server(
+    arguments: Vec<std::ffi::OsString>,
+    keystore: Option<String>,
+) -> std::process::ExitCode {
     if let Err(error) = logging::init() {
         eprintln!("any-mcp: diagnostic setup failed: {error}");
         return std::process::ExitCode::FAILURE;
@@ -198,7 +216,7 @@ fn start_server(arguments: Vec<std::ffi::OsString>) -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    if let Err(error) = runtime.block_on(run_server(arguments)) {
+    if let Err(error) = runtime.block_on(run_server(arguments, keystore)) {
         tracing::error!(reason = %error, "any-mcp startup or service failure");
         return std::process::ExitCode::FAILURE;
     }
@@ -212,11 +230,14 @@ fn production_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
-async fn run_server(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_server(
+    arguments: Vec<std::ffi::OsString>,
+    keystore: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Transport and HTTP configuration are validated before any Anytype
     // credential access, probe, or listener bind.
     let transport = http::TransportSelection::from_env()?;
-    let config = RuntimeConfig::from_process_args(arguments)?;
+    let config = RuntimeConfig::from_process_args_with_keystore_override(arguments, keystore)?;
     let protocol_mode = config.protocol_mode;
     match transport {
         http::TransportSelection::Stdio => {

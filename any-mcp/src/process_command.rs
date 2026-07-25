@@ -38,6 +38,11 @@ read_only = false
 
 # [limits]
 # artifact_bytes = 67108864
+
+# [auth]
+# Set exactly one keystore selector. `secret-service` is for Linux hosts.
+# keystore.file = "/absolute/path/to/keystore.db"
+# keystore.secret-service = true
 "#;
 
 /// One process-level action selected before logging or runtime construction.
