@@ -212,8 +212,8 @@ create-new behavior and never overwrites an existing file. Server startup
 accepts `-c ABSOLUTE_PATH`, `--config ABSOLUTE_PATH`, or `ANY_MCP_CONFIG`; the
 command-line value wins. When neither is present, an existing `any-mcp.toml`
 in the current directory is selected, followed by built-in defaults when that
-file is absent. Print the
-the consolidated binary version with `anyr -V` or `anyr --version`.
+file is absent. Print the consolidated binary version with `anyr -V` or
+`anyr --version`.
 
 An explicitly selected file must be an owner-controlled regular UTF-8 file no
 larger than 256 KiB. The schema is closed and versioned. Unknown fields,
@@ -221,6 +221,10 @@ unsupported versions, unsafe file permissions, linked config files, duplicate
 logical names, and invalid limits fail before protocol output. Selected MVP
 files must declare `spaces.read_only = false` so a future read-only space
 default cannot silently reinterpret an older writable configuration.
+TOML syntax and schema failures report a redacted line and column, the known
+schema path when available, and a safe reason without echoing configuration
+values or physical paths. Run `anyr mcp check --config FILE` to validate a
+policy without starting Anytype.
 
 ```toml
 schema_version = 1

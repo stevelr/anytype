@@ -338,7 +338,9 @@ mod tests {
 
         fs::write(&path, "not valid TOML").expect("replace with invalid content");
         let error = check_config(&path).expect_err("invalid config");
-        assert_eq!(error.to_string(), "invalid any-mcp TOML configuration");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.starts_with("invalid any-mcp TOML configuration at line 1"));
+        assert!(diagnostic.contains("syntax or value does not match the configuration schema"));
         fs::remove_file(path).expect("cleanup");
     }
 

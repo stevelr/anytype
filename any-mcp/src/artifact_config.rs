@@ -209,12 +209,16 @@ impl ArtifactConfig {
     ///
     /// # Errors
     ///
-    /// Returns a fixed diagnostic for malformed/unknown fields, unsupported
+    /// Returns a redacted diagnostic for malformed/unknown fields, unsupported
     /// versions, unsafe access declarations, invalid names or paths, or limits
-    /// outside immutable ceilings.
+    /// outside immutable ceilings. TOML syntax and schema errors include a
+    /// safe location, schema path when available, and problem category without
+    /// echoing configuration values.
     pub fn from_toml(contents: &str) -> Result<Self, ArtifactConfigError> {
-        let raw = toml::from_str::<RawConfig>(contents)
-            .map_err(|_| ArtifactConfigError::new(ConfigProblem::Toml))?;
+        let deserializer = toml::Deserializer::parse(contents)
+            .map_err(|error| ArtifactConfigError::toml_source(contents, &error, None))?;
+        let raw = serde_path_to_error::deserialize::<_, RawConfig>(deserializer)
+            .map_err(|error| ArtifactConfigError::toml(contents, &error))?;
         if raw.schema_version != 1 {
             return Err(ArtifactConfigError::new(ConfigProblem::Version));
         }
@@ -663,21 +667,45 @@ impl fmt::Debug for RelativeNativePath {
     }
 }
 
-/// Fixed, path-safe artifact configuration error.
+/// Path-safe artifact configuration error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactConfigError {
     problem: ConfigProblem,
+    toml: Option<TomlDiagnostic>,
 }
 
 impl ArtifactConfigError {
     const fn new(problem: ConfigProblem) -> Self {
-        Self { problem }
+        Self {
+            problem,
+            toml: None,
+        }
+    }
+
+    fn toml(contents: &str, error: &serde_path_to_error::Error<toml::de::Error>) -> Self {
+        let source = error.inner();
+        let path = safe_toml_schema_path(&error.path().to_string());
+        Self::toml_source(contents, source, path)
+    }
+
+    fn toml_source(contents: &str, source: &toml::de::Error, path: Option<String>) -> Self {
+        let location = source
+            .span()
+            .map(|span| toml_line_column(contents, span.start));
+        Self {
+            problem: ConfigProblem::Toml,
+            toml: Some(TomlDiagnostic {
+                location,
+                path,
+                problem: classify_toml_problem(source.message()),
+            }),
+        }
     }
 }
 
 impl fmt::Display for ArtifactConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self.problem {
+        let message = match self.problem {
             ConfigProblem::Arguments => "invalid any-mcp command-line arguments",
             ConfigProblem::Selector => "invalid any-mcp config selector",
             ConfigProblem::File => "selected any-mcp config file is not secure and readable",
@@ -695,7 +723,18 @@ impl fmt::Display for ArtifactConfigError {
             ConfigProblem::Staging => "invalid any-mcp staging policy",
             ConfigProblem::Validator => "invalid any-mcp validator policy",
             ConfigProblem::Auth => "invalid any-mcp authentication policy",
-        })
+        };
+        formatter.write_str(message)?;
+        if let Some(diagnostic) = &self.toml {
+            if let Some((line, column)) = diagnostic.location {
+                write!(formatter, " at line {line}, column {column}")?;
+            }
+            if let Some(path) = &diagnostic.path {
+                write!(formatter, " in `{path}`")?;
+            }
+            write!(formatter, ": {}", diagnostic.problem.message())?;
+        }
+        Ok(())
     }
 }
 
@@ -718,6 +757,161 @@ enum ConfigProblem {
     Staging,
     Validator,
     Auth,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TomlDiagnostic {
+    location: Option<(usize, usize)>,
+    path: Option<String>,
+    problem: TomlProblem,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TomlProblem {
+    SyntaxOrSchema,
+    UnknownField,
+    MissingField,
+    DuplicateField,
+    WrongType,
+    UnsupportedValue,
+    WrongLength,
+    NumericRange,
+}
+
+impl TomlProblem {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::SyntaxOrSchema => "syntax or value does not match the configuration schema",
+            Self::UnknownField => "field is not recognized",
+            Self::MissingField => "required field is missing",
+            Self::DuplicateField => "field is declared more than once",
+            Self::WrongType => "value has the wrong type",
+            Self::UnsupportedValue => "value is not supported",
+            Self::WrongLength => "value has the wrong number of items",
+            Self::NumericRange => "number is outside the supported range",
+        }
+    }
+}
+
+fn classify_toml_problem(message: &str) -> TomlProblem {
+    if message.contains("unknown field") {
+        TomlProblem::UnknownField
+    } else if message.contains("missing field") {
+        TomlProblem::MissingField
+    } else if message.contains("duplicate field") {
+        TomlProblem::DuplicateField
+    } else if message.contains("invalid type") {
+        TomlProblem::WrongType
+    } else if message.contains("unknown variant") || message.contains("invalid value") {
+        TomlProblem::UnsupportedValue
+    } else if message.contains("invalid length") {
+        TomlProblem::WrongLength
+    } else if message.contains("too large") || message.contains("out of range") {
+        TomlProblem::NumericRange
+    } else {
+        TomlProblem::SyntaxOrSchema
+    }
+}
+
+fn toml_line_column(contents: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut column = 1;
+    for (offset, character) in contents.char_indices() {
+        if offset >= byte_offset {
+            break;
+        }
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
+fn safe_toml_schema_path(path: &str) -> Option<String> {
+    const FIELDS: &[&str] = &[
+        "schema_version",
+        "spaces",
+        "read_only",
+        "allowed",
+        "id",
+        "name",
+        "limits",
+        "artifact_bytes",
+        "transfer_chunk_bytes",
+        "staging_total_bytes",
+        "staging_entries",
+        "staging_ttl_secs",
+        "staging_connections",
+        "staging_requests",
+        "staging_requests_per_minute",
+        "staging_header_bytes",
+        "staging_header_secs",
+        "staging_no_progress_secs",
+        "receipt_bytes",
+        "operation_secs",
+        "cleanup_batch",
+        "discovery_rows",
+        "markdown_bytes",
+        "markdown_chars",
+        "validator_processes",
+        "validator_total_input_bytes",
+        "roots",
+        "import",
+        "export",
+        "path",
+        "path_native",
+        "encoding",
+        "value",
+        "staging",
+        "enabled",
+        "root",
+        "bind",
+        "public_base_url",
+        "validators",
+        "driver",
+        "sha256",
+        "required",
+        "mime",
+        "timeout_secs",
+        "memory_bytes",
+        "input_bytes",
+        "stdout_bytes",
+        "stderr_bytes",
+        "fields",
+        "field_bytes",
+        "platform",
+    ];
+
+    if path.is_empty() || path == "." {
+        return None;
+    }
+    for segment in path.split('.') {
+        let name_end = segment.find('[').unwrap_or(segment.len());
+        let name = &segment[..name_end];
+        if !FIELDS.contains(&name) || !safe_toml_indices(&segment[name_end..]) {
+            return None;
+        }
+    }
+    Some(path.to_owned())
+}
+
+fn safe_toml_indices(mut suffix: &str) -> bool {
+    while !suffix.is_empty() {
+        let Some(index) = suffix.strip_prefix('[') else {
+            return false;
+        };
+        let Some(end) = index.find(']') else {
+            return false;
+        };
+        if end == 0 || !index[..end].bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        suffix = &index[end + 1..];
+    }
+    true
 }
 
 #[derive(Deserialize)]
@@ -1704,6 +1898,38 @@ mod tests {
             assert_eq!(error.to_string(), "invalid any-mcp authentication policy");
             assert!(!error.to_string().contains("/tmp/keys.db"));
         }
+    }
+
+    #[test]
+    fn toml_diagnostics_locate_schema_errors_without_echoing_values() {
+        let secret = "operator-secret-value";
+        let wrong_type = format!("schema_version = 1\n[spaces]\nread_only = \"{secret}\"\n");
+        let error = ArtifactConfig::from_toml(&wrong_type).expect_err("wrong type");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("line 3, column 13"));
+        assert!(diagnostic.contains("`spaces.read_only`"));
+        assert!(diagnostic.contains("value has the wrong type"));
+        assert!(!diagnostic.contains(secret));
+
+        let unknown = ArtifactConfig::from_toml(
+            "schema_version = 1\nunknown_policy = true\n[spaces]\nread_only = false\n",
+        )
+        .expect_err("unknown field")
+        .to_string();
+        assert!(unknown.contains("line 2, column 1"));
+        assert!(unknown.contains("field is not recognized"));
+        assert!(!unknown.contains("unknown_policy"));
+
+        let missing = ArtifactConfig::from_toml("schema_version = 1\n[spaces]\n")
+            .expect_err("missing field")
+            .to_string();
+        assert!(missing.contains("required field is missing"));
+
+        let syntax = ArtifactConfig::from_toml("schema_version = 1\n[spaces\nread_only = false\n")
+            .expect_err("malformed syntax")
+            .to_string();
+        assert!(syntax.contains("line 2"));
+        assert!(syntax.contains("syntax or value does not match the configuration schema"));
     }
 
     #[test]

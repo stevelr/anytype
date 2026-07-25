@@ -3,7 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Steve Schoettler
 // SPDX-License-Identifier: Apache-2.0
 
-use std::process::Command;
+use std::{fs::OpenOptions, io::Write, path::PathBuf, process::Command};
 
 fn unauthenticated_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
@@ -16,6 +16,26 @@ fn unauthenticated_command() -> Command {
         .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
         .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
     command
+}
+
+fn invalid_config_file(contents: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "any-mcp-invalid-config-{}-{}.toml",
+        std::process::id(),
+        getrandom::u64().unwrap_or(0)
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).expect("create invalid config");
+    file.write_all(contents.as_bytes())
+        .expect("write invalid config");
+    file.sync_all().expect("sync invalid config");
+    path
 }
 
 #[test]
@@ -105,6 +125,33 @@ fn invalid_catalog_profile_fails_before_auth_without_echoing_its_value() {
     );
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
     assert!(stderr.contains("ANY_MCP_PROFILE"));
+    assert!(!stderr.contains(secret_like_value));
+    assert!(!stderr.contains("HTTP credentials are missing"));
+}
+
+#[test]
+fn invalid_toml_reports_redacted_location_path_and_reason_before_auth() {
+    let secret_like_value = "operator-secret-config-value";
+    let path = invalid_config_file(&format!(
+        "schema_version = 1\n[spaces]\nread_only = \"{secret_like_value}\"\n"
+    ));
+    let output = unauthenticated_command()
+        .arg("--config")
+        .arg(&path)
+        .output()
+        .expect("run any-mcp test binary");
+    std::fs::remove_file(path).expect("remove invalid config");
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "stdout is reserved for MCP frames"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("invalid any-mcp TOML configuration"));
+    assert!(stderr.contains("line 3, column 13"));
+    assert!(stderr.contains("spaces.read_only"));
+    assert!(stderr.contains("value has the wrong type"));
     assert!(!stderr.contains(secret_like_value));
     assert!(!stderr.contains("HTTP credentials are missing"));
 }

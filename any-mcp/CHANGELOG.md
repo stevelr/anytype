@@ -17,6 +17,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Maintenance commands are now `anyr mcp init` and `anyr mcp check`; version
   reporting is consolidated at `anyr -V`/`--version`.
 
+### Fixed
+
+- Report selected TOML syntax and schema failures with redacted line, column,
+  known schema path, and problem category instead of only the generic
+  `invalid any-mcp TOML configuration` message.
+
 ### Added
 
 - Configuration discovery now follows `-c`/`--config`, `ANY_MCP_CONFIG`, an
