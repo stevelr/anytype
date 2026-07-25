@@ -16,6 +16,11 @@ readme = "README.md"
 repository.workspace = true
 description = "Bounded, workflow-oriented Model Context Protocol server for Anytype."
 
+[package.metadata.dist]
+# anyr is the only user-facing executable. The binaries below are private
+# child-process targets required by integration tests.
+dist = false
+
 [[bin]]
 # Process-level integration tests need a child executable without restoring a
 # production any-mcp binary. The user-facing entrypoint is `anyr mcp`.

@@ -11,7 +11,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - The production MCP process is now launched as `anyr mcp`; the former
   standalone `any-mcp` executable was removed after an equivalent capability
   review. The any-mcp crate remains the reusable server library, and its
-  spawned integration tests use a private process wrapper.
+  spawned integration tests use private process wrappers. Release packaging
+  excludes those wrappers and distributes only the user-facing `anyr`
+  executable.
 - Maintenance commands are now `anyr mcp init` and `anyr mcp check`; version
   reporting is consolidated at `anyr -V`/`--version`.
 

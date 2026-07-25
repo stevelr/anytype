@@ -27,6 +27,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Select `anyr` as the default package for Cargo commands launched from the
+  virtual workspace root, so `cargo run -- -h` starts the user-facing CLI
+  without requiring `-p anyr`.
 - Remove the CLI integration test's legacy pre-existing space-ID input. It now
   uses `ANYTYPE_TEST_SPACE_PREFIX` and requires an unambiguous matching space
   before running mutation coverage.

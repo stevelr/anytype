@@ -5,6 +5,7 @@
 
 [workspace]
 members = ["any-edit", "any-mcp", "anyback", "anyr", "anytype-api", "anytype-rpc"]
+default-members = ["anyr"]
 resolver = "3"
 
 [workspace.package]

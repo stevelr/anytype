@@ -37,6 +37,19 @@ This repository is a rust workspace for Anytype automation, with client librarie
 </tr>
 </table>
 
+## Build and run
+
+The workspace keeps private test executables alongside its libraries, but
+selects `anyr` for Cargo commands that do not name a package. Run the
+user-facing CLI from the repository root:
+
+```sh
+cargo run -- -h
+```
+
+Use `--workspace` or `-p PACKAGE` when you need to build or test other
+workspace members.
+
 ## Compatibility notes
 
 - [Numeric and checkbox filter status](FILTER_STATUS.md) records the
