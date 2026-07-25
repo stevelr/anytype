@@ -1110,11 +1110,26 @@ impl TryFrom<RawLimits> for ArtifactLimits {
 
     fn try_from(raw: RawLimits) -> Result<Self, Self::Error> {
         let defaults = Self::default();
+        let artifact_bytes = bounded(
+            raw.artifact_bytes,
+            defaults.artifact_bytes,
+            64 * 1024,
+            1 << 30,
+        )?;
+
+        // Limits that operate on a single artifact inherit its configured ceiling
+        // when omitted. This lets an operator lower `artifact_bytes` without
+        // having to repeat every dependent default, while explicitly configured
+        // incompatible limits are still rejected by cross-field validation.
+        let transfer_chunk_default = defaults.transfer_chunk_bytes.min(artifact_bytes);
+        let markdown_default = defaults.markdown_bytes.min(artifact_bytes);
+        let validator_total_input_default =
+            defaults.validator_total_input_bytes.max(artifact_bytes);
         Ok(Self {
-            artifact_bytes: bounded(raw.artifact_bytes, defaults.artifact_bytes, 1, 1 << 30)?,
+            artifact_bytes,
             transfer_chunk_bytes: bounded(
                 raw.transfer_chunk_bytes,
-                defaults.transfer_chunk_bytes,
+                transfer_chunk_default,
                 64 * 1024,
                 64 * 1024 * 1024,
             )?,
@@ -1176,12 +1191,7 @@ impl TryFrom<RawLimits> for ArtifactLimits {
             )?),
             cleanup_batch: bounded(raw.cleanup_batch, defaults.cleanup_batch, 1, 1_024)?,
             discovery_rows: bounded(raw.discovery_rows, defaults.discovery_rows, 1, 10_000)?,
-            markdown_bytes: bounded(
-                raw.markdown_bytes,
-                defaults.markdown_bytes,
-                1,
-                64 * 1024 * 1024,
-            )?,
+            markdown_bytes: bounded(raw.markdown_bytes, markdown_default, 1, 64 * 1024 * 1024)?,
             markdown_chars: bounded(raw.markdown_chars, defaults.markdown_chars, 1, 1_000_000)?,
             validator_processes: bounded(
                 raw.validator_processes,
@@ -1191,7 +1201,7 @@ impl TryFrom<RawLimits> for ArtifactLimits {
             )?,
             validator_total_input_bytes: bounded(
                 raw.validator_total_input_bytes,
-                defaults.validator_total_input_bytes,
+                validator_total_input_default,
                 1,
                 2_u64 * 1024 * 1024 * 1024,
             )?,
@@ -2008,6 +2018,13 @@ mod tests {
 
     #[test]
     fn limits_enforce_individual_and_cross_field_bounds() {
+        let one_mebibyte =
+            ArtifactConfig::from_toml(&format!("{MINIMAL}\n[limits]\nartifact_bytes = 1048576\n"))
+                .expect("one MiB artifact limit with inherited dependent limits");
+        assert_eq!(one_mebibyte.limits.artifact_bytes, 1_048_576);
+        assert_eq!(one_mebibyte.limits.transfer_chunk_bytes, 1_048_576);
+        assert_eq!(one_mebibyte.limits.markdown_bytes, 1_048_576);
+
         let valid = ArtifactConfig::from_toml(&format!(
             "{MINIMAL}\n[limits]\nartifact_bytes = 1048576\n\
              transfer_chunk_bytes = 65536\nmarkdown_bytes = 1024\n\
