@@ -438,6 +438,12 @@ impl fmt::Debug for ValidatorConfig {
 }
 
 impl ValidatorConfig {
+    /// Returns the executable path for Linux retained-descriptor activation.
+    ///
+    /// Other platforms retain the parsed configuration but intentionally do
+    /// not activate validators until they have an equivalent execution
+    /// boundary.
+    #[cfg(target_os = "linux")]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

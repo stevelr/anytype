@@ -256,7 +256,11 @@ fn pin_executable(config: &ValidatorConfig) -> Result<Option<File>, ValidatorAct
     }
 }
 
-#[cfg(unix)]
+// Validator activation is Linux-only: execution below uses the retained
+// descriptor through `/proc/self/fd` and applies `PR_SET_NO_NEW_PRIVS`.
+// macOS has neither equivalent, so it must not activate this authority based
+// only on the fact that `O_NOFOLLOW` is available there.
+#[cfg(target_os = "linux")]
 fn open_executable_no_follow(path: &std::path::Path) -> Result<File, ValidatorActivationError> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -265,11 +269,6 @@ fn open_executable_no_follow(path: &std::path::Path) -> Result<File, ValidatorAc
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)
         .map_err(|_| ValidatorActivationError)
-}
-
-#[cfg(not(unix))]
-fn open_executable_no_follow(path: &std::path::Path) -> Result<File, ValidatorActivationError> {
-    File::open(path).map_err(|_| ValidatorActivationError)
 }
 
 #[cfg(unix)]
@@ -298,24 +297,6 @@ fn safe_executable_metadata(metadata: &std::fs::Metadata) -> bool {
 #[cfg(target_os = "linux")]
 fn native_binary_magic(magic: &[u8]) -> bool {
     magic.starts_with(b"\x7fELF")
-}
-
-#[cfg(target_os = "macos")]
-fn native_binary_magic(magic: &[u8]) -> bool {
-    matches!(
-        magic,
-        [0xfe, 0xed, 0xfa, 0xce]
-            | [0xfe, 0xed, 0xfa, 0xcf]
-            | [0xce, 0xfa, 0xed, 0xfe]
-            | [0xcf, 0xfa, 0xed, 0xfe]
-            | [0xca, 0xfe, 0xba, 0xbe]
-            | [0xbe, 0xba, 0xfe, 0xca]
-    )
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn native_binary_magic(magic: &[u8]) -> bool {
-    magic.starts_with(b"MZ")
 }
 
 fn hash_reader(reader: &mut File, maximum: u64) -> Result<String, ValidatorActivationError> {
@@ -603,6 +584,7 @@ struct ValidatorExecutionError;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::artifact_config::ArtifactConfig;
 
     #[test]

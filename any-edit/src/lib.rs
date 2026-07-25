@@ -49,10 +49,10 @@ pub enum Commands {
     CopyLink {
         /// Delay in milliseconds after activating Anytype (default: 300)
         #[arg(long, default_value = "300")]
-        pub activate_delay: u64,
+        activate_delay: u64,
         /// Delay in milliseconds after sending keystroke (default: 200)
         #[arg(long, default_value = "200")]
-        pub keystroke_delay: u64,
+        keystroke_delay: u64,
     },
     /// Get, edit with $EDITOR, and update
     Edit {
