@@ -372,11 +372,14 @@ name = "anytype-rpc"
 version = "0.5.0-pre.2"
 dependencies = [
  "chrono",
+ "clap",
  "prost",
  "prost-types",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "snafu",
+ "tokio",
  "tonic",
  "tonic-prost",
 ]

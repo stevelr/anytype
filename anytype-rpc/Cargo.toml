@@ -28,7 +28,7 @@ prost.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 
-[dev.dependencies]
+[dev-dependencies]
 clap.workspace = true
 serde_yaml_ng = "0.10.0"
 tokio.workspace = true

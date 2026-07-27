@@ -59,7 +59,7 @@ fn main() {
 
     if let Err(err) = runtime.block_on(run(cli)) {
         let code = error::exit_code(&err);
-        eprintln!("{err}");
+        eprintln!("{}", error::render(&err));
         std::process::exit(code);
     }
 }

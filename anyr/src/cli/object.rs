@@ -1,5 +1,5 @@
-use anyhow::Result;
-use anytype::prelude::*;
+use anyhow::{Result, bail};
+use anytype::{prelude::*, validation::looks_like_object_id};
 
 use crate::{
     cli::{AppContext, must_have_body, pagination_limit, pagination_offset, resolve_icon_exists},
@@ -51,6 +51,15 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             ctx.output.emit_json(&result)
         }
         super::ObjectCommands::Get { space, object_id } => {
+            // `get` addresses an object by id only. Point a caller who passed
+            // a name or type at the commands that turn one into an id.
+            if !looks_like_object_id(&object_id) {
+                bail!(
+                    "`object get` takes an object id, not a name: \"{object_id}\"\n  \
+                     hint: run `anyr search --space {space} --text {object_id} -t` \
+                     or `anyr object list {space} -t` to find the id"
+                );
+            }
             let space_id = ctx.client.resolve_space_id(&space).await?;
             let object = ctx.client.object(space_id, object_id).get().await?;
             ctx.output.emit_json(&object)

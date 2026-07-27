@@ -8,6 +8,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Better error messages for cli errors, with user-friendly hints.
 - Consolidated the former `any-edit`, `anyback`, and `any-mcp` command
   surfaces under `anyr md`, `anyr backup`, and `anyr mcp`. Shared endpoint,
   keystore, output, and `-v`/`-vv` verbosity options are inherited from anyr.
