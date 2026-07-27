@@ -5,17 +5,22 @@ description: Use when an agent needs to read, search, create, edit, organize, up
 
 # Anytype MCP
 
-The MCP server is started with `anyr mcp`. Once connected, agents call its
-advertised tools rather than starting another server or issuing equivalent CLI
-commands.
+The any-mcp server (`anyr mcp`) is reached over its Streamable HTTP
+interface: it runs as a persistent service (systemd unit `any-mcp`,
+loopback-only, bearer-token auth), and the agent's MCP client is already
+configured to connect to it. Call the advertised tools of the connected
+`anymcp` server. Never launch `anyr mcp` yourself and never spawn a stdio
+copy — a second server is unnecessary, and stdio mode is reserved for hosts
+without the HTTP service. If the `anymcp` tools are absent from your tool
+list, report that the server was unreachable when your session started
+instead of trying to start one.
 
 Use any-mcp for verified, bounded Anytype workflows. Prefer its tools over shell
 commands whenever the required capability is advertised.
 
 ## Start safely
 
-1. Call `server_status`. If optional tools matter, call
-   `optional_toolset_status`.
+1. Call `server_status`. If optional tools matter, call `optional_toolset_status`.
 2. Discover spaces, types, properties, tags, collections, chats, and objects;
    do not guess IDs or assume a display name is unique.
 3. Read before mutating. Reuse returned IDs, cursors, body hashes, and
