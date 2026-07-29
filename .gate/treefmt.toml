@@ -24,7 +24,7 @@ options = ["format", "--write", "--config-path=@GATE_BIOME_CONFIG@"]
 [formatter.dprint]
 command = "dprint"
 includes = ["*.json", "*.jsonc", "*.json5", "*.md", "*.markdown", "*.toml", "*.yaml", "*.yml", "*.kdl"]
-options = ["fmt", "--config", "@GATE_DPRINT_CONFIG@"]
+options = ["fmt", "--config", "@GATE_DPRINT_CONFIG@", "--config-discovery=ignore-descendants"]
 
 [formatter.just]
 command = "just"
@@ -38,7 +38,7 @@ includes = ["*.nix"]
 [formatter.ruff]
 command = "ruff"
 includes = ["*.py", "*.pyi"]
-options = ["format"]
+options = ["format", "--config", "@GATE_RUFF_CONFIG@"]
 
 [formatter.rustfmt]
 command = "rustfmt"

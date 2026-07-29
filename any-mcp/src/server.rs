@@ -164,7 +164,7 @@ impl AnyMcpServer {
         Self::build_with_optional_registries(runtime, production_optional_registries(), true)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "acceptance-harness"))]
     pub(crate) fn new_with_optional_registries(
         runtime: RuntimeContext,
         linked_optional_registries: &'static [&'static dyn OptionalToolsetRegistry],

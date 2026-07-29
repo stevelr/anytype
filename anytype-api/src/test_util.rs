@@ -3422,17 +3422,15 @@ where
     F: FnOnce(Arc<TestContext>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let ctx = Arc::new(
-        TestContext::new().await.unwrap_or_else(|error| {
-            panic!(
-                "Failed to create test context: {error}\n  \
+    let ctx = Arc::new(TestContext::new().await.unwrap_or_else(|error| {
+        panic!(
+            "Failed to create test context: {error}\n  \
                  using {}\n  \
                  (integration tests need a reachable Anytype server whose \
                  credentials are in the configured keystore)",
-                test_environment_summary()
-            )
-        }),
-    );
+            test_environment_summary()
+        )
+    }));
 
     let result = std::panic::AssertUnwindSafe(test_fn(Arc::clone(&ctx)))
         .catch_unwind()
