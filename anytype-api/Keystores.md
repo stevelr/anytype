@@ -12,9 +12,43 @@ Keystores can store keys for multiple processes and multiple service ids.
 
 See [below](#debugging) for diagnostic and debugging tips
 
+## Choosing a keystore
+
+Recommended, by environment:
+
+1. **Desktop (Linux, macOS, Windows): use the OS keyring.** This is the
+   resolved default, so usually there is nothing to configure. On Linux the
+   default resolution prefers the D-Bus Secret Service (gnome-keyring or
+   KWallet) whenever a session bus is present. The OS keyring needs no path
+   or key management, encrypts secrets at rest under your login password,
+   mediates access with OS prompts, and — because the keyring daemon
+   serializes concurrent clients — has no file-locking concerns when a
+   long-running service and CLI invocations share credentials.
+2. **Headless servers, containers, CI: use an explicit `file:` spec** (or
+   `env` for CI runners with injected secrets). A Secret Service needs a
+   session bus and an unlocked keyring daemon, which on a machine with no
+   interactive login means extra setup (user lingering, a scripted unlock
+   with a fixed passphrase, and in containers the `CAP_IPC_LOCK` capability
+   for gnome-keyring's mlock wrapper) — and an unlock passphrase stored next
+   to the keyring protects little more than a `0600` file does. The file
+   keystore is one artifact that works everywhere, is easy to back up, and
+   supports optional at-rest encryption.
+3. **Headless Secret Service** is still workable if you want one store for
+   both desktop and services: run the keyring daemon under a lingering user
+   session, unlock it at start, and set
+   `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus` for any systemd
+   service that needs it (ordered after `user@<uid>.service`).
+
+**Set the spec explicitly in service deployments.** When no keystore is
+selected, Linux default resolution probes the Secret Service and silently
+falls back to the file store at the default path if the bus or daemon is
+unreachable — so a service can come up "successfully" reading an empty file
+store and report missing credentials. An explicit `ANYTYPE_KEYSTORE`
+(`secret-service` or `file:path=...`) makes that failure loud instead.
+
 ## Keystore spec
 
-Keystore spec is determined by, in order of precedence, `ClientConfig::keystore`; the environment variable `ANYTYPE_KEYSTORE`; or the platform default keyring. (`keyring` for macos, `windows` for windows, `keyutils` for linux, etc)
+Keystore spec is determined by, in order of precedence, `ClientConfig::keystore`; the environment variable `ANYTYPE_KEYSTORE`; or the platform default keyring: `keychain` for macos, `windows` for windows, and on linux `secret-service` when a D-Bus session bus is available, otherwise `file`.
 
 The first word of the keystore spec is the name of the keystore: 'file', 'env', or one of the OS keyrings. See [the keyring crate](https://github.com/open-source-cooperative/keyring-rs/blob/main/src/lib.rs). for the list of platform-specific defaults and options.
 
@@ -25,9 +59,9 @@ Keystore spec examples:
 - `file` use file (sqlite) keystore in the default location
 - `file:path=/path/to/my/file.db"` use file (sqlite) keystore in custom location
 - `file:path=/path/to/my/file.db:cipher=aegis256:hexkey=HEX_KEY` file keystore in custom location with 256-bit encryption
-- `secret-service` on linux, use the dbus-based secret service keystore
-- `keyutils` linux kernel keyutils keystore (default on linux)
-- `keyring` macos user keyring (default on macos)
+- `secret-service` on linux, use the dbus-based secret service keystore (the default on desktop linux when a session bus is present)
+- `keyutils` linux kernel keyutils keystore (not recommended: keys do not persist across reboots)
+- `keychain` macos user keychain (default on macos)
 - `windows` Windows Credential Store (default on windows)
 - `env` retrieve keys from environment to store in an in-memory hashtable. This keystore does not persist, and accepts no modifiers.
 

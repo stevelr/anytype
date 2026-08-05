@@ -13,6 +13,30 @@ use crate::{
     prelude::*,
 };
 
+/// Maximum characters of a rejected value echoed back in a validation message.
+const MAX_ECHOED_VALUE_CHARS: usize = 80;
+
+/// Returns a bounded, control-character-free rendering of a rejected input.
+///
+/// Validation messages describe the caller's own request, so echoing the
+/// offending value makes the failure actionable. The result is length-bounded
+/// and escaped so a hostile or malformed argument cannot flood or reprogram a
+/// terminal that prints it.
+fn echo_value(value: &str) -> String {
+    let mut shown = String::new();
+    for ch in value.chars().take(MAX_ECHOED_VALUE_CHARS) {
+        if ch.is_control() {
+            shown.extend(ch.escape_default());
+        } else {
+            shown.push(ch);
+        }
+    }
+    if value.chars().count() > MAX_ECHOED_VALUE_CHARS {
+        shown.push('…');
+    }
+    shown
+}
+
 fn is_cid_chars(str: &str) -> bool {
     // base32 lower-case alphabet used by CIDv1 (no padding)
     str.bytes()
@@ -104,14 +128,18 @@ impl ValidationLimits {
         ensure!(
             !id.is_empty(),
             ValidationSnafu {
-                message: format!("{description} id cannot be empty"),
+                message: format!("{description} cannot be empty"),
             }
         );
         // looks_like_object_id checks the length, prefix, and character set
         ensure!(
             looks_like_object_id(id),
             ValidationSnafu {
-                message: format!("{description} not a valid object id",),
+                message: format!(
+                    "{description} is not a valid object id: \"{}\" \
+                     (expected an id beginning with \"bafyrei\")",
+                    echo_value(id)
+                ),
             }
         );
         Ok(())

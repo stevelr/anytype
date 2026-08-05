@@ -2,9 +2,10 @@
 
 ## Startup
 
-An MCP host launches the server with `anyr mcp`; agents call the advertised
-tools and do not launch another server. For broad PKM work the host typically
-uses:
+The server (`anyr mcp`) runs as a persistent Streamable HTTP service the MCP
+host connects to; agents call the advertised tools and never launch a server
+themselves (stdio launch exists only for hosts without the HTTP service).
+For broad PKM work the service typically runs with:
 
 ```text
 ANY_MCP_PROFILE=standard

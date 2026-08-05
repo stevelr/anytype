@@ -295,6 +295,9 @@ fn usable_algorithm(jwk: &Jwk) -> Option<Algorithm> {
             }
         }
         AlgorithmParameters::OctetKey(_) => return None,
+        AlgorithmParameters::Other(_) => return None,
+        // AlgorithmParameters is declared non-exhaustive in jsonwebtoken v11.0 so we must use a catch-all
+        _ => return None,
     };
     match declared {
         Some(declared) if declared != inherent => None,

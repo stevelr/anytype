@@ -3422,11 +3422,15 @@ where
     F: FnOnce(Arc<TestContext>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let ctx = Arc::new(
-        TestContext::new()
-            .await
-            .unwrap_or_else(|error| panic!("Failed to create test context: {error}")),
-    );
+    let ctx = Arc::new(TestContext::new().await.unwrap_or_else(|error| {
+        panic!(
+            "Failed to create test context: {error}\n  \
+                 using {}\n  \
+                 (integration tests need a reachable Anytype server whose \
+                 credentials are in the configured keystore)",
+            test_environment_summary()
+        )
+    }));
 
     let result = std::panic::AssertUnwindSafe(test_fn(Arc::clone(&ctx)))
         .catch_unwind()
@@ -3548,6 +3552,23 @@ pub(crate) fn test_keystore_spec() -> String {
 
 fn test_keystore_spec_from(configured: std::result::Result<String, VarError>) -> String {
     configured.unwrap_or_else(|_| "env".to_owned())
+}
+
+/// Describes the endpoint and keystore an integration test run resolved to.
+///
+/// A setup failure is almost always a misconfigured environment rather than a
+/// defect in the test, and [`AnytypeError`] redacts its own `Display`, so the
+/// harness names the inputs it actually used. Only the resolved endpoint and
+/// keystore *spec* are shown — never a stored credential.
+#[doc(hidden)]
+pub fn test_environment_summary() -> String {
+    let base_url = std::env::var(crate::config::ANYTYPE_TEST_URL_ENV)
+        .unwrap_or_else(|_| crate::config::ANYTYPE_TEST_URL.to_string());
+    format!(
+        "{}={base_url} ANYTYPE_KEYSTORE={}",
+        crate::config::ANYTYPE_TEST_URL_ENV,
+        test_keystore_spec()
+    )
 }
 
 /// Creates a new test context with a custom app name

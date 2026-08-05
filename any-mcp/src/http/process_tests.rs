@@ -351,6 +351,9 @@ async fn wrong_bearer_and_untested_versions_fail_over_the_socket() {
         .expect("wrong bearer");
     assert_eq!(response.status(), 401);
 
+    // The launch revision is a valid proposal: real Streamable HTTP clients
+    // (e.g. zeroclaw) still open with 2024-11-05, and rmcp echoes any known
+    // proposed version, so the handshake succeeds and a session is issued.
     let response = client
         .post(format!("{base}/mcp"))
         .bearer_auth(TEST_TOKEN)
@@ -368,7 +371,32 @@ async fn wrong_bearer_and_untested_versions_fail_over_the_socket() {
         }))
         .send()
         .await
-        .expect("stdio-only revision over HTTP");
+        .expect("launch revision over HTTP");
+    assert!(response.status().is_success(), "{}", response.status());
+    assert!(
+        response.headers().get("mcp-session-id").is_some(),
+        "initialize with the launch revision must issue a session"
+    );
+
+    // An untested revision proposed in an initialize body still fails closed.
+    let response = client
+        .post(format!("{base}/mcp"))
+        .bearer_auth(TEST_TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "1999-01-01",
+                "capabilities": {},
+                "clientInfo": {"name": "process-test", "version": "1.0.0"},
+            },
+        }))
+        .send()
+        .await
+        .expect("unknown revision over HTTP");
     assert_eq!(response.status(), 400);
 
     server.stop().await;

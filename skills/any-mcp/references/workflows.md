@@ -1,4 +1,4 @@
-# PKM workflow recipes
+# Anytype workflow recipes
 
 Replace uppercase placeholders with values returned by discovery or the prior
 step. The companion JSON file contains schema-validated representative calls.
@@ -53,6 +53,8 @@ Never send a tag name where the mutation requires a tag ID.
 
 ## Send chat messages
 
+Resolve the space name and chat name. In a chat space the default chat name is "General".
+
 ### Plain text
 
 Resolve the exact chat ID with `chat_list`, then call `chat_message_add`.
@@ -74,22 +76,22 @@ Example `message-blocks.json`:
 
 ```json
 [
-  {
-    "type": "text",
-    "content": {
-      "text": "Saved for later",
-      "style": "header2",
-      "marks": [],
-      "checked": false
-    }
-  },
-  {
-    "type": "link",
-    "content": {
-      "target_object_id": "OBJECT_ID",
-      "kind": "object"
-    }
-  }
+	{
+		"type": "text",
+		"content": {
+			"text": "Saved for later",
+			"style": "header2",
+			"marks": [],
+			"checked": false
+		}
+	},
+	{
+		"type": "link",
+		"content": {
+			"target_object_id": "OBJECT_ID",
+			"kind": "object"
+		}
+	}
 ]
 ```
 

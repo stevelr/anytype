@@ -48,11 +48,25 @@ use crate::{
     server::AnyMcpServer,
 };
 
-/// Streamable-HTTP-capable protocol revisions accepted by this server.
+/// Streamable-HTTP-capable protocol revisions accepted in the
+/// `MCP-Protocol-Version` header on post-initialize requests.
 ///
-/// Revision `2024-11-05` predates Streamable HTTP and stays stdio-only; the
-/// `2026-07-28` preview uses the stateless adapter, never stable sessions.
+/// Revision `2024-11-05` predates both Streamable HTTP and this header, so a
+/// compliant client never sends it here; the `2026-07-28` preview uses the
+/// stateless adapter, never stable sessions.
 const ACCEPTED_VERSIONS: [&str; 3] = ["2025-03-26", "2025-06-18", "2025-11-25"];
+
+/// Protocol revisions a client may propose in an `initialize` body.
+///
+/// Everything in [`ACCEPTED_VERSIONS`] plus `2024-11-05`: real Streamable
+/// HTTP clients in the wild (e.g. zeroclaw) still propose the launch
+/// revision while speaking the newer transport perfectly well, and the spec
+/// requires a server to answer an unsupported proposal with a version it
+/// does support — not reject the handshake. rmcp echoes any known proposed
+/// version, so the session proceeds on the client's revision; the rest of
+/// this module is revision-agnostic.
+const INITIALIZE_ACCEPTED_VERSIONS: [&str; 4] =
+    ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 
 /// Reviewed `rmcp` SSE keep-alive interval.
 const SSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -299,8 +313,9 @@ impl StableBackend {
         } = admitted;
 
         // Gate: the negotiated-version header must be a tested
-        // Streamable-HTTP-capable revision. rmcp alone would also accept the
-        // stdio-only 2024-11-05 revision.
+        // Streamable-HTTP-capable revision. The header postdates 2024-11-05,
+        // so it is not in the accepted set even though an initialize body may
+        // propose it (see INITIALIZE_ACCEPTED_VERSIONS).
         if let Some(version) = parts.headers.get(PROTOCOL_VERSION_HEADER) {
             let accepted = version
                 .to_str()
@@ -399,7 +414,7 @@ fn initialize_version_accepted(body: &[u8]) -> bool {
             .get("params")
             .and_then(|params| params.get("protocolVersion"))
             .and_then(Value::as_str)
-            .is_some_and(|version| ACCEPTED_VERSIONS.contains(&version))
+            .is_some_and(|version| INITIALIZE_ACCEPTED_VERSIONS.contains(&version))
     })
 }
 
@@ -603,7 +618,7 @@ mod tests {
     async fn untested_revisions_are_rejected_before_session_work() {
         let backend = backend(4);
         let alice = principal("alice");
-        for version in ["2024-11-05", "2026-07-28", "1999-01-01"] {
+        for version in ["2026-07-28", "1999-01-01"] {
             let response = backend
                 .clone()
                 .call(admitted(
