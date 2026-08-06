@@ -91,10 +91,11 @@ production child owns a separate client and deliberately exposes no test-only
 HTTP metrics endpoint, so spawned evidence uses MCP request/result/error
 category counts instead.
 
-The direct-router module currently contains 19 ignored cases; the library
-filter also selects eight focused cross-entry regressions (seven
-optional-registry cases plus files), for 27 cases total. The spawned target
-contains 21 ignored live cases.
+The direct-router and spawned targets keep their server-backed scenarios
+ignored by default. The direct-router library filter also includes focused
+cross-entry regressions for optional registries and files. Run the targets or
+select scenarios by name; the harness inventory is authoritative as coverage
+evolves.
 
 The harness bounds individual stdout frames to 2 MiB, aggregate stdout to
 8 MiB, individual stderr lines to 64 KiB, aggregate stderr to 1 MiB, and the

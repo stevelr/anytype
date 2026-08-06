@@ -729,6 +729,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Describe ignored live stdio scenarios by target and behavior instead of
+  maintaining stale exact case counts in public conformance documentation.
 - Remove hand-maintained exact ignored-test case counts from the README so
   acceptance coverage changes cannot silently stale the documentation.
 - Move stdio compatibility evidence under `any-mcp/docs/` and update its public
