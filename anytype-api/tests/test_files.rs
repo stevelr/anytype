@@ -107,15 +107,15 @@ async fn test_rest_file_upload_download_and_delete() -> TestResult<()> {
 /// `FileDeleteRequest::permanently` must bypass the bin, so the deleted file is
 /// unresolvable rather than merely archived.
 ///
-/// `DELETE ...?skip_bin=true` was observed once to stop responding on
-/// `anytype-cli` 0.3.6 and to keep hanging for that space afterwards; it was
-/// not reproducible from fresh spaces (tracked as any-18f5). Because the client
-/// applies no default request timeout (any-sqns), the call is wall-clock
-/// bounded here so a recurrence fails this test instead of wedging the suite.
+/// On `anytype-cli` 0.3.6, permanent deletion was measured taking about 154
+/// seconds before returning `204 No Content` (tracked as any-18f5). Because the
+/// client applies no default request timeout (any-sqns), the call is bounded by
+/// the same finite 180-second budget used for live CLI commands. A recurrence
+/// still fails instead of wedging the suite indefinitely.
 #[tokio::test]
 async fn test_rest_file_permanent_delete_bypasses_bin() -> TestResult<()> {
     /// Wall-clock ceiling for the permanent delete.
-    const PERMANENT_DELETE_BUDGET: Duration = Duration::from_secs(30);
+    const PERMANENT_DELETE_BUDGET: Duration = Duration::from_secs(180);
 
     with_test_context(|ctx| async move {
         let file_name = format!("permanent-{}.txt", unique_suffix());
@@ -128,6 +128,7 @@ async fn test_rest_file_permanent_delete_bypasses_bin() -> TestResult<()> {
             .mime("text/plain")
             .upload()
             .await?;
+
         // Deliberately not registered: cleanup deletes every registered file,
         // and a second delete of a permanently removed file fails. The
         // cleanup-owned space is dropped either way, so nothing leaks even if

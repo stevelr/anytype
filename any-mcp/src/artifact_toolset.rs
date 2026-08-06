@@ -1483,6 +1483,22 @@ where
     Ok((output, total, sha256, media_type, etag))
 }
 
+#[cfg(feature = "acceptance-harness")]
+async fn acceptance_pause_before_file_import_dispatch() {
+    static PAUSE_USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if std::env::var("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE")
+        .ok()
+        .as_deref()
+        == Some("file_import_pre_dispatch")
+        && !PAUSE_USED.swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        if let Some(ready) = std::env::var_os("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY") {
+            let _ = std::fs::write(ready, b"ready\n");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
 async fn file_import(
     runtime: &RuntimeContext,
     input: FileImportInput,
@@ -1511,6 +1527,8 @@ async fn file_import(
     let staging_record = source.staging_record();
     let validator_findings =
         run_configured_validators(runtime, &source, declared_media_type.as_deref()).await?;
+    #[cfg(feature = "acceptance-harness")]
+    acceptance_pause_before_file_import_dispatch().await;
     let key = idempotency_key(b"import", &input.idempotency_key);
     let fingerprint = import_fingerprint(
         &space_id,

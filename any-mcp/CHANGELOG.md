@@ -32,6 +32,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Complete terminal artifact data-plane acceptance for quota, TTL cleanup,
+  create-new collisions, pre-dispatch cancellation, restart reconciliation,
+  stale-generation rejection, bounded sequential staging ranges, exact raw MCP
+  frame byte/token ceilings, and counts-only lifecycle diagnostics. Cleanup
+  evidence is emitted only after private file removal succeeds, and spawned
+  process capture rejects unconsumed stdout frames or non-allowlisted stderr
+  fields.
 - Narrow local artifact root authority on stable stdio with one bounded,
   session-scoped MCP `roots/list` snapshot. When the initialized client
   advertises the roots capability, a local artifact path is effective only

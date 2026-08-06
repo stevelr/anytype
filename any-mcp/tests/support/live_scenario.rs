@@ -4325,19 +4325,26 @@ mod artifact_acceptance;
 // transport matrix, so no single target names the complete harness surface.
 #[allow(unused_imports)]
 pub use artifact_acceptance::{
-    ARTIFACT_CREATE_MARKDOWN, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES,
+    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ARTIFACT_CREATE_MARKDOWN, ARTIFACT_FILE_MEDIA_TYPE,
+    ARTIFACT_FILE_PAYLOAD, ARTIFACT_FRAME_CEILING_BYTES, ARTIFACT_FRAME_CEILING_TOKENS,
+    ARTIFACT_PAYLOAD_FRAME_DELTA_BYTES, ARTIFACT_PAYLOAD_FRAME_DELTA_TOKENS, ARTIFACT_TOOL_NAMES,
     ARTIFACT_UPDATE_MARKDOWN, ArtifactCatalogSnapshot, ArtifactContentEvidence, ArtifactContentRun,
-    ArtifactContentScenario, ArtifactControlPlane, ArtifactDataPlane, ArtifactDocumentRecord,
-    ArtifactFileRecord, ArtifactMimeFixture, ArtifactPolicyEvidence, ArtifactPolicyFixture,
-    ArtifactPolicyOptions, ArtifactPolicyProbe, ArtifactPolicyRun, ArtifactPolicyScenario,
-    ArtifactProbeExpectation, ArtifactProbeOutcome, ArtifactServerLogAudit, ArtifactSmokeEvidence,
-    ArtifactSmokeFixture, ArtifactStatusEvidence, ArtifactTransport, ArtifactValidatorOutcome,
-    ArtifactValidatorProbe, ArtifactValidatorRecord, CanonicalizationEffect, FixtureSpacePolicy,
-    FixtureValidatorPolicy, PinnedValidatorExecutable, UNAUTHORIZED_SPACE_ID, artifact_sha256,
+    ArtifactContentScenario, ArtifactControlPlane, ArtifactDataPlane, ArtifactDirectorySnapshot,
+    ArtifactDocumentRecord, ArtifactFileRecord, ArtifactFrameMeasurement,
+    ArtifactLifecycleScenario, ArtifactLimitProfile, ArtifactMimeFixture, ArtifactPolicyEvidence,
+    ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyProbe, ArtifactPolicyRun,
+    ArtifactPolicyScenario, ArtifactProbeExpectation, ArtifactProbeOutcome, ArtifactServerLogAudit,
+    ArtifactSmokeEvidence, ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStatusEvidence,
+    ArtifactTransport, ArtifactValidatorOutcome, ArtifactValidatorProbe, ArtifactValidatorRecord,
+    CanonicalizationEffect, FixtureSpacePolicy, FixtureValidatorPolicy, PinnedValidatorExecutable,
+    UNAUTHORIZED_SPACE_ID, allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
     assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
-    audit_server_log, classify_canonicalization, classify_server_log, probe_expectation,
-    require_completed, run_artifact_content_scenario, run_artifact_policy_scenario,
-    run_artifact_smoke_scenario, server_log_offset, validate_tool_frame,
+    assert_payload_frame_independence, audit_server_log, classify_canonicalization,
+    classify_collision_frames, classify_server_log, measure_artifact_frame, probe_expectation,
+    reject_oversized_stage_chunk, release_stage_upload, require_completed,
+    run_artifact_content_scenario, run_artifact_policy_scenario, run_artifact_smoke_scenario,
+    server_log_offset, stage_head_status, upload_stage_bytes, validate_tool_frame,
+    wait_for_stage_reaped,
 };
 
 /// Evidence tier required for every optional production operation.

@@ -34,9 +34,9 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anytype::{
@@ -46,8 +46,9 @@ use anytype::{
 use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
-use super::McpDriver;
+use super::{McpDriver, ToolErrorEvidence};
 
 /// Exact sorted production artifact tool inventory.
 pub const ARTIFACT_TOOL_NAMES: [&str; 8] = [
@@ -700,6 +701,94 @@ fn simple_relative_name(relative: &str) -> bool {
     )
 }
 
+/// Closed numeric-limit profiles used by lifecycle acceptance fixtures.
+///
+/// Every non-default profile stays inside production configuration bounds. The
+/// profiles deliberately lower limits instead of adding test-only runtime
+/// bypasses, so quota, expiry, and payload evidence exercises the same parser
+/// and staging implementation as an operator configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ArtifactLimitProfile {
+    /// Production defaults; the rendered policy omits `[limits]`.
+    #[default]
+    Default,
+    /// Two-entry, one-MiB aggregate quota with sub-MiB artifacts.
+    Quota,
+    /// Minimum admitted sixty-second TTL and bounded cleanup batch.
+    TtlCleanup,
+    /// One-MiB artifact ceiling with sixty-four-KiB transfer chunks.
+    PayloadCeiling,
+}
+
+impl ArtifactLimitProfile {
+    /// Complete closed lifecycle limit inventory.
+    pub const ALL: [Self; 4] = [
+        Self::Default,
+        Self::Quota,
+        Self::TtlCleanup,
+        Self::PayloadCeiling,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Quota => "quota",
+            Self::TtlCleanup => "ttl_cleanup",
+            Self::PayloadCeiling => "payload_ceiling",
+        }
+    }
+
+    /// Parses an exact stable identifier.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+
+    /// Maximum accepted artifact bytes for this profile.
+    #[must_use]
+    pub const fn artifact_bytes(self) -> u64 {
+        match self {
+            Self::Default => 256 * 1024 * 1024,
+            Self::Quota => 768 * 1024,
+            Self::TtlCleanup => 64 * 1024,
+            Self::PayloadCeiling => 1024 * 1024,
+        }
+    }
+
+    /// Staged-record TTL in seconds for this profile.
+    #[must_use]
+    pub const fn staging_ttl_secs(self) -> u64 {
+        match self {
+            Self::Default | Self::Quota => 900,
+            Self::TtlCleanup | Self::PayloadCeiling => 60,
+        }
+    }
+
+    fn render(self) -> String {
+        match self {
+            Self::Default => String::new(),
+            Self::Quota => format!(
+                "[limits]\nartifact_bytes = {}\ntransfer_chunk_bytes = 65536\nstaging_total_bytes = 1048576\nstaging_entries = 2\ncleanup_batch = 2\n",
+                self.artifact_bytes()
+            ),
+            Self::TtlCleanup => format!(
+                "[limits]\nartifact_bytes = {}\ntransfer_chunk_bytes = 65536\nstaging_total_bytes = 1048576\nstaging_entries = 8\nstaging_ttl_secs = {}\ncleanup_batch = 8\n",
+                self.artifact_bytes(),
+                self.staging_ttl_secs()
+            ),
+            Self::PayloadCeiling => format!(
+                "[limits]\nartifact_bytes = {}\ntransfer_chunk_bytes = 65536\nstaging_total_bytes = 4194304\nstaging_entries = 8\nstaging_ttl_secs = {}\ncleanup_batch = 8\n",
+                self.artifact_bytes(),
+                self.staging_ttl_secs()
+            ),
+        }
+    }
+}
+
 /// Strict artifact policy options shared by every acceptance fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactPolicyOptions {
@@ -717,6 +806,8 @@ pub struct ArtifactPolicyOptions {
     pub spaces: FixtureSpacePolicy,
     /// Configured validator declaration shape.
     pub validators: FixtureValidatorPolicy,
+    /// Numeric-limit profile rendered into the strict policy.
+    pub limits: ArtifactLimitProfile,
 }
 
 impl Default for ArtifactPolicyOptions {
@@ -726,7 +817,38 @@ impl Default for ArtifactPolicyOptions {
             read_only: false,
             spaces: FixtureSpacePolicy::AllowedUnderTest,
             validators: FixtureValidatorPolicy::Absent,
+            limits: ArtifactLimitProfile::Default,
         }
+    }
+}
+
+/// Content-free exact snapshot of one acceptance fixture directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArtifactDirectorySnapshot {
+    /// Owner-private staging lock files.
+    pub lock_files: u64,
+    /// Published private staging records.
+    pub record_files: u64,
+    /// In-progress private staging files.
+    pub temporary_files: u64,
+    /// Ordinary export files.
+    pub ordinary_files: u64,
+    /// Entries outside the closed fixture inventory.
+    pub unexpected_entries: u64,
+    /// Aggregate bytes across ordinary, record, and temporary files.
+    pub total_file_bytes: u64,
+}
+
+impl ArtifactDirectorySnapshot {
+    /// Whether a staging directory contains only its single process lock.
+    #[must_use]
+    pub const fn is_reaped(self) -> bool {
+        self.lock_files == 1
+            && self.record_files == 0
+            && self.temporary_files == 0
+            && self.ordinary_files == 0
+            && self.unexpected_entries == 0
+            && self.total_file_bytes == 0
     }
 }
 
@@ -740,6 +862,7 @@ pub struct ArtifactPolicyFixture {
     config: PathBuf,
     import: PathBuf,
     export: PathBuf,
+    staging: PathBuf,
     staging_base_url: Option<String>,
     validator: Option<PinnedValidatorExecutable>,
     options: ArtifactPolicyOptions,
@@ -831,6 +954,7 @@ impl ArtifactPolicyFixture {
             config,
             import,
             export,
+            staging,
             staging_base_url,
             validator,
             options,
@@ -917,6 +1041,82 @@ impl ArtifactPolicyFixture {
     pub fn export_exists(&self, relative: &str) -> bool {
         simple_relative_name(relative) && self.export.join(relative).is_file()
     }
+
+    /// Returns a counts-only exact snapshot of the private staging directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed message when an entry cannot be classified or inspected.
+    pub fn staging_snapshot(&self) -> Result<ArtifactDirectorySnapshot, String> {
+        directory_snapshot(&self.staging, true)
+    }
+
+    /// Returns a counts-only exact snapshot of the authorized export directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed message when an entry cannot be classified or inspected.
+    pub fn export_snapshot(&self) -> Result<ArtifactDirectorySnapshot, String> {
+        directory_snapshot(&self.export, false)
+    }
+
+    /// Private marker written when the test-only pre-dispatch pause is reached.
+    #[must_use]
+    pub fn acceptance_pause_ready_path(&self) -> PathBuf {
+        self.base.join("acceptance-pause-ready")
+    }
+
+    /// Whether the complete private fixture tree still exists.
+    #[must_use]
+    pub fn tree_exists(&self) -> bool {
+        self.base.is_dir()
+    }
+}
+
+fn directory_snapshot(path: &Path, staging: bool) -> Result<ArtifactDirectorySnapshot, String> {
+    let mut snapshot = ArtifactDirectorySnapshot::default();
+    let entries =
+        fs::read_dir(path).map_err(|_| "inspect artifact fixture directory".to_owned())?;
+    for entry in entries {
+        let entry = entry.map_err(|_| "inspect artifact fixture directory".to_owned())?;
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "inspect artifact fixture directory".to_owned())?;
+        if !metadata.is_file() {
+            snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if staging && name == ".any-mcp-staging.lock" {
+            snapshot.lock_files = snapshot.lock_files.saturating_add(1);
+            continue;
+        }
+        snapshot.total_file_bytes = snapshot.total_file_bytes.saturating_add(metadata.len());
+        if staging
+            && name
+                .strip_suffix(".bin")
+                .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(lowercase_hex_byte))
+        {
+            snapshot.record_files = snapshot.record_files.saturating_add(1);
+        } else if staging
+            && name
+                .strip_prefix(".any-mcp-")
+                .and_then(|value| value.strip_suffix(".tmp"))
+                .is_some_and(|stem| stem.len() == 16 && stem.bytes().all(lowercase_hex_byte))
+        {
+            snapshot.temporary_files = snapshot.temporary_files.saturating_add(1);
+        } else if staging {
+            snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
+        } else {
+            snapshot.ordinary_files = snapshot.ordinary_files.saturating_add(1);
+        }
+    }
+    Ok(snapshot)
+}
+
+fn lowercase_hex_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
 }
 
 impl Drop for ArtifactPolicyFixture {
@@ -956,6 +1156,7 @@ fn render_policy(
          [spaces]\n\
          read_only = false\n\
          {}\
+         {}\
          [[roots.import]]\n\
          id = \"{}\"\n\
          path = \"{}\"\n\
@@ -963,6 +1164,7 @@ fn render_policy(
          id = \"{}\"\n\
          path = \"{}\"\n",
         allowed,
+        options.limits.render(),
         toml_basic_string(ArtifactPolicyFixture::IMPORT_ROOT),
         toml_basic_string(&import.display().to_string()),
         toml_basic_string(ArtifactPolicyFixture::EXPORT_ROOT),
@@ -1419,38 +1621,11 @@ async fn stage_upload(
 ) -> Result<String, String> {
     let size = u64::try_from(payload.len())
         .map_err(|_| "staged payload exceeds the addressable range".to_owned())?;
-    let allocation = driver
-        .call_tool(
-            "artifact_stage_upload",
-            json!({
-                "space": space_id,
-                "size_bytes": size,
-                "media_type": media_type,
-                "expected_sha256": artifact_sha256(payload)
-            }),
-        )
-        .await?;
-    let handle = required_str(&allocation, "/handle")?;
-    let url = required_str(&allocation, "/upload_url")?;
-    let last = size
-        .checked_sub(1)
-        .ok_or_else(|| "staged payload must not be empty".to_owned())?;
-    let response = staging_client()?
-        .put(&url)
-        .header(AUTHORIZATION, format!("Bearer {handle}"))
-        .header(CONTENT_TYPE, media_type.to_owned())
-        .header(CONTENT_RANGE, format!("bytes 0-{last}/{size}"))
-        .body(payload.to_vec())
-        .send()
-        .await
-        .map_err(|_| "staged upload transport failed".to_owned())?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "staged upload rejected with status {}",
-            response.status().as_u16()
-        ));
-    }
-    Ok(handle)
+    let expected_sha256 = artifact_sha256(payload);
+    let allocation =
+        allocate_stage_upload(driver, space_id, size, media_type, Some(&expected_sha256)).await?;
+    upload_stage_bytes(&allocation, payload, media_type).await?;
+    Ok(allocation.handle.to_string())
 }
 
 /// Reads exact published bytes from the selected data plane.
@@ -1555,6 +1730,22 @@ fn required_str(value: &Value, pointer: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("artifact result omitted {pointer}"))
+}
+
+fn take_required_string(value: &mut Value, pointer: &str) -> Result<String, String> {
+    match value.pointer_mut(pointer) {
+        Some(Value::String(text)) => Ok(std::mem::take(text)),
+        _ => Err(format!("artifact result omitted {pointer}")),
+    }
+}
+
+fn zeroize_json_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => text.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json_strings),
+        Value::Object(fields) => fields.values_mut().for_each(zeroize_json_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn required_u64(value: &Value, field: &str) -> Result<u64, String> {
@@ -1692,6 +1883,7 @@ impl ArtifactPolicyScenario {
             // Validator behavior is a separate scenario family: policy
             // scenarios must observe an unchanged, validator-free catalog.
             validators: FixtureValidatorPolicy::Absent,
+            limits: ArtifactLimitProfile::Default,
         }
     }
 
@@ -2603,6 +2795,7 @@ impl ArtifactContentScenario {
             read_only: false,
             spaces: FixtureSpacePolicy::AllowedUnderTest,
             validators: self.validator_policy(),
+            limits: ArtifactLimitProfile::Default,
         }
     }
 
@@ -3317,6 +3510,468 @@ pub fn assert_artifact_content_parity(
         }
     }
     Ok(())
+}
+
+/// Closed inventory of lifecycle and payload acceptance scenarios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactLifecycleScenario {
+    /// Aggregate byte and record quotas refuse further reservations.
+    Quota,
+    /// Expired records are reaped and their handles become uniformly stale.
+    TtlCleanup,
+    /// Concurrent create-new publication produces one winner and one conflict.
+    Collision,
+    /// A cancelled pre-dispatch import leaves its staged source reusable.
+    Cancellation,
+    /// A restarted child invalidates old handles and reconciles private state.
+    RestartStaleGeneration,
+    /// Small and ceiling-sized payloads produce bounded MCP frames.
+    PayloadCeiling,
+}
+
+impl ArtifactLifecycleScenario {
+    /// Complete closed lifecycle scenario inventory.
+    pub const ALL: [Self; 6] = [
+        Self::Quota,
+        Self::TtlCleanup,
+        Self::Collision,
+        Self::Cancellation,
+        Self::RestartStaleGeneration,
+        Self::PayloadCeiling,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quota => "quota",
+            Self::TtlCleanup => "ttl_cleanup",
+            Self::Collision => "collision",
+            Self::Cancellation => "cancellation",
+            Self::RestartStaleGeneration => "restart_stale_generation",
+            Self::PayloadCeiling => "payload_ceiling",
+        }
+    }
+
+    /// Parses an exact stable identifier.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+
+    /// Strict policy options realizing this scenario.
+    #[must_use]
+    pub const fn policy_options(self) -> ArtifactPolicyOptions {
+        let limits = match self {
+            Self::Quota => ArtifactLimitProfile::Quota,
+            Self::TtlCleanup => ArtifactLimitProfile::TtlCleanup,
+            Self::Cancellation | Self::PayloadCeiling => ArtifactLimitProfile::PayloadCeiling,
+            Self::Collision | Self::RestartStaleGeneration => ArtifactLimitProfile::Default,
+        };
+        ArtifactPolicyOptions {
+            staging: true,
+            read_only: false,
+            spaces: FixtureSpacePolicy::AllowedUnderTest,
+            validators: FixtureValidatorPolicy::Absent,
+            limits,
+        }
+    }
+}
+
+/// Sensitive staging capability retained only inside one acceptance scenario.
+///
+/// Callers must never log or return this value as content-free evidence.
+pub struct ArtifactStageAllocation {
+    handle: Zeroizing<String>,
+    record: String,
+    url: String,
+    size_bytes: u64,
+}
+
+impl fmt::Debug for ArtifactStageAllocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactStageAllocation")
+            .field("size_bytes", &self.size_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ArtifactStageAllocation {
+    /// Bearer used only in the staging authorization header.
+    #[must_use]
+    pub fn handle(&self) -> &str {
+        self.handle.as_str()
+    }
+
+    /// Non-secret record identifier present in the staging URL.
+    #[must_use]
+    pub fn record(&self) -> &str {
+        &self.record
+    }
+
+    /// Opaque staging URL, which must not contain the bearer.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Exact reserved byte length.
+    #[must_use]
+    pub const fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+}
+
+/// Content-free measurement of one complete MCP response frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactFrameMeasurement {
+    /// Complete structured tool result after envelope validation.
+    pub structured_content: Value,
+    /// Exact serialized JSON frame bytes.
+    pub frame_bytes: u64,
+    /// Exact cl100k token count of the serialized frame.
+    pub frame_tokens: u64,
+}
+
+/// Fixed maximum serialized response bytes for measured artifact calls.
+pub const ARTIFACT_FRAME_CEILING_BYTES: u64 = 16 * 1024;
+/// Fixed maximum cl100k tokens for measured artifact calls.
+pub const ARTIFACT_FRAME_CEILING_TOKENS: u64 = 4_096;
+/// Maximum frame-byte variation allowed between small and ceiling payloads.
+pub const ARTIFACT_PAYLOAD_FRAME_DELTA_BYTES: u64 = 128;
+/// Maximum token variation allowed between small and ceiling payloads.
+pub const ARTIFACT_PAYLOAD_FRAME_DELTA_TOKENS: u64 = 32;
+
+/// Measures and validates one raw artifact `tools/call` response frame.
+///
+/// # Errors
+///
+/// Returns a fixed message when the frame is malformed, exceeds either fixed
+/// ceiling, or cannot be tokenized.
+pub fn measure_artifact_frame(
+    name: &str,
+    id: u64,
+    frame: &[u8],
+) -> Result<ArtifactFrameMeasurement, String> {
+    if frame.last() != Some(&b'\n')
+        || frame.first() == Some(&b'\n')
+        || frame[..frame.len().saturating_sub(1)].contains(&b'\n')
+    {
+        return Err("measured artifact response was not one LF-delimited frame".to_owned());
+    }
+    let frame_text = std::str::from_utf8(frame)
+        .map_err(|_| "measured artifact response was not UTF-8".to_owned())?;
+    let parsed: Value = serde_json::from_slice(&frame[..frame.len().saturating_sub(1)])
+        .map_err(|_| "measured artifact response was not JSON".to_owned())?;
+    let tokenizer =
+        tiktoken_rs::cl100k_base().map_err(|_| "initialize artifact frame tokenizer".to_owned())?;
+    let tokens = tokenizer.encode_with_special_tokens(frame_text);
+    let frame_bytes = u64::try_from(frame.len())
+        .map_err(|_| "measured artifact frame exceeds the addressable range".to_owned())?;
+    let frame_tokens = u64::try_from(tokens.len())
+        .map_err(|_| "measured artifact token count exceeds the addressable range".to_owned())?;
+    if frame_bytes > ARTIFACT_FRAME_CEILING_BYTES || frame_tokens > ARTIFACT_FRAME_CEILING_TOKENS {
+        return Err("artifact response exceeded its fixed MCP frame ceiling".to_owned());
+    }
+    Ok(ArtifactFrameMeasurement {
+        structured_content: validate_tool_frame(name, id, &parsed)?,
+        frame_bytes,
+        frame_tokens,
+    })
+}
+
+/// Proves that payload-size changes do not materially expand MCP responses.
+///
+/// # Errors
+///
+/// Returns a fixed message if either measured difference exceeds its reviewed
+/// fixed allowance.
+pub fn assert_payload_frame_independence(
+    small: &ArtifactFrameMeasurement,
+    large: &ArtifactFrameMeasurement,
+) -> Result<(), String> {
+    if small.frame_bytes.abs_diff(large.frame_bytes) > ARTIFACT_PAYLOAD_FRAME_DELTA_BYTES
+        || small.frame_tokens.abs_diff(large.frame_tokens) > ARTIFACT_PAYLOAD_FRAME_DELTA_TOKENS
+    {
+        return Err("artifact MCP frame size varied with payload bytes".to_owned());
+    }
+    Ok(())
+}
+
+/// Reads and validates the exact reviewed artifact catalog from one driver.
+///
+/// # Errors
+///
+/// Returns a fixed message when the advertised catalog is incomplete or has
+/// drifted from the reviewed fixture.
+pub async fn artifact_catalog_snapshot(
+    driver: &mut impl McpDriver,
+) -> Result<ArtifactCatalogSnapshot, String> {
+    let descriptors = driver.list_tool_descriptors().await?;
+    let snapshot = ArtifactCatalogSnapshot::from_descriptors(&descriptors)?;
+    ArtifactCatalogSnapshot::reviewed()?.compare(&snapshot)?;
+    Ok(snapshot)
+}
+
+/// Allocates one exact remote upload reservation without sending payload bytes.
+///
+/// # Errors
+///
+/// Returns a fixed message when the production tool omits or confuses one
+/// capability field.
+pub async fn allocate_stage_upload(
+    driver: &mut impl McpDriver,
+    space_id: &str,
+    size_bytes: u64,
+    media_type: &str,
+    expected_sha256: Option<&str>,
+) -> Result<ArtifactStageAllocation, String> {
+    let mut arguments = json!({
+        "space": space_id,
+        "size_bytes": size_bytes,
+        "media_type": media_type,
+    });
+    if let Some(expected) = expected_sha256 {
+        arguments
+            .as_object_mut()
+            .ok_or_else(|| "stage allocation arguments are not an object".to_owned())?
+            .insert(
+                "expected_sha256".to_owned(),
+                Value::String(expected.to_owned()),
+            );
+    }
+    let mut allocation = driver.call_tool("artifact_stage_upload", arguments).await?;
+    let handle = Zeroizing::new(take_required_string(&mut allocation, "/handle")?);
+    let record = required_str(&allocation, "/record")?;
+    let url = required_str(&allocation, "/upload_url")?;
+    if !url.contains(&record) || url.contains(handle.as_str()) {
+        return Err("staging URL must expose only the non-secret record".to_owned());
+    }
+    let observed_size = allocation["size_bytes"]
+        .as_u64()
+        .ok_or_else(|| "stage allocation omitted its exact size".to_owned())?;
+    if observed_size != size_bytes {
+        return Err("stage allocation changed its reserved size".to_owned());
+    }
+    zeroize_json_strings(&mut allocation);
+    Ok(ArtifactStageAllocation {
+        handle,
+        record,
+        url,
+        size_bytes,
+    })
+}
+
+/// Exact transfer range used by acceptance uploads.
+///
+/// Every non-default lifecycle profile configures this production minimum, so
+/// large fixtures must cross the real sequential-range boundary.
+pub const ACCEPTANCE_TRANSFER_CHUNK_BYTES: usize = 65_536;
+
+/// Uploads exact bytes into one previously allocated staging record.
+///
+/// # Errors
+///
+/// Returns a fixed message when lengths disagree, an offset is not acknowledged,
+/// or the production HTTP route rejects a bounded sequential range.
+pub async fn upload_stage_bytes(
+    allocation: &ArtifactStageAllocation,
+    payload: &[u8],
+    media_type: &str,
+) -> Result<(), String> {
+    let size = u64::try_from(payload.len())
+        .map_err(|_| "staged payload exceeds the addressable range".to_owned())?;
+    if size == 0 || size != allocation.size_bytes {
+        return Err("staged upload bytes disagree with the reservation".to_owned());
+    }
+    let client = staging_client()?;
+    let mut offset = 0_u64;
+    for chunk in payload.chunks(ACCEPTANCE_TRANSFER_CHUNK_BYTES) {
+        let chunk_length = u64::try_from(chunk.len())
+            .map_err(|_| "staged upload range exceeds the addressable range".to_owned())?;
+        let next_offset = offset
+            .checked_add(chunk_length)
+            .ok_or_else(|| "staged upload offset overflow".to_owned())?;
+        let last = next_offset
+            .checked_sub(1)
+            .ok_or_else(|| "staged payload must not be empty".to_owned())?;
+        let response = client
+            .put(allocation.url())
+            .bearer_auth(allocation.handle())
+            .header(CONTENT_TYPE, media_type)
+            .header(CONTENT_RANGE, format!("bytes {offset}-{last}/{size}"))
+            .body(chunk.to_vec())
+            .send()
+            .await
+            .map_err(|_| "staged upload transport failed".to_owned())?;
+        let expected_status = if next_offset == size {
+            reqwest::StatusCode::CREATED
+        } else {
+            reqwest::StatusCode::NO_CONTENT
+        };
+        if response.status() != expected_status
+            || response
+                .headers()
+                .get("upload-offset")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                != Some(next_offset)
+        {
+            return Err("staged upload range was not acknowledged exactly".to_owned());
+        }
+        offset = next_offset;
+    }
+    if offset == size {
+        Ok(())
+    } else {
+        Err("staged upload did not send its complete reservation".to_owned())
+    }
+}
+
+/// Proves the production staging route rejects one range above the transfer ceiling.
+///
+/// # Errors
+///
+/// Returns a fixed message when the reservation is too small for the probe or
+/// the oversized range is not rejected before any offset is committed.
+pub async fn reject_oversized_stage_chunk(
+    allocation: &ArtifactStageAllocation,
+    payload: &[u8],
+    media_type: &str,
+) -> Result<(), String> {
+    let probe_length = ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_add(1);
+    if payload.len() < probe_length || allocation.size_bytes != payload.len() as u64 {
+        return Err("oversized staging-range probe requires a larger exact reservation".to_owned());
+    }
+    let last = probe_length.saturating_sub(1);
+    let response = staging_client()?
+        .put(allocation.url())
+        .bearer_auth(allocation.handle())
+        .header(CONTENT_TYPE, media_type)
+        .header(
+            CONTENT_RANGE,
+            format!("bytes 0-{last}/{}", allocation.size_bytes),
+        )
+        .body(payload[..probe_length].to_vec())
+        .send()
+        .await
+        .map_err(|_| "oversized staged upload probe failed".to_owned())?;
+    if response.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        Ok(())
+    } else {
+        Err("staging route did not enforce the transfer chunk ceiling".to_owned())
+    }
+}
+
+/// Releases one exact staging allocation through the production MCP tool.
+///
+/// # Errors
+///
+/// Returns a fixed message when the release is not definitive.
+pub async fn release_stage_upload(
+    driver: &mut impl McpDriver,
+    allocation: &ArtifactStageAllocation,
+) -> Result<(), String> {
+    let released = driver
+        .call_tool("artifact_release", json!({"handle": allocation.handle()}))
+        .await?;
+    if released["released"] == Value::Bool(true) {
+        Ok(())
+    } else {
+        Err("staging allocation was not released".to_owned())
+    }
+}
+
+/// Returns the staging HTTP status for one authenticated record without a body.
+///
+/// # Errors
+///
+/// Returns a fixed message when the bounded HTTP request cannot complete.
+pub async fn stage_head_status(
+    allocation: &ArtifactStageAllocation,
+) -> Result<reqwest::StatusCode, String> {
+    staging_client()?
+        .head(allocation.url())
+        .bearer_auth(allocation.handle())
+        .send()
+        .await
+        .map(|response| response.status())
+        .map_err(|_| "staged status transport failed".to_owned())
+}
+
+/// Waits until an expired record is both inaccessible and physically reaped.
+///
+/// # Errors
+///
+/// Returns a fixed timeout or fixture-inspection message. The returned snapshot
+/// contains counts only and cannot expose a record identity or bearer.
+pub async fn wait_for_stage_reaped(
+    policy: &ArtifactPolicyFixture,
+    allocation: &ArtifactStageAllocation,
+    timeout: Duration,
+) -> Result<ArtifactDirectorySnapshot, String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "artifact cleanup deadline overflow".to_owned())?;
+    loop {
+        let status = stage_head_status(allocation).await?;
+        let snapshot = policy.staging_snapshot()?;
+        if status == reqwest::StatusCode::NOT_FOUND && snapshot.is_reaped() {
+            return Ok(snapshot);
+        }
+        if Instant::now() >= deadline {
+            return Err("artifact TTL cleanup did not finish before its deadline".to_owned());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Classifies two concurrent tool frames as exactly one success and one conflict.
+///
+/// # Errors
+///
+/// Returns a fixed message when either envelope is malformed or the race does
+/// not produce the single-winner create-new contract.
+pub fn classify_collision_frames(
+    name: &str,
+    ids: [u64; 2],
+    frames: &[Value; 2],
+    preview: bool,
+) -> Result<Value, String> {
+    let mut success = None;
+    let mut conflicts = 0_u8;
+    for (id, frame) in ids.into_iter().zip(frames) {
+        if frame["jsonrpc"] != Value::String("2.0".to_owned())
+            || frame["id"].as_u64() != Some(id)
+            || frame.get("error").is_some()
+        {
+            return Err("collision response carried an invalid JSON-RPC envelope".to_owned());
+        }
+        let result = frame
+            .get("result")
+            .ok_or_else(|| "collision response omitted its result".to_owned())?;
+        if result["isError"] == Value::Bool(false) {
+            if success
+                .replace(validate_tool_frame(name, id, frame)?)
+                .is_some()
+            {
+                return Err("artifact collision produced more than one winner".to_owned());
+            }
+        } else {
+            let refusal = ToolErrorEvidence::from_result(result, preview)?;
+            if refusal.code() != "conflict" {
+                return Err("artifact collision loser was not a conflict".to_owned());
+            }
+            conflicts = conflicts.saturating_add(1);
+        }
+    }
+    match (success, conflicts) {
+        (Some(winner), 1) => Ok(winner),
+        _ => Err("artifact collision did not produce one winner and one conflict".to_owned()),
+    }
 }
 
 /// Fixed upstream server-log error classes already isolated and tracked.
@@ -4409,6 +5064,92 @@ mod tests {
         let mut relabeled = executed;
         relabeled[1].validator_count += 1;
         assert!(assert_artifact_content_parity(&relabeled, &expected).is_err());
+    }
+
+    #[test]
+    fn lifecycle_scenarios_are_closed_and_render_production_limit_profiles() {
+        let mut ids = std::collections::BTreeSet::new();
+        for scenario in ArtifactLifecycleScenario::ALL {
+            assert!(
+                ids.insert(scenario.as_str()),
+                "duplicate lifecycle scenario"
+            );
+            assert_eq!(
+                ArtifactLifecycleScenario::parse(scenario.as_str()),
+                Some(scenario)
+            );
+            let profile = scenario.policy_options().limits;
+            assert!(ArtifactLimitProfile::parse(profile.as_str()).is_some());
+            let fixture = ArtifactPolicyFixture::create_with(
+                "bafyrei-lifecycle-space",
+                scenario.policy_options(),
+            )
+            .expect("lifecycle policy fixture");
+            let contents = fixture.policy_contents().expect("lifecycle policy");
+            let parsed = contents
+                .parse::<toml::Table>()
+                .expect("lifecycle fixture uses production TOML schema");
+            assert_eq!(
+                parsed.contains_key("limits"),
+                profile != ArtifactLimitProfile::Default
+            );
+            assert_eq!(
+                fixture.staging_snapshot().expect("empty staging snapshot"),
+                ArtifactDirectorySnapshot::default()
+            );
+        }
+        assert_eq!(ids.len(), ArtifactLifecycleScenario::ALL.len());
+        for profile in ArtifactLimitProfile::ALL {
+            assert_eq!(ArtifactLimitProfile::parse(profile.as_str()), Some(profile));
+            assert!(profile.artifact_bytes() >= 64 * 1024);
+            assert!(profile.staging_ttl_secs() >= 60);
+        }
+    }
+
+    #[test]
+    fn measured_frames_are_bounded_and_payload_independence_is_quantified() {
+        let frame = |id: u64, size: u64| {
+            let value = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "isError": false,
+                    "content": [{"type": "text", "text": "bounded artifact result"}],
+                    "structuredContent": {
+                        "file_id": "bafyrei-measured-file",
+                        "receipt": {"size_bytes": size, "sha256": "a".repeat(64)}
+                    }
+                }
+            });
+            let mut encoded = serde_json::to_vec(&value).expect("encode measured frame fixture");
+            encoded.push(b'\n');
+            encoded
+        };
+        let small =
+            measure_artifact_frame("file_import", 7, &frame(7, 13)).expect("small measured frame");
+        let large = measure_artifact_frame("file_import", 8, &frame(8, 1024 * 1024))
+            .expect("large measured frame");
+        assert!(small.frame_bytes <= ARTIFACT_FRAME_CEILING_BYTES);
+        assert!(large.frame_tokens <= ARTIFACT_FRAME_CEILING_TOKENS);
+        assert_eq!(assert_payload_frame_independence(&small, &large), Ok(()));
+
+        let mut divergent = large;
+        divergent.frame_bytes = divergent
+            .frame_bytes
+            .saturating_add(ARTIFACT_PAYLOAD_FRAME_DELTA_BYTES + 1);
+        assert!(assert_payload_frame_independence(&small, &divergent).is_err());
+    }
+
+    #[test]
+    fn staging_allocation_debug_output_does_not_expose_capabilities() {
+        let allocation = ArtifactStageAllocation {
+            handle: Zeroizing::new("secret-bearer".to_owned()),
+            record: "0123456789abcdef0123456789abcdef".to_owned(),
+            url: "http://127.0.0.1/artifacts/v1/0123456789abcdef0123456789abcdef".to_owned(),
+            size_bytes: 9,
+        };
+        let debug = format!("{allocation:?}");
+        assert!(!debug.contains("secret-bearer"));
     }
 
     #[test]

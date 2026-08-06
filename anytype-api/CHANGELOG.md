@@ -17,8 +17,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   conditional/ranged downloads (metadata `HEAD`, `206`, `412`, `416`, and a
   locally rejected zero-length range). The README records the verified
   `anytype-cli` 0.3.6 file-endpoint behavior: `206`/`412`/`416` are served, no
-  `ETag`/`Last-Modified` validators are sent, and no request timeout is
-  applied by default.
+  `ETag`/`Last-Modified` validators are sent, no request timeout is applied by
+  default, and permanent deletion can take about 154 seconds to return `204`.
+  The live test uses a finite 180-second ceiling aligned with the CLI test gate.
 - Add a live show/close lifecycle measurement test proving a bare gRPC
   `ObjectShow` holds no server-side open state (verified via
   `DebugOpenedObjects` with an `ObjectOpen` validation leg), that one

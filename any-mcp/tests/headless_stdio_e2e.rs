@@ -48,12 +48,17 @@ mod support;
 
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane,
-    ArtifactDataPlane, ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun,
-    ArtifactPolicyScenario, ArtifactSmokeFixture, ArtifactTransport,
-    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
-    audit_server_log, run_artifact_content_scenario, run_artifact_policy_scenario,
-    run_artifact_smoke_scenario, server_log_offset, validate_tool_frame,
+    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD,
+    ARTIFACT_TOOL_NAMES, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
+    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactLifecycleScenario,
+    ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
+    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactTransport, allocate_stage_upload,
+    artifact_catalog_snapshot, artifact_sha256, assert_artifact_content_parity,
+    assert_artifact_parity, assert_artifact_policy_parity, assert_payload_frame_independence,
+    audit_server_log, classify_collision_frames, measure_artifact_frame,
+    reject_oversized_stage_chunk, release_stage_upload, run_artifact_content_scenario,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_offset,
+    stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
@@ -608,6 +613,104 @@ impl StdioDriver {
         validate_tool_frame(name, id, &frame)
     }
 
+    /// Issues and measures one complete artifact `tools/call` response frame.
+    #[cfg(feature = "acceptance-harness")]
+    fn measured_tool_frame(
+        &mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Result<ArtifactFrameMeasurement, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let mut params = json!({"name": name, "arguments": arguments});
+        if self.options.preview {
+            params
+                .as_object_mut()
+                .ok_or_else(|| "preview measured-tool params were not an object".to_owned())?
+                .insert("_meta".to_owned(), preview_meta());
+        }
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "method":"tools/call",
+            "params":params
+        }));
+        let frame = self.process.read_frame_bytes();
+        let parsed: Value = serde_json::from_slice(&frame[..frame.len().saturating_sub(1)])
+            .map_err(|_| "measured artifact response was not JSON".to_owned())?;
+        if parsed["id"].as_u64() != Some(id) {
+            return Err("measured artifact response carried a mismatched identifier".to_owned());
+        }
+        self.process.record_response(&parsed);
+        measure_artifact_frame(name, id, &frame)
+    }
+
+    /// Dispatches two concurrent calls and returns their request identifiers and frames.
+    #[cfg(feature = "acceptance-harness")]
+    fn collision_tool_frames(
+        &mut self,
+        name: &'static str,
+        first: Value,
+        second: Value,
+    ) -> ([u64; 2], [Value; 2]) {
+        let first_id = self.next_id;
+        let ids = [first_id, first_id.saturating_add(1)];
+        let frames = self.request_pair(
+            "tools/call",
+            json!({"name": name, "arguments": first}),
+            json!({"name": name, "arguments": second}),
+        );
+        (ids, frames)
+    }
+
+    /// Cancels one in-flight tool call and proves the server remains responsive.
+    #[cfg(feature = "acceptance-harness")]
+    fn cancel_tool_call(
+        &mut self,
+        name: &'static str,
+        arguments: Value,
+        pause_ready: &Path,
+    ) -> Result<u64, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let mut params = json!({"name": name, "arguments": arguments});
+        if self.options.preview {
+            params
+                .as_object_mut()
+                .expect("preview tool params object")
+                .insert("_meta".to_owned(), preview_meta());
+        }
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "method":"tools/call",
+            "params":params
+        }));
+        let deadline = std::time::Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .ok_or_else(|| "artifact cancellation handshake deadline overflow".to_owned())?;
+        while !pause_ready.is_file() {
+            if std::time::Instant::now() >= deadline {
+                return Err("artifact cancellation never reached the pre-dispatch pause".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let marker = std::fs::read(pause_ready)
+            .map_err(|_| "read artifact cancellation handshake".to_owned())?;
+        if marker != b"ready\n" {
+            return Err("artifact cancellation handshake was malformed".to_owned());
+        }
+        self.process.notification(
+            "notifications/cancelled",
+            json!({"requestId": id, "reason": "artifact acceptance cancellation"}),
+        );
+        let ping = self.request("ping", json!({}));
+        if ping["result"] != json!({}) {
+            return Err("artifact child did not respond after cancellation".to_owned());
+        }
+        Ok(id)
+    }
+
     fn list_tool_descriptors_sync(&mut self) -> Result<Vec<Value>, String> {
         let response = self.request("tools/list", json!({}));
         response["result"]["tools"]
@@ -698,6 +801,12 @@ impl StdioDriver {
     fn try_finish(self) -> Result<(String, ProcessOutput), String> {
         let transcript = self.process.redacted_transcript();
         self.process.try_finish().map(|output| (transcript, output))
+    }
+
+    #[cfg(feature = "acceptance-harness")]
+    fn terminate(self) -> Result<(String, ProcessOutput), String> {
+        let transcript = self.process.redacted_transcript();
+        self.process.terminate().map(|output| (transcript, output))
     }
 
     fn finish_after_panic(mut self) -> (String, ProcessOutput, &'static str) {
@@ -1307,6 +1416,269 @@ enum ChildCleanupRecord {
     Failed,
 }
 
+#[cfg(feature = "acceptance-harness")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ArtifactChildProcessEvidence {
+    cleanup_events: u64,
+    cleanup_records: u64,
+    reconciliation_events: u64,
+    reconciled_records: u64,
+    cancelled_operations: u64,
+    stdout_bytes: u64,
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn artifact_child_process_evidence(
+    output: &ProcessOutput,
+    forbidden_response_id: Option<u64>,
+) -> Result<ArtifactChildProcessEvidence, String> {
+    if output.stdout != output.consumed_stdout {
+        return Err("artifact child emitted unconsumed protocol output".to_owned());
+    }
+    for line in output.stdout.split_inclusive(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if line.last() != Some(&b'\n') {
+            return Err("artifact child stdout ended with an unterminated frame".to_owned());
+        }
+        let frame: Value = serde_json::from_slice(&line[..line.len().saturating_sub(1)])
+            .map_err(|_| "artifact child stdout contained a non-JSON frame".to_owned())?;
+        let object = frame
+            .as_object()
+            .ok_or_else(|| "artifact child stdout frame was not an object".to_owned())?;
+        if frame["jsonrpc"] != Value::String("2.0".to_owned())
+            || !frame.get("id").is_some_and(Value::is_number)
+            || frame.get("result").is_some() == frame.get("error").is_some()
+            || object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "jsonrpc" | "id" | "result" | "error"))
+            || contains_forbidden_diagnostic_field(&frame)
+        {
+            return Err("artifact child stdout violated the exact JSON-RPC contract".to_owned());
+        }
+        if forbidden_response_id.is_some_and(|forbidden| frame["id"].as_u64() == Some(forbidden)) {
+            return Err("cancelled artifact request emitted a response frame".to_owned());
+        }
+    }
+
+    let stderr = std::str::from_utf8(&output.stderr)
+        .map_err(|_| "artifact child stderr was not UTF-8".to_owned())?;
+    let mut evidence = ArtifactChildProcessEvidence {
+        stdout_bytes: u64::try_from(output.stdout.len())
+            .map_err(|_| "artifact child stdout exceeds the addressable range".to_owned())?,
+        ..ArtifactChildProcessEvidence::default()
+    };
+    for line in stderr.lines() {
+        if line.is_empty() {
+            return Err("artifact child stderr contained a blank diagnostic line".to_owned());
+        }
+        let diagnostic = parse_artifact_diagnostic(line)?;
+        match diagnostic {
+            ArtifactDiagnostic::RuntimeReady => {}
+            ArtifactDiagnostic::Operation { operation, outcome } => {
+                if operation == "file_import" && outcome == "cancelled" {
+                    evidence.cancelled_operations = evidence.cancelled_operations.saturating_add(1);
+                }
+            }
+            ArtifactDiagnostic::Cleanup { count } => {
+                evidence.cleanup_events = evidence.cleanup_events.saturating_add(1);
+                evidence.cleanup_records = evidence.cleanup_records.saturating_add(count);
+            }
+            ArtifactDiagnostic::Reconciliation { count } => {
+                evidence.reconciliation_events = evidence.reconciliation_events.saturating_add(1);
+                evidence.reconciled_records = evidence.reconciled_records.saturating_add(count);
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn contains_forbidden_diagnostic_field(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(name, value)| {
+            let normalized = name.to_ascii_lowercase();
+            (normalized.contains("authorization")
+                || normalized.contains("bearer")
+                || normalized.contains("credential")
+                || normalized.contains("session_token")
+                || normalized.contains("access_token")
+                || normalized.contains("refresh_token")
+                || normalized.contains("api_key"))
+                || contains_forbidden_diagnostic_field(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_forbidden_diagnostic_field),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+enum ArtifactDiagnostic<'a> {
+    RuntimeReady,
+    Operation {
+        operation: &'a str,
+        outcome: &'a str,
+    },
+    Cleanup {
+        count: u64,
+    },
+    Reconciliation {
+        count: u64,
+    },
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn parse_artifact_diagnostic(line: &str) -> Result<ArtifactDiagnostic<'_>, String> {
+    const RUNTIME_READY: &str = "authenticated Anytype runtime ready";
+    const OPERATION: &str = "Anytype operation completed";
+    const CLEANUP: &str = "Artifact staging cleanup completed";
+    const RECONCILIATION: &str = "Artifact staging reconciliation completed";
+
+    let (message, required_fields): (&str, &[&str]) = if line.contains(RUNTIME_READY) {
+        (RUNTIME_READY, &["http_available", "grpc_available"])
+    } else if line.contains(OPERATION) {
+        (
+            OPERATION,
+            &[
+                "operation",
+                "correlation_id",
+                "duration_ms",
+                "outcome",
+                "upstream_status",
+                "upstream_http_status",
+                "upstream_http_status_present",
+            ],
+        )
+    } else if line.contains(CLEANUP) {
+        (CLEANUP, &["operation", "outcome", "cleanup_count"])
+    } else if line.contains(RECONCILIATION) {
+        (RECONCILIATION, &["operation", "outcome", "cleanup_count"])
+    } else {
+        return Err("artifact child stderr contained a non-allowlisted line".to_owned());
+    };
+    let (prefix, suffix) = line
+        .split_once(message)
+        .ok_or_else(|| "artifact child diagnostic omitted its fixed message".to_owned())?;
+    let prefix = prefix.split_whitespace().collect::<Vec<_>>();
+    if prefix.len() != 2
+        || prefix.get(1).copied() != Some("INFO")
+        || prefix.first().is_none_or(|timestamp| {
+            timestamp.len() > 64
+                || !timestamp.bytes().all(|byte| {
+                    byte.is_ascii_digit() || matches!(byte, b'-' | b':' | b'.' | b'+' | b'T' | b'Z')
+                })
+        })
+    {
+        return Err("artifact child diagnostic prefix was not fixed-format INFO".to_owned());
+    }
+    let mut fields = Vec::new();
+    for field in suffix.split_whitespace() {
+        let (name, value) = field
+            .split_once('=')
+            .ok_or_else(|| "artifact child diagnostic field was malformed".to_owned())?;
+        if fields.iter().any(|(existing, _)| *existing == name) {
+            return Err("artifact child diagnostic repeated a field".to_owned());
+        }
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(value);
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err("artifact child diagnostic value was not bounded".to_owned());
+        }
+        fields.push((name, value));
+    }
+    if fields.len() != required_fields.len()
+        || required_fields
+            .iter()
+            .any(|required| !fields.iter().any(|(name, _)| name == required))
+    {
+        return Err("artifact child diagnostic fields were not exact".to_owned());
+    }
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find_map(|(candidate, value)| (*candidate == name).then_some(*value))
+            .ok_or_else(|| "artifact child diagnostic omitted a field".to_owned())
+    };
+    match message {
+        RUNTIME_READY => {
+            if !matches!(field("http_available")?, "true" | "false")
+                || !matches!(field("grpc_available")?, "true" | "false")
+            {
+                return Err("artifact runtime diagnostic booleans were malformed".to_owned());
+            }
+            Ok(ArtifactDiagnostic::RuntimeReady)
+        }
+        OPERATION => {
+            let operation = field("operation")?;
+            let outcome = field("outcome")?;
+            if !ARTIFACT_TOOL_NAMES.contains(&operation)
+                || field("duration_ms")?.parse::<u64>().is_err()
+                || field("upstream_http_status")?.parse::<u16>().is_err()
+                || !matches!(field("upstream_http_status_present")?, "true" | "false")
+            {
+                return Err("artifact operation diagnostic values were malformed".to_owned());
+            }
+            Ok(ArtifactDiagnostic::Operation { operation, outcome })
+        }
+        CLEANUP => {
+            if field("operation")? != "artifact_staging_cleanup"
+                || field("outcome")? != "expired_reaped"
+            {
+                return Err("artifact cleanup diagnostic values were malformed".to_owned());
+            }
+            Ok(ArtifactDiagnostic::Cleanup {
+                count: field("cleanup_count")?
+                    .parse()
+                    .map_err(|_| "artifact cleanup count was malformed".to_owned())?,
+            })
+        }
+        RECONCILIATION => {
+            if field("operation")? != "artifact_staging_reconciliation"
+                || field("outcome")? != "startup_complete"
+            {
+                return Err("artifact reconciliation diagnostic values were malformed".to_owned());
+            }
+            Ok(ArtifactDiagnostic::Reconciliation {
+                count: field("cleanup_count")?
+                    .parse()
+                    .map_err(|_| "artifact reconciliation count was malformed".to_owned())?,
+            })
+        }
+        _ => Err("artifact child diagnostic message was not fixed".to_owned()),
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn finish_registered_artifact_child(
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    forbidden_response_id: Option<u64>,
+) -> Result<ArtifactChildProcessEvidence, String> {
+    let driver = lock_driver(child)
+        .take()
+        .ok_or_else(|| "registered artifact child disappeared".to_owned())?;
+    let (_, output) = driver.try_finish()?;
+    artifact_child_process_evidence(&output, forbidden_response_id)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn terminate_registered_artifact_child(
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+) -> Result<ArtifactChildProcessEvidence, String> {
+    let driver = lock_driver(child)
+        .take()
+        .ok_or_else(|| "registered artifact child disappeared".to_owned())?;
+    let (_, output) = driver.terminate()?;
+    artifact_child_process_evidence(&output, None)
+}
+
 fn spawn_disposable_standard_driver(
     ctx: &TestContext,
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
@@ -1365,6 +1737,27 @@ fn spawn_disposable_artifact_driver(
     policy: Arc<ArtifactPolicyFixture>,
     options: DriverOptions,
 ) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
+    spawn_disposable_artifact_driver_configured(ctx, cleanup_record, policy, options, false)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn spawn_disposable_paused_artifact_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    policy: Arc<ArtifactPolicyFixture>,
+    options: DriverOptions,
+) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
+    spawn_disposable_artifact_driver_configured(ctx, cleanup_record, policy, options, true)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn spawn_disposable_artifact_driver_configured(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    policy: Arc<ArtifactPolicyFixture>,
+    options: DriverOptions,
+    pause_file_import: bool,
+) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
     let child_environment = ctx
         .disposable_child_environment()
         .ok_or_else(|| sentinel_assertion("disposable callback omitted its child environment"))?
@@ -1373,6 +1766,20 @@ fn spawn_disposable_artifact_driver(
     child_environment.configure(&mut command)?;
     configure_stdio_command(&mut command, options, Some("artifacts"));
     command.env("ANY_MCP_CONFIG", policy.config_path());
+    if pause_file_import {
+        let ready = policy.acceptance_pause_ready_path();
+        let _ = std::fs::remove_file(&ready);
+        command
+            .env(
+                "ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE",
+                "file_import_pre_dispatch",
+            )
+            .env("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY", ready);
+    } else {
+        command
+            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE")
+            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY");
+    }
     ctx.spawn_owned_child(move || {
         // The fixture tree must outlive the child so no export or staged byte
         // is removed while the production process still holds its roots.
@@ -5453,6 +5860,593 @@ async fn headless_artifact_content_spawned_scenarios() {
         }
         DisposableRun::Skipped(reason) => {
             panic!("artifact content scenarios require disposable admission: {reason:?}");
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_quota_acceptance(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+) -> Result<(), String> {
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let first = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        400 * 1024,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    let second = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        400 * 1024,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    let reserved = policy.staging_snapshot()?;
+    if reserved.temporary_files != 2 || reserved.unexpected_entries != 0 {
+        return Err("quota reservations did not produce the exact staging snapshot".to_owned());
+    }
+    let entry_refusal = driver
+        .call_tool_error(
+            "artifact_stage_upload",
+            json!({
+                "space": ctx.space_id,
+                "size_bytes": 1,
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE
+            }),
+        )
+        .await?;
+    if entry_refusal.code() != "bounded_result" {
+        return Err("staging entry quota did not return bounded_result".to_owned());
+    }
+
+    release_stage_upload(&mut driver, &first).await?;
+    let third = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        300 * 1024,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    release_stage_upload(&mut driver, &third).await?;
+    let byte_refusal = driver
+        .call_tool_error(
+            "artifact_stage_upload",
+            json!({
+                "space": ctx.space_id,
+                "size_bytes": 700 * 1024,
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE
+            }),
+        )
+        .await?;
+    if byte_refusal.code() != "bounded_result" {
+        return Err("staging byte quota did not return bounded_result".to_owned());
+    }
+    release_stage_upload(&mut driver, &second).await?;
+    if !policy.staging_snapshot()?.is_reaped() {
+        return Err("quota scenario did not release its exact staging state".to_owned());
+    }
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_ttl_acceptance(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+) -> Result<(), String> {
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let allocation = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        1,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    let allocated = policy.staging_snapshot()?;
+    if allocated.temporary_files != 1 || allocated.unexpected_entries != 0 {
+        return Err("TTL allocation did not produce the exact staging snapshot".to_owned());
+    }
+    let cleanup_deadline = Duration::from_secs(
+        policy
+            .options()
+            .limits
+            .staging_ttl_secs()
+            .saturating_add(75),
+    );
+    let reaped = wait_for_stage_reaped(policy, &allocation, cleanup_deadline).await?;
+    if !reaped.is_reaped() {
+        return Err("TTL cleanup did not produce the exact reaped snapshot".to_owned());
+    }
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn import_collision_fixture(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+) -> Result<String, String> {
+    let suffix = unique_suffix();
+    let imported = lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered collision child disappeared".to_owned())?
+        .call_tool_sync(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"local": {
+                    "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                    "path": ArtifactPolicyFixture::FILE_SOURCE
+                }},
+                "name": format!("artifact-collision-{suffix}.bin"),
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": format!("artifact-collision-import-{suffix}")
+            }),
+        )?;
+    let file_id = imported["file_id"]
+        .as_str()
+        .ok_or_else(|| "collision fixture import omitted file_id".to_owned())?
+        .to_owned();
+    ctx.register_file(&file_id);
+    Ok(file_id)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_collision_acceptance(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+) -> Result<(), String> {
+    let mut catalog_driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let catalog = artifact_catalog_snapshot(&mut catalog_driver).await?;
+    let file_id = import_collision_fixture(ctx, child).await?;
+    let suffix = unique_suffix();
+    let destination = format!("collision-{suffix}.bin");
+    let arguments = |key: &str| {
+        json!({
+            "space": ctx.space_id,
+            "file_id": file_id,
+            "destination": {"local": {
+                "root": ArtifactPolicyFixture::EXPORT_ROOT,
+                "path": destination
+            }},
+            "idempotency_key": key
+        })
+    };
+    let (ids, frames) = lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered collision child disappeared".to_owned())?
+        .collision_tool_frames(
+            "file_export",
+            arguments(&format!("artifact-collision-first-{suffix}")),
+            arguments(&format!("artifact-collision-second-{suffix}")),
+        );
+    let winner = classify_collision_frames("file_export", ids, &frames, false)?;
+    if winner.pointer("/receipt/sha256").and_then(Value::as_str)
+        != Some(artifact_sha256(ARTIFACT_FILE_PAYLOAD).as_str())
+    {
+        return Err("collision winner did not publish the exact source bytes".to_owned());
+    }
+    if policy.read_export(&destination)? != ARTIFACT_FILE_PAYLOAD {
+        return Err("collision destination bytes diverged from the winner".to_owned());
+    }
+    let exported = policy.export_snapshot()?;
+    if exported.ordinary_files != 1
+        || exported.total_file_bytes != ARTIFACT_FILE_PAYLOAD.len() as u64
+        || exported.unexpected_entries != 0
+    {
+        return Err("collision scenario did not produce one exact destination".to_owned());
+    }
+    catalog.compare(&artifact_catalog_snapshot(&mut catalog_driver).await?)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_cancellation_acceptance(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+) -> Result<u64, String> {
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let payload = vec![0x5a; 256 * 1024];
+    let expected = artifact_sha256(&payload);
+    let allocation = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        payload.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&expected),
+    )
+    .await?;
+    upload_stage_bytes(&allocation, &payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    let suffix = unique_suffix();
+    let arguments = json!({
+        "space": ctx.space_id,
+        "source": {"staged_handle": allocation.handle()},
+        "name": format!("artifact-cancel-{suffix}.bin"),
+        "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+        "idempotency_key": format!("artifact-cancel-import-{suffix}")
+    });
+    let cancelled_id = lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered cancellation child disappeared".to_owned())?
+        .cancel_tool_call(
+            "file_import",
+            arguments.clone(),
+            &policy.acceptance_pause_ready_path(),
+        )?;
+    let imported = driver.call_tool("file_import", arguments).await?;
+    let file_id = imported["file_id"]
+        .as_str()
+        .ok_or_else(|| "post-cancellation retry omitted file_id".to_owned())?
+        .to_owned();
+    ctx.register_file(&file_id);
+    if imported.pointer("/receipt/sha256").and_then(Value::as_str) != Some(expected.as_str()) {
+        return Err("post-cancellation retry did not preserve exact staged bytes".to_owned());
+    }
+    release_stage_upload(&mut driver, &allocation).await?;
+    if !policy.staging_snapshot()?.is_reaped() {
+        return Err("cancelled artifact operation left private staging state".to_owned());
+    }
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    Ok(cancelled_id)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_restart_acceptance(
+    ctx: &TestContext,
+    first_child: &Arc<Mutex<Option<StdioDriver>>>,
+    first_cleanup: &Arc<Mutex<ChildCleanupRecord>>,
+    second_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    policy: Arc<ArtifactPolicyFixture>,
+) -> Result<ArtifactChildProcessEvidence, String> {
+    let mut first_driver = OwnedStdioDriver {
+        driver: Arc::clone(first_child),
+    };
+    let catalog = artifact_catalog_snapshot(&mut first_driver).await?;
+    let payload = vec![0x33; 64 * 1024];
+    let expected = artifact_sha256(&payload);
+    let stale = allocate_stage_upload(
+        &mut first_driver,
+        &ctx.space_id,
+        payload.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&expected),
+    )
+    .await?;
+    upload_stage_bytes(&stale, &payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    if policy.staging_snapshot()?.record_files != 1 {
+        return Err("restart fixture did not retain one complete staged record".to_owned());
+    }
+    let _terminated = terminate_registered_artifact_child(first_child)?;
+    if *first_cleanup
+        .lock()
+        .map_err(|_| "restart cleanup lock poisoned".to_owned())?
+        != ChildCleanupRecord::NotRun
+    {
+        return Err("restart child cleanup ran before disposable teardown".to_owned());
+    }
+
+    let second_child = spawn_disposable_artifact_driver(
+        ctx,
+        second_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn restarted artifact child".to_owned())?;
+    lock_driver(&second_child)
+        .as_mut()
+        .ok_or_else(|| "restarted artifact child disappeared".to_owned())?
+        .initialize();
+    let mut second_driver = OwnedStdioDriver {
+        driver: Arc::clone(&second_child),
+    };
+    catalog.compare(&artifact_catalog_snapshot(&mut second_driver).await?)?;
+    if stage_head_status(&stale).await? != reqwest::StatusCode::NOT_FOUND {
+        return Err("pre-restart staging handle remained HTTP-accessible".to_owned());
+    }
+    let stale_release = second_driver
+        .call_tool_error("artifact_release", json!({"handle": stale.handle()}))
+        .await?;
+    if stale_release.code() != "not_found" {
+        return Err("pre-restart handle did not return fixed stale not_found".to_owned());
+    }
+    if !policy.staging_snapshot()?.is_reaped() {
+        return Err("restart reconciliation did not reap private staging state".to_owned());
+    }
+    let fresh = allocate_stage_upload(
+        &mut second_driver,
+        &ctx.space_id,
+        1,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    release_stage_upload(&mut second_driver, &fresh).await?;
+    let evidence = finish_registered_artifact_child(&second_child, None)?;
+    if evidence.reconciliation_events == 0 || evidence.reconciled_records == 0 {
+        return Err("restarted child omitted bounded reconciliation log evidence".to_owned());
+    }
+    Ok(evidence)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn measured_payload_import(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    payload: &[u8],
+    label: &str,
+) -> Result<(ArtifactFrameMeasurement, ArtifactStageAllocation), String> {
+    let expected = artifact_sha256(payload);
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let allocation = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        payload.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&expected),
+    )
+    .await?;
+    if payload.len() > ACCEPTANCE_TRANSFER_CHUNK_BYTES {
+        reject_oversized_stage_chunk(&allocation, payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    }
+    upload_stage_bytes(&allocation, payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    let suffix = unique_suffix();
+    let measured = lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered payload child disappeared".to_owned())?
+        .measured_tool_frame(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"staged_handle": allocation.handle()},
+                "name": format!("artifact-payload-{label}-{suffix}.bin"),
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": format!("artifact-payload-{label}-{suffix}")
+            }),
+        )?;
+    let file_id = measured
+        .structured_content
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "measured payload import omitted file_id".to_owned())?
+        .to_owned();
+    ctx.register_file(&file_id);
+    if measured
+        .structured_content
+        .pointer("/receipt/sha256")
+        .and_then(Value::as_str)
+        != Some(expected.as_str())
+        || measured
+            .structured_content
+            .pointer("/receipt/size_bytes")
+            .and_then(Value::as_u64)
+            != Some(payload.len() as u64)
+    {
+        return Err("measured payload import did not verify exact bytes".to_owned());
+    }
+    Ok((measured, allocation))
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_payload_acceptance(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+) -> Result<(), String> {
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let (small, small_stage) =
+        measured_payload_import(ctx, child, b"payload-small", "small").await?;
+    let large_payload = (0..1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (large, large_stage) =
+        measured_payload_import(ctx, child, &large_payload, "ceiling").await?;
+    assert_payload_frame_independence(&small, &large)?;
+    let over_limit = driver
+        .call_tool_error(
+            "artifact_stage_upload",
+            json!({
+                "space": ctx.space_id,
+                "size_bytes": 1024 * 1024 + 1,
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE
+            }),
+        )
+        .await?;
+    if over_limit.code() != "bounded_result" {
+        return Err("over-ceiling payload did not return bounded_result".to_owned());
+    }
+    release_stage_upload(&mut driver, &small_stage).await?;
+    release_stage_upload(&mut driver, &large_stage).await?;
+    if !policy.staging_snapshot()?.is_reaped() {
+        return Err("payload scenario left private staging state".to_owned());
+    }
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+}
+
+/// Runs quota, TTL, collision, cancellation, restart, stale-generation, and
+/// measured payload-ceiling scenarios against spawned production handlers.
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_lifecycle_and_payload_scenarios() {
+    let cleanup = (0..ArtifactLifecycleScenario::ALL.len() + 1)
+        .map(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)))
+        .collect::<Vec<_>>();
+    let callback_cleanup = cleanup.clone();
+    let log_window = artifact_server_log_window();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-lifecycle",
+        move |ctx| {
+            Box::pin(async move {
+                let mut cleanup_index = 0_usize;
+                for scenario in ArtifactLifecycleScenario::ALL {
+                    eprintln!("artifact lifecycle scenario={}", scenario.as_str());
+                    let policy = Arc::new(
+                        ArtifactPolicyFixture::create_with(
+                            &ctx.space_id,
+                            scenario.policy_options(),
+                        )
+                        .map_err(|_| sentinel_assertion("create artifact lifecycle fixture"))?,
+                    );
+                    let record = callback_cleanup
+                        .get(cleanup_index)
+                        .ok_or_else(|| sentinel_assertion("artifact lifecycle cleanup record missing"))?;
+                    cleanup_index = cleanup_index.saturating_add(1);
+                    let child = if scenario == ArtifactLifecycleScenario::Cancellation {
+                        spawn_disposable_paused_artifact_driver(
+                            ctx.as_ref(),
+                            Arc::clone(record),
+                            Arc::clone(&policy),
+                            DriverOptions::STANDARD,
+                        )
+                    } else {
+                        spawn_disposable_artifact_driver(
+                            ctx.as_ref(),
+                            Arc::clone(record),
+                            Arc::clone(&policy),
+                            DriverOptions::STANDARD,
+                        )
+                    }?;
+                    lock_driver(&child)
+                        .as_mut()
+                        .ok_or_else(|| sentinel_assertion("artifact lifecycle child disappeared"))?
+                        .initialize();
+
+                    let result = match scenario {
+                        ArtifactLifecycleScenario::Quota => {
+                            run_artifact_quota_acceptance(ctx.as_ref(), &child, &policy).await
+                        }
+                        ArtifactLifecycleScenario::TtlCleanup => {
+                            run_artifact_ttl_acceptance(ctx.as_ref(), &child, &policy).await
+                        }
+                        ArtifactLifecycleScenario::Collision => {
+                            run_artifact_collision_acceptance(ctx.as_ref(), &child, &policy).await
+                        }
+                        ArtifactLifecycleScenario::Cancellation => {
+                            match run_artifact_cancellation_acceptance(
+                                ctx.as_ref(),
+                                &child,
+                                &policy,
+                            )
+                            .await
+                            {
+                                Err(error) => Err(error),
+                                Ok(cancelled) => {
+                                    match finish_registered_artifact_child(&child, Some(cancelled)) {
+                                        Err(error) => Err(error),
+                                        Ok(evidence) if evidence.cancelled_operations == 0 => Err(
+                                            "cancelled artifact operation omitted fixed log evidence"
+                                                .to_owned(),
+                                        ),
+                                        Ok(_) => Ok(()),
+                                    }
+                                }
+                            }
+                        }
+                        ArtifactLifecycleScenario::RestartStaleGeneration => {
+                            let second = callback_cleanup.get(cleanup_index).ok_or_else(|| {
+                                sentinel_assertion("artifact restart cleanup record missing")
+                            })?;
+                            cleanup_index = cleanup_index.saturating_add(1);
+                            run_artifact_restart_acceptance(
+                                ctx.as_ref(),
+                                &child,
+                                record,
+                                Arc::clone(second),
+                                Arc::clone(&policy),
+                            )
+                            .await
+                            .map(|_| ())
+                        }
+                        ArtifactLifecycleScenario::PayloadCeiling => {
+                            run_artifact_payload_acceptance(ctx.as_ref(), &child, &policy).await
+                        }
+                    };
+                    result.map_err(|error| {
+                        eprintln!(
+                            "artifact lifecycle scenario={} failure={error}",
+                            scenario.as_str()
+                        );
+                        sentinel_assertion("artifact lifecycle scenario failed")
+                    })?;
+                    if !matches!(
+                        scenario,
+                        ArtifactLifecycleScenario::Cancellation
+                            | ArtifactLifecycleScenario::RestartStaleGeneration
+                    ) {
+                        let evidence = finish_registered_artifact_child(&child, None)
+                            .map_err(|_| sentinel_assertion("stop artifact lifecycle child"))?;
+                        if scenario == ArtifactLifecycleScenario::TtlCleanup
+                            && (evidence.cleanup_events == 0 || evidence.cleanup_records == 0)
+                        {
+                            return Err(sentinel_assertion(
+                                "TTL cleanup omitted bounded reap log evidence",
+                            ));
+                        }
+                    }
+                    if !policy.tree_exists() {
+                        return Err(sentinel_assertion(
+                            "artifact fixture tree disappeared before child teardown",
+                        ));
+                    }
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe artifact lifecycle scenarios");
+
+    match outcome {
+        DisposableRun::Completed(()) => {
+            for record in &cleanup {
+                assert_eq!(
+                    *record.lock().expect("artifact lifecycle cleanup record"),
+                    ChildCleanupRecord::Stopped
+                );
+            }
+            if let Some((path, offset)) = log_window {
+                let audit = audit_server_log(&path, offset)
+                    .expect("audit captured artifact lifecycle server log");
+                eprintln!(
+                    "artifact lifecycle server log inspected={} panic_or_fatal={} unclassified={} known={:?}",
+                    audit.inspected_lines,
+                    audit.panic_or_fatal_lines,
+                    audit.unclassified_error_lines,
+                    audit.known_classes
+                );
+                assert!(
+                    audit.is_clean(),
+                    "captured server log reported a panic, fatal, or unclassified error class"
+                );
+            }
+        }
+        DisposableRun::Skipped(reason) => {
+            panic!("artifact lifecycle scenarios require disposable admission: {reason:?}");
         }
     }
 }

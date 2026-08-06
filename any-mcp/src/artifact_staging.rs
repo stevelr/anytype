@@ -561,6 +561,9 @@ impl ArtifactStaging {
                 Ok(None) if content_length == status.size_bytes => (0, content_length),
                 _ => return fixed_response(StatusCode::BAD_REQUEST),
             };
+        if expected_request_bytes > self.state.limits.transfer_chunk_bytes {
+            return fixed_response(StatusCode::PAYLOAD_TOO_LARGE);
+        }
         if offset != status.offset {
             return fixed_response(StatusCode::CONFLICT);
         }
@@ -1071,14 +1074,52 @@ impl ArtifactStaging {
             .filter_map(|(id, record)| (record.expires <= now).then_some(*id))
             .take(self.state.limits.cleanup_batch)
             .collect::<Vec<_>>();
+        let mut reaped = 0_usize;
         for id in expired {
-            if let Some(record) = records.remove(&id) {
-                let name = record.record_name.clone();
-                let directory = self.state.directory.clone();
-                let _ = tokio::task::spawn_blocking(move || directory.remove_record(&name)).await;
+            let Some(record) = records.remove(&id) else {
+                continue;
+            };
+            let target = {
+                let mut state = record.state.lock().await;
+                match &mut *state {
+                    RecordState::Receiving { destination, .. } => destination
+                        .take()
+                        .map_or(ExpiredCleanupTarget::Busy, ExpiredCleanupTarget::Temporary),
+                    RecordState::Ready { .. }
+                    | RecordState::Available { .. }
+                    | RecordState::Consumed => {
+                        ExpiredCleanupTarget::Published(record.record_name.clone())
+                    }
+                }
+            };
+            let directory = self.state.directory.clone();
+            let removed = tokio::task::spawn_blocking(move || match target {
+                ExpiredCleanupTarget::Temporary(destination) => destination.discard().is_ok(),
+                ExpiredCleanupTarget::Published(name) => directory.remove_record(&name).is_ok(),
+                ExpiredCleanupTarget::Busy => false,
+            })
+            .await
+            .unwrap_or(false);
+            if removed {
+                reaped = reaped.saturating_add(1);
             }
         }
+        if reaped > 0 {
+            tracing::info!(
+                target: "any_mcp::operation",
+                operation = "artifact_staging_cleanup",
+                outcome = "expired_reaped",
+                cleanup_count = reaped,
+                "Artifact staging cleanup completed"
+            );
+        }
     }
+}
+
+enum ExpiredCleanupTarget {
+    Temporary(AtomicExport),
+    Published(String),
+    Busy,
 }
 
 struct IncomingWrite {

@@ -1035,6 +1035,11 @@ on pre-existing content in the configured test space.
 
 Integration tests require a running Anytype server and environment variables. See `src/client.rs` for details.
 
+On `anytype-cli` 0.3.6, `DELETE ...?skip_bin=true` can take about 154 seconds
+to return `204 No Content`. The permanent-delete live test keeps the request
+under a finite 180-second wall-clock ceiling, matching the CLI live-test command
+budget while still preventing an unresponsive endpoint from wedging the suite.
+
 The crate no longer ships a semantic gRPC mock server. Successful gRPC
 behavior is covered with cleanup-owned resources against the configured real
 Anytype server. Protocol and reducer edge cases use scripted transport handlers

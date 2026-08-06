@@ -1763,7 +1763,7 @@ through both entry paths. Existing focused live regressions remain alongside
 this acceptance baseline. `server::headless_integration` contains 21 ignored
 direct-router cases; the library command also selects eight focused
 cross-entry regressions (seven optional-registry cases plus files), for 29
-cases total. The spawned target contains exactly 24 ignored live cases when the
+cases total. The spawned target contains exactly 25 ignored live cases when the
 `acceptance-harness` feature is enabled.
 
 ### Artifact data-plane acceptance matrix
@@ -1804,6 +1804,28 @@ probe a matched, a mismatched, and an out-of-scope MIME declaration, so an
 optional validator reports the rejection while the import proceeds and a
 required one refuses it.
 
+The lifecycle family runs six spawned-production scenarios against the same
+real backend. Quota coverage independently exhausts the configured entry and
+aggregate-byte reservations. TTL coverage waits for the minimum admitted
+expiry, requires both a stale `404` and an exact lock-only staging snapshot,
+and checks the fixed counts-only cleanup event. A concurrent create-new export
+race must yield exactly one verified destination and one `conflict` without
+changing the winner. Cancellation uses an acceptance-only scheduling pause
+around the production pre-dispatch boundary, sends the standard MCP
+`notifications/cancelled` notification, requires no response frame for that
+request, and then reuses the same staged source successfully. An abrupt child
+termination leaves one completed private stage for the next production child
+to reconcile; the old bearer must fail through both MCP and HTTP while a fresh
+generation remains usable.
+
+The payload-ceiling scenario uploads bytes only through the staging HTTP data
+plane, imports both a small payload and a one-MiB ceiling payload, and measures
+the complete JSON-RPC responses with exact serialized-byte and cl100k token
+counts. Both remain below fixed 16-KiB/4096-token ceilings, may differ by at
+most 128 bytes/32 tokens, and an `artifact_bytes + 1` reservation is refused as
+`bounded_result`. Payload bytes never enter an MCP argument, result, transcript,
+or diagnostic.
+
 The validator scenarios declare one real host `file(1)`-compatible executable
 pinned by absolute path and SHA-256; nothing is shipped or synthesized, and the
 fixture admits exactly the ownership and mode that the production validator
@@ -1822,7 +1844,7 @@ on any panic, fatal, or error class outside the already isolated upstream set;
 only counts and fixed category names are reported, never log lines.
 
 Select the live acceptance targets explicitly — two direct-router cases by
-their exact paths, and the three spawned cases by their shared prefix:
+their exact paths, and the four spawned cases by their shared prefix:
 
 ```sh
 cargo test -p any-mcp --lib headless_artifact_direct_transport_matrix_scenario \

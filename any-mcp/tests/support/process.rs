@@ -35,6 +35,8 @@ pub const MAX_STDERR_BYTES: usize = 1024 * 1024;
 /// Captured, bounded output from a completed production process.
 pub struct ProcessOutput {
     pub stdout: Vec<u8>,
+    /// Exact stdout frames consumed by the protocol driver, including LF framing.
+    pub consumed_stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     /// Fixed classification of the child status without numeric or platform detail.
     #[allow(dead_code)]
@@ -56,6 +58,7 @@ pub struct ProtocolProcess {
     frames: mpsc::Receiver<Vec<u8>>,
     stdout_thread: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
     stderr_thread: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    consumed_stdout: Vec<u8>,
     transcript: Vec<String>,
     deadline: Duration,
     failure: Option<ProcessFailureEvidence>,
@@ -91,6 +94,7 @@ impl ProtocolProcess {
             frames,
             stdout_thread: Some(stdout_thread),
             stderr_thread: Some(stderr_thread),
+            consumed_stdout: Vec::new(),
             transcript: Vec::new(),
             deadline,
             failure: None,
@@ -155,14 +159,15 @@ impl ProtocolProcess {
         self.transcript.push(format!("<- id={id} {outcome}"));
     }
 
-    /// Reads one bounded LF-delimited JSON-RPC frame.
-    pub fn read_frame(&mut self) -> Value {
+    /// Reads one bounded LF-delimited JSON-RPC frame as exact wire bytes.
+    pub fn read_frame_bytes(&mut self) -> Vec<u8> {
         let bytes = match self.frames.recv_timeout(self.deadline) {
             Ok(bytes) => bytes,
             Err(error) => {
                 let transcript = self.redacted_transcript();
                 let output = self.shutdown(false, false).unwrap_or(ProcessOutput {
                     stdout: Vec::new(),
+                    consumed_stdout: Vec::new(),
                     stderr: Vec::new(),
                     exit_category: "unknown",
                 });
@@ -182,6 +187,13 @@ impl ProtocolProcess {
         };
         assert_eq!(bytes.last(), Some(&b'\n'), "one LF-delimited stdout frame");
         assert_ne!(bytes.first(), Some(&b'\n'), "no blank stdout frame");
+        self.consumed_stdout.extend_from_slice(&bytes);
+        bytes
+    }
+
+    /// Reads and decodes one bounded LF-delimited JSON-RPC frame.
+    pub fn read_frame(&mut self) -> Value {
+        let bytes = self.read_frame_bytes();
         serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("stdout line is one JSON frame")
     }
 
@@ -304,6 +316,7 @@ impl ProtocolProcess {
         if errors.is_empty() {
             Ok(ProcessOutput {
                 stdout,
+                consumed_stdout: std::mem::take(&mut self.consumed_stdout),
                 stderr,
                 exit_category,
             })
@@ -318,11 +331,32 @@ impl ProtocolProcess {
             .unwrap_or_else(|error| panic!("bounded protocol process cleanup failed: {error}"))
     }
 
+    /// Terminates the child immediately and returns bounded captured output.
+    ///
+    /// This is reserved for crash/restart acceptance scenarios that must prove
+    /// startup reconciliation rather than orderly shutdown cleanup.
+    #[cfg(feature = "acceptance-harness")]
+    pub fn terminate(mut self) -> Result<ProcessOutput, String> {
+        if let Some(child) = self.child.as_mut() {
+            child
+                .kill()
+                .map_err(|_| "terminate production any-mcp child".to_owned())?;
+        }
+        self.shutdown(false, false)
+    }
+
     /// Closes stdin and reports bounded shutdown defects without panicking.
     pub fn try_finish(mut self) -> Result<ProcessOutput, String> {
-        self.shutdown(true, true)
+        let output = self.shutdown(true, true)?;
+        if output.stdout != output.consumed_stdout {
+            return Err("any-mcp emitted unconsumed protocol output before shutdown".to_owned());
+        }
+        Ok(output)
     }
 }
+
+#[cfg(feature = "acceptance-harness")]
+const _: fn(ProtocolProcess) -> Result<ProcessOutput, String> = ProtocolProcess::terminate;
 
 impl Drop for ProtocolProcess {
     fn drop(&mut self) {

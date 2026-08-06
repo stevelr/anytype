@@ -335,6 +335,7 @@ fn cleanup_stale_staging_files(root: &RootCapability) -> Result<(), RootAccessEr
     let entries = directory
         .entries()
         .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    let mut reconciled = 0_usize;
     for entry in entries {
         let entry = entry.map_err(|_| RootAccessError::new(RootProblem::Activation))?;
         let name = entry.file_name();
@@ -356,8 +357,17 @@ fn cleanup_stale_staging_files(root: &RootCapability) -> Result<(), RootAccessEr
         directory
             .remove_file(Path::new(&name))
             .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        reconciled = reconciled.saturating_add(1);
     }
-    sync_parent_directory(&directory).map_err(|_| RootAccessError::new(RootProblem::Activation))
+    sync_parent_directory(&directory).map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    tracing::info!(
+        target: "any_mcp::operation",
+        operation = "artifact_staging_reconciliation",
+        outcome = "startup_complete",
+        cleanup_count = reconciled,
+        "Artifact staging reconciliation completed"
+    );
+    Ok(())
 }
 
 fn retained_directory(directory: &OpenedDirectory) -> Result<Dir, RootAccessError> {
@@ -406,6 +416,16 @@ impl fmt::Debug for AtomicExport {
 }
 
 impl AtomicExport {
+    /// Removes an unpublished private destination and confirms parent metadata.
+    pub(crate) fn discard(mut self) -> Result<(), RootAccessError> {
+        self.file.take();
+        self.parent
+            .remove_file(Path::new(&self.temporary_name))
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        sync_parent_directory(&self.parent)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))
+    }
+
     /// Clones a read handle for pre-publication verification.
     pub(crate) fn try_clone_reader(&self) -> io::Result<File> {
         self.file
