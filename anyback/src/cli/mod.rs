@@ -43,6 +43,9 @@ use tracing::{info, warn};
 pub mod decode;
 #[cfg(feature = "tui")]
 mod inspector;
+pub mod output;
+
+pub use output::{CommandOutput, OutputMode, TextBuilder};
 
 use decode::{
     ExpandedSnapshotEntry, ImportEventProgressReport, ImportReport, MANIFEST_NAME, Manifest,
@@ -344,7 +347,7 @@ pub struct ExtractArgs {
 
     /// Output file path
     #[arg(value_name = "OUTPUT")]
-    pub output: PathBuf,
+    pub destination: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -423,7 +426,7 @@ impl ExportFormatArg {
 
 pub struct AppContext {
     pub client: AnytypeClient,
-    pub json: bool,
+    pub output: CommandOutput,
 }
 
 pub fn parse_cli_from_env() -> Result<Cli> {
@@ -507,9 +510,91 @@ fn normalize_command_shortcuts(args: &[OsString]) -> Vec<OsString> {
     args.to_vec()
 }
 
-pub fn emit_json<T: Serialize>(value: &T) -> Result<()> {
-    let text = serde_json::to_string_pretty(value)?;
-    println!("{text}");
+/// Commands that render an interactive terminal UI and therefore cannot be
+/// redirected, formatted, or silenced by the standard output contract.
+#[must_use]
+pub const fn command_is_interactive(command: &Commands) -> bool {
+    #[cfg(feature = "tui")]
+    {
+        matches!(command, Commands::Inspect(_))
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = command;
+        false
+    }
+}
+
+/// The command name as spelled on the command line, for diagnostics.
+#[must_use]
+pub const fn command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::Create(_) => "create",
+        Commands::Restore(_) => "restore",
+        Commands::List(_) => "list",
+        Commands::Manifest(_) => "manifest",
+        Commands::Diff(_) => "diff",
+        Commands::Extract(_) => "extract",
+        Commands::Export(_) => "export",
+        Commands::Import(_) => "import",
+        #[cfg(feature = "tui")]
+        Commands::Inspect(_) => "inspect",
+    }
+}
+
+/// Rejects a result path that aliases an input or artifact used by `command`.
+///
+/// Parent CLIs should call this during argument validation for early errors.
+/// [`run_command`] also calls it before dispatch so library users receive the
+/// same protection.
+pub fn validate_command_output(command: &Commands, output: &CommandOutput) -> Result<()> {
+    match command {
+        Commands::Create(args) | Commands::Export(args) => {
+            validate_object_list_output(output, args.objects.as_deref())?;
+            if let Some(dest) = args.dest.as_deref() {
+                validate_archive_output(output, dest, "created archive")?;
+            }
+        }
+        Commands::Restore(args) | Commands::Import(args) => {
+            validate_archive_output(output, &args.archive, "input archive")?;
+            validate_object_list_output(output, args.objects.as_deref())?;
+            if let Some(log) = args.log.as_deref() {
+                output.ensure_distinct_from(log, "restore report")?;
+            }
+        }
+        Commands::List(args) => {
+            validate_archive_output(output, &args.archive, "input archive")?;
+        }
+        Commands::Manifest(args) => {
+            validate_archive_output(output, &args.archive, "input archive")?;
+        }
+        Commands::Diff(args) => {
+            validate_archive_output(output, &args.archive1, "first input archive")?;
+            validate_archive_output(output, &args.archive2, "second input archive")?;
+        }
+        Commands::Extract(args) => {
+            validate_archive_output(output, &args.archive, "input archive")?;
+            output.ensure_distinct_from(&args.destination, "extracted object")?;
+        }
+        #[cfg(feature = "tui")]
+        Commands::Inspect(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_archive_output(
+    output: &CommandOutput,
+    archive: &Path,
+    description: &str,
+) -> Result<()> {
+    output.ensure_distinct_from(archive, description)?;
+    output.ensure_distinct_from(&manifest_sidecar_path(archive), "archive manifest")
+}
+
+fn validate_object_list_output(output: &CommandOutput, spec: Option<&str>) -> Result<()> {
+    if let Some(spec) = spec.filter(|value| *value != "-") {
+        output.ensure_distinct_from(Path::new(spec), "object list input")?;
+    }
     Ok(())
 }
 
@@ -559,44 +644,49 @@ struct ArchiveCmpReport {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
+    let output = if cli.json {
+        CommandOutput::json()
+    } else {
+        CommandOutput::human()
+    };
+
     match &cli.command {
-        Commands::List(args) => return handle_list(cli.json, args),
-        Commands::Manifest(args) => return handle_manifest(cli.json, args),
-        Commands::Diff(args) => return handle_diff(cli.json, args),
-        Commands::Extract(args) => return handle_extract(cli.json, args),
+        Commands::List(args) => return handle_list(&output, args),
+        Commands::Manifest(args) => return handle_manifest(&output, args),
+        Commands::Diff(args) => return handle_diff(&output, args),
+        Commands::Extract(args) => return handle_extract(&output, args),
         #[cfg(feature = "tui")]
         Commands::Inspect(args) => return inspector::run_inspector(&args.archive, args.max_cache),
         _ => {}
     }
 
     let client = build_client(&cli)?;
-    let json = cli.json;
     let command = cli.command;
-    run_command(command, client, json).await
+    run_command(command, client, output).await
 }
 
-/// Execute a backup command with a client configured by the parent application.
-pub async fn run_command(command: Commands, client: AnytypeClient, json: bool) -> Result<()> {
-    match &command {
-        Commands::List(args) => return handle_list(json, args),
-        Commands::Manifest(args) => return handle_manifest(json, args),
-        Commands::Diff(args) => return handle_diff(json, args),
-        Commands::Extract(args) => return handle_extract(json, args),
-        #[cfg(feature = "tui")]
-        Commands::Inspect(args) => return inspector::run_inspector(&args.archive, args.max_cache),
-        _ => {}
-    }
-
-    let ctx = AppContext { client, json };
+/// Execute a backup command with a client and output contract configured by
+/// the parent application.
+///
+/// The parent application is responsible for rejecting output combinations the
+/// requested command cannot honor; see [`command_is_interactive`].
+pub async fn run_command(
+    command: Commands,
+    client: AnytypeClient,
+    output: CommandOutput,
+) -> Result<()> {
+    validate_command_output(&command, &output)?;
+    let ctx = AppContext { client, output };
 
     match command {
         Commands::Create(args) | Commands::Export(args) => handle_backup_create(&ctx, args).await,
         Commands::Restore(args) | Commands::Import(args) => handle_restore_apply(&ctx, args).await,
-        Commands::List(_) | Commands::Manifest(_) | Commands::Diff(_) | Commands::Extract(_) => {
-            unreachable!("handled above")
-        }
+        Commands::List(args) => handle_list(&ctx.output, &args),
+        Commands::Manifest(args) => handle_manifest(&ctx.output, &args),
+        Commands::Diff(args) => handle_diff(&ctx.output, &args),
+        Commands::Extract(args) => handle_extract(&ctx.output, &args),
         #[cfg(feature = "tui")]
-        Commands::Inspect(_) => unreachable!("handled above"),
+        Commands::Inspect(args) => inspector::run_inspector(&args.archive, args.max_cache),
     }
 }
 
@@ -621,9 +711,10 @@ async fn handle_backup_create(ctx: &AppContext, args: BackupCreateArgs) -> Resul
     validate_backup_args(&args)?;
     let export_options = backup_export_options(&args);
 
-    let progress = ProgressReporter::new(ctx.json, "Starting backup");
+    let progress = ProgressReporter::new(&ctx.output, "Starting backup");
     let space = resolve_space(&ctx.client, &args.space).await?;
     let backup_target = resolve_backup_target(&args, &space.id)?;
+    validate_archive_output(&ctx.output, &backup_target.archive_path, "created archive")?;
     progress.set_message("Resolved destination space");
 
     progress.set_message("Collecting object metadata");
@@ -678,21 +769,18 @@ async fn handle_backup_create(ctx: &AppContext, args: BackupCreateArgs) -> Resul
     // Ensure archive+manifest writes are flushed to disk before subsequent operations.
     sync_filesystem_after_archive_write();
 
-    if ctx.json {
-        emit_json(&serde_json::json!({
-            "archive": backup_target.archive_path,
-            "exported": backup.exported,
-            "requested": manifest.objects.len(),
-        }))?;
-    } else {
-        println!(
+    let report = serde_json::json!({
+        "archive": backup_target.archive_path,
+        "exported": backup.exported,
+        "requested": manifest.objects.len(),
+    });
+    ctx.output.emit(&report, || {
+        format!(
             "archive={} exported={}",
             backup_target.archive_path.display(),
             backup.exported
-        );
-    }
-
-    Ok(())
+        )
+    })
 }
 
 fn validate_backup_args(args: &BackupCreateArgs) -> Result<()> {
@@ -1096,7 +1184,7 @@ fn finalize_backup_output_path(source: &Path, dest: &Path) -> Result<()> {
 }
 
 async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Result<()> {
-    let progress = ProgressReporter::new(ctx.json, "Starting restore");
+    let progress = ProgressReporter::new(&ctx.output, "Starting restore");
     let (cancel_sender, mut cancel_state) = new_import_cancel_channel();
     let signal_forwarder = spawn_import_cancel_signal_forwarder(cancel_sender);
     let result = async {
@@ -1117,10 +1205,8 @@ async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Resul
                 "requested": plan.selected_ids.len(),
                 "manifest_present": plan.manifest.is_some(),
             });
-            if ctx.json {
-                emit_json(&payload)?;
-            } else {
-                println!(
+            ctx.output.emit(&payload, || {
+                format!(
                     "dry-run ok archive={} space={} requested={} manifest={}",
                     archive.display(),
                     space.id,
@@ -1130,8 +1216,8 @@ async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Resul
                     } else {
                         "missing"
                     }
-                );
-            }
+                )
+            })?;
             return Ok(());
         }
         progress.set_message("Importing archive");
@@ -1158,11 +1244,9 @@ async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Resul
         );
         progress.finish("Restore completed");
         write_report(&report, args.log.as_deref())?;
-        if ctx.json {
-            emit_json(&report)?;
-        } else {
-            print_report_summary(&report);
-        }
+        log_report_summary(&report);
+        ctx.output
+            .emit(&report, || render_report_summary(&report))?;
         Ok(())
     }
     .await;
@@ -1887,7 +1971,7 @@ fn apply_import_response(
     }
 }
 
-fn handle_diff(json: bool, args: &DiffArgs) -> Result<()> {
+fn handle_diff(output: &CommandOutput, args: &DiffArgs) -> Result<()> {
     let (format1, objects1) = collect_cmp_objects(&args.archive1)?;
     let (format2, objects2) = collect_cmp_objects(&args.archive2)?;
 
@@ -1933,51 +2017,48 @@ fn handle_diff(json: bool, args: &DiffArgs) -> Result<()> {
         &objects2,
     );
 
-    if json {
-        emit_json(&report)?;
-        return Ok(());
-    }
+    output.emit(&report, || {
+        let archive1_label = archive_basename(&args.archive1);
+        let archive2_label = archive_basename(&args.archive2);
+        let mut text = TextBuilder::new();
 
-    let archive1_label = archive_basename(&args.archive1);
-    let archive2_label = archive_basename(&args.archive2);
-
-    println!("< {archive1_label} only");
-    for row in &report.archive1_only {
-        println!(
-            "< {} {} {} {} {}",
-            row.object_id, row.r#type, row.name, row.size, row.last_modified
-        );
-    }
-    println!();
-    println!("> {archive2_label} only");
-    for row in &report.archive2_only {
-        println!(
-            "> {} {} {} {} {}",
-            row.object_id, row.r#type, row.name, row.size, row.last_modified
-        );
-    }
-    println!();
-    println!("* Changed");
-    for row in &report.changed {
-        println!(
-            "< {} {} {} {} {}",
-            row.left.object_id,
-            row.left.r#type,
-            row.left.name,
-            row.left.size,
-            row.left.last_modified
-        );
-        println!(
-            "> {} {} {} {} {}",
-            row.right.object_id,
-            row.right.r#type,
-            row.right.name,
-            row.right.size,
-            row.right.last_modified
-        );
-    }
-
-    Ok(())
+        text.line(format!("< {archive1_label} only"));
+        for row in &report.archive1_only {
+            text.line(format!(
+                "< {} {} {} {} {}",
+                row.object_id, row.r#type, row.name, row.size, row.last_modified
+            ));
+        }
+        text.blank();
+        text.line(format!("> {archive2_label} only"));
+        for row in &report.archive2_only {
+            text.line(format!(
+                "> {} {} {} {} {}",
+                row.object_id, row.r#type, row.name, row.size, row.last_modified
+            ));
+        }
+        text.blank();
+        text.line("* Changed");
+        for row in &report.changed {
+            text.line(format!(
+                "< {} {} {} {} {}",
+                row.left.object_id,
+                row.left.r#type,
+                row.left.name,
+                row.left.size,
+                row.left.last_modified
+            ));
+            text.line(format!(
+                "> {} {} {} {} {}",
+                row.right.object_id,
+                row.right.r#type,
+                row.right.name,
+                row.right.size,
+                row.right.last_modified
+            ));
+        }
+        text.finish()
+    })
 }
 
 fn archive_basename(path: &Path) -> String {
@@ -2121,7 +2202,7 @@ fn cmp_value_to_text(value: &Value) -> String {
     }
 }
 
-fn handle_list(json: bool, args: &ListArgs) -> Result<()> {
+fn handle_list(output: &CommandOutput, args: &ListArgs) -> Result<()> {
     let reader = ArchiveReader::from_path(&args.archive)?;
     let source = reader.source();
     let files = reader.list_files()?;
@@ -2151,36 +2232,30 @@ fn handle_list(json: bool, args: &ListArgs) -> Result<()> {
         expanded: expanded.clone(),
     };
 
-    if json {
-        emit_json(&report)?;
-        return Ok(());
-    }
-
-    print_list_summary(&report, inferred_object_ids.len());
-    if args.files {
-        for entry in files {
-            println!("{} {}", entry.bytes, entry.path);
+    output.emit(&report, || {
+        let mut text = TextBuilder::new();
+        render_list_summary(&mut text, &report, inferred_object_ids.len());
+        if args.files {
+            for entry in &files {
+                text.line(format!("{} {}", entry.bytes, entry.path));
+            }
+        } else if let Some(entries) = expanded.as_ref() {
+            render_expanded_entries(&mut text, entries);
+        } else if !args.brief {
+            for object_id in &inferred_object_ids {
+                text.line(object_id);
+            }
         }
-    } else if let Some(entries) = expanded {
-        print_expanded_entries(&entries);
-    } else if !args.brief {
-        for object_id in &inferred_object_ids {
-            println!("{object_id}");
-        }
-    }
-    Ok(())
+        text.finish()
+    })
 }
 
-fn handle_manifest(json: bool, args: &ManifestArgs) -> Result<()> {
+fn handle_manifest(output: &CommandOutput, args: &ManifestArgs) -> Result<()> {
     let reader = ArchiveReader::from_path(&args.archive)?;
     let (manifest, manifest_error) = read_manifest_prefer_sidecar(&args.archive, &reader);
     if let Some(manifest) = manifest {
-        if json {
-            emit_json(&manifest)?;
-        } else {
-            println!("{}", serde_json::to_string_pretty(&manifest)?);
-        }
-        Ok(())
+        // The manifest is already a JSON document; human mode renders it indented.
+        output.emit_json(&manifest)
     } else {
         if let Some(err) = manifest_error {
             bail!("manifest unreadable: {err}");
@@ -2189,53 +2264,53 @@ fn handle_manifest(json: bool, args: &ManifestArgs) -> Result<()> {
     }
 }
 
-fn print_list_summary(report: &ListReport, object_count: usize) {
-    println!("archive: {}", report.archive);
+fn render_list_summary(text: &mut TextBuilder, report: &ListReport, object_count: usize) {
+    text.line(format!("archive: {}", report.archive));
     if let Some(summary) = report.manifest_summary.as_ref() {
-        println!(
+        text.line(format!(
             "space: {} ({})",
             summary.source_space_name, summary.source_space_id
-        );
+        ));
         let created = summary
             .created_at_display
             .clone()
             .or_else(|| format_datetime_display(&summary.created_at))
             .unwrap_or_else(|| summary.created_at.clone());
-        println!("created: {created}");
-        println!("format: {}", summary.format);
+        text.line(format!("created: {created}"));
+        text.line(format!("format: {}", summary.format));
     } else if let Some(err) = report.manifest_error.as_ref() {
-        println!("manifest: unreadable ({err})");
+        text.line(format!("manifest: unreadable ({err})"));
     } else {
-        println!("manifest: missing");
+        text.line("manifest: missing");
     }
-    println!("objects: {object_count}");
-    println!(
+    text.line(format!("objects: {object_count}"));
+    text.line(format!(
         "files: {} ({} bytes)",
         report.file_count, report.total_bytes
-    );
+    ));
 }
 
-fn print_expanded_entries(entries: &[ExpandedSnapshotEntry]) {
+fn render_expanded_entries(text: &mut TextBuilder, entries: &[ExpandedSnapshotEntry]) {
     let unreadable = entries.iter().filter(|e| e.status == "unreadable").count();
-    println!(
+    text.line(format!(
         "expanded: parsed={} unreadable={}",
         entries.len().saturating_sub(unreadable),
         unreadable
-    );
+    ));
     for entry in entries {
         if entry.status == "unreadable" {
-            println!(
+            text.line(format!(
                 "unreadable path={} id={} reason={}",
                 entry.path,
                 entry.id.as_deref().unwrap_or("-"),
                 entry.unreadable_reason.as_deref().unwrap_or("-")
-            );
+            ));
         } else {
             let object_type = entry
                 .object_type
                 .as_ref()
                 .map_or_else(|| "null".to_string(), ToString::to_string);
-            println!(
+            text.line(format!(
                 "ok path={} id={} name={} type={} layout={}({}) archived={}",
                 entry.path,
                 entry.id.as_deref().unwrap_or("-"),
@@ -2248,37 +2323,31 @@ fn print_expanded_entries(entries: &[ExpandedSnapshotEntry]) {
                 entry
                     .archived
                     .map_or_else(|| "-".to_string(), |b| b.to_string())
-            );
+            ));
         }
     }
 }
 
-fn handle_extract(json: bool, args: &ExtractArgs) -> Result<()> {
-    let kind = save_archive_object(&args.archive, &args.object_id, &args.output)?;
-    if json {
-        emit_json(&serde_json::json!({
-            "archive": args.archive,
-            "object_id": args.object_id,
-            "output": args.output,
-            "kind": match kind {
-                SavedObjectKind::Markdown => "markdown",
-                SavedObjectKind::Raw => "raw",
-            }
-        }))?;
-        return Ok(());
-    }
-
+fn handle_extract(output: &CommandOutput, args: &ExtractArgs) -> Result<()> {
+    let kind = save_archive_object(&args.archive, &args.object_id, &args.destination)?;
     let label = match kind {
         SavedObjectKind::Markdown => "markdown",
         SavedObjectKind::Raw => "raw",
     };
-    println!(
-        "extracted object {} from {} to {} ({label})",
-        args.object_id,
-        args.archive.display(),
-        args.output.display()
-    );
-    Ok(())
+    let report = serde_json::json!({
+        "archive": args.archive,
+        "object_id": args.object_id,
+        "output": args.destination,
+        "kind": label,
+    });
+    output.emit(&report, || {
+        format!(
+            "extracted object {} from {} to {} ({label})",
+            args.object_id,
+            args.archive.display(),
+            args.destination.display()
+        )
+    })
 }
 
 async fn resolve_space(client: &AnytypeClient, space_id_or_name: &str) -> Result<Space> {
@@ -2350,8 +2419,8 @@ fn load_object_ids_spec(spec: &str) -> Result<Vec<String>> {
     Ok(parse_object_id_lines(&text))
 }
 
-fn progress_enabled(json: bool, stderr_is_tty: bool) -> bool {
-    !json && stderr_is_tty
+fn progress_enabled(output: &CommandOutput, stderr_is_tty: bool) -> bool {
+    output.allows_progress() && stderr_is_tty
 }
 
 struct ProgressReporter {
@@ -2359,8 +2428,8 @@ struct ProgressReporter {
 }
 
 impl ProgressReporter {
-    fn new(json: bool, message: &str) -> Self {
-        let enabled = progress_enabled(json, io::stderr().is_terminal());
+    fn new(output: &CommandOutput, message: &str) -> Self {
+        let enabled = progress_enabled(output, io::stderr().is_terminal());
         if enabled {
             let bar = ProgressBar::new_spinner();
             let style = ProgressStyle::with_template("{spinner:.green} {msg}")
@@ -2469,25 +2538,31 @@ fn descriptors_from_selection(
         .collect()
 }
 
-fn print_report_summary(report: &ImportReport) {
+/// Records the import outcome on the tracing channel.
+///
+/// Kept separate from the result document so that quiet and JSON output still
+/// produce operator diagnostics on stderr.
+fn log_report_summary(report: &ImportReport) {
     info!(
         "import summary: imported={} attempted={} failed={}",
         report.imported, report.attempted, report.failed
     );
-    println!(
-        "imported {}/{} objects (failed: {})",
-        report.imported, report.attempted, report.failed
-    );
-
-    if !report.summary.is_empty() {
-        for line in &report.summary {
-            println!("- {line}");
-        }
-    }
-
     if report.failed > 0 {
         warn!("import completed with failures");
     }
+}
+
+/// Renders the human-readable import summary.
+fn render_report_summary(report: &ImportReport) -> String {
+    let mut text = TextBuilder::new();
+    text.line(format!(
+        "imported {}/{} objects (failed: {})",
+        report.imported, report.attempted, report.failed
+    ));
+    for line in &report.summary {
+        text.line(format!("- {line}"));
+    }
+    text.finish()
 }
 
 fn write_report(report: &ImportReport, path: Option<&Path>) -> Result<()> {
@@ -2843,7 +2918,7 @@ mod tests {
         if let Commands::Extract(args) = cli.command {
             assert_eq!(args.object_id, "bafyreitest");
             assert_eq!(args.archive, PathBuf::from("archive-dir"));
-            assert_eq!(args.output, PathBuf::from("/tmp/out.md"));
+            assert_eq!(args.destination, PathBuf::from("/tmp/out.md"));
         } else {
             panic!("expected extract command");
         }
@@ -3075,22 +3150,34 @@ mod tests {
 
     #[test]
     fn progress_disabled_when_json_enabled() {
-        assert!(!progress_enabled(true, true));
+        assert!(!progress_enabled(&CommandOutput::json(), true));
+        assert!(!progress_enabled(
+            &CommandOutput::new(OutputMode::Pretty, None),
+            true
+        ));
+    }
+
+    #[test]
+    fn progress_disabled_when_quiet() {
+        assert!(!progress_enabled(
+            &CommandOutput::new(OutputMode::Quiet, None),
+            true
+        ));
     }
 
     #[test]
     fn progress_disabled_for_non_tty() {
-        assert!(!progress_enabled(false, false));
+        assert!(!progress_enabled(&CommandOutput::human(), false));
     }
 
     #[test]
     fn progress_enabled_for_tty_human_output() {
-        assert!(progress_enabled(false, true));
+        assert!(progress_enabled(&CommandOutput::human(), true));
     }
 
     #[test]
     fn progress_reporter_disabled_when_json_enabled() {
-        let reporter = ProgressReporter::new(true, "hidden");
+        let reporter = ProgressReporter::new(&CommandOutput::json(), "hidden");
         assert!(!reporter.enabled());
     }
 

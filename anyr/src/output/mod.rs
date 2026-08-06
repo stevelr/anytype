@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod table;
 
@@ -28,6 +28,11 @@ impl Output {
 
     pub fn format(&self) -> OutputFormat {
         self.format
+    }
+
+    /// Destination file for command output, or `None` when writing to stdout.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     pub fn emit_json<T: Serialize + ?Sized>(&self, value: &T) -> Result<()> {

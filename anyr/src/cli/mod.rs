@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "mcp")]
 use std::ffi::OsString;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use anytype::prelude::*;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use tracing::warn;
@@ -1700,6 +1700,12 @@ pub struct AppContext {
 
 pub async fn run(mut cli: Cli) -> Result<()> {
     apply_init_cli_endpoint_defaults(&mut cli);
+
+    #[cfg(feature = "backup")]
+    if let Commands::Backup(ref command) = cli.command {
+        validate_backup_output_flags(&cli, command)?;
+    }
+
     let output = Output::new(resolve_output_format(&cli), cli.output.clone());
 
     // Handle commands that don't need a client or keystore
@@ -1739,11 +1745,8 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         Commands::Md(args) => any_edit::run(args, ctx.client).await,
         #[cfg(feature = "backup")]
         Commands::Backup(args) => {
-            let json = matches!(
-                ctx.output.format(),
-                OutputFormat::Json | OutputFormat::Pretty
-            );
-            anyback_reader::cli::run_command(args, ctx.client, json).await
+            let output = backup_output(&ctx.output);
+            anyback_reader::cli::run_command(args, ctx.client, output).await
         }
         #[cfg(feature = "mcp")]
         Commands::Mcp(_) => unreachable!("MCP is dispatched before the standard runtime"),
@@ -1835,6 +1838,77 @@ fn resolve_output_format(cli: &Cli) -> OutputFormat {
     } else {
         OutputFormat::Json
     }
+}
+
+/// Maps the resolved Anyr output format onto the backup command output contract.
+///
+/// Anyr's table presentation maps to the backup commands' human text summaries;
+/// the backup reports are documents rather than uniform rows.
+#[cfg(feature = "backup")]
+fn backup_output(output: &Output) -> anyback_reader::cli::CommandOutput {
+    use anyback_reader::cli::{CommandOutput, OutputMode};
+
+    let mode = match output.format() {
+        OutputFormat::Json => OutputMode::Json,
+        OutputFormat::Pretty => OutputMode::Pretty,
+        OutputFormat::Table => OutputMode::Human,
+        OutputFormat::Quiet => OutputMode::Quiet,
+    };
+    CommandOutput::new(mode, output.path().map(Path::to_path_buf))
+}
+
+/// Rejects global output flag combinations that a backup command cannot honor.
+///
+/// Anyr warns and picks a winner for conflicting format flags on most
+/// commands. Backup commands produce archives and import reports whose
+/// presentation is load-bearing for scripts, so an ambiguous or impossible
+/// request is an error instead of a silently downgraded run.
+#[cfg(feature = "backup")]
+fn validate_backup_output_flags(cli: &Cli, command: &anyback_reader::cli::Commands) -> Result<()> {
+    use anyback_reader::cli::{command_is_interactive, command_name};
+
+    let name = command_name(command);
+
+    let mut requested: Vec<&str> = Vec::new();
+    if cli.json {
+        requested.push("--json");
+    }
+    if cli.pretty {
+        requested.push("--pretty");
+    }
+    if cli.table {
+        requested.push("--table");
+    }
+    if cli.quiet {
+        requested.push("--quiet");
+    }
+    if requested.len() > 1 {
+        bail!(
+            "conflicting output formats for `backup {name}`: {} - choose one",
+            requested.join(", ")
+        );
+    }
+
+    if cli.quiet && cli.output.is_some() {
+        bail!(
+            "conflicting output options for `backup {name}`: --quiet suppresses the output that --output would write"
+        );
+    }
+
+    if command_is_interactive(command) {
+        if let Some(flag) = requested.first() {
+            bail!("`backup {name}` renders an interactive terminal UI and does not support {flag}");
+        }
+        if cli.output.is_some() {
+            bail!(
+                "`backup {name}` renders an interactive terminal UI and does not support --output"
+            );
+        }
+    }
+
+    let output = Output::new(resolve_output_format(cli), cli.output.clone());
+    anyback_reader::cli::validate_command_output(command, &backup_output(&output))
+        .with_context(|| format!("invalid output path for `backup {name}`"))
 }
 
 fn resolve_table_date_format(cli: &Cli) -> String {
@@ -1981,4 +2055,191 @@ pub fn resolve_icon_exists(
         return Ok(Some(Icon::File { file: path }));
     }
     Ok(None)
+}
+
+#[cfg(all(test, feature = "backup"))]
+mod backup_output_tests {
+    use super::*;
+    use anyback_reader::cli::OutputMode;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("arguments should parse")
+    }
+
+    fn validate(args: &[&str]) -> Result<()> {
+        let cli = parse(args);
+        let Commands::Backup(ref command) = cli.command else {
+            panic!("expected a backup command");
+        };
+        validate_backup_output_flags(&cli, command)
+    }
+
+    fn mode_for(args: &[&str]) -> OutputMode {
+        let cli = parse(args);
+        backup_output(&Output::new(
+            resolve_output_format(&cli),
+            cli.output.clone(),
+        ))
+        .mode()
+    }
+
+    #[test]
+    fn default_backup_output_is_compact_json() {
+        assert_eq!(
+            mode_for(&["anyr", "backup", "list", "archive-dir"]),
+            OutputMode::Json
+        );
+    }
+
+    #[test]
+    fn global_format_flags_reach_the_backup_dispatcher() {
+        assert_eq!(
+            mode_for(&["anyr", "--pretty", "backup", "list", "archive-dir"]),
+            OutputMode::Pretty
+        );
+        assert_eq!(
+            mode_for(&["anyr", "--table", "backup", "list", "archive-dir"]),
+            OutputMode::Human
+        );
+        assert_eq!(
+            mode_for(&["anyr", "--quiet", "backup", "list", "archive-dir"]),
+            OutputMode::Quiet
+        );
+    }
+
+    #[test]
+    fn output_file_reaches_the_backup_dispatcher() {
+        let cli = parse(&[
+            "anyr",
+            "backup",
+            "list",
+            "archive-dir",
+            "--output",
+            "report.json",
+        ]);
+        let output = backup_output(&Output::new(
+            resolve_output_format(&cli),
+            cli.output.clone(),
+        ));
+        assert_eq!(output.path(), Some(Path::new("report.json")));
+    }
+
+    #[test]
+    fn output_file_aliases_are_rejected_before_dispatch() {
+        for args in [
+            vec![
+                "anyr",
+                "backup",
+                "list",
+                "archive.zip",
+                "--output",
+                "./archive.zip",
+            ],
+            vec![
+                "anyr",
+                "backup",
+                "create",
+                "--space",
+                "space",
+                "--dest",
+                "archive.zip",
+                "--output",
+                "archive.zip",
+            ],
+            vec![
+                "anyr",
+                "backup",
+                "extract",
+                "archive.zip",
+                "object-id",
+                "object.md",
+                "--output",
+                "object.md",
+            ],
+            vec![
+                "anyr",
+                "backup",
+                "restore",
+                "archive.zip",
+                "--space",
+                "space",
+                "--log",
+                "report.json",
+                "--output",
+                "report.json",
+            ],
+        ] {
+            let err = validate(&args).expect_err("aliased output must fail");
+            let message = format!("{err:#}");
+            assert!(message.contains("aliases"), "{message}");
+        }
+    }
+
+    #[test]
+    fn conflicting_format_flags_are_rejected() {
+        let err = validate(&["anyr", "--json", "--table", "backup", "list", "archive-dir"])
+            .expect_err("conflicting formats must fail");
+        let message = err.to_string();
+        assert!(message.contains("conflicting output formats"), "{message}");
+        assert!(message.contains("--json"), "{message}");
+        assert!(message.contains("--table"), "{message}");
+    }
+
+    #[test]
+    fn quiet_with_output_file_is_rejected() {
+        let err = validate(&[
+            "anyr",
+            "--quiet",
+            "backup",
+            "list",
+            "archive-dir",
+            "--output",
+            "report.json",
+        ])
+        .expect_err("quiet plus output file must fail");
+        assert!(
+            err.to_string().contains("--quiet suppresses the output"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn single_format_flags_are_accepted() {
+        for flag in ["--json", "--pretty", "--table", "--quiet"] {
+            validate(&["anyr", flag, "backup", "list", "archive-dir"])
+                .unwrap_or_else(|err| panic!("{flag} should be accepted: {err}"));
+        }
+        validate(&[
+            "anyr",
+            "--pretty",
+            "backup",
+            "list",
+            "archive-dir",
+            "--output",
+            "report.json",
+        ])
+        .expect("pretty with an output file should be accepted");
+    }
+
+    #[cfg(feature = "inspect")]
+    #[test]
+    fn interactive_inspect_rejects_output_redirection() {
+        let err = validate(&[
+            "anyr",
+            "backup",
+            "inspect",
+            "archive-dir",
+            "--output",
+            "report.json",
+        ])
+        .expect_err("inspect must reject --output");
+        assert!(err.to_string().contains("interactive terminal UI"), "{err}");
+
+        let err = validate(&["anyr", "--quiet", "backup", "inspect", "archive-dir"])
+            .expect_err("inspect must reject --quiet");
+        assert!(err.to_string().contains("interactive terminal UI"), "{err}");
+
+        validate(&["anyr", "backup", "inspect", "archive-dir"])
+            .expect("plain inspect should be accepted");
+    }
 }

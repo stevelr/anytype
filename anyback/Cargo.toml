@@ -62,6 +62,7 @@ cli = [
   "dep:indicatif",
   "dep:tonic",
   "dep:prost",
+  "dep:same-file",
 ]
 tui = [
   "cli",
@@ -90,6 +91,7 @@ prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm", "image-defaults", "tokio"], optional = true }
+same-file = { version = "1.0.6", optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

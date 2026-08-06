@@ -6,40 +6,39 @@ anyback - backup and restore Anytype spaces and objects
 
 ## SYNOPSIS
 
-`anyback [GLOBAL_OPTIONS] <COMMAND>`
+`anyr [GLOBAL_OPTIONS] backup <COMMAND>`
 
-`anyback backup --space NAME_OR_ID [--objects FILE|-] [--format markdown|pb|pb-json|json] [--dir DIR | --dest PATH] [--prefix PREFIX]`
+`anyr backup create --space NAME_OR_ID [--objects FILE|-] [--format markdown|pb|pb-json|json] [--dir DIR | --dest PATH] [--prefix PREFIX]`
 
-`anyback restore ARCHIVE --space NAME_OR_ID [--objects FILE|-] [--import-mode ignore-errors|all-or-nothing] [--log REPORT.json]`
+`anyr backup restore ARCHIVE --space NAME_OR_ID [--objects FILE|-] [--import-mode ignore-errors|all-or-nothing] [--log REPORT.json]`
 
-`anyback export ...` (alias for `backup`)
+`anyr backup export ...` (alias for `create`)
 
-`anyback import ...` (alias for `restore`)
+`anyr backup import ...` (alias for `restore`)
 
-`anyback list ARCHIVE [--brief|--expanded|--files]`
+`anyr backup list ARCHIVE [--brief|--expanded|--files]`
 
-`anyback manifest ARCHIVE`
+`anyr backup manifest ARCHIVE`
 
-`anyback diff ARCHIVE1 ARCHIVE2`
+`anyr backup diff ARCHIVE1 ARCHIVE2`
 
-`anyback extract ARCHIVE ID OUTPUT`
+`anyr backup extract ARCHIVE ID OUTPUT`
 
-`anyback inspect ARCHIVE [--max-cache SIZE]`
-
-`anyback auth <SUBCOMMAND>`
+`anyr backup inspect ARCHIVE [--max-cache SIZE]`
 
 ## DESCRIPTION
 
-`anyback` is a CLI tool for backing up and restoring Anytype spaces.
+`anyback` is the backup and restore command set of the consolidated `anyr`
+CLI; it is reached as `anyr backup <COMMAND>` and shares `anyr`'s endpoint,
+keystore, and output options.
 
-- `backup` creates full-space or selective backups as `.zip` archives.
+- `create` creates full-space or selective backups as `.zip` archives.
 - `restore` imports an archive into an existing destination space.
 - `list` shows archive summary and object IDs.
   - `--brief` prints summary only (no object IDs).
   - `--expanded` parses all snapshot files and emits per-object metadata.
   - `--files` lists files with sizes.
   - Accepts both directory archives and `.zip` archives.
-  - Supports `--json` for machine-readable output.
 - `manifest` prints the archive manifest as JSON.
 - `diff` compares two archives and prints archive1-only, archive2-only, and changed objects.
 - `extract` extracts one object from an archive:
@@ -52,17 +51,42 @@ anyback - backup and restore Anytype spaces and objects
 
 ## GLOBAL OPTIONS
 
+These are the `anyr` global options; place them before or after `backup`.
+
 - `-u, --url URL` HTTP API endpoint (env: `ANYTYPE_URL`).
 - `--grpc URL` gRPC endpoint (env: `ANYTYPE_GRPC_ENDPOINT`).
 - `--keystore VALUE` keystore type/config.
 - `--keystore-service NAME` keystore service name.
-- `--json` machine-readable output where applicable.
+- `-j, --json` compact JSON result document (the default).
+- `--pretty` indented JSON result document.
+- `-t, --table` human-readable text summary.
+- `-q, --quiet` suppress the result document; report the outcome only through the exit status.
+- `-o, --output FILE` write the result document to FILE instead of stdout.
 - `-v, --verbose` increase log verbosity.
-- `--color auto|always|never` color output mode (default `auto`).
+
+## RESULT OUTPUT
+
+Each non-interactive command writes one result document to stdout, or to the
+file named by `-o FILE`. Progress indicators, warnings, and errors always go to
+stderr, so stdout stays parseable in JSON modes. The destination is replaced
+only when the result is ready. `inspect` renders an interactive TUI and does
+not produce a result document.
+
+`manifest` is a JSON document in every non-quiet mode; `--table` renders it
+indented rather than compact.
+
+Output combinations that cannot be honored are rejected with an error instead
+of a silently chosen winner:
+
+- more than one of `--json`, `--pretty`, `--table`, `--quiet`.
+- `--quiet` together with `-o FILE`, because nothing would be written.
+- any of those flags with `inspect`, which renders an interactive terminal UI.
+- `-o FILE` when FILE aliases an archive, object-list input, restore report, or
+  extracted output used by the command.
 
 ## OBJECT LIST INPUT
 
-For `backup` and `restore`, `--objects` accepts:
+For `create` and `restore`, `--objects` accepts:
 
 - `FILE`: path to a text file with one object ID per line.
 - `-`: read object IDs from stdin.
@@ -80,7 +104,7 @@ Backup writes `.zip` archives. Manifest metadata is written to a sidecar file `<
 ## RESTORE OPTIONS
 
 - `--import-mode ignore-errors` (default): continue importing after object errors.
-- `--import-mode all-or-nothing`: stop on first error. Note: this is not transactional — previously imported objects are not rolled back.
+- `--import-mode all-or-nothing`: stop on first error. Note: this is not transactional: previously imported objects are not rolled back.
 - `--dry-run`: validate archive and destination space without importing.
 - `--log FILE`: write a JSON report with per-object success/failure details.
 - `--replace`: replace existing objects from archive.
@@ -95,9 +119,10 @@ Archives without manifest metadata (e.g. desktop-generated Anytype backups) are 
 
 ## ENVIRONMENT VARIABLES
 
-- `ANYTYPE_URL` — HTTP API endpoint (same as `--url`).
-- `ANYTYPE_GRPC_ENDPOINT` — gRPC endpoint (same as `--grpc`).
-- `ANYBACK_RESTORE_TRANSPORT` — set to `snapshots` to use snapshot import transport instead of path-based import.
+- `ANYTYPE_URL`: HTTP API endpoint (same as `--url`).
+- `ANYTYPE_GRPC_ENDPOINT`: gRPC endpoint (same as `--grpc`).
+- `ANYBACK_RESTORE_TRANSPORT`: set to `snapshots` to use snapshot import transport instead of path-based import.
+- `ANYR_BIN`: path to the `anyr` executable used by the live backup test suites.
 
 ## EXIT STATUS
 

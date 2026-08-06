@@ -39,6 +39,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- `anyr backup` now honors compact, pretty, table, quiet, and output-file
+  contracts while keeping progress and diagnostics on stderr.
+- Reject `anyr backup -o FILE` when the result path aliases an input archive,
+  object-list file, restore report, created archive, or extracted output; result
+  files are now replaced only after the command has produced its document.
 - Write `-v`/`-vv`/`RUST_LOG` tracing diagnostics to stderr instead of stdout,
   so stdout carries only the command's result document and machine-readable
   output such as `--json` backup results stays parseable. ANSI styling now

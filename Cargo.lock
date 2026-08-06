@@ -282,6 +282,7 @@ dependencies = [
  "rand 0.10.2",
  "ratatui",
  "ratatui-image",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",

@@ -945,7 +945,7 @@ fn backup_selected(
     write_ids_file(&ids_file, ids)?;
 
     let mut args = vec![
-        "backup".to_string(),
+        "create".to_string(),
         "--space".to_string(),
         space.to_string(),
         "--objects".to_string(),
@@ -1312,10 +1312,10 @@ fn write_ids_file(path: &Path, ids: &[String]) -> Result<()> {
 }
 
 fn parse_archive_path(output: &str) -> Option<PathBuf> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix("archive="))
-        .and_then(|rest| rest.split_whitespace().next())
+    parse_json_output(output)
+        .ok()?
+        .get("archive")
+        .and_then(Value::as_str)
         .map(PathBuf::from)
 }
 
@@ -1500,36 +1500,16 @@ fn run_anyback<const N: usize>(args: [&str; N]) -> Result<String> {
 }
 
 fn run_anyback_dyn(args: &[&str]) -> Result<String> {
-    let output = run_with_lock_retry(|| {
-        if let Ok(exe) = std::env::var("CARGO_BIN_EXE_anyback") {
-            let mut command = Command::new(exe);
-            command.args(args);
-            configure_test_keystore(&mut command)?;
-            command.output().context("failed to execute anyback binary")
-        } else {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = manifest_dir
-                .parent()
-                .ok_or_else(|| anyhow!("failed to resolve workspace root"))?;
-            let mut command = Command::new("cargo");
-            command.current_dir(workspace_root);
-            command.args(["run", "--quiet", "--bin", "anyback", "--"]);
-            command.args(args);
-            configure_test_keystore(&mut command)?;
-            command
-                .output()
-                .context("failed to execute anyback via cargo run")
-        }
-    })?;
-    if !output.status.success() {
-        bail!(
-            "anyback command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("backup");
+    full.extend_from_slice(args);
+    run_anyr_dyn(&full)
+}
+
+/// Parses the structured (compact JSON) result document written by `anyr`.
+fn parse_json_output(output: &str) -> Result<Value> {
+    serde_json::from_str(output.trim())
+        .with_context(|| format!("expected structured anyr output, got: {output}"))
 }
 
 fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
@@ -1549,9 +1529,34 @@ fn run_anyr_dyn(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Resolves the `anyr` executable under test.
+///
+/// `ANYR_BIN` wins when set; otherwise the binary built alongside this test
+/// harness is required. The harness never falls back to `PATH`.
+fn anyr_binary() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ANYR_BIN") {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(anyhow!("ANYR_BIN is not a file: {}", path.display()));
+        }
+        return Ok(path);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(target_dir) = exe.parent().and_then(Path::parent)
+    {
+        let candidate = target_dir.join(format!("anyr{}", std::env::consts::EXE_SUFFIX));
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(anyhow!(
+        "anyr test binary not found; run `cargo build -p anyr` first or set ANYR_BIN"
+    ))
+}
+
 fn run_anyr_raw(args: &[&str]) -> Result<std::process::Output> {
     run_with_lock_retry(|| {
-        let mut command = Command::new("anyr");
+        let mut command = Command::new(anyr_binary()?);
         command.args(args);
         configure_test_keystore(&mut command)?;
         command.output().context("failed to execute anyr command")

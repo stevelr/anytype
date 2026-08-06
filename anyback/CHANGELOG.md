@@ -7,9 +7,6 @@
 - The standalone `anyback` executable is replaced by the `anyr backup`
   command. Archive operations are available through the reusable CLI library;
   authentication is provided by `anyr auth`.
-
-### Changed
-
 - Markdown conversion unit tests now build self-contained protobuf and
   `pb.json` archive fixtures in test code instead of depending on an external
   `samples/` tree, so heading, list-whitespace, table, and `save_archive_object`
@@ -18,6 +15,16 @@
   unsupported snapshot extensions, missing root blocks, and missing archives.
 - Normalized Rust and spellchecker configuration formatting.
 - bumped dependencies: lru -> 0.16.4, nix -> 0.31.1, rand -> 0.10.0
+
+### Fixed
+
+- Live backup and restore harnesses now invoke `anyr backup`, parse structured
+  results, and run offline profile checks in the ordinary test suite.
+- Backup result files are written fallibly only after a result is ready, and
+  output paths that alias command inputs or generated artifacts are rejected
+  before dispatch to prevent archive, extract, and restore-report corruption.
+- Live backup harnesses no longer fall back to an unrelated `anyr` executable
+  from `PATH` when the workspace binary is unavailable.
 
 ## [0.4.0-alpha.2]
 

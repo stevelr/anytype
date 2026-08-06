@@ -54,6 +54,14 @@ anyr backup inspect ARCHIVE [--max-cache SIZE]
   - `--import-mode ignore-errors` (default): continue after errors.
   - `--import-mode all-or-nothing`: stop on first error (not transactional; already-imported objects are not rolled back).
 - **Restore reports**: `--log REPORT.json` writes a JSON report with success/failure details.
+- **Result output**: every non-interactive command writes one result document,
+  shaped by the global `anyr` output options - compact JSON (default), `--pretty`,
+  `--table` for the human-readable summary, `--quiet` to suppress it, and `-o FILE`
+  to write it to a file. The interactive `inspect` command renders a TUI instead.
+  Progress and diagnostics stay on stderr. `anyr` rejects impossible combinations
+  (several format flags at once, `--quiet` with `-o FILE`, any output flag on
+  `inspect`, or a result file that aliases an input or generated artifact) instead
+  of silently choosing one.
 - **Archive formats**: `list`, `diff`, `inspect`, and `restore` accept both `.zip` archives and unpacked archive directories.
 - **Manifest**: anyback writes manifest metadata to `<archive>.manifest.json`. Archives without manifests (e.g. desktop-generated backups) are still supported.
 

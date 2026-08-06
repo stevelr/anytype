@@ -77,6 +77,16 @@ anyr mcp init
 anyr mcp check
 ```
 
+Backup commands honor the same global output contract as the rest of anyr:
+compact JSON by default, `--pretty` for indented JSON, `--table` for the
+human-readable summaries, `--quiet` to suppress the result document, and
+`-o FILE` to route it to a file instead of stdout. Progress spinners and
+diagnostics always stay on stderr, so stdout holds only the result document.
+Combinations that cannot be honored are rejected rather than silently
+downgraded: more than one format flag, `--quiet` together with `-o FILE`, any
+output flag applied to the interactive `anyr backup inspect`, and a backup
+result path that aliases a command input or generated artifact.
+
 The consolidated binary owns shared endpoint, keystore, output, and
 verbosity options. Use `-v`, `-vv`, or `RUST_LOG` for diagnostics; diagnostics
 are always written to stderr, so stdout carries only the command's result

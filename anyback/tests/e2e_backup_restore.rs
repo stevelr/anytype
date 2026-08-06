@@ -10,7 +10,7 @@ use std::{
     time::SystemTime,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use anytype::prelude::*;
 use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::Value;
@@ -123,7 +123,7 @@ async fn e2e_backup_create_full_then_restore_apply_subset() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--dir",
@@ -153,10 +153,7 @@ async fn e2e_backup_create_full_then_restore_apply_subset() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported 1/1 objects (failed: 0)"),
-        "unexpected restore output: {restore_output}"
-    );
+    assert_import_counts(&restore_output, 1, 1, 0)?;
     assert_non_tty_output_clean(&restore_output);
 
     let imported_id = wait_find_object_id_by_name(&dest_space.name, &object_name).await?;
@@ -183,7 +180,7 @@ async fn e2e_backup_create_full_then_restore_into_new_space_path() -> Result<()>
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--dir",
@@ -208,10 +205,7 @@ async fn e2e_backup_create_full_then_restore_into_new_space_path() -> Result<()>
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let imported_id = wait_find_object_id_by_name(&dest_space.name, &object_name).await?;
@@ -244,7 +238,7 @@ async fn e2e_backup_create_full_then_restore_apply_same_space() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--dir",
@@ -261,10 +255,7 @@ async fn e2e_backup_create_full_then_restore_apply_same_space() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let _ = wait_find_object_id_by_name(&source_space.name, &object_name).await?;
@@ -287,7 +278,7 @@ async fn e2e_backup_create_json_output_is_parseable() -> Result<()> {
     write_ids_file(&object_ids_file, std::slice::from_ref(&source_id))?;
     let output = run_anyback([
         "--json",
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -327,7 +318,7 @@ async fn e2e_backup_create_pb_json_then_restore_same_space() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--format",
@@ -349,10 +340,7 @@ async fn e2e_backup_create_pb_json_then_restore_same_space() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let list_output = run_anyback([
@@ -394,7 +382,7 @@ async fn e2e_archive_inspect_supports_pb_and_pb_json_archives() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let pb_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--format",
@@ -408,7 +396,7 @@ async fn e2e_archive_inspect_supports_pb_and_pb_json_archives() -> Result<()> {
         .ok_or_else(|| anyhow!("could not parse archive path from output: {pb_output}"))?;
 
     let pb_json_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--format",
@@ -464,7 +452,7 @@ async fn e2e_backup_restore_chat_space_messages() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         chat_space.name.as_str(),
         "--prefix",
@@ -486,10 +474,7 @@ async fn e2e_backup_restore_chat_space_messages() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     wait_chat_message_contains(&chat_space.name, &chat_id, &token).await?;
@@ -526,7 +511,7 @@ async fn e2e_backup_restore_regular_space_chat_messages() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--prefix",
@@ -550,10 +535,7 @@ async fn e2e_backup_restore_regular_space_chat_messages() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     wait_chat_message_in_space(&dest_space.name, &token).await?;
@@ -611,10 +593,7 @@ async fn e2e_export_then_import_subset_between_spaces() -> Result<()> {
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
 
-    assert!(
-        import_output.contains("imported 2/2 objects (failed: 0)"),
-        "unexpected import output: {import_output}"
-    );
+    assert_import_counts(&import_output, 2, 2, 0)?;
     assert_non_tty_output_clean(&import_output);
 
     let report_text = fs::read_to_string(&report_path)
@@ -678,7 +657,7 @@ async fn e2e_restore_apply_json_output_is_parseable() -> Result<()> {
     write_ids_file(&object_ids_file, std::slice::from_ref(&source_id))?;
 
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -730,7 +709,7 @@ async fn e2e_backup_create_incremental_with_types_filter() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--mode",
@@ -791,7 +770,7 @@ async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let full_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--dir",
@@ -806,7 +785,7 @@ async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
     let inc_id = create_object(&source_space.name, &inc_name, "incremental body")?;
 
     let inc_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--mode",
@@ -830,7 +809,10 @@ async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
             .ok_or_else(|| anyhow!("bad incremental archive path"))?,
     ])?;
     assert!(
-        preflight_output.contains("dry-run ok"),
+        parse_json_output(&preflight_output)?
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         "unexpected restore dry-run output: {preflight_output}"
     );
 
@@ -858,7 +840,7 @@ async fn e2e_backup_include_files_controls_binary_payloads() -> Result<()> {
     write_ids_file(&ids_file, &object_ids)?;
 
     let no_files_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -872,7 +854,7 @@ async fn e2e_backup_include_files_controls_binary_payloads() -> Result<()> {
         .ok_or_else(|| anyhow!("could not parse archive path from output: {no_files_output}"))?;
 
     let with_files_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -922,7 +904,7 @@ async fn e2e_backup_include_archived_controls_archived_objects() -> Result<()> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let no_arch_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--types",
@@ -937,7 +919,7 @@ async fn e2e_backup_include_archived_controls_archived_objects() -> Result<()> {
     let no_arch_ids = archive_object_ids(&no_arch_archive)?;
 
     let with_arch_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--types",
@@ -995,7 +977,7 @@ async fn e2e_backup_include_nested_includes_linked_objects() -> Result<()> {
     write_ids_file(&ids_file, std::slice::from_ref(&parent_id))?;
 
     let no_nested_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1010,7 +992,7 @@ async fn e2e_backup_include_nested_includes_linked_objects() -> Result<()> {
     let no_nested_ids = archive_object_ids(&no_nested_archive)?;
 
     let with_nested_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1075,7 +1057,7 @@ async fn e2e_backup_include_backlinks_includes_referencing_objects() -> Result<(
     write_ids_file(&ids_file, std::slice::from_ref(&root_id))?;
 
     let no_backlinks_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1091,7 +1073,7 @@ async fn e2e_backup_include_backlinks_includes_referencing_objects() -> Result<(
     let no_backlinks_ids = archive_object_ids(&no_backlinks_archive)?;
 
     let with_backlinks_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1146,7 +1128,7 @@ async fn e2e_backup_markdown_include_properties_changes_output() -> Result<()> {
     write_ids_file(&ids_file, std::slice::from_ref(&source_id))?;
 
     let no_props_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1162,7 +1144,7 @@ async fn e2e_backup_markdown_include_properties_changes_output() -> Result<()> {
         .ok_or_else(|| anyhow!("could not parse archive path from output: {no_props_output}"))?;
 
     let with_props_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1206,7 +1188,7 @@ async fn e2e_backup_incremental_since_mode_boundary_exact_timestamp() -> Result<
 
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let exclusive_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--mode",
@@ -1227,7 +1209,7 @@ async fn e2e_backup_incremental_since_mode_boundary_exact_timestamp() -> Result<
     let exclusive_ids = backup_selected_ids(&exclusive_archive)?;
 
     let inclusive_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--mode",
@@ -1316,10 +1298,7 @@ async fn e2e_import_preserves_created_and_last_modified_dates() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        import_output.contains("imported 1/1 objects (failed: 0)"),
-        "unexpected import output: {import_output}"
-    );
+    assert_import_counts(&import_output, 1, 1, 0)?;
     assert_non_tty_output_clean(&import_output);
 
     let imported_id = wait_find_object_id_by_name(&dest_space.name, &object_name).await?;
@@ -1363,7 +1342,7 @@ async fn e2e_restore_reverts_modified_object_to_backup_state() -> Result<()> {
     // Backup the space, filtering to pages to keep it small
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--types",
@@ -1406,10 +1385,7 @@ async fn e2e_restore_reverts_modified_object_to_backup_state() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     // Verify object reverted to v1 state
@@ -1453,7 +1429,7 @@ async fn e2e_restore_replace_restores_property_fields() -> Result<()> {
     let ids_file = temp_dir.path().join("replace_prop_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&object_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1487,10 +1463,7 @@ async fn e2e_restore_replace_restores_property_fields() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let after = get_object_json(&source_space.name, &object_id)?;
@@ -1533,7 +1506,7 @@ async fn e2e_restore_replace_file_object_reverts_name() -> Result<()> {
     let ids_file = temp_dir.path().join("replace_file_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&file_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1566,10 +1539,7 @@ async fn e2e_restore_replace_file_object_reverts_name() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let file_json = get_file_json(&source_space.name, &file_id)?;
@@ -1606,7 +1576,7 @@ async fn e2e_restore_replace_type_object_reverts_fields() -> Result<()> {
     let ids_file = temp_dir.path().join("replace_type_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&type_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1638,10 +1608,7 @@ async fn e2e_restore_replace_type_object_reverts_fields() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored = get_type_json(&source_space.name, &type_id)?;
@@ -1680,7 +1647,7 @@ async fn e2e_restore_replace_property_object_reverts_fields() -> Result<()> {
     let ids_file = temp_dir.path().join("replace_property_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&prop_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1712,10 +1679,7 @@ async fn e2e_restore_replace_property_object_reverts_fields() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored = get_property_json(&source_space.name, &prop_id)?;
@@ -1760,7 +1724,7 @@ async fn e2e_restore_replace_collection_with_items_reverts_membership() -> Resul
     let ids_file = temp_dir.path().join("replace_collection_ids.txt");
     write_ids_file(&ids_file, &selected)?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1787,10 +1751,7 @@ async fn e2e_restore_replace_collection_with_items_reverts_membership() -> Resul
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored_collection_id =
@@ -1891,7 +1852,7 @@ async fn e2e_restore_replace_custom_type_object_reverts_type_and_fields() -> Res
     let ids_file = temp_dir.path().join("replace_custom_type_ids.txt");
     write_ids_file(&ids_file, &selected)?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -1925,10 +1886,7 @@ async fn e2e_restore_replace_custom_type_object_reverts_type_and_fields() -> Res
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored_object_id =
@@ -1989,7 +1947,7 @@ async fn e2e_restore_replace_complex_nested_object_reverts_graph() -> Result<()>
     let ids_file = temp_dir.path().join("replace_nested_ids.txt");
     write_ids_file(&ids_file, &selected)?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -2020,10 +1978,7 @@ async fn e2e_restore_replace_complex_nested_object_reverts_graph() -> Result<()>
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored_parent_id = find_exact_object_id_by_name(&source_space.name, &parent_name)?;
@@ -2103,7 +2058,7 @@ async fn e2e_restore_replace_after_object_type_changed_since_backup() -> Result<
     let ids_file = temp_dir.path().join("replace_type_changed_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&object_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -2137,10 +2092,7 @@ async fn e2e_restore_replace_after_object_type_changed_since_backup() -> Result<
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored_object_id = wait_find_object_id_by_name(&source_space.name, &name_v1).await?;
@@ -2183,7 +2135,7 @@ async fn e2e_restore_recovers_deleted_object() -> Result<()> {
     // Backup the space, filtering to pages to keep it small
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--types",
@@ -2221,10 +2173,7 @@ async fn e2e_restore_recovers_deleted_object() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     // Verify object is restored and not archived
@@ -2277,7 +2226,7 @@ async fn e2e_restore_recovers_permanently_deleted_object() -> Result<()> {
     // Backup the space
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--types",
@@ -2320,10 +2269,7 @@ async fn e2e_restore_recovers_permanently_deleted_object() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     // Verify object is restored
@@ -2381,7 +2327,7 @@ async fn e2e_restore_recovers_permanently_deleted_file_same_space() -> Result<()
     let ids_file = temp_dir.path().join("permdelete_file_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&file_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -2410,10 +2356,7 @@ async fn e2e_restore_recovers_permanently_deleted_file_same_space() -> Result<()
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored_id = wait_find_file_id_by_name(&source_space.name, &file_name).await?;
@@ -2451,7 +2394,7 @@ async fn e2e_restore_recovers_permanently_deleted_type_same_space() -> Result<()
     let ids_file = temp_dir.path().join("permdelete_type_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&type_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -2478,10 +2421,7 @@ async fn e2e_restore_recovers_permanently_deleted_type_same_space() -> Result<()
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored = wait_find_type_by_name(&source_space.name, &type_name).await?;
@@ -2520,7 +2460,7 @@ async fn e2e_restore_recovers_permanently_deleted_property_same_space() -> Resul
     let ids_file = temp_dir.path().join("permdelete_property_ids.txt");
     write_ids_file(&ids_file, std::slice::from_ref(&prop_id))?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -2547,10 +2487,7 @@ async fn e2e_restore_recovers_permanently_deleted_property_same_space() -> Resul
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored = wait_find_property_by_name(&source_space.name, &prop_name).await?;
@@ -2598,7 +2535,7 @@ async fn e2e_restore_recovers_permanently_deleted_collection_with_items_same_spa
     let ids_file = temp_dir.path().join("permdelete_collection_ids.txt");
     write_ids_file(&ids_file, &selected)?;
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--objects",
@@ -2627,10 +2564,7 @@ async fn e2e_restore_recovers_permanently_deleted_collection_with_items_same_spa
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    assert!(
-        restore_output.contains("imported "),
-        "unexpected restore output: {restore_output}"
-    );
+    parse_import_report(&restore_output)?;
     assert_non_tty_output_clean(&restore_output);
 
     let restored_collection_id =
@@ -2664,7 +2598,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
     // Full space backup
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let full_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--prefix",
@@ -2689,7 +2623,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
 
     // Incremental backup 1 (captures changes since full backup)
     let inc1_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--mode",
@@ -2718,7 +2652,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
 
     // Incremental backup 2 (captures changes since inc1)
     let inc2_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space.name.as_str(),
         "--mode",
@@ -2794,10 +2728,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
             .to_str()
             .ok_or_else(|| anyhow!("bad full archive path"))?,
     ])?;
-    assert!(
-        restore_full.contains("imported "),
-        "unexpected full restore output: {restore_full}"
-    );
+    parse_import_report(&restore_full)?;
     wait_object_name_eq(&source_space.name, &object_id, &v1_name).await?;
     wait_object_body_contains(&source_space.name, &object_id, v1_body).await?;
 
@@ -2811,10 +2742,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
             .to_str()
             .ok_or_else(|| anyhow!("bad inc1 archive path"))?,
     ])?;
-    assert!(
-        restore_inc1.contains("imported "),
-        "unexpected inc1 restore output: {restore_inc1}"
-    );
+    parse_import_report(&restore_inc1)?;
     wait_object_name_eq(&source_space.name, &object_id, &v2_name).await?;
     wait_object_body_contains(&source_space.name, &object_id, v2_body).await?;
 
@@ -2828,10 +2756,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
             .to_str()
             .ok_or_else(|| anyhow!("bad inc2 archive path"))?,
     ])?;
-    assert!(
-        restore_inc2.contains("imported "),
-        "unexpected inc2 restore output: {restore_inc2}"
-    );
+    parse_import_report(&restore_inc2)?;
     wait_object_name_eq(&source_space.name, &object_id, &v3_name).await?;
     wait_object_body_contains(&source_space.name, &object_id, v3_body).await?;
 
@@ -2950,52 +2875,24 @@ fn resolve_space_by_name_cli(name: &str) -> Result<Space> {
 }
 
 fn run_anyback<const N: usize>(args: [&str; N]) -> Result<String> {
-    let output = run_with_lock_retry(|| {
-        if let Ok(exe) = std::env::var("CARGO_BIN_EXE_anyback") {
-            let mut command = Command::new(exe);
-            command.args(args);
-            configure_test_keystore(&mut command)?;
-            command.output().context("failed to execute anyback binary")
-        } else {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = manifest_dir
-                .parent()
-                .ok_or_else(|| anyhow!("failed to resolve workspace root"))?;
-            let mut command = Command::new("cargo");
-            command.current_dir(workspace_root);
-            command.args(["run", "--quiet", "--bin", "anyback", "--"]);
-            command.args(args);
-            configure_test_keystore(&mut command)?;
-            command
-                .output()
-                .context("failed to execute anyback via cargo run")
-        }
-    })?;
+    run_anyback_dyn(&args)
+}
 
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "anyback command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            stdout,
-            stderr
-        );
-    }
-
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if !output.stderr.is_empty() {
-        text.push('\n');
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(text)
+fn run_anyback_dyn(args: &[&str]) -> Result<String> {
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("backup");
+    full.extend_from_slice(args);
+    let (stdout, stderr) = run_anyr_parts(&full)?;
+    // Progress animation belongs to a TTY only; a piped stderr must stay plain.
+    assert_non_tty_output_clean(&stderr);
+    Ok(stdout)
 }
 
 fn parse_archive_path(output: &str) -> Option<PathBuf> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix("archive="))
-        .and_then(|rest| rest.split_whitespace().next())
+    parse_json_output(output)
+        .ok()?
+        .get("archive")
+        .and_then(Value::as_str)
         .map(PathBuf::from)
 }
 
@@ -3208,17 +3105,99 @@ fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
     run_anyr_dyn(&args)
 }
 
+/// Resolves the `anyr` executable under test.
+///
+/// `ANYR_BIN` wins when set; otherwise the binary built alongside this test
+/// harness is required. The harness never falls back to `PATH`.
+fn anyr_binary() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ANYR_BIN") {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(anyhow!("ANYR_BIN is not a file: {}", path.display()));
+        }
+        return Ok(path);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(target_dir) = exe.parent().and_then(Path::parent)
+    {
+        let candidate = target_dir.join(format!("anyr{}", std::env::consts::EXE_SUFFIX));
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(anyhow!(
+        "anyr test binary not found; run `cargo build -p anyr` first or set ANYR_BIN"
+    ))
+}
+
+/// Parses the structured (compact JSON) result document written by `anyr`.
+fn parse_json_output(output: &str) -> Result<Value> {
+    serde_json::from_str(output.trim())
+        .with_context(|| format!("expected structured anyr output, got: {output}"))
+}
+
+/// Counts reported by `anyr backup restore`.
+#[derive(Debug, Clone, Copy)]
+struct ImportSummary {
+    attempted: u64,
+    imported: u64,
+    failed: u64,
+}
+
+/// Parses the structured import report emitted by `anyr backup restore`.
+fn parse_import_report(output: &str) -> Result<ImportSummary> {
+    let value = parse_json_output(output)?;
+    let field = |name: &str| -> Result<u64> {
+        value
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("import report missing `{name}`: {output}"))
+    };
+    let summary = ImportSummary {
+        attempted: field("attempted")?,
+        imported: field("imported")?,
+        failed: field("failed")?,
+    };
+    ensure!(
+        summary.imported.saturating_add(summary.failed) <= summary.attempted,
+        "inconsistent import report {summary:?}"
+    );
+    Ok(summary)
+}
+
+/// Asserts that a restore reported the expected counts.
+///
+/// Only reached by the `snapshot-import` cases, which are compiled out by default.
+#[allow(dead_code)]
+fn assert_import_counts(output: &str, imported: u64, attempted: u64, failed: u64) -> Result<()> {
+    let summary = parse_import_report(output)?;
+    ensure!(
+        summary.imported == imported && summary.attempted == attempted && summary.failed == failed,
+        "unexpected import report {summary:?}, wanted imported={imported} attempted={attempted} failed={failed}"
+    );
+    Ok(())
+}
+
 fn run_anyr_dyn(args: &[&str]) -> Result<String> {
+    Ok(run_anyr_parts(args)?.0)
+}
+
+/// Runs `anyr` and returns its stdout and stderr separately.
+///
+/// Keeping the two apart matters for backup commands: stdout carries the
+/// structured result document, and stderr carries progress and diagnostics.
+fn run_anyr_parts(args: &[&str]) -> Result<(String, String)> {
     let output = run_with_lock_retry(|| {
-        let mut command = Command::new("anyr");
+        let mut command = Command::new(anyr_binary()?);
         command.args(args);
         configure_test_keystore(&mut command)?;
         command.output().context("failed to execute anyr command")
     })?;
 
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
     if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
             "anyr command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
             output.status,
@@ -3227,7 +3206,7 @@ fn run_anyr_dyn(args: &[&str]) -> Result<String> {
         );
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok((stdout.trim().to_string(), stderr))
 }
 
 fn run_with_lock_retry<F>(mut run: F) -> Result<std::process::Output>

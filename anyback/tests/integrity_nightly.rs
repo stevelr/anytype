@@ -208,8 +208,9 @@ async fn nightly_integrity_fuzz_roundtrip() -> Result<()> {
     Ok(())
 }
 
+// Pure configuration checks: no server and no backup execution, so this
+// runs in the ordinary test suite.
 #[test]
-#[ignore = "backup-restore"]
 fn integrity_config_profiles_parse() -> Result<()> {
     let tiny = IntegrityConfig::profile("tiny", 1)?;
     let small = IntegrityConfig::profile("small", 1)?;
@@ -225,8 +226,9 @@ fn integrity_config_profiles_parse() -> Result<()> {
     Ok(())
 }
 
+// Pure configuration checks: no server and no backup execution, so this
+// runs in the ordinary test suite.
 #[test]
-#[ignore = "backup-restore"]
 fn export_arg_profile_matrix_rotates_expected_flag_sets() {
     let p0 = export_arg_profile(0);
     let p1 = export_arg_profile(1);
@@ -500,7 +502,7 @@ fn run_backup_restore_batch(
     let report_path = temp_dir.path().join("report.json");
 
     let mut backup_args = vec![
-        "backup".to_string(),
+        "create".to_string(),
         "--space".to_string(),
         source_space_name.to_string(),
         "--format".to_string(),
@@ -642,7 +644,7 @@ fn run_full_space_backup_restore(
     let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let report_path = temp_dir.path().join("chat-report.json");
     let backup_output = run_anyback([
-        "backup",
+        "create",
         "--space",
         source_space_name,
         "--format",
@@ -691,7 +693,7 @@ fn run_markdown_export_probe(
     )?;
 
     let mut args = vec![
-        "backup".to_string(),
+        "create".to_string(),
         "--space".to_string(),
         source_space_name.to_string(),
         "--format".to_string(),
@@ -1310,50 +1312,50 @@ fn run_anyback<const N: usize>(args: [&str; N]) -> Result<String> {
 }
 
 fn run_anyback_dyn(args: &[&str]) -> Result<String> {
-    let output = run_with_lock_retry(|| {
-        if let Ok(exe) = std::env::var("CARGO_BIN_EXE_anyback") {
-            let mut command = Command::new(exe);
-            command.args(args);
-            configure_test_keystore(&mut command)?;
-            command.output().context("failed to execute anyback binary")
-        } else {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = manifest_dir
-                .parent()
-                .ok_or_else(|| anyhow!("failed to resolve workspace root"))?;
-            let mut command = Command::new("cargo");
-            command.current_dir(workspace_root);
-            command.args(["run", "--quiet", "--bin", "anyback", "--"]);
-            command.args(args);
-            configure_test_keystore(&mut command)?;
-            command
-                .output()
-                .context("failed to execute anyback via cargo run")
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("backup");
+    full.extend_from_slice(args);
+    run_anyr_dyn(&full)
+}
+
+/// Parses the structured (compact JSON) result document written by `anyr`.
+fn parse_json_output(output: &str) -> Result<Value> {
+    serde_json::from_str(output.trim())
+        .with_context(|| format!("expected structured anyr output, got: {output}"))
+}
+
+/// Resolves the `anyr` executable under test.
+///
+/// `ANYR_BIN` wins when set; otherwise the binary built alongside this test
+/// harness is required. The harness never falls back to `PATH`.
+fn anyr_binary() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ANYR_BIN") {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(anyhow!("ANYR_BIN is not a file: {}", path.display()));
         }
-    })?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "anyback command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            stdout,
-            stderr
-        );
+        return Ok(path);
     }
-
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if !output.stderr.is_empty() {
-        text.push('\n');
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(target_dir) = exe.parent().and_then(Path::parent)
+    {
+        let candidate = target_dir.join(format!("anyr{}", std::env::consts::EXE_SUFFIX));
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
     }
-    Ok(text)
+    Err(anyhow!(
+        "anyr test binary not found; run `cargo build -p anyr` first or set ANYR_BIN"
+    ))
 }
 
 fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
+    run_anyr_dyn(&args)
+}
+
+fn run_anyr_dyn(args: &[&str]) -> Result<String> {
     let output = run_with_lock_retry(|| {
-        let mut command = Command::new("anyr");
+        let mut command = Command::new(anyr_binary()?);
         command.args(args);
         configure_test_keystore(&mut command)?;
         command.output().context("failed to execute anyr command")
@@ -1504,10 +1506,10 @@ fn clone_sqlite_with_sidecars(source_db: &Path) -> Result<PathBuf> {
 }
 
 fn parse_archive_path(output: &str) -> Option<PathBuf> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix("archive="))
-        .and_then(|rest| rest.split_whitespace().next())
+    parse_json_output(output)
+        .ok()?
+        .get("archive")
+        .and_then(Value::as_str)
         .map(PathBuf::from)
 }
 
