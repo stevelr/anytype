@@ -1,0 +1,132 @@
+# Protected installed-binary smoke gate for anyr backup and restore.
+
+name: anyr-anyback-live
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/anyr-anyback-live.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "anyr/**"
+      - "anyback/**"
+      - "anytype-api/**"
+      - "anytype-rpc/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/anyr-anyback-live.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "anyr/**"
+      - "anyback/**"
+      - "anytype-api/**"
+      - "anytype-rpc/**"
+
+permissions:
+  contents: read
+
+jobs:
+  installed-backup-smoke:
+    name: installed anyr backup create/restore
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    environment: anytype-headless
+    runs-on:
+      - self-hosted
+      - linux
+      - anytype-headless
+    timeout-minutes: 25
+    concurrency:
+      group: any-mcp-headless
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.96.0
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: anyr-anyback-live
+
+      - name: Install anyr and run the required serial live gate
+        shell: bash
+        env:
+          ANYR_ANYBACK_HEADLESS_ENV_FILE: ${{ vars.ANYR_ANYBACK_HEADLESS_ENV_FILE }}
+          ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE }}
+        run: |
+          set -euo pipefail
+          test -n "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
+          test "${ANYR_ANYBACK_HEADLESS_ENV_FILE#/}" != "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
+          test -r "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
+          test -n "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
+          test "${ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
+          test -r "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
+
+          set -a
+          source "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
+          set +a
+          export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
+          test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
+          test -n "$test_prefix"
+          test "${#test_prefix}" -le 470
+          case "$test_prefix" in
+            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
+              printf '%s\n' "ANYTYPE_TEST_SPACE_PREFIX must use ASCII letters, digits, hyphens, or underscores" >&2
+              exit 1
+              ;;
+          esac
+          unset test_prefix
+
+          umask 077
+          gate_dir="$(mktemp -d "$RUNNER_TEMP/anyr-anyback-live-XXXXXX")"
+          export ANYBACK_HEADLESS_REDACTED_LOG_FILE="$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
+
+          install_root="$gate_dir/installed"
+          cargo install --locked --path anyr --root "$install_root"
+          export ANYR_BIN="$install_root/bin/anyr"
+          test "${ANYR_BIN#/}" != "$ANYR_BIN"
+          test -x "$ANYR_BIN"
+
+          marker="$gate_dir/callback.marker"
+          expected_marker="$gate_dir/callback.expected"
+          nonce="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+          test "${#nonce}" -eq 64
+          printf '%s\n' "$nonce" > "$expected_marker"
+          export ANYBACK_REQUIRED_GATE_MARKER="$marker"
+          export ANYBACK_REQUIRED_GATE_NONCE="$nonce"
+
+          cargo test --locked -p anyback --test required_live_gate \
+            required_installed_anyr_backup_create_restore -- \
+            --ignored --exact --test-threads=1 --nocapture
+          test -f "$marker"
+          cmp --silent "$expected_marker" "$marker"
+
+      - name: Capture bounded redacted server evidence on failure
+        if: failure()
+        shell: bash
+        env:
+          ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE }}
+        run: |
+          set -euo pipefail
+          artifact="$RUNNER_TEMP/anyr-anyback-live-server-tail.log"
+          tail -c 65536 -- "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE" > "$artifact"
+          chmod 0600 "$artifact"
+          printf 'ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT=%s\n' "$artifact" >> "$GITHUB_ENV"
+
+      - name: Retain bounded redacted server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anyr-anyback-live-server-log
+          path: ${{ env.ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT }}
+          if-no-files-found: warn
+          retention-days: 7

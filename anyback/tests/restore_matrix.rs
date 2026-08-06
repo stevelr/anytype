@@ -11,7 +11,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::OnceLock,
     thread,
     time::Duration,
 };
@@ -20,6 +19,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::Value;
 use tokio::time::sleep;
+
+mod support;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ObjKind {
@@ -868,7 +869,7 @@ fn run_anyr_dyn(args: &[&str]) -> Result<String> {
     let output = run_with_lock_retry(|| {
         let mut command = Command::new(anyr_binary()?);
         command.args(args);
-        configure_test_keystore(&mut command)?;
+        let _keystore = support::keystore::configure_test_keystore(&mut command)?;
         command.output().context("failed to execute anyr command")
     })?;
 
@@ -945,70 +946,6 @@ fn looks_like_transient_anytype_error(output: &std::process::Output) -> bool {
         || haystack.contains("failed to export markdown")
         || haystack.contains("context deadline exceeded")
         || haystack.contains("sqlite: step: disk I/O error")
-}
-
-fn configure_test_keystore(command: &mut Command) -> Result<()> {
-    if let Some(keystore) = cloned_test_keystore()? {
-        command.env("ANYTYPE_KEYSTORE", keystore);
-    }
-    Ok(())
-}
-
-fn cloned_test_keystore() -> Result<Option<&'static str>> {
-    static CLONED: OnceLock<Option<String>> = OnceLock::new();
-    if let Some(value) = CLONED.get() {
-        return Ok(value.as_deref());
-    }
-
-    let computed = if let Some(source) = std::env::var("ANYTYPE_KEYSTORE")
-        .ok()
-        .and_then(|value| value.strip_prefix("file:path=").map(ToString::to_string))
-    {
-        Some(format!(
-            "file:path={}",
-            clone_sqlite_with_sidecars(Path::new(&source))?.display()
-        ))
-    } else {
-        None
-    };
-
-    let _ = CLONED.set(computed);
-    Ok(CLONED.get().and_then(|v| v.as_deref()))
-}
-
-fn clone_sqlite_with_sidecars(source_db: &Path) -> Result<PathBuf> {
-    if !source_db.exists() {
-        bail!("source keystore does not exist: {}", source_db.display());
-    }
-
-    let mut target_db = std::env::temp_dir();
-    target_db.push(format!(
-        "anyback-matrix-keystore-{}-{}.db",
-        std::process::id(),
-        anytype::test_util::unique_suffix()
-    ));
-    fs::copy(source_db, &target_db).with_context(|| {
-        format!(
-            "failed to copy keystore {} to {}",
-            source_db.display(),
-            target_db.display()
-        )
-    })?;
-
-    for suffix in ["-wal", "-shm"] {
-        let source_sidecar = PathBuf::from(format!("{}{}", source_db.display(), suffix));
-        if source_sidecar.exists() {
-            let target_sidecar = PathBuf::from(format!("{}{}", target_db.display(), suffix));
-            fs::copy(&source_sidecar, &target_sidecar).with_context(|| {
-                format!(
-                    "failed to copy sidecar {} to {}",
-                    source_sidecar.display(),
-                    target_sidecar.display()
-                )
-            })?;
-        }
-    }
-    Ok(target_db)
 }
 
 fn parse_archive_path(output: &str) -> Option<PathBuf> {

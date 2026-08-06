@@ -83,6 +83,22 @@ This package also exposes a reusable Rust library crate, `anyback_reader`, for a
   - `ANYBACK_IMPORT_MAX_BATCH_BYTES` (default 3 MiB)
   - `ANYBACK_IMPORT_MAX_BATCH_SNAPSHOTS` (default 128)
 
+### Required Installed-Binary Live Gate
+
+The protected `anyr-anyback-live` workflow installs `anyr` with `cargo install`,
+then runs one exact ignored test serially. The gate creates a source object in a
+new prefix-authorized disposable space, runs `anyr backup create`, restores into
+a second disposable space, verifies the restored name and body without relying
+on source IDs, and proves that both spaces were removed.
+
+Operators must provide authenticated HTTP and gRPC settings, an absolute path to
+a reviewed redacted server log, `ANYTYPE_DISPOSABLE_TEST_PROCESS=1`, and a unique
+`ANYTYPE_TEST_SPACE_PREFIX`. Missing admission, credentials, pings, archive
+output, callback evidence, or restored content fails the gate. Run this target
+alone with `--ignored --exact --test-threads=1`; do not share its server with
+parallel mutation suites. Normal workspace tests remain offline because the
+live test stays ignored.
+
 ### Integrity Testing
 
 Fuzz testing for backup/restore roundtrips:

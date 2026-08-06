@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a protected serial live gate that installs `anyr`, creates and restores a
+  backup across cleanup-owned disposable spaces, verifies semantic content, and
+  requires proof that cleanup completed.
+
 ### Changed
 
 - The standalone `anyback` executable is replaced by the `anyr backup`
@@ -17,6 +23,10 @@
 - bumped dependencies: lru -> 0.16.4, nix -> 0.31.1, rand -> 0.10.0
 
 ### Fixed
+
+- Live backup and restore harnesses now isolate file-backed keystores in private
+  command-scoped clones, including SQLite sidecars, and remove the clones after
+  each child process exits.
 
 - Live backup and restore harnesses now invoke `anyr backup`, parse structured
   results, and run offline profile checks in the ordinary test suite.

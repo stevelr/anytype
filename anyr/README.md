@@ -567,6 +567,15 @@ python tests/cli_commands.py
 The real-operation case discovers exactly one current space whose name begins
 with `ANYTYPE_TEST_SPACE_PREFIX`; it skips rather than selecting ambiguously.
 
+The protected `anyr-anyback-live` workflow separately installs `anyr` as users
+do and runs the required backup create/restore smoke test. That gate never skips:
+it requires authenticated HTTP and gRPC pings, explicit disposable-process
+admission, a unique safe space prefix, and a reviewed redacted server log. It
+creates and removes its own source and destination spaces, runs as one exact
+test with `--test-threads=1`, and must not overlap other live mutation suites.
+The ordinary offline workspace test does not run this ignored server-backed
+target.
+
 ## License
 
 Apache License, Version 2.0

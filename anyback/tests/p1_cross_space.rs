@@ -13,6 +13,8 @@ use chrono::{DateTime, FixedOffset};
 use serde_json::Value;
 use tokio::{sync::Mutex as AsyncMutex, time::sleep};
 
+mod support;
+
 struct P1CleanupGuard {
     scopes: Vec<P1CleanupScope>,
 }
@@ -1558,7 +1560,7 @@ fn run_anyr_raw(args: &[&str]) -> Result<std::process::Output> {
     run_with_lock_retry(|| {
         let mut command = Command::new(anyr_binary()?);
         command.args(args);
-        configure_test_keystore(&mut command)?;
+        let _keystore = support::keystore::configure_test_keystore(&mut command)?;
         command.output().context("failed to execute anyr command")
     })
 }
@@ -1783,51 +1785,4 @@ where
     } else {
         bail!("failed to execute command")
     }
-}
-
-fn configure_test_keystore(command: &mut Command) -> Result<()> {
-    if let Some(keystore) = cloned_test_keystore()? {
-        command.env("ANYTYPE_KEYSTORE", keystore);
-    }
-    Ok(())
-}
-
-fn cloned_test_keystore() -> Result<Option<&'static str>> {
-    static CLONED: OnceLock<Option<String>> = OnceLock::new();
-    if let Some(value) = CLONED.get() {
-        return Ok(value.as_deref());
-    }
-
-    let computed = if let Some(source) = std::env::var("ANYTYPE_KEYSTORE")
-        .ok()
-        .and_then(|value| value.strip_prefix("file:path=").map(ToString::to_string))
-    {
-        Some(format!(
-            "file:path={}",
-            clone_sqlite_with_sidecars(Path::new(&source))?.display()
-        ))
-    } else {
-        None
-    };
-
-    let _ = CLONED.set(computed);
-    Ok(CLONED.get().and_then(|v| v.as_deref()))
-}
-
-fn clone_sqlite_with_sidecars(source_db: &Path) -> Result<PathBuf> {
-    if !source_db.exists() {
-        bail!("source keystore does not exist: {}", source_db.display());
-    }
-
-    let target_db = std::env::temp_dir().join(format!("anyback-p1-keystore-{}.db", uniq()));
-    fs::copy(source_db, &target_db)?;
-
-    for suffix in ["-wal", "-shm"] {
-        let source_sidecar = PathBuf::from(format!("{}{}", source_db.display(), suffix));
-        if source_sidecar.exists() {
-            let target_sidecar = PathBuf::from(format!("{}{}", target_db.display(), suffix));
-            fs::copy(&source_sidecar, &target_sidecar)?;
-        }
-    }
-    Ok(target_db)
 }

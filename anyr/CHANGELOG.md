@@ -55,6 +55,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Remove the CLI integration test's legacy pre-existing space-ID input. It now
   uses `ANYTYPE_TEST_SPACE_PREFIX` and requires an unambiguous matching space
   before running mutation coverage.
+- Add protected installed-binary coverage for `anyr backup create` and `restore`
+  that verifies restored content and cleanup of both disposable spaces.
 
 ### Added
 

@@ -50,6 +50,11 @@ name = "restore_matrix"
 path = "tests/restore_matrix.rs"
 required-features = ["cli"]
 
+[[test]]
+name = "required_live_gate"
+path = "tests/required_live_gate.rs"
+required-features = ["cli"]
+
 [features]
 default = ["cli"]
 cli = [
@@ -105,3 +110,4 @@ nix = { version = "0.31.1", default-features = false, features = ["fs"] }
 [dev-dependencies]
 rand = "0.10.2"
 tempfile = "3.27.0"
+zeroize.workspace = true
