@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+---
+
+## [Unreleased - 260806]
+
 ### Added
 
 - Add live file coverage for permanent delete, REST-vs-gRPC upload backend

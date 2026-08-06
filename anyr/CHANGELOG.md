@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+---
+
+## [Unreleased - 260806]
+
 ### Added
 
 - Server-backed `file` command coverage in the Python CLI suite: upload

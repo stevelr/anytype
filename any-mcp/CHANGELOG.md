@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+---
+
+## [Unreleased - 260806]
+
 ### Changed
 
 - The production MCP process is now launched as `anyr mcp`, as all binaries
