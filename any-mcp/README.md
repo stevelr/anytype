@@ -1721,10 +1721,10 @@ release is published by this documentation change.
 
 The ignored live suite checks authenticated HTTP and gRPC before work and runs
 serially so mutation verification does not compete with itself for the
-server's rate limit. All 27 library cases use a prefix-authorized disposable
-space; no direct-router case mutates an ambient fixture. Spawned disposable
-workflows register each production child for stop-and-wait cleanup before
-protocol initialization, while focused spawned profile sentinels retain their
+server's rate limit. Library cases use prefix-authorized disposable spaces; no
+direct-router case mutates an ambient fixture. Spawned disposable workflows
+register each production child for stop-and-wait cleanup before protocol
+initialization, while focused spawned profile sentinels retain their
 cleanup-owned test context. Every created object, type, and property is
 registered immediately for cleanup. The suite requires a running headless
 server, env-only disposable credentials from `.test-env`, and `anyr auth
@@ -1760,11 +1760,10 @@ read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
 list filter and rejects a continuation cursor whose filter binding changes
 through both entry paths. Existing focused live regressions remain alongside
-this acceptance baseline. `server::headless_integration` contains 21 ignored
-direct-router cases; the library command also selects eight focused
-cross-entry regressions (seven optional-registry cases plus files), for 29
-cases total. The spawned target contains exactly 25 ignored live cases when the
-`acceptance-harness` feature is enabled.
+this acceptance baseline. `server::headless_integration` contains the
+direct-router cases, while the library command also selects focused cross-entry
+regressions for the optional registries and files. The spawned target enables
+its live cases with the `acceptance-harness` feature.
 
 ### Artifact data-plane acceptance matrix
 
