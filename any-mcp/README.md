@@ -278,10 +278,10 @@ path_native = { encoding = "unix-bytes-base64url", value = "L2..." }
 Windows uses `windows-wtf16le-base64url`. The parser decodes these values
 directly into native OS strings and applies component, traversal, prefix, and
 length checks without lossy Unicode conversion. Root activation retains
-directory handles. Authority comes from the selected TOML policy alone: the
-server does not request MCP client roots, and a client that advertises roots
-neither widens nor narrows the configured policy. Capability-relative file
-walks on Linux,
+directory handles. The selected TOML policy is the only source of authority; on
+stable stdio an MCP client that advertises the roots capability can additionally
+narrow it (see [Client roots](#client-roots)), never widen it.
+Capability-relative file walks on Linux,
 macOS, and Windows reject links and reparse points, cross-filesystem
 redirection, unsafe permissions or ACLs, hard-linked imports, traversal,
 over-limit files, and export collisions. Export bytes remain in an
@@ -359,8 +359,26 @@ Clients address bytes as a logical root ID plus a relative path, for example
 `{"local": {"root": "inbox", "path": "reports/q3.md"}}`. Absolute paths, `..`,
 symlinks, and unlisted root IDs are refused, and an unauthorized root and an
 absent file are both reported through the same fixed not-found message so a
-caller cannot probe the filesystem layout. Client-advertised MCP roots are not
-consulted: only the TOML policy grants authority.
+caller cannot probe the filesystem layout.
+
+#### Client roots
+
+Stable stdio serves one client session per process, so it takes one bounded
+`roots/list` snapshot from a client that advertises the roots capability and
+uses it as a session-scoped narrowing layer. A local artifact path is effective
+only when it lies beneath both a configured root and at least one client root,
+so a client root outside every configured root grants nothing and an empty
+snapshot denies every local root. The snapshot is taken at most once per
+session; `notifications/roots/list_changed` is ignored, so a changed
+client root needs a new session.
+
+A client that advertises no roots capability keeps the configured policy
+unchanged, as do preview stdio and the HTTP transport. A snapshot that cannot be
+frozen securely — transport failure, timeout, more than 64 roots, a duplicate
+alias, or a URI that is not a canonical local `file:` directory — disables local
+root operations for the rest of the session rather than falling back to the
+broader configured policy. Staged operations are unaffected. Client root URIs
+and display names never appear in diagnostics or receipts.
 
 #### Remote clients (HTTP staging)
 
@@ -1569,6 +1587,7 @@ runtime and advertises their static capability alongside the tool catalog.
 
 - `src/artifact_config.rs`: selected TOML schema, native paths, and limits.
 - `src/artifact_roots.rs`: retained root capabilities and client narrowing.
+- `src/artifact_client_roots.rs`: session-scoped `roots/list` snapshot decision.
 - `src/space_policy.rs`: frozen canonical Anytype-space authorization.
 - `src/config.rs` — validated environment and operational limits.
 - `src/logging.rs` — stderr-only tracing setup.

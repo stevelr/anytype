@@ -595,6 +595,19 @@ impl AbsoluteNativePath {
         validate_absolute_native(&decoded).map(Self)
     }
 
+    /// Validates an already decoded platform-native absolute path.
+    ///
+    /// Used by decoders that produce native units directly, such as the MCP
+    /// client-root `file:` URI decoder, which must not require UTF-8 on Unix.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed diagnostic for a relative, traversing, overlong, or
+    /// otherwise unsupported native path.
+    pub(crate) fn from_os_str(value: &OsStr) -> Result<Self, ArtifactConfigError> {
+        validate_absolute_native(value).map(Self)
+    }
+
     pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }

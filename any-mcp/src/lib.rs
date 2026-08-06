@@ -61,6 +61,7 @@
 //! The crate README contains current host registration, complete tool semantics,
 //! protocol compatibility, token baselines, and operational guidance.
 
+mod artifact_client_roots;
 pub mod artifact_config;
 pub mod artifact_roots;
 mod artifact_staging;

@@ -16,16 +16,33 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Fixed
 
 - Correct the README claim that artifact root activation intersects the
-  configured policy with MCP client roots. Authority comes from the selected
-  TOML policy alone; a client that advertises roots neither widens nor narrows
-  it. Replace the stale artifact data-plane roadmap section, which described
-  the implemented `artifacts` registry as not yet selectable.
+  configured policy with MCP client roots at activation time. The selected
+  TOML policy is the only source of root authority, and no transport widens
+  it; the client-root intersection is a separate session-scoped narrowing
+  layer applied on stable stdio only (see Added). Replace the stale artifact
+  data-plane roadmap section, which described the implemented `artifacts`
+  registry as not yet selectable.
 - Report selected TOML syntax and schema failures with redacted line, column,
   known schema path, and problem category instead of only the generic
   `invalid any-mcp TOML configuration` message.
 
 ### Added
 
+- Narrow local artifact root authority on stable stdio with one bounded,
+  session-scoped MCP `roots/list` snapshot. When the initialized client
+  advertises the roots capability, a local artifact path is effective only
+  when it lies beneath both a configured root and at least one client root, so
+  a client root outside every configured root grants nothing and an empty
+  snapshot denies every local root. The snapshot never widens the configured
+  policy, is taken once per session, and `notifications/roots/list_changed` is
+  ignored, so a changed client root needs a new session. A client that
+  advertises no roots capability keeps the configured policy unchanged, as do
+  preview stdio and the HTTP transport. A snapshot that cannot be frozen
+  securely — transport failure, timeout, more than 64 roots, a duplicate
+  alias, or a URI that is not a canonical local `file:` directory — disables
+  local root operations for the rest of the session instead of falling back to
+  the broader configured policy. Staged operations are unaffected, and client
+  root URIs and display names never appear in diagnostics or receipts.
 - Add artifact policy and configuration acceptance scenarios — space policy
   omitted, empty, and restricted elsewhere, read-only mode, and disabled
   staging — to the multi-transport artifact harness. Each scenario is a

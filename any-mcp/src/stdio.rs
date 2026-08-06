@@ -63,6 +63,10 @@ where
     R: AsyncBufRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    // Stable stdio serves exactly one initialized client session per process,
+    // so MCP client roots may narrow the static local artifact root policy for
+    // this session. Preview stdio and multi-session transports do not.
+    server.runtime().client_roots().enable();
     loop {
         let frame = match read_frame(&mut reader).await {
             Ok(Some(frame)) if frame.iter().all(u8::is_ascii_whitespace) => continue,
@@ -638,6 +642,57 @@ mod tests {
     use crate::preview::{
         META_CLIENT_CAPABILITIES, META_CLIENT_INFO, META_PROTOCOL_VERSION, MetaError, validate_meta,
     };
+
+    fn test_runtime() -> crate::runtime::RuntimeContext {
+        use anytype::prelude::{AnytypeClient, ClientConfig};
+
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("any-mcp-test".to_owned()),
+            app_name: "any-mcp-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("in-memory test client");
+        crate::runtime::RuntimeContext::from_parts(
+            client,
+            1,
+            std::time::Duration::from_secs(1),
+            crate::runtime::StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn stable_stdio_enables_client_root_narrowing_and_preview_does_not() {
+        let stable = test_runtime();
+        let (client, server_side) = duplex(64);
+        drop(client);
+        let (reader, writer) = tokio::io::split(server_side);
+        serve_stable(
+            AnyMcpServer::new(stable.clone()).expect("static catalog"),
+            BufReader::new(reader),
+            writer,
+        )
+        .await
+        .expect("clean stable shutdown");
+        assert!(stable.client_roots().is_enabled());
+
+        let preview = test_runtime();
+        let (client, server_side) = duplex(64);
+        drop(client);
+        let (reader, writer) = tokio::io::split(server_side);
+        serve_preview(
+            AnyMcpServer::new(preview.clone()).expect("static catalog"),
+            BufReader::new(reader),
+            writer,
+        )
+        .await
+        .expect("clean preview shutdown");
+        assert!(!preview.client_roots().is_enabled());
+    }
 
     fn meta(version: &str) -> Map<String, Value> {
         json!({

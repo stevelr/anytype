@@ -15,7 +15,7 @@ use rmcp::{
         ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
         ServerInfo, Tool,
     },
-    service::RequestContext,
+    service::{NotificationContext, RequestContext},
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -667,11 +667,20 @@ impl ServerHandler for AnyMcpServer {
             .cloned()
     }
 
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        // Client-root narrowing is inert unless a single-session transport
+        // enabled it, so this is a no-op for every other transport.
+        self.runtime().client_roots().install_peer(&context.peer);
+    }
+
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        // A client that omits `notifications/initialized` still reaches a
+        // terminal roots decision: installation is set-once and idempotent.
+        self.runtime().client_roots().install_peer(&context.peer);
         // Optional registries are selected before the exhaustive Phase-1
         // future is constructed, so this erased await contains only the
         // chosen route's state.

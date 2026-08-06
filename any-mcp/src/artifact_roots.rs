@@ -611,6 +611,12 @@ impl RootAccessError {
         Self { problem }
     }
 
+    /// Builds the fixed failure used when a client-root snapshot cannot be
+    /// securely frozen for the session.
+    pub(crate) const fn client_roots() -> Self {
+        Self::new(RootProblem::ClientRoots)
+    }
+
     /// Returns the stable, path-free failure classification.
     #[must_use]
     pub const fn kind(&self) -> RootAccessErrorKind {

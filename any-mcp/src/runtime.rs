@@ -25,6 +25,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    artifact_client_roots::ClientRootsGate,
     artifact_config::ArtifactConfig,
     artifact_roots::RootRegistry,
     artifact_staging::ArtifactStaging,
@@ -67,6 +68,7 @@ pub struct RuntimeContext {
     artifact_staging: Option<ArtifactStaging>,
     artifact_validators: Option<ValidatorRunner>,
     artifact_operations: ArtifactOperationState,
+    client_roots: Arc<ClientRootsGate>,
 }
 
 struct RuntimeParts {
@@ -101,6 +103,7 @@ impl fmt::Debug for RuntimeContext {
                     .map_or(0, ValidatorRunner::configured_count),
             )
             .field("artifact_operations", &"<redacted>")
+            .field("client_roots", &self.client_roots)
             .finish_non_exhaustive()
     }
 }
@@ -221,8 +224,21 @@ impl RuntimeContext {
     pub(crate) fn fork_identity(&self) -> Self {
         Self {
             identity: Arc::new(()),
+            // A fork serves a different client session, so it must never
+            // inherit another session's client-root narrowing decision.
+            client_roots: Arc::new(ClientRootsGate::default()),
             ..self.clone()
         }
+    }
+
+    /// Returns the configured per-invocation upstream timeout.
+    pub(crate) const fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    /// Returns this session's MCP client-root narrowing gate.
+    pub(crate) fn client_roots(&self) -> &ClientRootsGate {
+        &self.client_roots
     }
 
     /// Returns the one absolute deadline for a newly admitted invocation.
@@ -658,6 +674,7 @@ impl RuntimeContext {
             artifact_staging: None,
             artifact_validators: None,
             artifact_operations: ArtifactOperationState::default(),
+            client_roots: Arc::new(ClientRootsGate::default()),
         }
     }
 }

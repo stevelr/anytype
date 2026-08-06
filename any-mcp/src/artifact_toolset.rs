@@ -1035,11 +1035,22 @@ fn stored_media_type(value: Option<&str>) -> Result<Option<String>, ArtifactTool
         .transpose()
 }
 
-fn roots(runtime: &RuntimeContext) -> Result<EffectiveRootRegistry, ArtifactToolError> {
-    runtime
+/// Resolves effective local root authority for one operation.
+///
+/// On a transport that carries one terminal client session, the configured
+/// static roots are narrowed by a single bounded `roots/list` snapshot; every
+/// other transport keeps the static policy unchanged. A snapshot that cannot
+/// be securely frozen disables local roots for the session instead of falling
+/// back to the broader static policy.
+async fn roots(runtime: &RuntimeContext) -> Result<EffectiveRootRegistry, ArtifactToolError> {
+    let registry = runtime
         .artifact_roots()
-        .map(crate::artifact_roots::RootRegistry::static_policy)
-        .ok_or(ArtifactToolError::MissingRoots)
+        .ok_or(ArtifactToolError::MissingRoots)?;
+    runtime
+        .client_roots()
+        .effective(registry, runtime.request_timeout())
+        .await
+        .map_err(|error| classify_root_error(&error))
 }
 
 fn classify_root_error(error: &RootAccessError) -> ArtifactToolError {
@@ -1639,7 +1650,7 @@ async fn prepare_import_source(
         ResolvedSource::Local(location) => {
             let path = location.relative_path()?;
             let root_id = location.root;
-            let roots = roots(runtime)?;
+            let roots = roots(runtime).await?;
             let maximum = runtime.artifact_config().limits.artifact_bytes;
             let chunk = runtime.artifact_config().limits.transfer_chunk_bytes;
             tokio::task::spawn_blocking(move || {
@@ -1784,7 +1795,7 @@ async fn file_export(
         ResolvedDestination::Local(location) => {
             let path = location.relative_path()?;
             let root_id = location.root;
-            let roots = roots(runtime)?;
+            let roots = roots(runtime).await?;
             let maximum = limits.artifact_bytes;
             let destination = tokio::task::spawn_blocking(move || {
                 roots
@@ -2689,7 +2700,7 @@ async fn document_export(
         ResolvedDestination::Local(location) => {
             let path = location.relative_path()?;
             let root_id = location.root;
-            let roots = roots(runtime)?;
+            let roots = roots(runtime).await?;
             let maximum = runtime.artifact_config().limits.markdown_bytes;
             let bytes = body.into_bytes();
             let written = tokio::task::spawn_blocking(move || {
