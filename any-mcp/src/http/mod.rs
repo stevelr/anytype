@@ -20,6 +20,8 @@ pub(crate) mod admission;
 pub(crate) mod auth;
 pub mod config;
 pub(crate) mod listener;
+#[cfg(test)]
+mod load_tests;
 pub mod oauth;
 pub(crate) mod preview;
 #[cfg(test)]

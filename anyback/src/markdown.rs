@@ -1437,50 +1437,355 @@ pub fn convert_pb_snapshot_to_markdown(
 mod tests {
     use super::*;
 
-    #[test]
-    #[ignore = "requires samples"]
-    fn convert_sample_pb_object_to_markdown_contains_headings() {
-        let archive = Path::new("samples/getting-started-pb");
-        let object_id = "bafyreidgyug7rj6lweslb5rbeavhc44ytr5osfwj6w5snlspnjnsqa6ytm";
-        let markdown = convert_archive_object_pb_to_markdown(archive, object_id).unwrap();
-        assert!(markdown.contains("How Widgets Work"));
-        assert!(markdown.contains("## "));
-        assert!(!markdown.is_empty());
-        assert!(markdown.contains("   \n"));
+    use anytype_rpc::anytype::change::Snapshot as ChangeSnapshot;
+    use anytype_rpc::model::SmartBlockSnapshotBase;
+    use anytype_rpc::model::block::content::text::Marks;
+    use prost_types::Value as ProstValue;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    /// Synthetic object id for the in-code archive fixtures.
+    ///
+    /// The id is invented for tests; no archive outside this repository is required.
+    const DOC_ID: &str = "bafyreifixturedoc000000000000000000000000000000000000000000";
+    const DOC_NAME: &str = "Fixture Handbook";
+
+    fn text_block(id: &str, body: &str, style: TextStyle) -> Block {
+        Block {
+            id: id.to_string(),
+            content_value: Some(ContentValue::Text(Text {
+                text: body.to_string(),
+                style: style as i32,
+                marks: Some(Marks::default()),
+                ..Text::default()
+            })),
+            ..Block::default()
+        }
+    }
+
+    fn parent_block(id: &str, children: &[&str], content: Option<ContentValue>) -> Block {
+        Block {
+            id: id.to_string(),
+            children_ids: children.iter().map(|v| (*v).to_string()).collect(),
+            content_value: content,
+            ..Block::default()
+        }
+    }
+
+    /// One small document exercising headings, a list/paragraph boundary and a 2x2 table.
+    fn fixture_blocks() -> Vec<Block> {
+        vec![
+            parent_block(DOC_ID, &["title", "section", "item", "para", "table"], None),
+            text_block("title", DOC_NAME, TextStyle::Header1),
+            text_block("section", "Widget Basics", TextStyle::Header2),
+            text_block("item", "Alpha", TextStyle::Marked),
+            text_block("para", "Body paragraph", TextStyle::Paragraph),
+            parent_block(
+                "table",
+                &["col-a", "col-b", "row-1", "row-2"],
+                Some(ContentValue::Table(Table {})),
+            ),
+            parent_block(
+                "col-a",
+                &[],
+                Some(ContentValue::TableColumn(TableColumn {})),
+            ),
+            parent_block(
+                "col-b",
+                &[],
+                Some(ContentValue::TableColumn(TableColumn {})),
+            ),
+            parent_block(
+                "row-1",
+                &["row-1-col-a", "row-1-col-b"],
+                Some(ContentValue::TableRow(TableRow { is_header: true })),
+            ),
+            parent_block(
+                "row-2",
+                &["row-2-col-a", "row-2-col-b"],
+                Some(ContentValue::TableRow(TableRow::default())),
+            ),
+            text_block("row-1-col-a", "Widget", TextStyle::Paragraph),
+            text_block("row-1-col-b", "Count", TextStyle::Paragraph),
+            text_block("row-2-col-a", "Gear", TextStyle::Paragraph),
+            text_block("row-2-col-b", "3", TextStyle::Paragraph),
+        ]
+    }
+
+    fn string_value(value: &str) -> ProstValue {
+        ProstValue {
+            kind: Some(Kind::StringValue(value.to_string())),
+        }
+    }
+
+    fn number_value(value: f64) -> ProstValue {
+        ProstValue {
+            kind: Some(Kind::NumberValue(value)),
+        }
+    }
+
+    /// Details for a plain page (layout 0), keyed by the fixture object id.
+    fn fixture_details(root_id: &str) -> Struct {
+        Struct {
+            fields: [
+                ("id".to_string(), string_value(root_id)),
+                ("name".to_string(), string_value(DOC_NAME)),
+                ("layout".to_string(), number_value(0.0)),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn pb_snapshot_bytes(blocks: Vec<Block>, details: Struct) -> Vec<u8> {
+        let snapshot = SnapshotWithType {
+            sb_type: SmartBlockType::Page as i32,
+            snapshot: Some(ChangeSnapshot {
+                data: Some(SmartBlockSnapshotBase {
+                    blocks,
+                    details: Some(details),
+                    ..SmartBlockSnapshotBase::default()
+                }),
+                ..ChangeSnapshot::default()
+            }),
+        };
+        snapshot.encode_to_vec()
+    }
+
+    /// Render one fixture block in the archive `*.pb.json` shape so both snapshot
+    /// formats are generated from a single in-code document definition.
+    fn block_to_json(block: &Block) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".to_string(), json!(block.id));
+        if !block.children_ids.is_empty() {
+            obj.insert("childrenIds".to_string(), json!(block.children_ids));
+        }
+        match block.content_value.as_ref() {
+            Some(ContentValue::Text(text)) => {
+                let style = TextStyle::try_from(text.style).unwrap_or(TextStyle::Paragraph);
+                obj.insert(
+                    "text".to_string(),
+                    json!({
+                        "text": text.text,
+                        "style": style.as_str_name(),
+                        "checked": text.checked,
+                    }),
+                );
+            }
+            Some(ContentValue::Table(_)) => {
+                obj.insert("table".to_string(), json!({}));
+            }
+            Some(ContentValue::TableColumn(_)) => {
+                obj.insert("tableColumn".to_string(), json!({}));
+            }
+            Some(ContentValue::TableRow(row)) => {
+                obj.insert("tableRow".to_string(), json!({ "isHeader": row.is_header }));
+            }
+            _ => {}
+        }
+        JsonValue::Object(obj)
+    }
+
+    fn json_snapshot_bytes(blocks: &[Block], root_id: &str) -> Vec<u8> {
+        let doc = json!({
+            "sbType": SmartBlockType::Page.as_str_name(),
+            "snapshot": {
+                "data": {
+                    "blocks": blocks.iter().map(block_to_json).collect::<Vec<_>>(),
+                    "details": {
+                        "id": root_id,
+                        "name": DOC_NAME,
+                        "layout": 0,
+                    },
+                }
+            }
+        });
+        serde_json::to_vec(&doc).expect("fixture snapshot serializes")
+    }
+
+    /// Write a minimal directory archive containing a single object snapshot.
+    fn write_archive(base: &Path, snapshot_name: &str, snapshot_bytes: &[u8]) -> PathBuf {
+        let root = base.join("archive");
+        fs::create_dir_all(root.join("objects")).unwrap();
+        fs::write(root.join("manifest.json"), b"{}").unwrap();
+        fs::write(root.join("objects").join(snapshot_name), snapshot_bytes).unwrap();
+        root
+    }
+
+    fn pb_archive(base: &Path) -> PathBuf {
+        let bytes = pb_snapshot_bytes(fixture_blocks(), fixture_details(DOC_ID));
+        write_archive(base, &format!("{DOC_ID}.pb"), &bytes)
+    }
+
+    fn json_archive(base: &Path) -> PathBuf {
+        let bytes = json_snapshot_bytes(&fixture_blocks(), DOC_ID);
+        write_archive(base, &format!("{DOC_ID}.pb.json"), &bytes)
     }
 
     #[test]
-    #[ignore = "requires samples"]
-    fn convert_sample_pb_object_renders_markdown_tables() {
-        let archive = Path::new("samples/getting-started-pb");
-        let object_id = "bafyreihs3oyibcjqhwjuynp6j6aaqjhz6quijsy4vgakv4223exvruc5wi";
-        let markdown = convert_archive_object_pb_to_markdown(archive, object_id).unwrap();
-        assert!(markdown.contains("Simple table 3x2"));
-        assert!(markdown.contains('|'));
-        assert!(markdown.contains(":-"));
-    }
-
-    #[test]
-    #[ignore = "requires samples"]
-    fn convert_sample_pb_json_object_to_markdown_contains_headings() {
-        let archive = Path::new("samples/getting-started-json");
-        let object_id = "bafyreidgyug7rj6lweslb5rbeavhc44ytr5osfwj6w5snlspnjnsqa6ytm";
-        let markdown = convert_archive_object_to_markdown(archive, object_id).unwrap();
-        assert!(markdown.contains("How Widgets Work"));
-        assert!(markdown.contains("## "));
-        assert!(!markdown.is_empty());
-    }
-
-    #[test]
-    #[ignore = "requires samples"]
-    fn save_sample_pb_json_document_writes_markdown() {
-        let archive = Path::new("samples/getting-started-json");
-        let object_id = "bafyreidgyug7rj6lweslb5rbeavhc44ytr5osfwj6w5snlspnjnsqa6ytm";
+    fn convert_fixture_pb_object_to_markdown_contains_headings() {
         let dir = tempfile::tempdir().unwrap();
+        let archive = pb_archive(dir.path());
+        let markdown = convert_archive_object_pb_to_markdown(&archive, DOC_ID).unwrap();
+        assert!(markdown.contains("# Fixture Handbook"), "{markdown}");
+        assert!(markdown.contains("## Widget Basics"), "{markdown}");
+        assert!(!markdown.is_empty());
+    }
+
+    #[test]
+    fn convert_fixture_pb_object_closes_lists_with_trailing_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = pb_archive(dir.path());
+        let markdown = convert_archive_object_pb_to_markdown(&archive, DOC_ID).unwrap();
+        // A marked list item ends with the hard-break marker, and leaving the list
+        // emits a standalone marker line before the following paragraph.
+        assert!(
+            markdown.contains("- Alpha   \n   \nBody paragraph   \n"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn convert_fixture_pb_object_renders_markdown_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = pb_archive(dir.path());
+        let markdown = convert_archive_object_pb_to_markdown(&archive, DOC_ID).unwrap();
+        assert!(markdown.contains("| Widget | Count |"), "{markdown}");
+        assert!(markdown.contains(":-"), "{markdown}");
+        assert!(markdown.contains("| Gear"), "{markdown}");
+        assert!(markdown.contains("| 3"), "{markdown}");
+    }
+
+    #[test]
+    fn convert_fixture_pb_json_object_matches_pb_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let pb = pb_archive(&dir.path().join("pb"));
+        let pb_json = json_archive(&dir.path().join("json"));
+
+        let from_pb = convert_archive_object_to_markdown(&pb, DOC_ID).unwrap();
+        let from_json = convert_archive_object_to_markdown(&pb_json, DOC_ID).unwrap();
+
+        assert!(from_json.contains("# Fixture Handbook"), "{from_json}");
+        assert!(from_json.contains("## Widget Basics"), "{from_json}");
+        assert_eq!(from_pb, from_json);
+    }
+
+    #[test]
+    fn save_fixture_pb_json_document_writes_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = json_archive(dir.path());
         let dest = dir.path().join("out.md");
-        let kind = save_archive_object(archive, object_id, &dest).unwrap();
+        let kind = save_archive_object(&archive, DOC_ID, &dest).unwrap();
         assert_eq!(kind, SavedObjectKind::Markdown);
-        let text = fs::read_to_string(dest).unwrap();
-        assert!(text.contains("How Widgets Work"));
+        let text = fs::read_to_string(&dest).unwrap();
+        assert!(text.contains("# Fixture Handbook"), "{text}");
+        assert!(text.contains("| Widget | Count |"), "{text}");
+    }
+
+    #[test]
+    fn convert_archive_object_reports_unknown_object_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = pb_archive(dir.path());
+        let err = convert_archive_object_pb_to_markdown(&archive, "bafyreimissingobject")
+            .expect_err("unknown object id must be rejected");
+        assert!(
+            err.to_string().contains("snapshot not found in archive"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn convert_archive_object_pb_rejects_json_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = json_archive(dir.path());
+        let err = convert_archive_object_pb_to_markdown(&archive, DOC_ID)
+            .expect_err("pb-only conversion must reject a pb-json snapshot");
+        assert!(err.to_string().contains("protobuf snapshots"), "{err}");
+    }
+
+    #[test]
+    fn convert_archive_object_reports_malformed_pb_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = write_archive(
+            dir.path(),
+            &format!("{DOC_ID}.pb"),
+            b"not a protobuf snapshot",
+        );
+        let err = convert_archive_object_to_markdown(&archive, DOC_ID)
+            .expect_err("malformed protobuf must be rejected");
+        assert!(
+            err.to_string()
+                .contains("failed to decode protobuf snapshot"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn convert_archive_object_reports_malformed_pb_json_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = write_archive(dir.path(), &format!("{DOC_ID}.pb.json"), b"{ not json");
+        let err = convert_archive_object_to_markdown(&archive, DOC_ID)
+            .expect_err("malformed pb-json must be rejected");
+        assert!(err.to_string().contains("invalid pb-json"), "{err}");
+    }
+
+    #[test]
+    fn convert_snapshot_bytes_rejects_unsupported_extension() {
+        let index = HashMap::new();
+        let err = convert_snapshot_bytes_to_markdown("objects/note.txt", b"{}", &index)
+            .expect_err("unsupported snapshot extension must be rejected");
+        assert!(
+            err.to_string().contains("unsupported snapshot format"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn convert_pb_snapshot_reports_missing_root_block() {
+        let bytes = pb_snapshot_bytes(fixture_blocks(), fixture_details("no-such-block"));
+        let index = HashMap::new();
+        let err = convert_pb_snapshot_to_markdown(&bytes, &index)
+            .expect_err("details pointing at an absent root block must be rejected");
+        assert!(err.to_string().contains("root block not found"), "{err}");
+    }
+
+    #[test]
+    fn convert_pb_snapshot_without_blocks_yields_empty_markdown() {
+        let bytes = pb_snapshot_bytes(Vec::new(), fixture_details(DOC_ID));
+        let index = HashMap::new();
+        assert_eq!(
+            convert_pb_snapshot_to_markdown(&bytes, &index).unwrap(),
+            String::new()
+        );
+    }
+
+    #[test]
+    fn save_archive_object_reports_missing_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent-archive");
+        let dest = dir.path().join("out.md");
+        let err = save_archive_object(&missing, DOC_ID, &dest)
+            .expect_err("a missing archive path must be rejected");
+        assert!(
+            err.to_string()
+                .contains("archive must be a directory or zip file"),
+            "{err}"
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn build_archive_object_index_skips_unreadable_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = pb_archive(dir.path());
+        fs::write(archive.join("objects").join("broken.pb"), b"\xff\xff\xff").unwrap();
+
+        let reader = ArchiveReader::from_path(&archive).unwrap();
+        let index = build_archive_object_index(&reader).unwrap();
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            index.get(DOC_ID).map(|info| info.name.as_str()),
+            Some(DOC_NAME)
+        );
     }
 }

@@ -112,7 +112,11 @@ impl ListenerState {
     }
 
     #[cfg(test)]
-    fn with_admission_bounds(mut self, permits: usize, admission_wait: Duration) -> Self {
+    pub(crate) fn with_admission_bounds(
+        mut self,
+        permits: usize,
+        admission_wait: Duration,
+    ) -> Self {
         self.permits = Arc::new(Semaphore::new(permits));
         self.admission_wait = admission_wait;
         self

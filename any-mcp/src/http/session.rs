@@ -296,6 +296,15 @@ impl StableBackend {
         }
     }
 
+    /// Returns the currently unreserved session slots.
+    ///
+    /// Test seam for the load and fault boundary suite: session admission is
+    /// otherwise observable only through response statuses.
+    #[cfg(test)]
+    pub(crate) fn available_session_slots(&self) -> usize {
+        self.registry.available_slots()
+    }
+
     /// Handles one admitted stable-mode request.
     pub(crate) async fn call(self: Arc<Self>, admitted: AdmittedRequest) -> Response<HttpBody> {
         // Reclaim bindings whose rmcp sessions idled out.

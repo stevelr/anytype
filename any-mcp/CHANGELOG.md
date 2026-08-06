@@ -57,6 +57,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and scope validation. Add real-socket process conformance coverage for
   authentication, lifecycle, CORS, session isolation and termination, catalog
   parity, limits, protocol negotiation, and secret-safe failures.
+- Add load and fault boundary coverage for the Streamable HTTP transport. Each
+  case drives one enforced boundary past its limit over real loopback sockets
+  and proves the fixed shed-and-recover behavior: the session ceiling under
+  concurrent initialize contention, the process-global request-rate budget
+  under burst and across principals, the 2 MiB body ceiling at and one byte
+  over the edge including a streamed body, the admitted-request concurrency
+  cap, an idle SSE reader that disconnects, a slow reader that applies
+  backpressure to its own connection only, drain-then-cancel graceful shutdown
+  with work inside and outside the deadline, and an abrupt client disconnect
+  during an in-flight mutation, which keeps exactly one upstream write and
+  replays the recorded outcome on a keyed retry. The suite is deterministic and
+  offline: gates and published counters replace sleeps, and one scripted
+  loopback upstream stands in for Anytype.
 - Link the default-off `artifacts` registry with eight payload-free workflows.
   Arbitrary MIME files and strict UTF-8 Markdown/plain text move through
   configured capability-relative roots or an authenticated loopback staging
