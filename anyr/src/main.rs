@@ -71,6 +71,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
 
 #[allow(clippy::unnecessary_wraps)] // may need lerrors later
 fn init_tracing(verbose: u8) -> Result<()> {
+    use std::io::IsTerminal;
     use tracing_subscriber::{EnvFilter, fmt};
 
     let filter = std::env::var("RUST_LOG").map_or_else(
@@ -86,6 +87,14 @@ fn init_tracing(verbose: u8) -> Result<()> {
         EnvFilter::new,
     );
 
-    fmt().with_env_filter(filter).init();
+    // Diagnostics always go to stderr so that stdout carries only the command's
+    // result document (`--json`/`--yaml` output must stay machine-parseable).
+    // ANSI styling follows stderr's terminal-ness, never stdout's, so redirected
+    // logs stay free of escape sequences.
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
     Ok(())
 }

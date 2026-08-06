@@ -78,7 +78,11 @@ anyr mcp check
 ```
 
 The consolidated binary owns shared endpoint, keystore, output, and
-verbosity options. Use `-v`, `-vv`, or `RUST_LOG` for diagnostics. `anyr -V`
+verbosity options. Use `-v`, `-vv`, or `RUST_LOG` for diagnostics; diagnostics
+are always written to stderr, so stdout carries only the command's result
+document and stays parseable by `jq` and other tools. ANSI styling follows
+stderr's terminal-ness, so redirected diagnostics contain no escape
+sequences. `anyr -V`
 or `anyr --version` reports the anyr Cargo binary version. Version reporting
 is intentionally top-level; `anyr mcp --version` is rejected with guidance to
 use `anyr --version`. The archive inspector is included in the default anyr
