@@ -15,12 +15,31 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Correct the README claim that artifact root activation intersects the
+  configured policy with MCP client roots. Authority comes from the selected
+  TOML policy alone; a client that advertises roots neither widens nor narrows
+  it. Replace the stale artifact data-plane roadmap section, which described
+  the implemented `artifacts` registry as not yet selectable.
 - Report selected TOML syntax and schema failures with redacted line, column,
   known schema path, and problem category instead of only the generic
   `invalid any-mcp TOML configuration` message.
 
 ### Added
 
+- Add artifact policy and configuration acceptance scenarios — space policy
+  omitted, empty, and restricted elsewhere, read-only mode, and disabled
+  staging — to the multi-transport artifact harness. Each scenario is a
+  complete server configuration executed across the direct router and the
+  scripted, stable, and preview stdio control planes, and every control plane
+  is required to report the same advertised catalog, the same artifact status
+  projection, and the same refusal code and guidance. Probes classify before
+  any Anytype write, so a denied configuration creates nothing and an accepted
+  staging allocation is released within its scenario. An offline test loads
+  every rendered scenario policy through the production TOML parser.
+- Document operator setup for the artifact data plane in the README:
+  environment-only credentials, registry and policy selection, local stdio and
+  remote HTTP staging topologies, space policy shapes, read-only mode, and the
+  complete limit, quota, and time-to-live table.
 - Add a reusable multi-transport acceptance harness for the artifact data
   plane. `tests/support/artifact_acceptance.rs` declares a closed matrix of
   four control planes (scripted JSON-RPC frames, in-process direct router,

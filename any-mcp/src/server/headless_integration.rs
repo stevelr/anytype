@@ -34,7 +34,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::artifact_config::ArtifactConfig;
+use crate::artifact_config::{ArtifactConfig, SpaceReference};
 use crate::optional_toolsets::{
     OptionalToolsetSelection, production_optional_metadata, production_optional_registries,
 };
@@ -44,8 +44,10 @@ use crate::runtime::{RuntimeContext, StartupStatus};
 pub(super) mod live_scenario;
 
 use live_scenario::{
-    ArtifactPolicyFixture, ArtifactSmokeFixture, ArtifactTransport, assert_artifact_parity,
-    require_completed, run_artifact_smoke_scenario,
+    ArtifactControlPlane, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
+    ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy, UNAUTHORIZED_SPACE_ID,
+    assert_artifact_parity, assert_artifact_policy_parity, require_completed,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario,
 };
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
@@ -2573,10 +2575,19 @@ fn headless_direct_ordinary_tools_cover_representative_layouts() {
     });
 }
 
-/// Builds a direct-router server that owns the fixture's artifact policy.
+/// Builds a read-write direct-router server that owns the fixture's policy.
 async fn live_artifact_server(
     ctx: &TestContext,
     policy: &ArtifactPolicyFixture,
+) -> Result<AnyMcpServer, TestError> {
+    live_artifact_server_with(ctx, policy, false).await
+}
+
+/// Builds a direct-router server that owns the fixture's artifact policy.
+async fn live_artifact_server_with(
+    ctx: &TestContext,
+    policy: &ArtifactPolicyFixture,
+    read_only: bool,
 ) -> Result<AnyMcpServer, TestError> {
     ctx.client
         .ping_http()
@@ -2605,6 +2616,7 @@ async fn live_artifact_server(
         },
         selected,
         &artifact,
+        read_only,
     )
     .await
     .map_err(|_| TestError::Assertion {
@@ -2669,6 +2681,113 @@ async fn headless_artifact_direct_transport_matrix_scenario() {
     .await
     .expect("cleanup-safe direct artifact acceptance matrix");
     require_completed(outcome, "direct artifact acceptance matrix")
+        .expect("prefix-authorized disposable admission");
+}
+
+/// Proves offline that every policy scenario renders a loadable strict policy.
+///
+/// The acceptance harness is compiled into external test targets that cannot
+/// name `ArtifactConfig`, so the fixture renderer is validated against the
+/// production parser here, where a rejected configuration fails without a
+/// server instead of during a live acceptance run.
+#[test]
+fn artifact_policy_fixtures_load_as_strict_operator_policies() {
+    for scenario in ArtifactPolicyScenario::ALL {
+        let options = scenario.policy_options();
+        let fixture = ArtifactPolicyFixture::create_with("bafyrei-policy-offline", options)
+            .expect("artifact policy fixture");
+        let contents = fixture.policy_contents().expect("policy contents");
+        let config = ArtifactConfig::from_toml(&contents).unwrap_or_else(|_| {
+            panic!(
+                "policy scenario {} must render a loadable policy",
+                scenario.as_str()
+            )
+        });
+
+        assert!(!config.spaces.read_only, "policy files stay writable");
+        let allowed = config.spaces.allowed.as_deref();
+        match options.spaces {
+            FixtureSpacePolicy::Omitted => assert_eq!(allowed, None),
+            FixtureSpacePolicy::Empty => assert_eq!(allowed, Some(&[][..])),
+            FixtureSpacePolicy::AllowedUnderTest => assert_eq!(
+                allowed,
+                Some(&[SpaceReference::Id("bafyrei-policy-offline".to_owned())][..])
+            ),
+            FixtureSpacePolicy::RestrictedElsewhere => assert_eq!(
+                allowed,
+                Some(&[SpaceReference::Id(UNAUTHORIZED_SPACE_ID.to_owned())][..])
+            ),
+        }
+        assert_eq!(config.import_root_count(), 1);
+        assert_eq!(config.export_root_count(), 1);
+        assert_eq!(
+            config.staging().is_some_and(|staging| staging.enabled),
+            options.staging,
+            "staging declaration must follow the scenario"
+        );
+    }
+}
+
+/// Runs the direct-router half of the artifact policy scenario families.
+///
+/// Every scenario is one complete operator configuration built by the shared
+/// harness, so the in-process router and the spawned production children prove
+/// the same catalog, the same reported status, and the same refusals. Denied
+/// configurations create nothing upstream, and an accepted staging allocation
+/// is released inside the scenario.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_policy_direct_scenarios() {
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-policy",
+        |ctx| {
+            Box::pin(async move {
+                for scenario in ArtifactPolicyScenario::ALL {
+                    eprintln!("artifact policy scenario={}", scenario.as_str());
+                    let policy = ArtifactPolicyFixture::create_with(
+                        &ctx.space_id,
+                        scenario.policy_options(),
+                    )
+                    .map_err(|_| TestError::Assertion {
+                        message: "create artifact policy fixture".to_owned(),
+                    })?;
+                    let server =
+                        live_artifact_server_with(ctx.as_ref(), &policy, scenario.is_read_only())
+                            .await?;
+                    let mut driver = DirectRouterDriver { server: &server };
+                    let run = ArtifactPolicyRun {
+                        scenario,
+                        control: ArtifactControlPlane::DirectRouter,
+                        policy: &policy,
+                        ctx: ctx.as_ref(),
+                    };
+                    let evidence = Box::pin(run_artifact_policy_scenario(&mut driver, &run))
+                        .await
+                        .map_err(|error| {
+                            eprintln!(
+                                "artifact policy scenario={} failure={error}",
+                                scenario.as_str()
+                            );
+                            TestError::Assertion {
+                                message: "direct artifact policy scenario failed".to_owned(),
+                            }
+                        })?;
+                    assert_artifact_policy_parity(
+                        std::slice::from_ref(&evidence),
+                        &[ArtifactControlPlane::DirectRouter],
+                    )
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct artifact policy evidence was not exact".to_owned(),
+                    })?;
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct artifact policy scenarios");
+    require_completed(outcome, "direct artifact policy scenarios")
         .expect("prefix-authorized disposable admission");
 }
 

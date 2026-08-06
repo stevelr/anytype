@@ -48,9 +48,11 @@ mod support;
 
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    ArtifactControlPlane, ArtifactDataPlane, ArtifactPolicyFixture, ArtifactSmokeFixture,
-    ArtifactTransport, assert_artifact_parity, audit_server_log, run_artifact_smoke_scenario,
-    server_log_offset, validate_tool_frame,
+    ArtifactControlPlane, ArtifactDataPlane, ArtifactPolicyEvidence, ArtifactPolicyFixture,
+    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactSmokeFixture, ArtifactTransport,
+    assert_artifact_parity, assert_artifact_policy_parity, audit_server_log,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_offset,
+    validate_tool_frame,
 };
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
@@ -5124,6 +5126,173 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
 async fn headless_artifact_spawned_transport_matrix_scenario() {
     require_optional_workflow_executed(run_artifacts_real_workflow().await)
         .expect("spawned artifact acceptance matrix");
+}
+
+/// Selects the spawned child profile for one policy scenario.
+///
+/// Read-only is a server mode rather than a policy field, so it is selected
+/// through the production read-only switch while the strict TOML policy stays
+/// writable.
+#[cfg(feature = "acceptance-harness")]
+fn artifact_policy_driver_options(control: ArtifactControlPlane, read_only: bool) -> DriverOptions {
+    match (
+        control == ArtifactControlPlane::SpawnedPreviewStdio,
+        read_only,
+    ) {
+        (true, true) => DriverOptions::PREVIEW_READ_ONLY,
+        (true, false) => DriverOptions::PREVIEW_STANDARD,
+        (false, true) => DriverOptions::READ_ONLY,
+        (false, false) => DriverOptions::STANDARD,
+    }
+}
+
+/// Runs one spawned control plane through one artifact policy scenario.
+///
+/// The child is stopped before the next scenario starts, so at most one policy
+/// server per control plane is alive at a time and the fixture tree is removed
+/// with the disposable context.
+#[cfg(feature = "acceptance-harness")]
+async fn run_spawned_artifact_policy_scenario(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    scenario: ArtifactPolicyScenario,
+    control: ArtifactControlPlane,
+) -> TestResult<ArtifactPolicyEvidence> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create_with(&ctx.space_id, scenario.policy_options())
+            .map_err(|_| sentinel_assertion("create artifact policy fixture"))?,
+    );
+    let options = artifact_policy_driver_options(control, scenario.is_read_only());
+    let child =
+        spawn_disposable_artifact_driver(ctx, cleanup_record, Arc::clone(&policy), options)?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("registered artifact policy child disappeared"))?
+        .initialize();
+
+    let run = ArtifactPolicyRun {
+        scenario,
+        control,
+        policy: policy.as_ref(),
+        ctx,
+    };
+    let observed = if control == ArtifactControlPlane::ScriptedProtocol {
+        let mut driver = ScriptedArtifactDriver {
+            driver: Arc::clone(&child),
+        };
+        Box::pin(run_artifact_policy_scenario(&mut driver, &run)).await
+    } else {
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&child),
+        };
+        Box::pin(run_artifact_policy_scenario(&mut driver, &run)).await
+    };
+
+    // Stop this scenario's child before reporting, so a failure never leaves a
+    // production process holding the fixture policy.
+    let stopped = lock_driver(&child)
+        .take()
+        .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
+    let evidence = observed.map_err(|error| {
+        eprintln!(
+            "artifact policy scenario={} control={} failure={error}",
+            scenario.as_str(),
+            control.as_str()
+        );
+        sentinel_assertion("spawned artifact policy scenario failed")
+    })?;
+    if stopped.is_err() {
+        return Err(sentinel_assertion(
+            "spawned artifact policy child did not stop cleanly",
+        ));
+    }
+    Ok(evidence)
+}
+
+/// Runs every artifact policy scenario across the spawned control planes.
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_policy_spawned_scenarios() {
+    let cleanup: Vec<Arc<Mutex<ChildCleanupRecord>>> = (0..ArtifactPolicyScenario::ALL.len()
+        * SPAWNED_ARTIFACT_CONTROLS.len())
+        .map(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)))
+        .collect();
+    let callback_cleanup = cleanup.clone();
+    let log_window = artifact_server_log_window();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-policy",
+        move |ctx| {
+            Box::pin(async move {
+                for (scenario_index, scenario) in
+                    ArtifactPolicyScenario::ALL.into_iter().enumerate()
+                {
+                    eprintln!("artifact policy scenario={}", scenario.as_str());
+                    let mut evidence = Vec::with_capacity(SPAWNED_ARTIFACT_CONTROLS.len());
+                    for (control_index, control) in
+                        SPAWNED_ARTIFACT_CONTROLS.into_iter().enumerate()
+                    {
+                        let record = callback_cleanup
+                            .get(scenario_index * SPAWNED_ARTIFACT_CONTROLS.len() + control_index)
+                            .ok_or_else(|| {
+                                sentinel_assertion("artifact policy cleanup record missing")
+                            })?;
+                        evidence.push(
+                            Box::pin(run_spawned_artifact_policy_scenario(
+                                ctx.as_ref(),
+                                Arc::clone(record),
+                                scenario,
+                                control,
+                            ))
+                            .await?,
+                        );
+                    }
+                    assert_artifact_policy_parity(&evidence, &SPAWNED_ARTIFACT_CONTROLS).map_err(
+                        |error| {
+                            eprintln!(
+                                "artifact policy scenario={} parity failure={error}",
+                                scenario.as_str()
+                            );
+                            sentinel_assertion("spawned artifact policy planes diverged")
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned artifact policy scenarios");
+
+    match outcome {
+        DisposableRun::Completed(()) => {
+            for record in &cleanup {
+                assert_eq!(
+                    *record.lock().expect("artifact policy cleanup record"),
+                    ChildCleanupRecord::Stopped
+                );
+            }
+            if let Some((path, offset)) = log_window {
+                let audit = audit_server_log(&path, offset)
+                    .expect("audit captured artifact policy server log");
+                eprintln!(
+                    "artifact policy server log inspected={} panic_or_fatal={} unclassified={} known={:?}",
+                    audit.inspected_lines,
+                    audit.panic_or_fatal_lines,
+                    audit.unclassified_error_lines,
+                    audit.known_classes
+                );
+                assert!(
+                    audit.is_clean(),
+                    "captured server log reported a panic, fatal, or unclassified error class"
+                );
+            }
+        }
+        DisposableRun::Skipped(reason) => {
+            panic!("artifact policy scenarios require disposable admission: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]

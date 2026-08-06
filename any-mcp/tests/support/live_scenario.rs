@@ -4327,10 +4327,13 @@ mod artifact_acceptance;
 pub use artifact_acceptance::{
     ARTIFACT_CREATE_MARKDOWN, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES,
     ARTIFACT_UPDATE_MARKDOWN, ArtifactCatalogSnapshot, ArtifactControlPlane, ArtifactDataPlane,
-    ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactServerLogAudit, ArtifactSmokeEvidence,
-    ArtifactSmokeFixture, ArtifactTransport, artifact_sha256, assert_artifact_parity,
-    audit_server_log, classify_server_log, require_completed, run_artifact_smoke_scenario,
-    server_log_offset, validate_tool_frame,
+    ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyProbe,
+    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactProbeExpectation, ArtifactProbeOutcome,
+    ArtifactServerLogAudit, ArtifactSmokeEvidence, ArtifactSmokeFixture, ArtifactStatusEvidence,
+    ArtifactTransport, FixtureSpacePolicy, UNAUTHORIZED_SPACE_ID, artifact_sha256,
+    assert_artifact_parity, assert_artifact_policy_parity, audit_server_log, classify_server_log,
+    probe_expectation, require_completed, run_artifact_policy_scenario,
+    run_artifact_smoke_scenario, server_log_offset, validate_tool_frame,
 };
 
 /// Evidence tier required for every optional production operation.

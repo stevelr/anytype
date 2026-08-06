@@ -111,27 +111,29 @@ stable and preview protocol revisions tested with Codex, Claude Code, and MCP
 Inspector. Client registration is separate from Anytype login: create and
 store credentials with `anyr` or Anytype before starting the MCP host.
 
-## Artifact data-plane roadmap
+## Artifact data plane
 
-A future default-off `artifacts` registry is under security review. It is
-planned to move file and document payloads through authorized local roots or a
-loopback staging service while MCP carries only logical locations, opaque
-handles, hashes, sizes, and small receipts.
+The default-off `artifacts` registry moves file and document payloads through
+authorized local roots or a loopback staging service while MCP carries only
+logical locations, opaque handles, hashes, sizes, and small receipts. Select it
+with `ANY_MCP_TOOLSETS=artifacts`; nothing is granted until an explicitly
+selected policy file declares roots or staging.
 
-The planned startup policy uses an optional TOML file selected explicitly by
-`--config` or `ANY_MCP_CONFIG`, with no automatic discovery. It separates
-import and export roots, permits optional Anytype space restrictions, applies
-finite transfer and validator limits, and makes local exports create-new only.
-Selected MVP configs would have to declare writable space access explicitly so
-future access controls can default to read-only. Mounted roots would be
-admitted by required filesystem behavior instead of a filesystem-type label;
-remote mounts may still hang outside application cancellation. Root and local
-operation paths would preserve platform-native path values without requiring
-UTF-8 or lossy conversion. Read-only mode would expose status metadata without
+The startup policy is an optional TOML file selected explicitly by `--config`
+or `ANY_MCP_CONFIG`, with no automatic discovery beyond an `any-mcp.toml` in
+the working directory. It separates import and export roots, permits optional
+Anytype space restrictions, applies finite transfer and validator limits, and
+makes local exports create-new only. Selected files must declare writable space
+access explicitly so future access controls can default to read-only. Mounted
+roots are admitted by required filesystem behavior instead of a filesystem-type
+label; remote mounts may still hang outside application cancellation. Root and
+local operation paths preserve platform-native path values without requiring
+UTF-8 or lossy conversion. Read-only mode exposes status metadata without
 activating root, staging, or validator authority.
 
-This registry and its configuration options are not implemented or selectable
-yet. Existing inline file tools and their limits remain unchanged.
+Existing inline file tools and their limits are unchanged by this registry.
+[Operator setup](#operator-setup) walks through a complete local or remote
+deployment.
 
 ## Phase 1 foundations
 
@@ -276,8 +278,10 @@ path_native = { encoding = "unix-bytes-base64url", value = "L2..." }
 Windows uses `windows-wtf16le-base64url`. The parser decodes these values
 directly into native OS strings and applies component, traversal, prefix, and
 length checks without lossy Unicode conversion. Root activation retains
-directory handles and intersects static policy with MCP client roots; client
-roots can only narrow authority. Capability-relative file walks on Linux,
+directory handles. Authority comes from the selected TOML policy alone: the
+server does not request MCP client roots, and a client that advertises roots
+neither widens nor narrows the configured policy. Capability-relative file
+walks on Linux,
 macOS, and Windows reject links and reparse points, cross-filesystem
 redirection, unsafe permissions or ACLs, hard-linked imports, traversal,
 over-limit files, and export collisions. Export bytes remain in an
@@ -291,6 +295,174 @@ encrypted or object-backed filesystems can be used when they satisfy the same
 capability checks. Mount type labels are advisory and are often hidden by a
 container or sandbox. Avoid NFS and other network mounts for active artifact
 roots because network stalls can cause unpredictable filesystem delays.
+
+### Operator setup
+
+Artifact authority is granted in four independent steps. Each one fails closed
+on its own, so an incomplete setup refuses work instead of widening access.
+
+1. **Credentials, from the environment only.** The server performs no login and
+   never accepts credentials through MCP. It reuses `ANYTYPE_URL`,
+   `ANYTYPE_GRPC_ENDPOINT`, `ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE`
+   (default `anyr`). With `ANYTYPE_KEYSTORE=env`, supply `ANYTYPE_KEY_HTTP_TOKEN`
+   (and `ANYTYPE_KEY_ACCOUNT_KEY` for gRPC-backed workflows) through the host
+   environment or a secret facility. Do not place secrets in the policy file:
+   its `[auth]` table selects *which* keystore to read, never a secret value.
+2. **Select the registry.** `ANY_MCP_TOOLSETS=artifacts` advertises the eight
+   artifact tools. Without the selector they are absent from `tools/list`.
+3. **Select the policy.** `--config ABSOLUTE_PATH` or `ANY_MCP_CONFIG` chooses
+   the strict TOML file. Validate it before starting a client with
+   `anyr mcp check --config FILE`.
+4. **Verify at run time.** Call `artifact_status`. It reports
+   `local_roots_active`, `import_root_count`, `export_root_count`,
+   `staging_configured`, `staging_active`, and the validator counts, so an
+   operator can confirm the authority a client actually received.
+
+#### Local clients (stdio)
+
+A local MCP host starts `anyr mcp` over stdio and moves bytes through
+authorized directories on the same machine. Declare at least one import root
+for reads and one export root for create-new writes, and leave `[staging]` out:
+
+```toml
+schema_version = 1
+
+[spaces]
+read_only = false
+allowed = [{ name = "Personal" }]
+
+[[roots.import]]
+id = "inbox"
+path = "/absolute/operator-owned/import"
+
+[[roots.export]]
+id = "outbox"
+path = "/absolute/operator-owned/export"
+```
+
+```json
+{
+  "mcpServers": {
+    "anytype": {
+      "command": "/absolute/path/to/anytype/target/debug/anyr",
+      "args": ["mcp"],
+      "env": {
+        "ANY_MCP_TOOLSETS": "artifacts",
+        "ANY_MCP_CONFIG": "/absolute/path/to/any-mcp.toml"
+      }
+    }
+  }
+}
+```
+
+Clients address bytes as a logical root ID plus a relative path, for example
+`{"local": {"root": "inbox", "path": "reports/q3.md"}}`. Absolute paths, `..`,
+symlinks, and unlisted root IDs are refused, and an unauthorized root and an
+absent file are both reported through the same fixed not-found message so a
+caller cannot probe the filesystem layout. Client-advertised MCP roots are not
+consulted: only the TOML policy grants authority.
+
+#### Remote clients (HTTP staging)
+
+When the MCP client and its files are not on the server's filesystem, enable
+the staging service and omit local roots from client calls. Staging binds a
+loopback address only; terminate TLS in a separately managed reverse proxy and
+point `public_base_url` at that proxy:
+
+```toml
+[staging]
+enabled = true
+root = "/absolute/operator-owned/private-staging"
+bind = "127.0.0.1:8765"
+public_base_url = "https://artifacts.example.internal/artifacts/v1/"
+```
+
+Uploads are two steps: `artifact_stage_upload` allocates an exact-size record
+and returns an opaque handle, an upload URL that contains only the non-secret
+record identifier, and an expiry. The client then `PUT`s the exact bytes with
+`Authorization: Bearer <handle>` and passes `{"staged_handle": "<handle>"}` as
+the tool `source`. Exports reverse this with `{"remote": true}`, and
+`artifact_release` deletes the staged bytes once the client has read them.
+Handles never appear in URLs, and the server never fetches a caller-supplied
+URL. Staging requires activated local roots: it is a data plane on top of the
+policy, not a replacement for it, and `artifact_status` reports
+`staging_active: false` whenever roots are inactive.
+
+#### Space policy
+
+`spaces.allowed` selects one of three shapes, checked by every space resolver
+before any request is constructed.
+
+| Configuration                              | Effect                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `allowed` omitted                          | Every space the account can otherwise reach is permitted.                                              |
+| `allowed = []`                             | No space is permitted; space-scoped calls report `authentication`.                                     |
+| `allowed = [{ id = "…" }, { name = "…" }]` | Only these spaces are permitted; names resolve once at startup and the canonical ID set is then fixed. |
+
+A restricted policy also rejects unscoped global search and space creation.
+Because entries resolve once, a space renamed after startup keeps the identity
+it was granted, and a new process is required to pick up a policy change.
+
+#### Read-only mode
+
+`ANY_MCP_READ_ONLY=1` is a server mode, not a policy field; a selected policy
+file must still declare `spaces.read_only = false`. A read-only server removes
+every artifact mutation from its catalog, keeps only `artifact_status`, and
+activates no roots, no staging service, and no validators. A mutation named
+anyway is refused with the fixed message
+`This Anytype server is read-only. Mutating workflows are disabled.` Read-only
+is the recommended first registration for a new client.
+
+#### Quotas, deadlines, and time-to-live
+
+Every `[limits]` value is optional, clamped to the range below, and rejected
+outside it. Lowering `artifact_bytes` also lowers the omitted defaults of the
+single-artifact limits that depend on it.
+
+| Key                           | Default    | Range                 |
+| ----------------------------- | ---------- | --------------------- |
+| `artifact_bytes`              | 268435456  | 65536 – 1073741824    |
+| `transfer_chunk_bytes`        | 8388608    | 65536 – 67108864      |
+| `staging_total_bytes`         | 1073741824 | 1048576 – 17179869184 |
+| `staging_entries`             | 256        | 1 – 4096              |
+| `staging_ttl_secs`            | 900        | 60 – 86400            |
+| `staging_connections`         | 64         | 1 – 256               |
+| `staging_requests`            | 64         | 1 – 256               |
+| `staging_requests_per_minute` | 600        | 1 – 10000             |
+| `staging_header_bytes`        | 16384      | 4096 – 65536          |
+| `staging_header_secs`         | 5          | 1 – 30                |
+| `staging_no_progress_secs`    | 30         | 1 – 120               |
+| `receipt_bytes`               | 16384      | 2048 – 65536          |
+| `operation_secs`              | 300        | 1 – 900               |
+| `cleanup_batch`               | 64         | 1 – 1024              |
+| `discovery_rows`              | 1000       | 1 – 10000             |
+| `markdown_bytes`              | 10485760   | 1 – 67108864          |
+| `markdown_chars`              | 100000     | 1 – 1000000           |
+| `validator_processes`         | 4          | 1 – 16                |
+| `validator_total_input_bytes` | 536870912  | 1 – 2147483648        |
+
+Staged records expire after `staging_ttl_secs` and are removed in batches of at
+most `cleanup_batch`, so an abandoned client upload cannot retain the quota
+indefinitely. `operation_secs` bounds one artifact tool call end to end.
+
+Limits are also checked against each other, and an inconsistent set is rejected
+at load: `transfer_chunk_bytes` and `markdown_bytes` may not exceed
+`artifact_bytes`; `artifact_bytes` may not exceed `validator_total_input_bytes`
+or, when staging is enabled, `staging_total_bytes`; `cleanup_batch` may not
+exceed `staging_entries`; and neither staging deadline nor any validator
+timeout may exceed `operation_secs`.
+
+#### Validators
+
+Validators are optional and operator-declared. Each `[[validators]]` entry
+pins an absolute executable path plus its expected SHA-256, and runs with fixed
+arguments, a cleared environment, bounded input and output, a deadline, and a
+process-group boundary. A `required = true` validator blocks the operation when
+it rejects or is unavailable; an optional one contributes a bounded receipt
+category. MCP callers can never supply an executable, flag, environment
+variable, or command template. Validator execution is available on Linux today;
+macOS and Windows retain the validated configuration and report the validator
+unavailable, so a required validator blocks matching operations there.
 
 ### Token-free artifact workflows
 

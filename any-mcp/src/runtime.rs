@@ -568,8 +568,13 @@ impl RuntimeContext {
     /// reaches the same state through [`RuntimeContext::start`], which
     /// additionally performs credential lookup and the startup probes an
     /// acceptance fixture has already proven with its own client. The fixture
-    /// shape is fixed: standard profile, read-write, two concurrent requests,
-    /// and a 30-second request timeout.
+    /// shape is otherwise fixed: standard profile, two concurrent requests, and
+    /// a 30-second request timeout.
+    ///
+    /// `read_only` mirrors [`RuntimeContext::start`] exactly: a read-only
+    /// server activates no artifact roots, and therefore no staging service and
+    /// no validators, so the direct router and a spawned read-only child report
+    /// the same artifact status.
     ///
     /// # Errors
     ///
@@ -582,11 +587,12 @@ impl RuntimeContext {
         startup_status: StartupStatus,
         optional_toolsets: OptionalToolsetSelection,
         artifact: &ArtifactConfig,
+        read_only: bool,
     ) -> Result<Self, StartupError> {
         let authority = SpaceAuthority::initialize(&client, &artifact.spaces)
             .await
             .map_err(|_| StartupError::SpacePolicy)?;
-        let artifact_roots = if optional_toolsets.contains("artifacts") {
+        let artifact_roots = if optional_toolsets.contains("artifacts") && !read_only {
             Some(RootRegistry::activate(artifact).map_err(|_| StartupError::ArtifactRoots)?)
         } else {
             None
@@ -598,7 +604,7 @@ impl RuntimeContext {
                 request_timeout: Duration::from_secs(30),
                 startup_status,
                 profile: ApplicationProfile::Standard,
-                read_only: false,
+                read_only,
                 optional_toolsets,
                 space_authority: authority,
             },

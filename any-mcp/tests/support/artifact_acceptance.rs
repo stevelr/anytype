@@ -429,13 +429,71 @@ pub fn artifact_sha256(bytes: &[u8]) -> String {
     hex_digest(&Sha256::digest(bytes))
 }
 
+/// Operator space policy declared by an acceptance fixture.
+///
+/// The three configured shapes are distinguished by the `allowed` key alone:
+/// omitting it admits every otherwise-authorized space, an explicit empty list
+/// admits none, and an explicit list admits exactly its entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FixtureSpacePolicy {
+    /// `allowed` is omitted, so the space under test is admitted.
+    Omitted,
+    /// `allowed = []`, so no space is admitted.
+    Empty,
+    /// `allowed` names exactly the disposable space under test.
+    AllowedUnderTest,
+    /// `allowed` names exactly one other space, denying the space under test.
+    RestrictedElsewhere,
+}
+
+impl FixtureSpacePolicy {
+    /// Complete closed inventory of configured space policies.
+    pub const ALL: [Self; 4] = [
+        Self::Omitted,
+        Self::Empty,
+        Self::AllowedUnderTest,
+        Self::RestrictedElsewhere,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Omitted => "omitted",
+            Self::Empty => "empty",
+            Self::AllowedUnderTest => "allowed_under_test",
+            Self::RestrictedElsewhere => "restricted_elsewhere",
+        }
+    }
+
+    /// Whether the disposable space under test is admitted by this policy.
+    #[must_use]
+    pub const fn admits_space_under_test(self) -> bool {
+        matches!(self, Self::Omitted | Self::AllowedUnderTest)
+    }
+}
+
+/// Syntactically valid identifier of a space that exists in no test account.
+///
+/// The restricted fixture authorizes only this identifier, so the disposable
+/// space under test is denied by policy rather than by upstream visibility.
+pub const UNAUTHORIZED_SPACE_ID: &str = "any-mcp-acceptance-unauthorized-space";
+
 /// Strict artifact policy options shared by every acceptance fixture.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactPolicyOptions {
     /// Whether the remote HTTP staging service is enabled.
     pub staging: bool,
-    /// Whether the server runs in read-only mode.
+    /// Whether the server under test runs in read-only mode.
+    ///
+    /// Read-only is a server mode, never a policy field: `ArtifactConfig`
+    /// rejects a configuration declaring `spaces.read_only = true`, so the
+    /// rendered policy always declares `read_only = false` and the caller
+    /// selects read-only through the production server's read-only switch
+    /// (`ANY_MCP_READ_ONLY` for a spawned child).
     pub read_only: bool,
+    /// Configured space policy shape.
+    pub spaces: FixtureSpacePolicy,
 }
 
 impl Default for ArtifactPolicyOptions {
@@ -443,6 +501,7 @@ impl Default for ArtifactPolicyOptions {
         Self {
             staging: true,
             read_only: false,
+            spaces: FixtureSpacePolicy::AllowedUnderTest,
         }
     }
 }
@@ -621,19 +680,35 @@ fn render_policy(
     staging_base_url: Option<&str>,
     options: ArtifactPolicyOptions,
 ) -> String {
+    // `ArtifactConfig` rejects `spaces.read_only = true` outright, so the
+    // policy always declares a writable configuration and read-only coverage
+    // uses the production server's read-only mode instead.
+    let allowed = match options.spaces {
+        FixtureSpacePolicy::Omitted => String::new(),
+        FixtureSpacePolicy::Empty => "allowed = []\n".to_owned(),
+        FixtureSpacePolicy::AllowedUnderTest => {
+            format!(
+                "allowed = [{{ id = \"{}\" }}]\n",
+                toml_basic_string(space_id)
+            )
+        }
+        FixtureSpacePolicy::RestrictedElsewhere => format!(
+            "allowed = [{{ id = \"{}\" }}]\n",
+            toml_basic_string(UNAUTHORIZED_SPACE_ID)
+        ),
+    };
     let mut contents = format!(
         "schema_version = 1\n\
          [spaces]\n\
-         read_only = {}\n\
-         allowed = [{{ id = \"{}\" }}]\n\
+         read_only = false\n\
+         {}\
          [[roots.import]]\n\
          id = \"{}\"\n\
          path = \"{}\"\n\
          [[roots.export]]\n\
          id = \"{}\"\n\
          path = \"{}\"\n",
-        options.read_only,
-        toml_basic_string(space_id),
+        allowed,
         toml_basic_string(ArtifactPolicyFixture::IMPORT_ROOT),
         toml_basic_string(&import.display().to_string()),
         toml_basic_string(ArtifactPolicyFixture::EXPORT_ROOT),
@@ -1244,6 +1319,563 @@ pub fn validate_tool_frame(name: &str, id: u64, frame: &Value) -> Result<Value, 
         .ok_or_else(|| format!("{name} frame omitted structured content"))
 }
 
+/// Fixed corrective text returned when a mutation reaches a read-only server.
+///
+/// Mirrors `ToolError::read_only` in `any-mcp/src/error.rs`. The harness is
+/// compiled into external test targets that cannot name crate-private items,
+/// so the exact expected text is restated here and asserted verbatim.
+pub const READ_ONLY_GUIDANCE: &str =
+    "This Anytype server is read-only. Mutating workflows are disabled.";
+
+/// Fixed corrective text returned when remote staging is not configured.
+///
+/// Mirrors the crate-private `STAGING_REQUIRED_GUIDANCE` in
+/// `any-mcp/src/artifact_staging.rs`.
+pub const STAGING_REQUIRED_GUIDANCE: &str =
+    "Remote artifact staging is disabled. Enable it in the selected any-mcp TOML config.";
+
+/// Stable domain error code reported for a policy-denied space.
+pub const AUTHENTICATION_CODE: &str = "authentication";
+/// Stable domain error code reported for an unauthorized root or absent entity.
+pub const NOT_FOUND_CODE: &str = "not_found";
+/// Stable domain error code reported for read-only and configuration refusals.
+pub const VALIDATION_CODE: &str = "validation";
+
+/// Closed inventory of operator policy and configuration scenarios.
+///
+/// Every scenario is one complete server configuration. The smoke matrix
+/// already proves the permissive local and remote happy paths, so these
+/// scenarios prove what a configuration must *refuse*, plus the two
+/// permissive space shapes that are configured differently from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactPolicyScenario {
+    /// `spaces.allowed` omitted: the space under test stays authorized.
+    SpacesOmitted,
+    /// `spaces.allowed = []`: every space-scoped artifact call is denied.
+    SpacesEmpty,
+    /// `spaces.allowed` names another space: the space under test is denied.
+    SpacesRestrictedElsewhere,
+    /// Read-only server: every artifact mutation is unadvertised and refused.
+    ReadOnly,
+    /// Staging omitted: remote opaque-handle allocation is refused.
+    StagingDisabled,
+}
+
+impl ArtifactPolicyScenario {
+    /// Complete closed policy scenario inventory.
+    pub const ALL: [Self; 5] = [
+        Self::SpacesOmitted,
+        Self::SpacesEmpty,
+        Self::SpacesRestrictedElsewhere,
+        Self::ReadOnly,
+        Self::StagingDisabled,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SpacesOmitted => "spaces_omitted",
+            Self::SpacesEmpty => "spaces_empty",
+            Self::SpacesRestrictedElsewhere => "spaces_restricted_elsewhere",
+            Self::ReadOnly => "read_only",
+            Self::StagingDisabled => "staging_disabled",
+        }
+    }
+
+    /// Parses an exact stable identifier.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+
+    /// Exact fixture policy options that realize this scenario.
+    #[must_use]
+    pub const fn policy_options(self) -> ArtifactPolicyOptions {
+        let (staging, read_only, spaces) = match self {
+            Self::SpacesOmitted => (true, false, FixtureSpacePolicy::Omitted),
+            Self::SpacesEmpty => (true, false, FixtureSpacePolicy::Empty),
+            Self::SpacesRestrictedElsewhere => {
+                (true, false, FixtureSpacePolicy::RestrictedElsewhere)
+            }
+            Self::ReadOnly => (true, true, FixtureSpacePolicy::AllowedUnderTest),
+            Self::StagingDisabled => (false, false, FixtureSpacePolicy::AllowedUnderTest),
+        };
+        ArtifactPolicyOptions {
+            staging,
+            read_only,
+            spaces,
+        }
+    }
+
+    /// Whether the server under test runs in read-only mode.
+    #[must_use]
+    pub const fn is_read_only(self) -> bool {
+        self.policy_options().read_only
+    }
+
+    /// Whether the disposable space under test is admitted by policy.
+    #[must_use]
+    pub const fn admits_space_under_test(self) -> bool {
+        self.policy_options().spaces.admits_space_under_test()
+    }
+
+    /// Exact sorted artifact tools this configuration must advertise.
+    ///
+    /// A read-only server removes every artifact mutation from its catalog and
+    /// keeps only the read-only status tool.
+    #[must_use]
+    pub fn advertised_tools(self) -> Vec<&'static str> {
+        if self.is_read_only() {
+            vec!["artifact_status"]
+        } else {
+            ARTIFACT_TOOL_NAMES.to_vec()
+        }
+    }
+
+    /// Exact `artifact_status` report this configuration must produce.
+    #[must_use]
+    pub const fn expected_status(self) -> ArtifactStatusEvidence {
+        let options = self.policy_options();
+        // A read-only server never activates local roots, and staging is only
+        // activated on top of activated roots, so both report inactive while
+        // the configured staging declaration stays visible.
+        let roots_active = !options.read_only;
+        ArtifactStatusEvidence {
+            local_roots_active: roots_active,
+            import_root_count: if roots_active { 1 } else { 0 },
+            export_root_count: if roots_active { 1 } else { 0 },
+            staging_configured: options.staging,
+            staging_active: options.staging && roots_active,
+        }
+    }
+}
+
+/// Closed inventory of policy probes executed by every policy scenario.
+///
+/// Each probe is classified before any Anytype write can occur, so a denied
+/// configuration creates nothing and an authorized configuration fails on the
+/// next gate instead of mutating the disposable space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactPolicyProbe {
+    /// Import of a source that does not exist under the authorized import root.
+    LocalImportMissingSource,
+    /// Export whose destination names the import-only root.
+    LocalExportUnauthorizedRoot,
+    /// Remote staging allocation for a bounded payload.
+    StageUpload,
+}
+
+impl ArtifactPolicyProbe {
+    /// Complete closed probe inventory.
+    pub const ALL: [Self; 3] = [
+        Self::LocalImportMissingSource,
+        Self::LocalExportUnauthorizedRoot,
+        Self::StageUpload,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalImportMissingSource => "local_import_missing_source",
+            Self::LocalExportUnauthorizedRoot => "local_export_unauthorized_root",
+            Self::StageUpload => "stage_upload",
+        }
+    }
+
+    /// Production tool exercised by this probe.
+    #[must_use]
+    pub const fn tool_name(self) -> &'static str {
+        match self {
+            Self::LocalImportMissingSource => "file_import",
+            Self::LocalExportUnauthorizedRoot => "file_export",
+            Self::StageUpload => "artifact_stage_upload",
+        }
+    }
+}
+
+/// Required result of one policy probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactProbeExpectation {
+    /// The call must succeed; any allocated staging record is released again.
+    Accepted,
+    /// The call must be refused with this exact code and corrective message.
+    Refused {
+        /// Stable machine-readable domain error code.
+        code: &'static str,
+        /// Exact fixed corrective message, when the code alone is ambiguous.
+        message: Option<&'static str>,
+    },
+}
+
+/// Observed result of one policy probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactProbeOutcome {
+    /// The call succeeded.
+    Accepted,
+    /// The call was refused with this stable code and fixed corrective text.
+    Refused {
+        /// Stable machine-readable domain error code.
+        code: String,
+        /// Fixed corrective message; never an upstream body.
+        message: String,
+    },
+}
+
+/// Required outcome of one probe under one policy scenario.
+#[must_use]
+pub const fn probe_expectation(
+    scenario: ArtifactPolicyScenario,
+    probe: ArtifactPolicyProbe,
+) -> ArtifactProbeExpectation {
+    // Read-only is checked first by every artifact mutation, before the space
+    // policy and before any root or staging gate.
+    if scenario.is_read_only() {
+        return ArtifactProbeExpectation::Refused {
+            code: VALIDATION_CODE,
+            message: Some(READ_ONLY_GUIDANCE),
+        };
+    }
+    if !scenario.admits_space_under_test() {
+        return ArtifactProbeExpectation::Refused {
+            code: AUTHENTICATION_CODE,
+            message: None,
+        };
+    }
+    match probe {
+        ArtifactPolicyProbe::StageUpload => {
+            if scenario.policy_options().staging {
+                ArtifactProbeExpectation::Accepted
+            } else {
+                ArtifactProbeExpectation::Refused {
+                    code: VALIDATION_CODE,
+                    message: Some(STAGING_REQUIRED_GUIDANCE),
+                }
+            }
+        }
+        // An absent source and an import-only export destination are both
+        // reported through the single fixed not-found message, so neither
+        // refusal discloses which authorized root exists.
+        ArtifactPolicyProbe::LocalImportMissingSource
+        | ArtifactPolicyProbe::LocalExportUnauthorizedRoot => ArtifactProbeExpectation::Refused {
+            code: NOT_FOUND_CODE,
+            message: None,
+        },
+    }
+}
+
+/// Content-free `artifact_status` projection compared across transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactStatusEvidence {
+    /// Whether local roots were activated.
+    pub local_roots_active: bool,
+    /// Authorized import roots.
+    pub import_root_count: u64,
+    /// Authorized export roots.
+    pub export_root_count: u64,
+    /// Whether the policy declares an enabled staging service.
+    pub staging_configured: bool,
+    /// Whether the staging service is running.
+    pub staging_active: bool,
+}
+
+impl ArtifactStatusEvidence {
+    /// Reads the projection from an `artifact_status` result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed message when a required status field is absent.
+    pub fn from_status(status: &Value) -> Result<Self, String> {
+        Ok(Self {
+            local_roots_active: status["local_roots_active"] == Value::Bool(true),
+            import_root_count: required_u64(status, "import_root_count")?,
+            export_root_count: required_u64(status, "export_root_count")?,
+            staging_configured: status["staging_configured"] == Value::Bool(true),
+            staging_active: status["staging_active"] == Value::Bool(true),
+        })
+    }
+}
+
+/// Content-free result of one policy scenario on one control plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactPolicyEvidence {
+    /// Stable policy scenario identifier.
+    pub scenario: &'static str,
+    /// Stable control-plane identifier that produced this evidence.
+    pub control: &'static str,
+    /// Exact sorted artifact tools advertised by this configuration.
+    pub advertised_tools: Vec<String>,
+    /// Canonical descriptor digests of the advertised artifact tools.
+    pub catalog_digests: BTreeMap<String, String>,
+    /// Exact reported artifact status.
+    pub status: ArtifactStatusEvidence,
+    /// Observed outcome of every executed probe, keyed by probe identifier.
+    pub probes: BTreeMap<&'static str, ArtifactProbeOutcome>,
+}
+
+impl ArtifactPolicyEvidence {
+    /// Whether two control planes observed identical policy behavior.
+    ///
+    /// Only the control-plane identifier may differ.
+    #[must_use]
+    fn matches(&self, other: &Self) -> bool {
+        self.scenario == other.scenario
+            && self.advertised_tools == other.advertised_tools
+            && self.catalog_digests == other.catalog_digests
+            && self.status == other.status
+            && self.probes == other.probes
+    }
+}
+
+/// Fixture inputs for one policy scenario run.
+pub struct ArtifactPolicyRun<'a> {
+    /// Policy scenario under test.
+    pub scenario: ArtifactPolicyScenario,
+    /// Control plane driving the production server.
+    pub control: ArtifactControlPlane,
+    /// Strict operator policy backing the server under test.
+    pub policy: &'a ArtifactPolicyFixture,
+    /// Disposable space context that owns every created resource.
+    pub ctx: &'a TestContext,
+}
+
+/// Runs one policy scenario through one control plane.
+///
+/// The scenario proves three things about a complete server configuration: the
+/// exact advertised artifact catalog, the exact reported artifact status, and
+/// the exact refusal (or acceptance) of every probe. Denied configurations
+/// create nothing upstream, and an accepted staging allocation is released
+/// before the scenario returns, so no staged byte outlives the run.
+///
+/// # Errors
+///
+/// Returns a fixed message describing the first violated expectation; no
+/// artifact byte, staging bearer, or upstream body is retained.
+pub async fn run_artifact_policy_scenario(
+    driver: &mut impl McpDriver,
+    run: &ArtifactPolicyRun<'_>,
+) -> Result<ArtifactPolicyEvidence, String> {
+    let scenario = run.scenario;
+    if run.policy.options() != scenario.policy_options() {
+        return Err(format!(
+            "policy fixture does not realize scenario: {}",
+            scenario.as_str()
+        ));
+    }
+    let space_id = run.ctx.space_id.as_str();
+    let suffix = unique_suffix();
+
+    let descriptors = driver.list_tool_descriptors().await?;
+    let catalog_digests = artifact_descriptor_digests(&descriptors)?;
+    let advertised_tools = catalog_digests.keys().cloned().collect::<Vec<_>>();
+    if advertised_tools != scenario.advertised_tools() {
+        return Err(format!(
+            "advertised artifact catalog is not exact: {}",
+            scenario.as_str()
+        ));
+    }
+    let reviewed = ArtifactCatalogSnapshot::reviewed()?;
+    for (name, digest) in &catalog_digests {
+        if reviewed.tool_digests().get(name) != Some(digest) {
+            return Err(format!("artifact tool contract diverged: {name}"));
+        }
+    }
+
+    let status = ArtifactStatusEvidence::from_status(
+        &driver.call_tool("artifact_status", json!({})).await?,
+    )?;
+    if status != scenario.expected_status() {
+        return Err(format!(
+            "artifact status did not match the configuration: {}",
+            scenario.as_str()
+        ));
+    }
+
+    let mut probes = BTreeMap::new();
+    for probe in ArtifactPolicyProbe::ALL {
+        let outcome = Box::pin(execute_policy_probe(
+            driver, scenario, probe, space_id, &suffix,
+        ))
+        .await?;
+        probes.insert(probe.as_str(), outcome);
+    }
+
+    Ok(ArtifactPolicyEvidence {
+        scenario: scenario.as_str(),
+        control: run.control.as_str(),
+        advertised_tools,
+        catalog_digests,
+        status,
+        probes,
+    })
+}
+
+/// Canonical descriptor digests of every advertised artifact tool.
+///
+/// Unlike [`ArtifactCatalogSnapshot::from_descriptors`] this accepts a reduced
+/// inventory, because a read-only configuration advertises only the status
+/// tool.
+fn artifact_descriptor_digests(descriptors: &[Value]) -> Result<BTreeMap<String, String>, String> {
+    let mut digests = BTreeMap::new();
+    for descriptor in descriptors {
+        let name = descriptor
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "tools/list descriptor omitted its name".to_owned())?;
+        if !ARTIFACT_TOOL_NAMES.contains(&name) {
+            continue;
+        }
+        if digests
+            .insert(name.to_owned(), canonical_digest(descriptor))
+            .is_some()
+        {
+            return Err(format!("duplicate artifact tool descriptor: {name}"));
+        }
+    }
+    Ok(digests)
+}
+
+async fn execute_policy_probe(
+    driver: &mut impl McpDriver,
+    scenario: ArtifactPolicyScenario,
+    probe: ArtifactPolicyProbe,
+    space_id: &str,
+    suffix: &str,
+) -> Result<ArtifactProbeOutcome, String> {
+    let name = probe.tool_name();
+    let arguments = policy_probe_arguments(probe, space_id, suffix);
+    match probe_expectation(scenario, probe) {
+        ArtifactProbeExpectation::Accepted => {
+            let accepted = driver.call_tool(name, arguments).await?;
+            release_probe_allocation(driver, probe, &accepted).await?;
+            Ok(ArtifactProbeOutcome::Accepted)
+        }
+        ArtifactProbeExpectation::Refused { code, message } => {
+            let refusal = driver.call_tool_error(name, arguments).await?;
+            if refusal.code() != code {
+                return Err(format!(
+                    "probe {} was not refused with {code}",
+                    probe.as_str()
+                ));
+            }
+            let observed = refusal
+                .normalized_result()
+                .pointer("/structuredContent/message")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("probe {} omitted its message", probe.as_str()))?
+                .to_owned();
+            if message.is_some_and(|expected| expected != observed) {
+                return Err(format!(
+                    "probe {} was refused with unexpected guidance",
+                    probe.as_str()
+                ));
+            }
+            Ok(ArtifactProbeOutcome::Refused {
+                code: refusal.code().to_owned(),
+                message: observed,
+            })
+        }
+    }
+}
+
+fn policy_probe_arguments(probe: ArtifactPolicyProbe, space_id: &str, suffix: &str) -> Value {
+    match probe {
+        ArtifactPolicyProbe::LocalImportMissingSource => json!({
+            "space": space_id,
+            "source": {"local": {
+                "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                "path": "policy-absent-source.bin"
+            }},
+            "name": format!("policy-{suffix}.bin"),
+            "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+            "idempotency_key": format!("artifact-policy-import-{suffix}")
+        }),
+        // The import root is declared import-only, so naming it as an export
+        // destination must be refused before any upstream file is read.
+        ArtifactPolicyProbe::LocalExportUnauthorizedRoot => json!({
+            "space": space_id,
+            "file_id": format!("policy-absent-file-{suffix}"),
+            "destination": {"local": {
+                "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                "path": format!("policy-export-{suffix}.bin")
+            }},
+            "idempotency_key": format!("artifact-policy-export-{suffix}")
+        }),
+        ArtifactPolicyProbe::StageUpload => json!({
+            "space": space_id,
+            "size_bytes": ARTIFACT_FILE_PAYLOAD.len(),
+            "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+            "expected_sha256": artifact_sha256(ARTIFACT_FILE_PAYLOAD)
+        }),
+    }
+}
+
+/// Releases an accepted staging allocation so no record outlives the probe.
+async fn release_probe_allocation(
+    driver: &mut impl McpDriver,
+    probe: ArtifactPolicyProbe,
+    accepted: &Value,
+) -> Result<(), String> {
+    if probe != ArtifactPolicyProbe::StageUpload {
+        return Ok(());
+    }
+    let handle = required_str(accepted, "/handle")?;
+    let released = driver
+        .call_tool("artifact_release", json!({"handle": handle}))
+        .await?;
+    if released["released"] == Value::Bool(true) {
+        Ok(())
+    } else {
+        Err("accepted staging allocation was not released".to_owned())
+    }
+}
+
+/// Proves that every control plane observed the same policy behavior.
+///
+/// # Errors
+///
+/// Returns a fixed message naming the first divergent control plane, or
+/// reporting an incomplete, misordered, or duplicated executed matrix.
+pub fn assert_artifact_policy_parity(
+    executed: &[ArtifactPolicyEvidence],
+    expected: &[ArtifactControlPlane],
+) -> Result<(), String> {
+    if executed.len() != expected.len() {
+        return Err("executed artifact policy matrix is incomplete".to_owned());
+    }
+    let mut observed = Vec::with_capacity(executed.len());
+    for (evidence, control) in executed.iter().zip(expected) {
+        if evidence.control != control.as_str() {
+            return Err(format!(
+                "artifact policy evidence out of order: {}",
+                evidence.control
+            ));
+        }
+        if observed.contains(&evidence.control) {
+            return Err(format!(
+                "duplicate artifact policy evidence: {}",
+                evidence.control
+            ));
+        }
+        observed.push(evidence.control);
+    }
+    let Some(baseline) = executed.first() else {
+        return Err("artifact policy parity requires at least one control plane".to_owned());
+    };
+    for evidence in executed.iter().skip(1) {
+        if !baseline.matches(evidence) {
+            return Err(format!(
+                "artifact policy control plane diverged from {}: {}",
+                baseline.control, evidence.control
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Fixed upstream server-log error classes already isolated and tracked.
 pub const KNOWN_SERVER_LOG_CLASSES: [(&str, &str); 5] = [
     (
@@ -1705,16 +2337,239 @@ mod tests {
     fn policy_fixture_omits_staging_when_it_is_disabled() {
         let fixture = ArtifactPolicyFixture::create_with(
             "bafyrei-acceptance-space",
-            ArtifactPolicyOptions {
-                staging: false,
-                read_only: true,
-            },
+            ArtifactPolicyScenario::StagingDisabled.policy_options(),
         )
         .expect("artifact policy fixture");
         let contents = fixture.policy_contents().expect("policy contents");
         assert!(!contents.contains("[staging]"));
-        assert!(contents.contains("read_only = true"));
         assert!(fixture.staging_base_url().is_none());
+    }
+
+    #[test]
+    fn policy_scenarios_are_closed_uniquely_named_and_configured() {
+        let mut identifiers = std::collections::BTreeSet::new();
+        let mut options = Vec::new();
+        for scenario in ArtifactPolicyScenario::ALL {
+            assert!(
+                identifiers.insert(scenario.as_str()),
+                "duplicate policy scenario identifier"
+            );
+            assert_eq!(
+                ArtifactPolicyScenario::parse(scenario.as_str()),
+                Some(scenario)
+            );
+            assert!(
+                !options.contains(&scenario.policy_options()),
+                "policy scenario {} duplicates another configuration",
+                scenario.as_str()
+            );
+            options.push(scenario.policy_options());
+        }
+        assert!(ArtifactPolicyScenario::parse("spaces_partial").is_none());
+        for probe in ArtifactPolicyProbe::ALL {
+            assert!(ARTIFACT_TOOL_NAMES.contains(&probe.tool_name()));
+        }
+    }
+
+    #[test]
+    fn rendered_policy_declares_each_configured_space_shape() {
+        let render = |scenario: ArtifactPolicyScenario| {
+            ArtifactPolicyFixture::create_with("bafyrei-under-test", scenario.policy_options())
+                .expect("artifact policy fixture")
+                .policy_contents()
+                .expect("policy contents")
+        };
+
+        let omitted = render(ArtifactPolicyScenario::SpacesOmitted);
+        assert!(!omitted.contains("allowed"));
+        let empty = render(ArtifactPolicyScenario::SpacesEmpty);
+        assert!(empty.contains("allowed = []"));
+        let restricted = render(ArtifactPolicyScenario::SpacesRestrictedElsewhere);
+        assert!(restricted.contains(UNAUTHORIZED_SPACE_ID));
+        assert!(!restricted.contains("bafyrei-under-test"));
+        let allowed = render(ArtifactPolicyScenario::ReadOnly);
+        assert!(allowed.contains("allowed = [{ id = \"bafyrei-under-test\" }]"));
+    }
+
+    #[test]
+    fn rendered_policy_is_always_writable_because_the_parser_rejects_read_only() {
+        // `ArtifactConfig::from_toml` fails closed on `spaces.read_only = true`,
+        // so read-only coverage must come from the server's read-only mode.
+        for scenario in ArtifactPolicyScenario::ALL {
+            let contents =
+                ArtifactPolicyFixture::create_with("bafyrei-under-test", scenario.policy_options())
+                    .expect("artifact policy fixture")
+                    .policy_contents()
+                    .expect("policy contents");
+            assert!(contents.contains("read_only = false"));
+            assert!(!contents.contains("read_only = true"));
+        }
+    }
+
+    #[test]
+    fn policy_expectations_cover_every_scenario_and_probe_exactly() {
+        let refused = |code, message| ArtifactProbeExpectation::Refused { code, message };
+        for probe in ArtifactPolicyProbe::ALL {
+            assert_eq!(
+                probe_expectation(ArtifactPolicyScenario::ReadOnly, probe),
+                refused(VALIDATION_CODE, Some(READ_ONLY_GUIDANCE))
+            );
+            for denied in [
+                ArtifactPolicyScenario::SpacesEmpty,
+                ArtifactPolicyScenario::SpacesRestrictedElsewhere,
+            ] {
+                assert!(!denied.admits_space_under_test());
+                assert_eq!(
+                    probe_expectation(denied, probe),
+                    refused(AUTHENTICATION_CODE, None)
+                );
+            }
+            let expected = if probe == ArtifactPolicyProbe::StageUpload {
+                ArtifactProbeExpectation::Accepted
+            } else {
+                refused(NOT_FOUND_CODE, None)
+            };
+            assert_eq!(
+                probe_expectation(ArtifactPolicyScenario::SpacesOmitted, probe),
+                expected
+            );
+            let staging_disabled = if probe == ArtifactPolicyProbe::StageUpload {
+                refused(VALIDATION_CODE, Some(STAGING_REQUIRED_GUIDANCE))
+            } else {
+                refused(NOT_FOUND_CODE, None)
+            };
+            assert_eq!(
+                probe_expectation(ArtifactPolicyScenario::StagingDisabled, probe),
+                staging_disabled
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_configuration_advertises_only_the_status_tool() {
+        assert_eq!(
+            ArtifactPolicyScenario::ReadOnly.advertised_tools(),
+            vec!["artifact_status"]
+        );
+        assert_eq!(
+            ArtifactPolicyScenario::ReadOnly.expected_status(),
+            ArtifactStatusEvidence {
+                local_roots_active: false,
+                import_root_count: 0,
+                export_root_count: 0,
+                staging_configured: true,
+                staging_active: false,
+            }
+        );
+        for scenario in ArtifactPolicyScenario::ALL {
+            if scenario.is_read_only() {
+                continue;
+            }
+            assert_eq!(scenario.advertised_tools(), ARTIFACT_TOOL_NAMES.to_vec());
+            let status = scenario.expected_status();
+            assert!(status.local_roots_active);
+            assert_eq!(status.import_root_count, 1);
+            assert_eq!(status.export_root_count, 1);
+            assert_eq!(
+                status.staging_active,
+                scenario.policy_options().staging,
+                "staging activation must follow the configuration"
+            );
+            assert_eq!(status.staging_configured, status.staging_active);
+        }
+    }
+
+    fn policy_evidence(
+        scenario: ArtifactPolicyScenario,
+        control: ArtifactControlPlane,
+    ) -> ArtifactPolicyEvidence {
+        let advertised_tools = scenario
+            .advertised_tools()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let catalog_digests = advertised_tools
+            .iter()
+            .map(|name| (name.clone(), "d".repeat(64)))
+            .collect();
+        let probes = ArtifactPolicyProbe::ALL
+            .into_iter()
+            .map(|probe| {
+                let outcome = match probe_expectation(scenario, probe) {
+                    ArtifactProbeExpectation::Accepted => ArtifactProbeOutcome::Accepted,
+                    ArtifactProbeExpectation::Refused { code, message } => {
+                        ArtifactProbeOutcome::Refused {
+                            code: code.to_owned(),
+                            message: message.unwrap_or("Not found.").to_owned(),
+                        }
+                    }
+                };
+                (probe.as_str(), outcome)
+            })
+            .collect();
+        ArtifactPolicyEvidence {
+            scenario: scenario.as_str(),
+            control: control.as_str(),
+            advertised_tools,
+            catalog_digests,
+            status: scenario.expected_status(),
+            probes,
+        }
+    }
+
+    #[test]
+    fn policy_parity_requires_the_complete_ordered_control_matrix() {
+        let scenario = ArtifactPolicyScenario::SpacesRestrictedElsewhere;
+        let expected = ArtifactControlPlane::ALL;
+        let executed = expected
+            .into_iter()
+            .map(|control| policy_evidence(scenario, control))
+            .collect::<Vec<_>>();
+        assert_eq!(assert_artifact_policy_parity(&executed, &expected), Ok(()));
+
+        assert!(assert_artifact_policy_parity(&executed[..2], &expected).is_err());
+        let mut reordered = executed.clone();
+        reordered.swap(0, 1);
+        assert!(assert_artifact_policy_parity(&reordered, &expected).is_err());
+
+        let mut divergent = executed.clone();
+        divergent[3].probes.insert(
+            ArtifactPolicyProbe::StageUpload.as_str(),
+            ArtifactProbeOutcome::Accepted,
+        );
+        assert_eq!(
+            assert_artifact_policy_parity(&divergent, &expected),
+            Err(format!(
+                "artifact policy control plane diverged from {}: {}",
+                expected[0].as_str(),
+                expected[3].as_str()
+            ))
+        );
+
+        let mut relaxed = executed;
+        relaxed[2].advertised_tools = vec!["artifact_status".to_owned()];
+        assert!(assert_artifact_policy_parity(&relaxed, &expected).is_err());
+    }
+
+    #[test]
+    fn advertised_digests_accept_a_reduced_read_only_catalog() {
+        let mut descriptors = complete_descriptors();
+        assert_eq!(
+            artifact_descriptor_digests(&descriptors)
+                .expect("complete catalog")
+                .len(),
+            ARTIFACT_TOOL_NAMES.len()
+        );
+        descriptors.retain(|entry| entry["name"] == json!("artifact_status"));
+        descriptors.push(descriptor("object_search", "unrelated"));
+        let digests = artifact_descriptor_digests(&descriptors).expect("reduced catalog");
+        assert_eq!(
+            digests.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["artifact_status"]
+        );
+
+        descriptors.push(descriptor("artifact_status", "duplicate"));
+        assert!(artifact_descriptor_digests(&descriptors).is_err());
     }
 
     #[test]
