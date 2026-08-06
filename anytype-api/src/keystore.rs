@@ -285,7 +285,7 @@ fn valid_modifier_key(value: &str) -> bool {
 /// The static default keystore backend for the current platform.
 ///
 /// On Linux the effective default is resolved at runtime by
-/// [`resolve_default_store`], which prefers a running Secret Service and only
+/// `resolve_default_store`, which prefers a running Secret Service and only
 /// falls back to this `"file"` value when none is available; keyutils is no
 /// longer used as a default because it is non-persistent and its read path is
 /// unsupported by the keyring core (`search`). Other platforms use their native

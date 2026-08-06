@@ -149,6 +149,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Fix the `cargo doc` warning caused by `default_platform_keyring` linking to
+  the private `resolve_default_store` helper.
 - Fix the disposable test-harness sweep failing every run when an unrelated
   ambient space has an empty name: strict name validation now applies only to
   prefix-authorized (deletable) spaces, while unauthorized spaces keep
