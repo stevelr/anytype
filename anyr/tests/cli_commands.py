@@ -272,17 +272,35 @@ class TestAnyrCommands(unittest.TestCase):
         try:
             yield space_id
         finally:
-            run_anyr_with_input(
+            deleted = run_anyr_with_input(
                 f"n\ndelete:{space_name}\n", "space", "delete", space_id
+            )
+            self.assertEqual(
+                deleted.returncode,
+                0,
+                msg=(
+                    f"failed to delete disposable space {space_name}:\n"
+                    f"stdout={deleted.stdout}\n"
+                    f"stderr={deleted.stderr}"
+                ),
             )
             # Prove the deletion landed before returning. Other tests select
             # their working space by prefix, so a space that lingers in the
-            # listing would silently be adopted by one of them.
+            # listing would silently be adopted by one of them. A successful
+            # listing is required so transport and authentication failures do
+            # not masquerade as proof of absence.
             deadline = time.monotonic() + 30
-            while run_anyr("space", "get", space_id).returncode == 0:
+            while True:
+                spaces = run_anyr_json("space", "list", "--all")
+                self.assertIsInstance(spaces, list, "space list --all was not a list")
+                if not any(
+                    isinstance(space, dict) and space.get("id") == space_id
+                    for space in spaces
+                ):
+                    break
                 if time.monotonic() >= deadline:
                     raise AssertionError(
-                        f"disposable space {space_name} still resolves after deletion"
+                        f"disposable space {space_name} still appears after deletion"
                     )
                 time.sleep(1)
 
