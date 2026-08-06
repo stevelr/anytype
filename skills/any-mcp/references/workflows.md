@@ -76,22 +76,22 @@ Example `message-blocks.json`:
 
 ```json
 [
-	{
-		"type": "text",
-		"content": {
-			"text": "Saved for later",
-			"style": "header2",
-			"marks": [],
-			"checked": false
-		}
-	},
-	{
-		"type": "link",
-		"content": {
-			"target_object_id": "OBJECT_ID",
-			"kind": "object"
-		}
-	}
+  {
+    "type": "text",
+    "content": {
+      "text": "Saved for later",
+      "style": "header2",
+      "marks": [],
+      "checked": false
+    }
+  },
+  {
+    "type": "link",
+    "content": {
+      "target_object_id": "OBJECT_ID",
+      "kind": "object"
+    }
+  }
 ]
 ```
 
