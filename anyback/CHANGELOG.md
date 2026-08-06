@@ -10,6 +10,12 @@
 
 ### Changed
 
+- Markdown conversion unit tests now build self-contained protobuf and
+  `pb.json` archive fixtures in test code instead of depending on an external
+  `samples/` tree, so heading, list-whitespace, table, and `save_archive_object`
+  coverage runs in the ordinary offline suite. Added classified-error coverage
+  for unknown object ids, malformed protobuf and `pb-json` snapshots,
+  unsupported snapshot extensions, missing root blocks, and missing archives.
 - Normalized Rust and spellchecker configuration formatting.
 - bumped dependencies: lru -> 0.16.4, nix -> 0.31.1, rand -> 0.10.0
 
