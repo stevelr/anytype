@@ -40,7 +40,8 @@ use crate::{
 };
 
 use super::headless_integration::live_scenario::{
-    OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow,
+    ARTIFACT_TOOL_NAMES, ArtifactCatalogSnapshot, OptionalFastWorkflow, OptionalOperation,
+    OptionalRealWorkflow,
 };
 
 const ALPHA_READ: &str = "alpha_read";
@@ -56,6 +57,7 @@ const OPTIONAL_TOKEN_BUDGET: &str =
     include_str!("../../tests/snapshots/optional-toolsets-token-budget.json");
 const PRODUCTION_TOKEN_BUDGET: &str =
     include_str!("../../tests/snapshots/production-optional-token-budget.json");
+const ARTIFACT_CATALOG_SNAPSHOT: &str = include_str!("../../tests/snapshots/artifact-catalog.snap");
 const COMPACT_CATALOG_SNAPSHOT: &str = include_str!("../../tests/snapshots/catalog-compact.snap");
 const COMPACT_READ_ONLY_CATALOG_SNAPSHOT: &str =
     include_str!("../../tests/snapshots/catalog-compact-read-only.snap");
@@ -2260,6 +2262,40 @@ fn composed_catalogs_match_reviewed_token_measurements_and_ceilings() {
     );
 }
 
+/// Serializes the exact advertised artifact catalog, including every schema.
+fn artifact_catalog_snapshot() -> String {
+    let server = production_server(Some("artifacts"), ApplicationProfile::Standard, false, true)
+        .expect("linked artifacts production catalog");
+    let tools = server
+        .tools()
+        .iter()
+        .filter(|tool| ARTIFACT_TOOL_NAMES.contains(&tool.name.as_ref()))
+        .cloned()
+        .collect::<Vec<_>>();
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&canonical_json(json!({"tools": tools})))
+            .expect("artifact catalog snapshot")
+    )
+}
+
+#[test]
+fn artifact_catalog_matches_its_reviewed_snapshot() {
+    let snapshot = artifact_catalog_snapshot();
+    assert_eq!(
+        snapshot, ARTIFACT_CATALOG_SNAPSHOT,
+        "regenerate tests/snapshots/artifact-catalog.snap and review the complete diff"
+    );
+    let value: Value = serde_json::from_str(&snapshot).expect("artifact catalog snapshot value");
+    let descriptors = value["tools"].as_array().expect("artifact descriptors");
+    let observed =
+        ArtifactCatalogSnapshot::from_descriptors(descriptors).expect("exact artifact inventory");
+    ArtifactCatalogSnapshot::reviewed()
+        .expect("reviewed artifact catalog")
+        .compare(&observed)
+        .expect("reviewed artifact catalog matches the linked production contract");
+}
+
 #[test]
 #[ignore = "manual updater; review every optional contract and token delta"]
 fn write_optional_snapshots() {
@@ -2281,4 +2317,9 @@ fn write_optional_snapshots() {
         production_budget_json(),
     )
     .expect("write reviewed production optional token budget");
+    fs::write(
+        directory.join("artifact-catalog.snap"),
+        artifact_catalog_snapshot(),
+    )
+    .expect("write reviewed artifact catalog snapshot");
 }

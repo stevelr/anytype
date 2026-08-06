@@ -2263,6 +2263,18 @@ pub trait McpDriver {
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>>;
 
+    /// Returns complete `tools/list` descriptors, including every schema.
+    ///
+    /// Drivers that intentionally expose no catalog contract keep the default,
+    /// which fails closed rather than reporting an empty catalog.
+    fn list_tool_descriptors<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, String>> + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "driver does not expose tool descriptors".to_owned(),
+        )))
+    }
+
     fn list_resources<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>>;
@@ -4307,6 +4319,20 @@ pub use optional_workflow::{
     OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow, OptionalRegistry,
 };
 
+#[path = "artifact_acceptance.rs"]
+mod artifact_acceptance;
+// Each consuming acceptance target executes a different part of the artifact
+// transport matrix, so no single target names the complete harness surface.
+#[allow(unused_imports)]
+pub use artifact_acceptance::{
+    ARTIFACT_CREATE_MARKDOWN, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES,
+    ARTIFACT_UPDATE_MARKDOWN, ArtifactCatalogSnapshot, ArtifactControlPlane, ArtifactDataPlane,
+    ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactServerLogAudit, ArtifactSmokeEvidence,
+    ArtifactSmokeFixture, ArtifactTransport, artifact_sha256, assert_artifact_parity,
+    audit_server_log, classify_server_log, require_completed, run_artifact_smoke_scenario,
+    server_log_offset, validate_tool_frame,
+};
+
 /// Evidence tier required for every optional production operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptionalEvidenceTier {
@@ -4439,7 +4465,7 @@ pub struct OptionalScenarioId {
 impl OptionalScenarioId {
     /// Exact executable scenario inventory owned by the common foundation and
     /// the seven linked production descriptors.
-    pub const EXECUTABLE: [Self; 69] = [
+    pub const EXECUTABLE: [Self; 71] = [
         define_fast_with_owner(
             "optional_toolset_status_direct_contract",
             OptionalRegistry::CommonFoundation,
@@ -4470,6 +4496,16 @@ impl OptionalScenarioId {
         ),
         define_real(
             "artifact_local_real_headless",
+            OptionalRealWorkflow::Artifacts,
+            ARTIFACT_OPERATIONS,
+        ),
+        define_real(
+            "artifact_remote_staging_real_headless",
+            OptionalRealWorkflow::Artifacts,
+            ARTIFACT_OPERATIONS,
+        ),
+        define_real(
+            "artifact_direct_real_headless",
             OptionalRealWorkflow::Artifacts,
             ARTIFACT_OPERATIONS,
         ),
@@ -5784,7 +5820,7 @@ mod ownership_tests {
             optional_scenario_inventory(&declarations)
                 .expect("exact typed optional scenario inventory")
                 .len(),
-            69
+            71
         );
 
         let mut duplicate = declarations.clone();

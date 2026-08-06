@@ -561,6 +561,80 @@ impl RuntimeContext {
         )
     }
 
+    /// Builds a live runtime that owns activated artifact roots, staging, and
+    /// validators from an already parsed strict artifact policy.
+    ///
+    /// This is the direct-router acceptance seam. A production stdio child
+    /// reaches the same state through [`RuntimeContext::start`], which
+    /// additionally performs credential lookup and the startup probes an
+    /// acceptance fixture has already proven with its own client. The fixture
+    /// shape is fixed: standard profile, read-write, two concurrent requests,
+    /// and a 30-second request timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same concise [`StartupError`] values as
+    /// [`RuntimeContext::start`] when the space policy, roots, staging service,
+    /// or validators cannot be activated.
+    #[cfg(test)]
+    pub(crate) async fn from_parts_with_artifact_policy(
+        client: AnytypeClient,
+        startup_status: StartupStatus,
+        optional_toolsets: OptionalToolsetSelection,
+        artifact: &ArtifactConfig,
+    ) -> Result<Self, StartupError> {
+        let authority = SpaceAuthority::initialize(&client, &artifact.spaces)
+            .await
+            .map_err(|_| StartupError::SpacePolicy)?;
+        let artifact_roots = if optional_toolsets.contains("artifacts") {
+            Some(RootRegistry::activate(artifact).map_err(|_| StartupError::ArtifactRoots)?)
+        } else {
+            None
+        };
+        let mut runtime = Self::from_parts_with_authority(
+            client,
+            RuntimeParts {
+                max_concurrency: 2,
+                request_timeout: Duration::from_secs(30),
+                startup_status,
+                profile: ApplicationProfile::Standard,
+                read_only: false,
+                optional_toolsets,
+                space_authority: authority,
+            },
+        );
+        let artifact_staging = match (
+            artifact_roots.as_ref(),
+            artifact.staging().filter(|staging| staging.enabled),
+        ) {
+            (Some(roots), Some(staging)) => Some(
+                ArtifactStaging::activate(
+                    staging,
+                    &artifact.limits,
+                    roots,
+                    runtime.shutdown.clone(),
+                )
+                .await
+                .map_err(|_| StartupError::ArtifactStaging)?,
+            ),
+            _ => None,
+        };
+        let artifact_validators = if artifact_roots.is_some() && !artifact.validators().is_empty() {
+            Some(
+                ValidatorRunner::activate(artifact.validators(), &artifact.limits)
+                    .await
+                    .map_err(|_| StartupError::ArtifactValidators)?,
+            )
+        } else {
+            None
+        };
+        runtime.artifact_config = Arc::new(artifact.clone());
+        runtime.artifact_roots = artifact_roots;
+        runtime.artifact_staging = artifact_staging;
+        runtime.artifact_validators = artifact_validators;
+        Ok(runtime)
+    }
+
     fn from_parts_with_authority(client: AnytypeClient, parts: RuntimeParts) -> Self {
         Self {
             identity: Arc::new(()),

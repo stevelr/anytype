@@ -34,6 +34,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+use crate::artifact_config::ArtifactConfig;
 use crate::optional_toolsets::{
     OptionalToolsetSelection, production_optional_metadata, production_optional_registries,
 };
@@ -42,6 +43,10 @@ use crate::runtime::{RuntimeContext, StartupStatus};
 #[path = "../../tests/support/live_scenario.rs"]
 pub(super) mod live_scenario;
 
+use live_scenario::{
+    ArtifactPolicyFixture, ArtifactSmokeFixture, ArtifactTransport, assert_artifact_parity,
+    require_completed, run_artifact_smoke_scenario,
+};
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
     OptionalOperation, OptionalRealWorkflow, OptionalRegistry, OptionalScenarioDeclaration,
@@ -276,6 +281,21 @@ impl McpDriver for DirectRouterDriver<'_> {
                 .iter()
                 .map(|tool| tool.name.to_string())
                 .collect())
+        })
+    }
+
+    fn list_tool_descriptors<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, String>> + 'a>> {
+        Box::pin(async move {
+            self.server
+                .tools()
+                .iter()
+                .map(|tool| {
+                    serde_json::to_value(tool)
+                        .map_err(|error| format!("serialize tool descriptor: {error}"))
+                })
+                .collect()
         })
     }
 
@@ -2230,7 +2250,7 @@ fn advertised_optional_catalog_has_exact_typed_scenario_and_space_policy_ownersh
                 .map(|scenario| OptionalScenarioDeclaration::real_headless(registry_id, scenario)),
         );
     }
-    assert_eq!(scenario_declarations.len(), 69);
+    assert_eq!(scenario_declarations.len(), 71);
     live_scenario::validate_optional_live_ownership(
         &optional_tool_refs,
         &optional_resource_families,
@@ -2551,6 +2571,105 @@ fn headless_direct_ordinary_tools_cover_representative_layouts() {
             );
         }
     });
+}
+
+/// Builds a direct-router server that owns the fixture's artifact policy.
+async fn live_artifact_server(
+    ctx: &TestContext,
+    policy: &ArtifactPolicyFixture,
+) -> Result<AnyMcpServer, TestError> {
+    ctx.client
+        .ping_http()
+        .await
+        .expect("artifact suite requires authenticated HTTP");
+    ctx.client
+        .ping_grpc()
+        .await
+        .expect("artifact suite requires authenticated gRPC");
+    let contents = policy.policy_contents().map_err(|_| TestError::Assertion {
+        message: "read artifact acceptance policy".to_owned(),
+    })?;
+    let artifact = ArtifactConfig::from_toml(&contents).map_err(|_| TestError::Assertion {
+        message: "parse artifact acceptance policy".to_owned(),
+    })?;
+    let selected = OptionalToolsetSelection::parse(
+        Some("artifacts".to_owned()),
+        &production_optional_metadata(),
+    )
+    .expect("complete artifacts registry");
+    let runtime = RuntimeContext::from_parts_with_artifact_policy(
+        ctx.client.clone(),
+        StartupStatus {
+            http_available: true,
+            grpc_available: true,
+        },
+        selected,
+        &artifact,
+    )
+    .await
+    .map_err(|_| TestError::Assertion {
+        message: "activate artifact acceptance runtime".to_owned(),
+    })?;
+    Ok(AnyMcpServer::new(runtime).expect("production artifacts MCP catalog"))
+}
+
+/// Runs the direct-router half of the artifact acceptance transport matrix.
+///
+/// The in-process router shares its strict policy, disposable space, and
+/// evidence contract with the spawned production children, so a divergence
+/// between transports is a contract failure rather than a fixture difference.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_direct_transport_matrix_scenario() {
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-direct",
+        |ctx| {
+            Box::pin(async move {
+                let policy = ArtifactPolicyFixture::create(&ctx.space_id).map_err(|_| {
+                    TestError::Assertion {
+                        message: "create artifact acceptance policy".to_owned(),
+                    }
+                })?;
+                let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                let mut evidence = Vec::with_capacity(ArtifactTransport::DIRECT_MATRIX.len());
+                for transport in ArtifactTransport::DIRECT_MATRIX {
+                    eprintln!("artifact acceptance transport={}", transport.id());
+                    let mut driver = DirectRouterDriver { server: &server };
+                    let fixture = ArtifactSmokeFixture {
+                        transport,
+                        policy: &policy,
+                        ctx: ctx.as_ref(),
+                    };
+                    let observed = Box::pin(run_artifact_smoke_scenario(&mut driver, &fixture))
+                        .await
+                        .map_err(|error| {
+                            eprintln!(
+                                "artifact acceptance transport={} failure={error}",
+                                transport.id()
+                            );
+                            TestError::Assertion {
+                                message: "direct artifact acceptance transport failed".to_owned(),
+                            }
+                        })?;
+                    evidence.push(observed);
+                }
+                assert_artifact_parity(&evidence, &ArtifactTransport::DIRECT_MATRIX).map_err(
+                    |error| {
+                        eprintln!("artifact acceptance parity failure={error}");
+                        TestError::Assertion {
+                            message: "direct artifact transports diverged".to_owned(),
+                        }
+                    },
+                )?;
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct artifact acceptance matrix");
+    require_completed(outcome, "direct artifact acceptance matrix")
+        .expect("prefix-authorized disposable admission");
 }
 
 #[tokio::test]

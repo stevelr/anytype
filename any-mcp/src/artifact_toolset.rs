@@ -2893,7 +2893,11 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
     }
 
     fn headless_scenario_ids(&self) -> &'static [&'static str] {
-        &["artifact_local_real_headless"]
+        &[
+            "artifact_local_real_headless",
+            "artifact_remote_staging_real_headless",
+            "artifact_direct_real_headless",
+        ]
     }
 
     fn catalog_token_ceiling(&self) -> usize {

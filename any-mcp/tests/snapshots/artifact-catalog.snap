@@ -1,0 +1,1978 @@
+{
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Release one exact authenticated staging record and its private bytes.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "handle": {
+            "description": "Opaque staging bearer returned by allocation or remote export.",
+            "maxLength": 128,
+            "minLength": 64,
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle"
+        ],
+        "type": "object"
+      },
+      "name": "artifact_release",
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "released": {
+            "description": "Whether the exact authenticated record was released.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "released"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Allocate one exact-size authenticated remote import stage. Returns an opaque bearer separately from the fixed upload URL and never carries artifact bytes.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "expected_sha256": {
+            "description": "Optional expected lowercase SHA-256 checked before the stage becomes ready.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "media_type": {
+            "description": "Optional canonical MIME essence asserted by the caller.",
+            "maxLength": 255,
+            "minLength": 3,
+            "pattern": "^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$",
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Exact complete upload length reserved against staging quota.",
+            "maximum": 1073741824,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "space": {
+            "description": "Exact Anytype space ID or configured resolvable space name.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "space",
+          "size_bytes"
+        ],
+        "type": "object"
+      },
+      "name": "artifact_stage_upload",
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "description": "Presentation expiry timestamp; monotonic time governs authority.",
+            "maxLength": 64,
+            "minLength": 20,
+            "type": "string"
+          },
+          "handle": {
+            "description": "Opaque staging bearer credential; never place it in a URL.",
+            "maxLength": 128,
+            "minLength": 64,
+            "type": "string"
+          },
+          "offset": {
+            "description": "Initial or resumable committed byte offset.",
+            "maximum": 1073741824,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "record": {
+            "description": "Bounded non-secret record identifier used only in the staging route.",
+            "maxLength": 32,
+            "minLength": 32,
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Exact complete upload length reserved for this record.",
+            "maximum": 1073741824,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "upload_url": {
+            "description": "Fixed operator-configured upload URL containing only the record ID.",
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "record",
+          "handle",
+          "upload_url",
+          "expires_at",
+          "size_bytes",
+          "offset"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Inspect bounded artifact capability status. Returns counts and activation categories only; never paths, handles, credentials, or payloads.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "artifact_status",
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "export_root_count": {
+            "description": "Number of effective local export roots, without revealing their IDs.",
+            "maximum": 64,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "import_root_count": {
+            "description": "Number of effective local import roots, without revealing their IDs.",
+            "maximum": 64,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "local_roots_active": {
+            "description": "Whether local root capabilities were activated for this process.",
+            "type": "boolean"
+          },
+          "staging_active": {
+            "description": "Whether the supervised staging service is accepting requests.",
+            "type": "boolean"
+          },
+          "staging_configured": {
+            "description": "Whether the selected startup policy declares remote staging.",
+            "type": "boolean"
+          },
+          "validator_available_count": {
+            "description": "Number of validators whose executable and platform boundary were admitted.",
+            "maximum": 64,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "validator_count": {
+            "description": "Number of configured validator policies, without revealing their IDs.",
+            "maximum": 64,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "local_roots_active",
+          "import_root_count",
+          "export_root_count",
+          "staging_configured",
+          "staging_active",
+          "validator_count",
+          "validator_available_count"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Write one exact complete canonical Anytype Markdown body to an authorized create-new destination and return only bounded identity, counts, hashes, and receipt metadata.",
+      "inputSchema": {
+        "$defs": {
+          "ArtifactDestination": {
+            "additionalProperties": false,
+            "properties": {
+              "local": {
+                "$ref": "#/$defs/ArtifactLocalLocation",
+                "description": "Authorized local create-new destination, mutually exclusive with `remote`."
+              },
+              "remote": {
+                "description": "Whether to allocate a remote immutable download stage.",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "ArtifactLocalLocation": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Portable UTF-8 path relative to the selected root; exactly one path form is required.",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "path_native": {
+                "additionalProperties": false,
+                "description": "Platform-native encoded path relative to the selected root; exactly one path form is required.",
+                "properties": {
+                  "encoding": {
+                    "description": "Closed encoding for the current platform's native path representation.",
+                    "enum": [
+                      "unix-bytes-base64url",
+                      "windows-wtf16le-base64url"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "description": "Canonical unpadded base64url native path bytes or code units.",
+                    "maxLength": 5462,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "root": {
+                "description": "Canonical logical ID of one configured local artifact root.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "$ref": "#/$defs/ArtifactDestination",
+            "description": "Authorized create-new local or remote destination."
+          },
+          "expected_body_sha256": {
+            "description": "Optional SHA-256 precondition for the canonical Markdown body.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Stable caller key binding this create-new publication attempt.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "object_id": {
+            "description": "Exact Anytype object identifier; names are never guessed.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "space": {
+            "description": "Exact Anytype space ID or configured resolvable space name.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "space",
+          "object_id",
+          "destination",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "document_export",
+      "outputSchema": {
+        "$defs": {
+          "ArtifactDirection": {
+            "enum": [
+              "import",
+              "export"
+            ],
+            "type": "string"
+          },
+          "ArtifactReceipt": {
+            "additionalProperties": false,
+            "properties": {
+              "declared_media_type": {
+                "description": "Canonical MIME essence asserted at import, when supplied.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "direction": {
+                "$ref": "#/$defs/ArtifactDirection",
+                "description": "Direction in which bytes moved relative to Anytype."
+              },
+              "root_id": {
+                "description": "Logical root ID used without exposing a physical path.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sha256": {
+                "description": "Lowercase SHA-256 of the verified bytes.",
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "size_bytes": {
+                "description": "Exact byte length of the verified artifact.",
+                "maximum": 1073741824,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "space_id": {
+                "description": "Canonical Anytype space identity bound to the receipt.",
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              "staging_handle": {
+                "description": "Opaque remote bearer returned separately from the staging URL.",
+                "maxLength": 128,
+                "minLength": 64,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "staging_record": {
+                "description": "Non-secret remote record identifier when staged.",
+                "maxLength": 32,
+                "minLength": 32,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "staging_url": {
+                "description": "Fixed remote download URL containing no bearer credential.",
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/ArtifactState",
+                "description": "Terminal state proven by this operation."
+              },
+              "stored_media_type": {
+                "description": "Canonical MIME essence reported by the completed representation.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "validators": {
+                "description": "Bounded results from startup-configured validator policies.",
+                "items": {
+                  "$ref": "#/$defs/ValidatorFinding"
+                },
+                "maxItems": 16,
+                "type": "array"
+              }
+            },
+            "required": [
+              "direction",
+              "state",
+              "space_id",
+              "size_bytes",
+              "sha256",
+              "validators"
+            ],
+            "type": "object"
+          },
+          "ArtifactState": {
+            "enum": [
+              "consumed",
+              "available"
+            ],
+            "type": "string"
+          },
+          "ValidatorFinding": {
+            "additionalProperties": false,
+            "description": "Bounded public result from one startup-configured validator.",
+            "properties": {
+              "detected_media_type": {
+                "description": "Bounded detected MIME essence for a successful `file-mime` driver.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "Stable configured logical validator ID.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/ValidatorStatus",
+                "description": "Closed completion category."
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ValidatorStatus": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "unavailable",
+              "skipped",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "chars": {
+            "description": "Exact canonical Unicode scalar count.",
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "object_id": {
+            "description": "Exact exported Anytype object identity.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/$defs/ArtifactReceipt",
+            "description": "Bounded proof of create-new publication."
+          },
+          "reused": {
+            "description": "Whether a completed process-generation idempotency result was reused.",
+            "type": "boolean"
+          },
+          "sha256": {
+            "description": "SHA-256 of the exact canonical bytes written.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Exact canonical UTF-8 byte count.",
+            "maximum": 67108864,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "space_id": {
+            "description": "Canonical Anytype space identity.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "space_id",
+          "object_id",
+          "size_bytes",
+          "chars",
+          "sha256",
+          "receipt",
+          "reused"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Create one Anytype document from a complete authorized UTF-8 Markdown or plain-text artifact. Payload bytes never enter MCP arguments or results; source and canonical hashes are reported separately because Anytype may canonicalize Markdown.",
+      "inputSchema": {
+        "$defs": {
+          "ArtifactLocalLocation": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Portable UTF-8 path relative to the selected root; exactly one path form is required.",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "path_native": {
+                "additionalProperties": false,
+                "description": "Platform-native encoded path relative to the selected root; exactly one path form is required.",
+                "properties": {
+                  "encoding": {
+                    "description": "Closed encoding for the current platform's native path representation.",
+                    "enum": [
+                      "unix-bytes-base64url",
+                      "windows-wtf16le-base64url"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "description": "Canonical unpadded base64url native path bytes or code units.",
+                    "maxLength": 5462,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "root": {
+                "description": "Canonical logical ID of one configured local artifact root.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "type": "object"
+          },
+          "ArtifactSource": {
+            "additionalProperties": false,
+            "properties": {
+              "local": {
+                "$ref": "#/$defs/ArtifactLocalLocation",
+                "description": "Authorized local source, mutually exclusive with `staged_handle`."
+              },
+              "staged_handle": {
+                "description": "Opaque ready staging bearer, mutually exclusive with `local`.",
+                "maxLength": 128,
+                "minLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "BoundedList50OfMutationProperty": {
+            "items": {
+              "$ref": "#/$defs/MutationProperty"
+            },
+            "maxItems": 50,
+            "type": "array"
+          },
+          "BoundedText4096": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "DocumentSourceFormat": {
+            "oneOf": [
+              {
+                "const": "markdown",
+                "description": "Interpret the artifact as complete Markdown.",
+                "type": "string"
+              },
+              {
+                "const": "plain_text",
+                "description": "Escape the artifact as literal plain text before dispatch.",
+                "type": "string"
+              }
+            ]
+          },
+          "EntityId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._~-]+$",
+            "type": "string"
+          },
+          "MutationDate": {
+            "format": "date-time",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "MutationIds": {
+            "items": {
+              "$ref": "#/$defs/EntityId"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "MutationNumber": {
+            "maximum": 1000000000000000.0,
+            "minimum": -1000000000000000.0,
+            "type": "number"
+          },
+          "MutationProperty": {
+            "description": "One closed typed property assignment shared by create and update.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Plain text; an empty string is an explicit clear.",
+                "properties": {
+                  "format": {
+                    "const": "text",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  },
+                  "text": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Exact bounded replacement text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Finite bounded numeric value.",
+                "properties": {
+                  "format": {
+                    "const": "number",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  },
+                  "number": {
+                    "$ref": "#/$defs/MutationNumber",
+                    "description": "Canonical number."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "number"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "One existing select-option identifier.",
+                "properties": {
+                  "format": {
+                    "const": "select",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  },
+                  "select": {
+                    "$ref": "#/$defs/EntityId",
+                    "description": "Selected tag identifier."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "select"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Existing select-option identifiers; empty explicitly clears the set.",
+                "properties": {
+                  "format": {
+                    "const": "multi_select",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  },
+                  "multi_select": {
+                    "$ref": "#/$defs/MutationIds",
+                    "description": "Canonical selected tag identifiers."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "multi_select"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "RFC 3339 timestamp stored as a canonical UTC instant.",
+                "properties": {
+                  "date": {
+                    "$ref": "#/$defs/MutationDate",
+                    "description": "Canonical timestamp."
+                  },
+                  "format": {
+                    "const": "date",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "date"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Existing file identifiers; empty explicitly clears the set.",
+                "properties": {
+                  "files": {
+                    "$ref": "#/$defs/MutationIds",
+                    "description": "Canonical file identifiers."
+                  },
+                  "format": {
+                    "const": "files",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "files"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checkbox state; false is a scalar value, not a clear marker.",
+                "properties": {
+                  "checkbox": {
+                    "description": "Replacement checkbox state.",
+                    "type": "boolean"
+                  },
+                  "format": {
+                    "const": "checkbox",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "checkbox"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "URL text; an empty string is an explicit clear.",
+                "properties": {
+                  "format": {
+                    "const": "url",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  },
+                  "url": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Exact bounded URL text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "url"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Email text; an empty string is an explicit clear.",
+                "properties": {
+                  "email": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Exact bounded email text."
+                  },
+                  "format": {
+                    "const": "email",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "email"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Phone text; an empty string is an explicit clear.",
+                "properties": {
+                  "format": {
+                    "const": "phone",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  },
+                  "phone": {
+                    "$ref": "#/$defs/BoundedText4096",
+                    "description": "Exact bounded phone text."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "phone"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Existing object identifiers; empty explicitly clears the relation set.",
+                "properties": {
+                  "format": {
+                    "const": "objects",
+                    "type": "string"
+                  },
+                  "key": {
+                    "$ref": "#/$defs/MutationPropertyKey",
+                    "description": "Stable property key."
+                  },
+                  "objects": {
+                    "$ref": "#/$defs/MutationIds",
+                    "description": "Canonical related object identifiers."
+                  }
+                },
+                "required": [
+                  "format",
+                  "key",
+                  "objects"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MutationPropertyKey": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "description": "Stable caller key preventing an accidental duplicate create.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "description": "Bounded display name for the new object.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "object_type": {
+            "description": "Exact Anytype type key, ID, or unambiguous name.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "properties": {
+            "$ref": "#/$defs/BoundedList50OfMutationProperty",
+            "description": "Optional bounded typed property assignments validated against the resolved type."
+          },
+          "source": {
+            "$ref": "#/$defs/ArtifactSource",
+            "description": "Authorized local or staged UTF-8 source."
+          },
+          "source_format": {
+            "$ref": "#/$defs/DocumentSourceFormat",
+            "description": "Whether source bytes are complete Markdown or literal plain text."
+          },
+          "space": {
+            "description": "Exact Anytype space ID or configured resolvable space name.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "space",
+          "source",
+          "source_format",
+          "object_type",
+          "name",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "document_import_create",
+      "outputSchema": {
+        "$defs": {
+          "ValidatorFinding": {
+            "additionalProperties": false,
+            "description": "Bounded public result from one startup-configured validator.",
+            "properties": {
+              "detected_media_type": {
+                "description": "Bounded detected MIME essence for a successful `file-mime` driver.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "Stable configured logical validator ID.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/ValidatorStatus",
+                "description": "Closed completion category."
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ValidatorStatus": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "unavailable",
+              "skipped",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "canonical_sha256": {
+            "description": "SHA-256 of the complete canonical Markdown read back from Anytype.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "dispatched_chars": {
+            "description": "Exact dispatched Unicode scalar count.",
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dispatched_sha256": {
+            "description": "SHA-256 of the complete Markdown dispatched to Anytype.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "no_op": {
+            "description": "Whether update verification proved that no mutation was necessary.",
+            "type": "boolean"
+          },
+          "object_id": {
+            "description": "Exact created or updated Anytype object identity.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reused": {
+            "description": "Whether a completed process-generation idempotency result was reused.",
+            "type": "boolean"
+          },
+          "source_bytes": {
+            "description": "Exact source byte count.",
+            "maximum": 67108864,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_consumed": {
+            "description": "Whether a ready remote source was consumed after verified success.",
+            "type": "boolean"
+          },
+          "source_sha256": {
+            "description": "SHA-256 of the exact authorized source bytes.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "space_id": {
+            "description": "Canonical Anytype space identity.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "validators": {
+            "description": "Bounded results from startup-configured validator policies.",
+            "items": {
+              "$ref": "#/$defs/ValidatorFinding"
+            },
+            "maxItems": 16,
+            "type": "array"
+          }
+        },
+        "required": [
+          "space_id",
+          "object_id",
+          "source_sha256",
+          "dispatched_sha256",
+          "canonical_sha256",
+          "source_bytes",
+          "dispatched_chars",
+          "no_op",
+          "source_consumed",
+          "reused",
+          "validators"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Replace one exact Anytype document body from a complete authorized UTF-8 artifact after checking the required current-body hash. A canonical no-op performs no mutation.",
+      "inputSchema": {
+        "$defs": {
+          "ArtifactLocalLocation": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Portable UTF-8 path relative to the selected root; exactly one path form is required.",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "path_native": {
+                "additionalProperties": false,
+                "description": "Platform-native encoded path relative to the selected root; exactly one path form is required.",
+                "properties": {
+                  "encoding": {
+                    "description": "Closed encoding for the current platform's native path representation.",
+                    "enum": [
+                      "unix-bytes-base64url",
+                      "windows-wtf16le-base64url"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "description": "Canonical unpadded base64url native path bytes or code units.",
+                    "maxLength": 5462,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "root": {
+                "description": "Canonical logical ID of one configured local artifact root.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "type": "object"
+          },
+          "ArtifactSource": {
+            "additionalProperties": false,
+            "properties": {
+              "local": {
+                "$ref": "#/$defs/ArtifactLocalLocation",
+                "description": "Authorized local source, mutually exclusive with `staged_handle`."
+              },
+              "staged_handle": {
+                "description": "Opaque ready staging bearer, mutually exclusive with `local`.",
+                "maxLength": 128,
+                "minLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "DocumentSourceFormat": {
+            "oneOf": [
+              {
+                "const": "markdown",
+                "description": "Interpret the artifact as complete Markdown.",
+                "type": "string"
+              },
+              {
+                "const": "plain_text",
+                "description": "Escape the artifact as literal plain text before dispatch.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "expected_body_sha256": {
+            "description": "Required SHA-256 of the current complete canonical Markdown body.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Stable caller key preventing an accidental second replacement.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "object_id": {
+            "description": "Exact Anytype object identifier; names are never guessed.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/ArtifactSource",
+            "description": "Authorized local or staged UTF-8 replacement body."
+          },
+          "source_format": {
+            "$ref": "#/$defs/DocumentSourceFormat",
+            "description": "Whether source bytes are complete Markdown or literal plain text."
+          },
+          "space": {
+            "description": "Exact Anytype space ID or configured resolvable space name.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "space",
+          "object_id",
+          "source",
+          "source_format",
+          "expected_body_sha256",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "document_import_update",
+      "outputSchema": {
+        "$defs": {
+          "ValidatorFinding": {
+            "additionalProperties": false,
+            "description": "Bounded public result from one startup-configured validator.",
+            "properties": {
+              "detected_media_type": {
+                "description": "Bounded detected MIME essence for a successful `file-mime` driver.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "Stable configured logical validator ID.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/ValidatorStatus",
+                "description": "Closed completion category."
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ValidatorStatus": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "unavailable",
+              "skipped",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "canonical_sha256": {
+            "description": "SHA-256 of the complete canonical Markdown read back from Anytype.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "dispatched_chars": {
+            "description": "Exact dispatched Unicode scalar count.",
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dispatched_sha256": {
+            "description": "SHA-256 of the complete Markdown dispatched to Anytype.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "no_op": {
+            "description": "Whether update verification proved that no mutation was necessary.",
+            "type": "boolean"
+          },
+          "object_id": {
+            "description": "Exact created or updated Anytype object identity.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reused": {
+            "description": "Whether a completed process-generation idempotency result was reused.",
+            "type": "boolean"
+          },
+          "source_bytes": {
+            "description": "Exact source byte count.",
+            "maximum": 67108864,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_consumed": {
+            "description": "Whether a ready remote source was consumed after verified success.",
+            "type": "boolean"
+          },
+          "source_sha256": {
+            "description": "SHA-256 of the exact authorized source bytes.",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "space_id": {
+            "description": "Canonical Anytype space identity.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "validators": {
+            "description": "Bounded results from startup-configured validator policies.",
+            "items": {
+              "$ref": "#/$defs/ValidatorFinding"
+            },
+            "maxItems": 16,
+            "type": "array"
+          }
+        },
+        "required": [
+          "space_id",
+          "object_id",
+          "source_sha256",
+          "dispatched_sha256",
+          "canonical_sha256",
+          "source_bytes",
+          "dispatched_chars",
+          "no_op",
+          "source_consumed",
+          "reused",
+          "validators"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Stream one exact Anytype file to an authorized local create-new destination, verify size and SHA-256, and return only bounded receipt metadata.",
+      "inputSchema": {
+        "$defs": {
+          "ArtifactDestination": {
+            "additionalProperties": false,
+            "properties": {
+              "local": {
+                "$ref": "#/$defs/ArtifactLocalLocation",
+                "description": "Authorized local create-new destination, mutually exclusive with `remote`."
+              },
+              "remote": {
+                "description": "Whether to allocate a remote immutable download stage.",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "ArtifactLocalLocation": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Portable UTF-8 path relative to the selected root; exactly one path form is required.",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "path_native": {
+                "additionalProperties": false,
+                "description": "Platform-native encoded path relative to the selected root; exactly one path form is required.",
+                "properties": {
+                  "encoding": {
+                    "description": "Closed encoding for the current platform's native path representation.",
+                    "enum": [
+                      "unix-bytes-base64url",
+                      "windows-wtf16le-base64url"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "description": "Canonical unpadded base64url native path bytes or code units.",
+                    "maxLength": 5462,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "root": {
+                "description": "Canonical logical ID of one configured local artifact root.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "$ref": "#/$defs/ArtifactDestination",
+            "description": "Authorized create-new root-relative local destination."
+          },
+          "expected_strong_etag": {
+            "description": "Optional strong representation validator required by the caller.",
+            "maxLength": 256,
+            "minLength": 2,
+            "pattern": "^\"[\\x21\\x23-\\x7e]*\"$",
+            "type": "string"
+          },
+          "file_id": {
+            "description": "Exact Anytype file object identifier.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Stable caller key binding this publication attempt.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "space": {
+            "description": "Exact Anytype space ID or configured resolvable space name.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "space",
+          "file_id",
+          "destination",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "file_export",
+      "outputSchema": {
+        "$defs": {
+          "ArtifactDirection": {
+            "enum": [
+              "import",
+              "export"
+            ],
+            "type": "string"
+          },
+          "ArtifactReceipt": {
+            "additionalProperties": false,
+            "properties": {
+              "declared_media_type": {
+                "description": "Canonical MIME essence asserted at import, when supplied.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "direction": {
+                "$ref": "#/$defs/ArtifactDirection",
+                "description": "Direction in which bytes moved relative to Anytype."
+              },
+              "root_id": {
+                "description": "Logical root ID used without exposing a physical path.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sha256": {
+                "description": "Lowercase SHA-256 of the verified bytes.",
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "size_bytes": {
+                "description": "Exact byte length of the verified artifact.",
+                "maximum": 1073741824,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "space_id": {
+                "description": "Canonical Anytype space identity bound to the receipt.",
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              "staging_handle": {
+                "description": "Opaque remote bearer returned separately from the staging URL.",
+                "maxLength": 128,
+                "minLength": 64,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "staging_record": {
+                "description": "Non-secret remote record identifier when staged.",
+                "maxLength": 32,
+                "minLength": 32,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "staging_url": {
+                "description": "Fixed remote download URL containing no bearer credential.",
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/ArtifactState",
+                "description": "Terminal state proven by this operation."
+              },
+              "stored_media_type": {
+                "description": "Canonical MIME essence reported by the completed representation.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "validators": {
+                "description": "Bounded results from startup-configured validator policies.",
+                "items": {
+                  "$ref": "#/$defs/ValidatorFinding"
+                },
+                "maxItems": 16,
+                "type": "array"
+              }
+            },
+            "required": [
+              "direction",
+              "state",
+              "space_id",
+              "size_bytes",
+              "sha256",
+              "validators"
+            ],
+            "type": "object"
+          },
+          "ArtifactState": {
+            "enum": [
+              "consumed",
+              "available"
+            ],
+            "type": "string"
+          },
+          "ValidatorFinding": {
+            "additionalProperties": false,
+            "description": "Bounded public result from one startup-configured validator.",
+            "properties": {
+              "detected_media_type": {
+                "description": "Bounded detected MIME essence for a successful `file-mime` driver.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "Stable configured logical validator ID.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/ValidatorStatus",
+                "description": "Closed completion category."
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ValidatorStatus": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "unavailable",
+              "skipped",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "file_id": {
+            "description": "Canonical Anytype file object exported.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/$defs/ArtifactReceipt",
+            "description": "Bounded proof of verified create-new publication."
+          }
+        },
+        "required": [
+          "file_id",
+          "receipt"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Stream one complete authorized local file into one Anytype space, verify exact stored bytes, and return only bounded identity and receipt metadata.",
+      "inputSchema": {
+        "$defs": {
+          "ArtifactLocalLocation": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Portable UTF-8 path relative to the selected root; exactly one path form is required.",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "path_native": {
+                "additionalProperties": false,
+                "description": "Platform-native encoded path relative to the selected root; exactly one path form is required.",
+                "properties": {
+                  "encoding": {
+                    "description": "Closed encoding for the current platform's native path representation.",
+                    "enum": [
+                      "unix-bytes-base64url",
+                      "windows-wtf16le-base64url"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "description": "Canonical unpadded base64url native path bytes or code units.",
+                    "maxLength": 5462,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "root": {
+                "description": "Canonical logical ID of one configured local artifact root.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "type": "object"
+          },
+          "ArtifactSource": {
+            "additionalProperties": false,
+            "properties": {
+              "local": {
+                "$ref": "#/$defs/ArtifactLocalLocation",
+                "description": "Authorized local source, mutually exclusive with `staged_handle`."
+              },
+              "staged_handle": {
+                "description": "Opaque ready staging bearer, mutually exclusive with `local`.",
+                "maxLength": 128,
+                "minLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "description": "Stable caller key preventing an accidental duplicate mutation.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "media_type": {
+            "description": "Optional canonical MIME essence asserted by the caller.",
+            "maxLength": 255,
+            "minLength": 3,
+            "pattern": "^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$",
+            "type": "string"
+          },
+          "name": {
+            "description": "Bounded display name assigned to the Anytype file.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/ArtifactSource",
+            "description": "Authorized root-relative local source."
+          },
+          "space": {
+            "description": "Exact Anytype space ID or configured resolvable space name.",
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "space",
+          "source",
+          "name",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "file_import",
+      "outputSchema": {
+        "$defs": {
+          "ArtifactDirection": {
+            "enum": [
+              "import",
+              "export"
+            ],
+            "type": "string"
+          },
+          "ArtifactReceipt": {
+            "additionalProperties": false,
+            "properties": {
+              "declared_media_type": {
+                "description": "Canonical MIME essence asserted at import, when supplied.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "direction": {
+                "$ref": "#/$defs/ArtifactDirection",
+                "description": "Direction in which bytes moved relative to Anytype."
+              },
+              "root_id": {
+                "description": "Logical root ID used without exposing a physical path.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sha256": {
+                "description": "Lowercase SHA-256 of the verified bytes.",
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "size_bytes": {
+                "description": "Exact byte length of the verified artifact.",
+                "maximum": 1073741824,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "space_id": {
+                "description": "Canonical Anytype space identity bound to the receipt.",
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              "staging_handle": {
+                "description": "Opaque remote bearer returned separately from the staging URL.",
+                "maxLength": 128,
+                "minLength": 64,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "staging_record": {
+                "description": "Non-secret remote record identifier when staged.",
+                "maxLength": 32,
+                "minLength": 32,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "staging_url": {
+                "description": "Fixed remote download URL containing no bearer credential.",
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/ArtifactState",
+                "description": "Terminal state proven by this operation."
+              },
+              "stored_media_type": {
+                "description": "Canonical MIME essence reported by the completed representation.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "validators": {
+                "description": "Bounded results from startup-configured validator policies.",
+                "items": {
+                  "$ref": "#/$defs/ValidatorFinding"
+                },
+                "maxItems": 16,
+                "type": "array"
+              }
+            },
+            "required": [
+              "direction",
+              "state",
+              "space_id",
+              "size_bytes",
+              "sha256",
+              "validators"
+            ],
+            "type": "object"
+          },
+          "ArtifactState": {
+            "enum": [
+              "consumed",
+              "available"
+            ],
+            "type": "string"
+          },
+          "ValidatorFinding": {
+            "additionalProperties": false,
+            "description": "Bounded public result from one startup-configured validator.",
+            "properties": {
+              "detected_media_type": {
+                "description": "Bounded detected MIME essence for a successful `file-mime` driver.",
+                "maxLength": 255,
+                "minLength": 3,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "Stable configured logical validator ID.",
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/ValidatorStatus",
+                "description": "Closed completion category."
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ValidatorStatus": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "unavailable",
+              "skipped",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "file_id": {
+            "description": "Canonical Anytype file object created or safely reused.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/$defs/ArtifactReceipt",
+            "description": "Bounded proof of verified import completion."
+          },
+          "reused": {
+            "description": "Whether the result came from verified idempotency state.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "file_id",
+          "receipt",
+          "reused"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

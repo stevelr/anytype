@@ -1569,10 +1569,47 @@ read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
 list filter and rejects a continuation cursor whose filter binding changes
 through both entry paths. Existing focused live regressions remain alongside
-this acceptance baseline. `server::headless_integration` contains 19 ignored
+this acceptance baseline. `server::headless_integration` contains 20 ignored
 direct-router cases; the library command also selects eight focused
-cross-entry regressions (seven optional-registry cases plus files), for 27
-cases total. The spawned target contains exactly 21 ignored live cases.
+cross-entry regressions (seven optional-registry cases plus files), for 28
+cases total. The spawned target contains exactly 22 ignored live cases.
+
+### Artifact data-plane acceptance matrix
+
+`tests/support/artifact_acceptance.rs` is the reusable harness for artifact
+acceptance. It declares a closed transport matrix of four control planes
+(scripted JSON-RPC frames, in-process direct router, spawned stable stdio,
+spawned preview stdio) crossed with two data planes (authorized local roots and
+the remote HTTP staging service). An offline inventory test proves that the
+direct-router and spawned targets together execute all eight transports exactly
+once, so a transport cannot silently lose coverage.
+
+Every transport runs the same smoke scenario — file import/export, document
+create/export/update, and an explicit staging allocate/release — and returns
+content-free evidence: the exact advertised artifact catalog snapshot, verified
+byte lengths, and SHA-256 hashes. Each run compares the advertised catalog with
+the reviewed `tests/snapshots/artifact-catalog.snap` fixture and then compares
+the complete executed matrix for exact parity, so a divergence between the wire
+envelope, the router, and either protocol revision fails the suite.
+
+Fixture discipline is part of the harness rather than each scenario: a
+prefix-authorized disposable space, a private `0700` policy tree with `0600`
+sources and operator policy, immediate registration of every created object and
+file, exact teardown when the fixture is dropped, and rejection of skipped
+disposable admission. Setting `ANY_MCP_ARTIFACT_SERVER_LOG` to a captured
+Anytype server log makes the spawned matrix audit the appended window and fail
+on any panic, fatal, or error class outside the already isolated upstream set;
+only counts and fixed category names are reported, never log lines.
+
+Select the two live acceptance targets explicitly:
+
+```sh
+cargo test -p any-mcp --lib headless_artifact_direct_transport_matrix_scenario \
+  -- --ignored --exact \
+  server::headless_integration::headless_artifact_direct_transport_matrix_scenario
+cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e \
+  headless_artifact_spawned_transport_matrix_scenario -- --ignored --test-threads=1
+```
 
 The shared Markdown no-op scenario independently waits for stable REST exports
 and fresh `ObjectShow` identity/type/order evidence, supplies the complete

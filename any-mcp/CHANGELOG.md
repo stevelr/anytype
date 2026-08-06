@@ -21,6 +21,28 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a reusable multi-transport acceptance harness for the artifact data
+  plane. `tests/support/artifact_acceptance.rs` declares a closed matrix of
+  four control planes (scripted JSON-RPC frames, in-process direct router,
+  spawned stable stdio, spawned preview stdio) crossed with two data planes
+  (authorized local roots and the remote HTTP staging service), and an offline
+  inventory test proves the direct-router and spawned targets together execute
+  all eight transports exactly once. Every transport runs the same
+  content-free smoke scenario — file import and export, document create,
+  export and update, and an explicit staging allocate and release — compares
+  its advertised catalog against the reviewed
+  `tests/snapshots/artifact-catalog.snap` fixture, and then compares the
+  complete executed matrix for exact byte-length and hash parity. The harness
+  owns fixture discipline: a prefix-authorized disposable space, a private
+  policy tree with owner-only sources, immediate registration of every created
+  object and file, exact teardown, and rejection of skipped disposable
+  admission. Setting `ANY_MCP_ARTIFACT_SERVER_LOG` audits the appended window
+  of a captured Anytype server log by streaming it, and fails on any panic,
+  fatal, or error class outside the already isolated upstream set while
+  reporting only counts and fixed category names. Two ignored live targets
+  select the matrix: the direct-router case in `server::headless_integration`
+  and the spawned case in the `headless_stdio_e2e` acceptance-harness target.
+
 - Configuration file search order: command-line `-c`/`--config`, then
   environment `ANY_MCP_CONFIG`, then `any-mcp.toml` in the current directory.
   If no file is found, use built-in defaults.
