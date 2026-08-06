@@ -369,6 +369,12 @@ client
     .await?;
 ```
 
+Server compatibility, verified against `anytype-cli` 0.3.6 (API `2025-11-08`):
+the file endpoint advertises `Accept-Ranges: bytes` and returns 206, 412, and
+416, but supplies neither `ETag` nor `Last-Modified`, so `304 Not Modified`
+cannot be triggered there. No request-wide timeout is applied by default, so
+supply one through a custom `ClientBuilder` when an endpoint may not respond.
+
 `files().upload(space).from_path(path).upload()` selects REST for a simple
 path upload and returns a normalized `FileObject`. Adding `file_type`, `style`,
 `details`, or creation-context options selects the richer gRPC upload.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import contextlib
 import json
 import os
 import shutil
@@ -7,6 +8,12 @@ import subprocess
 import tempfile
 import time
 import unittest
+
+
+# Wall-clock ceiling for one anyr invocation. Generous enough for a live
+# server, but bounded so an unresponsive endpoint cannot wedge the suite and
+# skip a test's cleanup.
+CLI_TIMEOUT_SECONDS = 180
 
 
 def anyr_bin() -> str | None:
@@ -28,7 +35,12 @@ def base_env() -> dict:
 def run_help(*args: str) -> subprocess.CompletedProcess[str]:
     cmd = [anyr_bin(), *args, "--help"]
     return subprocess.run(
-        cmd, check=False, capture_output=True, text=True, env=base_env()
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=base_env(),
+        timeout=CLI_TIMEOUT_SECONDS,
     )
 
 
@@ -36,7 +48,12 @@ def run_anyr(*args: str) -> subprocess.CompletedProcess[str]:
     cmd = [anyr_bin(), *args]
     print(f"running cmd: {cmd}")
     return subprocess.run(
-        cmd, check=False, capture_output=True, text=True, env=base_env()
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=base_env(),
+        timeout=CLI_TIMEOUT_SECONDS,
     )
 
 
@@ -52,6 +69,7 @@ def run_anyr_with_input(
         text=True,
         input=input_text,
         env=base_env(),
+        timeout=CLI_TIMEOUT_SECONDS,
     )
 
 
@@ -239,6 +257,213 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("file", "delete")
         self.assert_help_ok("file", "download")
         self.assert_help_ok("file", "upload")
+
+    @contextlib.contextmanager
+    def disposable_space(self, label: str):
+        """Yield a freshly created prefix-owned space id, deleting it on exit.
+
+        The space is created solely for this test, so every object it holds is
+        removed with it and no ambient space is mutated.
+        """
+        space_name = f"{self.space_prefix}-{label}-{int(time.time() * 1000)}"
+        created = run_anyr_json("space", "create", space_name)
+        space_id = created.get("id")
+        self.assertIsInstance(space_id, str, "space create missing id")
+        try:
+            yield space_id
+        finally:
+            run_anyr_with_input(
+                f"n\ndelete:{space_name}\n", "space", "delete", space_id
+            )
+            # Prove the deletion landed before returning. Other tests select
+            # their working space by prefix, so a space that lingers in the
+            # listing would silently be adopted by one of them.
+            deadline = time.monotonic() + 30
+            while run_anyr("space", "get", space_id).returncode == 0:
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"disposable space {space_name} still resolves after deletion"
+                    )
+                time.sleep(1)
+
+    def test_file_operations(self) -> None:
+        """Server-backed coverage for the migrated REST-default file surface."""
+        self.assert_help_ok("file", "metadata")
+        self.assert_help_ok("file", "preload")
+        self.assert_help_ok("file", "discard-preload")
+
+        payload = b"anyr file surface coverage\n" * 16
+        with (
+            self.disposable_space("file") as space_id,
+            tempfile.TemporaryDirectory() as work,
+        ):
+            source = os.path.join(work, "coverage.txt")
+            with open(source, "wb") as handle:
+                handle.write(payload)
+
+            # Plain path upload: REST backend, no gRPC-only detail struct.
+            uploaded = run_anyr_json(
+                "file", "upload", space_id, "-f", source, "--mime", "text/plain"
+            )
+            file_id = uploaded.get("id")
+            self.assertIsInstance(file_id, str, "file upload missing id")
+            self.assertEqual(uploaded.get("size"), len(payload))
+            self.assertIsNone(
+                uploaded.get("details"), "path upload must use the REST backend"
+            )
+
+            fetched = run_anyr_json("file", "get", space_id, file_id)
+            self.assertEqual(fetched.get("id"), file_id, "file get id mismatch")
+
+            listed = run_anyr_json("file", "list", space_id, "--limit", "100")
+            self.assertTrue(
+                any(item.get("id") == file_id for item in listed.get("items", [])),
+                "file list is missing the uploaded file",
+            )
+
+            # search --sort / --sort --desc must both succeed and stay scoped.
+            for extra in (["--sort", "name"], ["--sort", "name", "--desc"]):
+                found = run_anyr_json(
+                    "file", "search", space_id, "--limit", "100", *extra
+                )
+                self.assertTrue(
+                    any(item.get("id") == file_id for item in found.get("items", [])),
+                    f"file search {' '.join(extra)} is missing the uploaded file",
+                )
+            self.assertNotEqual(
+                run_anyr("file", "search", space_id, "--desc", "--json").returncode,
+                0,
+                "--desc requires --sort",
+            )
+
+            # HEAD metadata carries the length and no body.
+            meta = run_anyr_json("file", "metadata", space_id, file_id)
+            self.assertEqual(meta.get("status"), 200)
+            metadata = meta.get("metadata", {})
+            self.assertEqual(metadata.get("content_length"), len(payload))
+
+            # Full REST download writes the exact bytes.
+            target = os.path.join(work, "downloaded.txt")
+            downloaded = run_anyr_json(
+                "file", "download", space_id, file_id, "-f", target
+            )
+            self.assertEqual(downloaded.get("status"), 200)
+            self.assertTrue(downloaded.get("written"))
+            with open(target, "rb") as handle:
+                self.assertEqual(handle.read(), payload)
+
+            self.assertEqual(metadata.get("accept_ranges"), "bytes")
+
+            # A ranged request writes only the requested window.
+            partial = os.path.join(work, "partial.txt")
+            ranged = run_anyr_json(
+                "file",
+                "download",
+                space_id,
+                file_id,
+                "-f",
+                partial,
+                "--range",
+                "bytes=0-9",
+            )
+            self.assertEqual(ranged.get("status"), 206)
+            self.assertTrue(ranged.get("written"))
+            self.assertEqual(
+                ranged.get("metadata", {}).get("content_range"),
+                f"bytes 0-9/{len(payload)}",
+            )
+            with open(partial, "rb") as handle:
+                self.assertEqual(handle.read(), payload[:10])
+
+            # 416 and 412 must leave the destination untouched. The server
+            # supplies no ETag/Last-Modified, so 304 is not reachable here
+            # (tracked as any-5pkh); an unmatchable If-Match still exercises
+            # the non-writing branch.
+            for extra, expected in (
+                (
+                    ["--range", f"bytes={len(payload) + 4096}-{len(payload) + 4100}"],
+                    416,
+                ),
+                (["--if-match", '"anyr-never-matches"'], 412),
+            ):
+                sentinel = os.path.join(work, f"sentinel-{expected}.txt")
+                with open(sentinel, "wb") as handle:
+                    handle.write(b"sentinel")
+                refused = run_anyr_json(
+                    "file", "download", space_id, file_id, "-f", sentinel, *extra
+                )
+                self.assertEqual(refused.get("status"), expected)
+                self.assertFalse(refused.get("written"))
+                with open(sentinel, "rb") as handle:
+                    self.assertEqual(handle.read(), b"sentinel")
+
+            # An unmatchable cache validator still yields the complete file.
+            revalidated = run_anyr_json(
+                "file",
+                "download",
+                space_id,
+                file_id,
+                "-f",
+                os.path.join(work, "revalidated.txt"),
+                "--if-none-match",
+                '"anyr-never-matches"',
+            )
+            self.assertEqual(revalidated.get("status"), 200)
+            self.assertEqual(revalidated.get("bytes"), len(payload))
+
+            # A gRPC-only option promotes a path upload to the gRPC backend.
+            # File objects are content addressed, so the promoted upload needs
+            # distinct bytes or it would resolve to the REST upload's object.
+            rich_source = os.path.join(work, "coverage-rich.txt")
+            with open(rich_source, "wb") as handle:
+                handle.write(payload + b"rich\n")
+            rich = run_anyr_json(
+                "file",
+                "upload",
+                space_id,
+                "-f",
+                rich_source,
+                "--file-type",
+                "file",
+                "--style",
+                "embed",
+            )
+            rich_id = rich.get("id")
+            self.assertIsInstance(rich_id, str, "rich upload missing id")
+            self.assertNotEqual(rich_id, file_id, "distinct bytes must not dedupe")
+            self.assertIsInstance(
+                rich.get("details"), dict, "a rich option must select gRPC"
+            )
+            self.assertNotEqual(
+                run_anyr(
+                    "file",
+                    "upload",
+                    space_id,
+                    "-f",
+                    rich_source,
+                    "--file-type",
+                    "file",
+                    "--mime",
+                    "text/plain",
+                ).returncode,
+                0,
+                "REST-only --mime must be rejected under a gRPC promotion",
+            )
+
+            # Preload round trip: the reservation is always discarded again.
+            preloaded = run_anyr_json("file", "preload", space_id, "-f", source)
+            preload_id = preloaded.get("preload_file_id")
+            self.assertIsInstance(preload_id, str, "preload missing id")
+            discarded = run_anyr_json("file", "discard-preload", space_id, preload_id)
+            self.assertTrue(discarded.get("discarded"))
+
+            # Bin delete and permanent delete both go through the REST builder.
+            binned = run_anyr_json("file", "delete", space_id, file_id)
+            self.assertTrue(binned.get("deleted"))
+            self.assertFalse(binned.get("permanent"))
+            purged = run_anyr_json("file", "delete", space_id, rich_id, "--permanent")
+            self.assertTrue(purged.get("deleted"))
+            self.assertTrue(purged.get("permanent"))
 
     def test_type(self) -> None:
         self.assert_help_ok("type")

@@ -135,7 +135,7 @@ fn live_mutation_retry_inventory_is_current() {
             1,
         ),
         ("test_chats.rs", include_str!("test_chats.rs"), 3, 0, 0, 5),
-        ("test_files.rs", include_str!("test_files.rs"), 0, 0, 0, 1),
+        ("test_files.rs", include_str!("test_files.rs"), 0, 0, 0, 6),
         (
             "test_filters.rs",
             include_str!("test_filters.rs"),
@@ -227,5 +227,5 @@ fn live_mutation_retry_inventory_is_current() {
     }
 
     assert_eq!(setup_calls, 126);
-    assert_eq!(excluded_calls, 64);
+    assert_eq!(excluded_calls, 69);
 }

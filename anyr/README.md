@@ -288,6 +288,11 @@ anyr file download "Personal" <FILE_OBJECT_ID> \
 anyr file metadata "Personal" <FILE_OBJECT_ID> --width 128
 ```
 
+Verified against `anytype-cli` 0.3.6 (API `2025-11-08`): ranged downloads
+(206), failed preconditions (412), and unsatisfiable ranges (416) all behave as
+documented, but the server sends no `ETag` or `Last-Modified`, so
+`--if-none-match` and `--if-modified-since` never produce a `304`.
+
 **List items in query or collection**
 
 ```sh

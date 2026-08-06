@@ -1974,20 +1974,19 @@ fn ingest_space_page(
         .map_err(|_| config_error("begin sweep plan page"))?;
     for space in response.items {
         limits.validate_id(&space.id, "space inventory id")?;
-        limits.validate_name(&space.name, "space inventory name")?;
         if space.object != SpaceModel::Space || space.name.chars().any(char::is_control) {
             return Err(config_error("invalid disposable space inventory identity"));
         }
+        // Only deletion candidates need a strictly valid name. Unauthorized
+        // ambient spaces may legitimately have empty or oversized names; they
+        // are recorded unselected and never touched.
+        let selected = prefix.authorizes(&space.name);
+        if selected {
+            limits.validate_name(&space.name, "space inventory name")?;
+        }
         let inserted = transaction.execute(
             "INSERT INTO seen(id, selected) VALUES (?1, ?2)",
-            (
-                &space.id,
-                if prefix.authorizes(&space.name) {
-                    1_i64
-                } else {
-                    0_i64
-                },
-            ),
+            (&space.id, if selected { 1_i64 } else { 0_i64 }),
         );
         if inserted.is_err() {
             return Err(config_error("duplicate disposable space inventory id"));
@@ -3643,6 +3642,57 @@ mod tests {
         assert_eq!(plan_selected_count(&plan).unwrap(), total);
         remove_private_file_if_present(&plan).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_plan_tolerates_unauthorized_empty_names_and_rejects_authorized_ones() {
+        let prefix = DisposablePrefix::parse("xtest".to_owned()).unwrap();
+        let limits = crate::validation::ValidationLimits::default();
+
+        // An ambient space with an empty name must not poison the sweep; it is
+        // recorded unselected. A control character still fails closed.
+        let root = private_test_root("ambient-empty-name");
+        let plan = test_plan(&root);
+        let mut connection = open_plan_database(&plan).unwrap();
+        let items = vec![
+            test_space(0, String::new()),
+            test_space(1, "xtest-selected".to_owned()),
+        ];
+        assert_eq!(
+            ingest_space_page(
+                &mut connection,
+                &limits,
+                &prefix,
+                test_page(2, 0, items),
+                0,
+                &mut None,
+            )
+            .unwrap(),
+            PageIngest::Complete
+        );
+        drop(connection);
+        assert_eq!(plan_selected_count(&plan).unwrap(), 1);
+        remove_private_file_if_present(&plan).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        // A control character in any name and an invalid authorized name both
+        // still fail closed.
+        for bad in [
+            test_space(0, "ambient\u{7}".to_owned()),
+            test_space(0, format!("xtest-{}", "x".repeat(4_096))),
+        ] {
+            let root = private_test_root("ambient-bad-name");
+            let plan = test_plan(&root);
+            let mut connection = open_plan_database(&plan).unwrap();
+            let response = test_page(1, 0, vec![bad]);
+            assert!(
+                ingest_space_page(&mut connection, &limits, &prefix, response, 0, &mut None,)
+                    .is_err()
+            );
+            drop(connection);
+            remove_private_file_if_present(&plan).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
