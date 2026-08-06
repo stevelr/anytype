@@ -8,6 +8,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Server-backed `file` command coverage in the Python CLI suite: upload
+  backend selection, get/list, `search --sort`/`--desc`, metadata `HEAD`,
+  full, ranged, `416`, and `412` downloads, a preload round trip, and bin and
+  permanent delete, each running on a per-test disposable space with a bounded
+  timeout on every CLI invocation. The README now records that
+  `--if-none-match`/`--if-modified-since` cannot produce a `304` against
+  `anytype-cli` 0.3.6, which sends no cache validators.
 - Better error messages for cli errors, with user-friendly hints.
 - Consolidated the former `any-edit`, `anyback`, and `any-mcp` command
   surfaces under `anyr md`, `anyr backup`, and `anyr mcp`. Shared endpoint,

@@ -8,6 +8,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add live file coverage for permanent delete, REST-vs-gRPC upload backend
+  auto-selection (path, reader, and rich-option promotion), and
+  conditional/ranged downloads (metadata `HEAD`, `206`, `412`, `416`, and a
+  locally rejected zero-length range). The README records the verified
+  `anytype-cli` 0.3.6 file-endpoint behavior: `206`/`412`/`416` are served, no
+  `ETag`/`Last-Modified` validators are sent, and no request timeout is
+  applied by default.
+- Add a live show/close lifecycle measurement test proving a bare gRPC
+  `ObjectShow` holds no server-side open state (verified via
+  `DebugOpenedObjects` with an `ObjectOpen` validation leg), that one
+  `ObjectClose` releases an opened object, and that `BodyRequest::fetch`'s
+  owned foreground close is server-confirmed and leaves no object open.
+
 - Add typed space administration methods for chat-space creation, permanent
   deletion, invitation creation/listing/revocation, and sharing controls.
 
@@ -131,6 +144,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   incomplete index evidence cannot manufacture an absence result.
 
 ### Fixed
+
+- Fix the disposable test-harness sweep failing every run when an unrelated
+  ambient space has an empty name: strict name validation now applies only to
+  prefix-authorized (deletable) spaces, while unauthorized spaces keep
+  identity and control-character checks and are recorded unselected.
 
 - Correct the crate's coverage and Cargo-feature documentation. The README and
   crate docs no longer claim 100% REST coverage; they now describe direct REST
