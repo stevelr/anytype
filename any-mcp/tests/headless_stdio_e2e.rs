@@ -48,11 +48,12 @@ mod support;
 
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    ArtifactControlPlane, ArtifactDataPlane, ArtifactPolicyEvidence, ArtifactPolicyFixture,
-    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactSmokeFixture, ArtifactTransport,
-    assert_artifact_parity, assert_artifact_policy_parity, audit_server_log,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_offset,
-    validate_tool_frame,
+    ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane,
+    ArtifactDataPlane, ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun,
+    ArtifactPolicyScenario, ArtifactSmokeFixture, ArtifactTransport,
+    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
+    audit_server_log, run_artifact_content_scenario, run_artifact_policy_scenario,
+    run_artifact_smoke_scenario, server_log_offset, validate_tool_frame,
 };
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
@@ -5291,6 +5292,167 @@ async fn headless_artifact_policy_spawned_scenarios() {
         }
         DisposableRun::Skipped(reason) => {
             panic!("artifact policy scenarios require disposable admission: {reason:?}");
+        }
+    }
+}
+
+/// Runs one spawned control plane through one artifact content scenario.
+///
+/// Each scenario owns a private policy fixture and a private production child,
+/// and the child is stopped before the next scenario starts, so a failure
+/// never leaves a server holding the fixture tree.
+#[cfg(feature = "acceptance-harness")]
+async fn run_spawned_artifact_content_scenario(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    scenario: ArtifactContentScenario,
+    control: ArtifactControlPlane,
+) -> TestResult<ArtifactContentEvidence> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create_with(&ctx.space_id, scenario.policy_options()).map_err(
+            |error| {
+                eprintln!(
+                    "artifact content scenario={} fixture failure={error}",
+                    scenario.as_str()
+                );
+                sentinel_assertion("create artifact content fixture")
+            },
+        )?,
+    );
+    let child = spawn_disposable_artifact_driver(
+        ctx,
+        cleanup_record,
+        Arc::clone(&policy),
+        artifact_driver_options(control),
+    )?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("registered artifact content child disappeared"))?
+        .initialize();
+
+    let run = ArtifactContentRun {
+        scenario,
+        control,
+        policy: policy.as_ref(),
+        ctx,
+    };
+    let observed = if control == ArtifactControlPlane::ScriptedProtocol {
+        let mut driver = ScriptedArtifactDriver {
+            driver: Arc::clone(&child),
+        };
+        Box::pin(run_artifact_content_scenario(&mut driver, &run)).await
+    } else {
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&child),
+        };
+        Box::pin(run_artifact_content_scenario(&mut driver, &run)).await
+    };
+
+    let stopped = lock_driver(&child)
+        .take()
+        .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
+    let evidence = observed.map_err(|error| {
+        eprintln!(
+            "artifact content scenario={} control={} failure={error}",
+            scenario.as_str(),
+            control.as_str()
+        );
+        sentinel_assertion("spawned artifact content scenario failed")
+    })?;
+    if stopped.is_err() {
+        return Err(sentinel_assertion(
+            "spawned artifact content child did not stop cleanly",
+        ));
+    }
+    Ok(evidence)
+}
+
+/// Runs every artifact content scenario across the spawned control planes.
+///
+/// The scenarios cover representative MIME import/export on both data planes,
+/// Markdown and plain-text create/update/export including explicit no-op and
+/// lossy canonicalization evidence, and optional and required validators.
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_content_spawned_scenarios() {
+    let cleanup: Vec<Arc<Mutex<ChildCleanupRecord>>> = (0..ArtifactContentScenario::ALL.len()
+        * SPAWNED_ARTIFACT_CONTROLS.len())
+        .map(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)))
+        .collect();
+    let callback_cleanup = cleanup.clone();
+    let log_window = artifact_server_log_window();
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-content",
+        move |ctx| {
+            Box::pin(async move {
+                for (scenario_index, scenario) in
+                    ArtifactContentScenario::ALL.into_iter().enumerate()
+                {
+                    eprintln!("artifact content scenario={}", scenario.as_str());
+                    let mut evidence = Vec::with_capacity(SPAWNED_ARTIFACT_CONTROLS.len());
+                    for (control_index, control) in
+                        SPAWNED_ARTIFACT_CONTROLS.into_iter().enumerate()
+                    {
+                        let record = callback_cleanup
+                            .get(scenario_index * SPAWNED_ARTIFACT_CONTROLS.len() + control_index)
+                            .ok_or_else(|| {
+                                sentinel_assertion("artifact content cleanup record missing")
+                            })?;
+                        evidence.push(
+                            Box::pin(run_spawned_artifact_content_scenario(
+                                ctx.as_ref(),
+                                Arc::clone(record),
+                                scenario,
+                                control,
+                            ))
+                            .await?,
+                        );
+                    }
+                    assert_artifact_content_parity(&evidence, &SPAWNED_ARTIFACT_CONTROLS).map_err(
+                        |error| {
+                            eprintln!(
+                                "artifact content scenario={} parity failure={error}",
+                                scenario.as_str()
+                            );
+                            sentinel_assertion("spawned artifact content planes diverged")
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned artifact content scenarios");
+
+    match outcome {
+        DisposableRun::Completed(()) => {
+            for record in &cleanup {
+                assert_eq!(
+                    *record.lock().expect("artifact content cleanup record"),
+                    ChildCleanupRecord::Stopped
+                );
+            }
+            if let Some((path, offset)) = log_window {
+                let audit = audit_server_log(&path, offset)
+                    .expect("audit captured artifact content server log");
+                eprintln!(
+                    "artifact content server log inspected={} panic_or_fatal={} unclassified={} known={:?}",
+                    audit.inspected_lines,
+                    audit.panic_or_fatal_lines,
+                    audit.unclassified_error_lines,
+                    audit.known_classes
+                );
+                assert!(
+                    audit.is_clean(),
+                    "captured server log reported a panic, fatal, or unclassified error class"
+                );
+            }
+        }
+        DisposableRun::Skipped(reason) => {
+            panic!("artifact content scenarios require disposable admission: {reason:?}");
         }
     }
 }

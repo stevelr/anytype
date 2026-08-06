@@ -4326,13 +4326,17 @@ mod artifact_acceptance;
 #[allow(unused_imports)]
 pub use artifact_acceptance::{
     ARTIFACT_CREATE_MARKDOWN, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES,
-    ARTIFACT_UPDATE_MARKDOWN, ArtifactCatalogSnapshot, ArtifactControlPlane, ArtifactDataPlane,
-    ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyProbe,
-    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactProbeExpectation, ArtifactProbeOutcome,
-    ArtifactServerLogAudit, ArtifactSmokeEvidence, ArtifactSmokeFixture, ArtifactStatusEvidence,
-    ArtifactTransport, FixtureSpacePolicy, UNAUTHORIZED_SPACE_ID, artifact_sha256,
-    assert_artifact_parity, assert_artifact_policy_parity, audit_server_log, classify_server_log,
-    probe_expectation, require_completed, run_artifact_policy_scenario,
+    ARTIFACT_UPDATE_MARKDOWN, ArtifactCatalogSnapshot, ArtifactContentEvidence, ArtifactContentRun,
+    ArtifactContentScenario, ArtifactControlPlane, ArtifactDataPlane, ArtifactDocumentRecord,
+    ArtifactFileRecord, ArtifactMimeFixture, ArtifactPolicyEvidence, ArtifactPolicyFixture,
+    ArtifactPolicyOptions, ArtifactPolicyProbe, ArtifactPolicyRun, ArtifactPolicyScenario,
+    ArtifactProbeExpectation, ArtifactProbeOutcome, ArtifactServerLogAudit, ArtifactSmokeEvidence,
+    ArtifactSmokeFixture, ArtifactStatusEvidence, ArtifactTransport, ArtifactValidatorOutcome,
+    ArtifactValidatorProbe, ArtifactValidatorRecord, CanonicalizationEffect, FixtureSpacePolicy,
+    FixtureValidatorPolicy, PinnedValidatorExecutable, UNAUTHORIZED_SPACE_ID, artifact_sha256,
+    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
+    audit_server_log, classify_canonicalization, classify_server_log, probe_expectation,
+    require_completed, run_artifact_content_scenario, run_artifact_policy_scenario,
     run_artifact_smoke_scenario, server_log_offset, validate_tool_frame,
 };
 

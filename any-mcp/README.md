@@ -1760,10 +1760,11 @@ read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
 list filter and rejects a continuation cursor whose filter binding changes
 through both entry paths. Existing focused live regressions remain alongside
-this acceptance baseline. `server::headless_integration` contains 20 ignored
+this acceptance baseline. `server::headless_integration` contains 21 ignored
 direct-router cases; the library command also selects eight focused
-cross-entry regressions (seven optional-registry cases plus files), for 28
-cases total. The spawned target contains exactly 22 ignored live cases.
+cross-entry regressions (seven optional-registry cases plus files), for 29
+cases total. The spawned target contains exactly 24 ignored live cases when the
+`acceptance-harness` feature is enabled.
 
 ### Artifact data-plane acceptance matrix
 
@@ -1783,6 +1784,34 @@ the reviewed `tests/snapshots/artifact-catalog.snap` fixture and then compares
 the complete executed matrix for exact parity, so a divergence between the wire
 envelope, the router, and either protocol revision fails the suite.
 
+Two further scenario families reuse the same harness. The policy family
+executes a complete server configuration — space policy omitted, empty, or
+restricted elsewhere, read-only mode, and disabled staging — across the
+scripted, direct, stable, and preview control planes, and every one of them
+must report the same advertised catalog, the same `artifact_status`
+projection, and the same refusal code and guidance.
+
+The content family proves what the artifact contract does with real bytes on
+both data planes. `mime_matrix` imports and exports binary, UTF-8 text, PNG,
+RIFF/WAVE, and out-of-tree payloads, comparing declared, stored, and exported
+essence with verified lengths and hashes. `document_canonicalization` creates
+from Markdown, exports the canonical body, requires that re-importing that
+exact body is reported as a no-op, and records every lossy difference as a
+closed category: the appended plain-text hard break, importer escaping that
+rewrites the dispatched bytes before Anytype canonicalizes anything, and a
+non-canonical Markdown rewrite. `validator_optional` and `validator_required`
+probe a matched, a mismatched, and an out-of-scope MIME declaration, so an
+optional validator reports the rejection while the import proceeds and a
+required one refuses it.
+
+The validator scenarios declare one real host `file(1)`-compatible executable
+pinned by absolute path and SHA-256; nothing is shipped or synthesized, and the
+fixture admits exactly the ownership and mode that the production validator
+boundary admits. Set `ANY_MCP_ACCEPTANCE_VALIDATOR` to an exact executable path
+when the host keeps one outside `PATH`. Validator execution is Linux-only, so
+other platforms keep the validated declaration and expect zero available
+validators.
+
 Fixture discipline is part of the harness rather than each scenario: a
 prefix-authorized disposable space, a private `0700` policy tree with `0600`
 sources and operator policy, immediate registration of every created object and
@@ -1792,14 +1821,18 @@ Anytype server log makes the spawned matrix audit the appended window and fail
 on any panic, fatal, or error class outside the already isolated upstream set;
 only counts and fixed category names are reported, never log lines.
 
-Select the two live acceptance targets explicitly:
+Select the live acceptance targets explicitly — two direct-router cases by
+their exact paths, and the three spawned cases by their shared prefix:
 
 ```sh
 cargo test -p any-mcp --lib headless_artifact_direct_transport_matrix_scenario \
   -- --ignored --exact \
   server::headless_integration::headless_artifact_direct_transport_matrix_scenario
+cargo test -p any-mcp --lib headless_artifact_policy_direct_scenarios \
+  -- --ignored --exact \
+  server::headless_integration::headless_artifact_policy_direct_scenarios
 cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e \
-  headless_artifact_spawned_transport_matrix_scenario -- --ignored --test-threads=1
+  headless_artifact_ -- --ignored --test-threads=1
 ```
 
 The shared Markdown no-op scenario independently waits for stable REST exports

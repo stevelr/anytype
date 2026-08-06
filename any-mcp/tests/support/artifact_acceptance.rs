@@ -17,6 +17,19 @@
 //! Nothing here retains artifact bytes, credentials, staging bearers, or raw
 //! server log lines; every reported value is a hash, a count, or a fixed
 //! category name.
+//!
+//! Three scenario families share that harness: the smoke matrix (one happy
+//! path per transport), the policy family (what a configuration must refuse),
+//! and the content family ([`ArtifactContentScenario`]) covering
+//! representative MIME artifacts, Markdown and plain-text canonicalization
+//! including explicit no-op and lossy evidence, and configured validators.
+//!
+//! The validator scenarios declare a real host `file(1)` executable pinned by
+//! hash ([`PinnedValidatorExecutable`]); no executable is shipped or
+//! synthesized, and a host without a hash-pinnable one fails those scenarios
+//! loudly rather than degrading into silent non-coverage.
+//! `ANY_MCP_ACCEPTANCE_VALIDATOR` selects an exact executable when the host
+//! keeps it outside `PATH`.
 #![allow(dead_code)] // Shared support: each consuming target executes a subset.
 
 use std::{
@@ -26,7 +39,10 @@ use std::{
     time::Duration,
 };
 
-use anytype::test_util::{DisposableRun, TestContext, unique_suffix};
+use anytype::{
+    objects::ANYTYPE_PLAIN_MARKDOWN_SUFFIX,
+    test_util::{DisposableRun, TestContext, unique_suffix},
+};
 use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -479,6 +495,211 @@ impl FixtureSpacePolicy {
 /// space under test is denied by policy rather than by upstream visibility.
 pub const UNAUTHORIZED_SPACE_ID: &str = "any-mcp-acceptance-unauthorized-space";
 
+/// Configured artifact validator declaration shape.
+///
+/// A declared validator is always the same real `file(1)`-compatible
+/// executable pinned by hash; only its `required` flag changes, because that
+/// flag is the single production switch between a reported finding and a
+/// refused artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FixtureValidatorPolicy {
+    /// No `[[validators]]` table is declared.
+    Absent,
+    /// One optional validator: a rejection is reported, never fatal.
+    Optional,
+    /// One required validator: a rejection refuses the artifact.
+    Required,
+}
+
+impl FixtureValidatorPolicy {
+    /// Complete closed inventory of configured validator shapes.
+    pub const ALL: [Self; 3] = [Self::Absent, Self::Optional, Self::Required];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Optional => "optional",
+            Self::Required => "required",
+        }
+    }
+
+    /// Whether the rendered policy declares a validator at all.
+    #[must_use]
+    pub const fn is_declared(self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+
+    /// Whether a declared validator refuses the artifact on rejection.
+    #[must_use]
+    pub const fn is_required(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
+/// Logical identifier of the single validator declared by the fixture policy.
+pub const FIXTURE_VALIDATOR_ID: &str = "mime";
+
+/// Exact MIME scope admitted to the fixture validator.
+///
+/// The scope is deliberately narrow so an out-of-scope declaration proves that
+/// a configured validator does not run on every artifact.
+pub const FIXTURE_VALIDATOR_MIME: [&str; 2] = ["text/plain", "image/png"];
+
+/// Whether this platform activates configured validator executables.
+///
+/// Retained-descriptor execution is reviewed for Linux only; every other
+/// platform admits the configuration but reports the validator unavailable.
+pub const VALIDATOR_PLATFORM_ACTIVATES: bool = cfg!(target_os = "linux");
+
+/// One real, hash-pinned executable declared as the fixture validator.
+///
+/// The fixture never ships or synthesizes an executable: it pins whatever
+/// `file(1)`-compatible binary the host already provides, so validator
+/// evidence comes from a real MIME detector rather than a semantic mock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedValidatorExecutable {
+    path: PathBuf,
+    sha256: String,
+}
+
+impl PinnedValidatorExecutable {
+    /// Environment variable naming an exact `file(1)`-compatible executable.
+    pub const OVERRIDE_ENV: &'static str = "ANY_MCP_ACCEPTANCE_VALIDATOR";
+
+    /// Pins the first host executable that production would also admit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed message when no candidate satisfies the production
+    /// executable boundary, so a validator scenario fails loudly instead of
+    /// silently degrading into no coverage.
+    pub fn discover() -> Result<Self, String> {
+        for candidate in validator_candidates() {
+            if let Some(pinned) = Self::pin(&candidate) {
+                return Ok(pinned);
+            }
+        }
+        Err("artifact validator fixture requires a hash-pinnable file(1) executable".to_owned())
+    }
+
+    /// Absolute path declared in the rendered policy.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Lowercase SHA-256 declared in the rendered policy.
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// Pins one candidate, mirroring the production executable boundary.
+    fn pin(candidate: &Path) -> Option<Self> {
+        // Production refuses a symlinked declaration outright, so the fixture
+        // declares the resolved target instead of the launcher symlink.
+        let path = fs::canonicalize(candidate).ok()?;
+        if !path.is_absolute() {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return None;
+        }
+        if !pinnable_executable(&metadata) {
+            return None;
+        }
+        let bytes = fs::read(&path).ok()?;
+        if !bytes.starts_with(b"\x7fELF") && VALIDATOR_PLATFORM_ACTIVATES {
+            return None;
+        }
+        Some(Self {
+            path,
+            sha256: artifact_sha256(&bytes),
+        })
+    }
+}
+
+/// Candidate validator executables in priority order.
+fn validator_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(selected) = std::env::var_os(PinnedValidatorExecutable::OVERRIDE_ENV) {
+        candidates.push(PathBuf::from(selected));
+    }
+    if let Some(search) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&search).map(|entry| entry.join("file")));
+    }
+    candidates.push(PathBuf::from("/usr/bin/file"));
+    candidates.push(PathBuf::from("/bin/file"));
+    // Platforms that never activate a validator still need one real, readable
+    // declaration, because the policy is parsed everywhere it is rendered.
+    if !VALIDATOR_PLATFORM_ACTIVATES && let Ok(current) = std::env::current_exe() {
+        candidates.push(current);
+    }
+    candidates
+}
+
+/// Whether production would admit this executable's ownership and mode.
+///
+/// The rule mirrors production's `safe_executable_metadata` exactly, so every
+/// host that production accepts is also pinnable: a trusted root-owned
+/// executable only has to deny group and other writers, while a caller-owned
+/// executable must deny every writer. A stricter fixture rule would make the
+/// validator scenarios unrunnable on mainstream distributions, whose stock
+/// `file(1)` is root-owned mode `0755`.
+#[cfg(unix)]
+fn pinnable_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    if !VALIDATOR_PLATFORM_ACTIVATES {
+        // A non-activating platform never opens or executes the declaration;
+        // it only has to parse a real path, so ordinary build-output modes
+        // must remain pinnable there.
+        return metadata.is_file() && metadata.mode() & 0o100 != 0;
+    }
+    // SAFETY: `geteuid` reads process identity and has no preconditions.
+    let effective_user = unsafe { libc::geteuid() };
+    let owner_is_trusted_root = metadata.uid() == 0 && effective_user != 0;
+    let safe_write_mode = if owner_is_trusted_root {
+        metadata.mode() & 0o022 == 0
+    } else {
+        metadata.mode() & 0o222 == 0
+    };
+    metadata.is_file()
+        && (metadata.uid() == 0 || metadata.uid() == effective_user)
+        && safe_write_mode
+        && metadata.mode() & 0o100 != 0
+}
+
+#[cfg(not(unix))]
+fn pinnable_executable(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+}
+
+/// Whether a fixture-relative path is exactly one ordinary file name.
+///
+/// `Path::join` silently replaces the base when the joined path is absolute or
+/// drive-qualified, so fixture confinement depends on this check. It is
+/// deliberately platform-independent: a single normal component plus a literal
+/// rejection of `..`, both separators, and a drive separator gives the same
+/// admitted set on Unix and Windows.
+fn simple_relative_name(relative: &str) -> bool {
+    if relative.is_empty()
+        || relative.contains("..")
+        || relative.contains(['/', '\\', ':'])
+        || relative.contains(|character: char| character.is_control())
+    {
+        return false;
+    }
+    let mut components = Path::new(relative).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
 /// Strict artifact policy options shared by every acceptance fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactPolicyOptions {
@@ -494,6 +715,8 @@ pub struct ArtifactPolicyOptions {
     pub read_only: bool,
     /// Configured space policy shape.
     pub spaces: FixtureSpacePolicy,
+    /// Configured validator declaration shape.
+    pub validators: FixtureValidatorPolicy,
 }
 
 impl Default for ArtifactPolicyOptions {
@@ -502,6 +725,7 @@ impl Default for ArtifactPolicyOptions {
             staging: true,
             read_only: false,
             spaces: FixtureSpacePolicy::AllowedUnderTest,
+            validators: FixtureValidatorPolicy::Absent,
         }
     }
 }
@@ -517,6 +741,7 @@ pub struct ArtifactPolicyFixture {
     import: PathBuf,
     export: PathBuf,
     staging_base_url: Option<String>,
+    validator: Option<PinnedValidatorExecutable>,
     options: ArtifactPolicyOptions,
 }
 
@@ -580,6 +805,11 @@ impl ArtifactPolicyFixture {
         } else {
             None
         };
+        let validator = if options.validators.is_declared() {
+            Some(PinnedValidatorExecutable::discover()?)
+        } else {
+            None
+        };
         let config = base.join("policy.toml");
         fs::write(
             &config,
@@ -589,6 +819,7 @@ impl ArtifactPolicyFixture {
                 &export,
                 &staging,
                 staging_base_url.as_deref(),
+                validator.as_ref(),
                 options,
             ),
         )
@@ -601,6 +832,7 @@ impl ArtifactPolicyFixture {
             import,
             export,
             staging_base_url,
+            validator,
             options,
         })
     }
@@ -635,6 +867,30 @@ impl ArtifactPolicyFixture {
         self.options
     }
 
+    /// Executable pinned into the rendered validator declaration, when any.
+    #[must_use]
+    pub fn validator(&self) -> Option<&PinnedValidatorExecutable> {
+        self.validator.as_ref()
+    }
+
+    /// Writes one exact import source under the authorized import root.
+    ///
+    /// Content scenarios seed their own sources, because every scenario needs
+    /// different bytes and every byte must disappear with the fixture tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed message when the relative path is unsafe or the source
+    /// cannot be written with private permissions.
+    pub fn seed_import(&self, relative: &str, bytes: &[u8]) -> Result<(), String> {
+        if !simple_relative_name(relative) {
+            return Err("import fixture path must be a simple file name".to_owned());
+        }
+        let path = self.import.join(relative);
+        fs::write(&path, bytes).map_err(|_| "write artifact import source".to_owned())?;
+        secure_files(std::slice::from_ref(&path))
+    }
+
     /// Reads the complete strict policy contents.
     ///
     /// # Errors
@@ -650,7 +906,7 @@ impl ArtifactPolicyFixture {
     ///
     /// Returns a fixed message when the relative path is unsafe or unreadable.
     pub fn read_export(&self, relative: &str) -> Result<Vec<u8>, String> {
-        if relative.is_empty() || relative.contains("..") || relative.contains('/') {
+        if !simple_relative_name(relative) {
             return Err("export fixture path must be a simple file name".to_owned());
         }
         fs::read(self.export.join(relative)).map_err(|_| "read artifact export".to_owned())
@@ -659,10 +915,7 @@ impl ArtifactPolicyFixture {
     /// Whether an export artifact exists under the export root.
     #[must_use]
     pub fn export_exists(&self, relative: &str) -> bool {
-        !relative.is_empty()
-            && !relative.contains("..")
-            && !relative.contains('/')
-            && self.export.join(relative).is_file()
+        simple_relative_name(relative) && self.export.join(relative).is_file()
     }
 }
 
@@ -678,6 +931,7 @@ fn render_policy(
     export: &Path,
     staging: &Path,
     staging_base_url: Option<&str>,
+    validator: Option<&PinnedValidatorExecutable>,
     options: ArtifactPolicyOptions,
 ) -> String {
     // `ArtifactConfig` rejects `spaces.read_only = true` outright, so the
@@ -728,6 +982,34 @@ fn render_policy(
             toml_basic_string(&staging.display().to_string()),
             toml_basic_string(bind),
             toml_basic_string(base_url),
+        ));
+    }
+    if let Some(validator) = validator.filter(|_| options.validators.is_declared()) {
+        let mime = FIXTURE_VALIDATOR_MIME
+            .iter()
+            .map(|pattern| format!("\"{}\"", toml_basic_string(pattern)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        contents.push_str(&format!(
+            "[[validators]]\n\
+             id = \"{}\"\n\
+             driver = \"file-mime\"\n\
+             path = \"{}\"\n\
+             sha256 = \"{}\"\n\
+             required = {}\n\
+             mime = [{mime}]\n\
+             timeout_secs = 20\n\
+             memory_bytes = 268435456\n\
+             input_bytes = 1048576\n\
+             stdout_bytes = 4096\n\
+             stderr_bytes = 4096\n\
+             fields = 4\n\
+             field_bytes = 255\n\
+             platform = \"linux-retained-fd-v1\"\n",
+            toml_basic_string(FIXTURE_VALIDATOR_ID),
+            toml_basic_string(&validator.path().display().to_string()),
+            toml_basic_string(validator.sha256()),
+            options.validators.is_required(),
         ));
     }
     contents
@@ -1407,6 +1689,9 @@ impl ArtifactPolicyScenario {
             staging,
             read_only,
             spaces,
+            // Validator behavior is a separate scenario family: policy
+            // scenarios must observe an unchanged, validator-free catalog.
+            validators: FixtureValidatorPolicy::Absent,
         }
     }
 
@@ -1876,6 +2161,1164 @@ pub fn assert_artifact_policy_parity(
     Ok(())
 }
 
+/// Representative artifact whose exact bytes and declared MIME are fixed.
+///
+/// Every fixture carries distinct bytes: Anytype files are content addressed,
+/// so identical payloads would collapse into one object and hide a per-MIME
+/// difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactMimeFixture {
+    /// Opaque binary payload with non-textual bytes.
+    Binary,
+    /// UTF-8 text payload.
+    Text,
+    /// Complete minimal PNG image.
+    Image,
+    /// Complete minimal RIFF/WAVE audio clip.
+    Audio,
+    /// Payload whose declared MIME is outside every registered tree.
+    Unknown,
+}
+
+/// Exact bytes of a complete minimal 1x1 PNG image.
+const MIME_IMAGE_PAYLOAD: [u8; 70] = [
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 252, 207, 192, 80, 15, 0, 4,
+    133, 1, 128, 132, 169, 140, 33, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+/// Exact bytes of a complete minimal 16-bit mono RIFF/WAVE clip.
+const MIME_AUDIO_PAYLOAD: [u8; 60] = [
+    82, 73, 70, 70, 52, 0, 0, 0, 87, 65, 86, 69, 102, 109, 116, 32, 16, 0, 0, 0, 1, 0, 1, 0, 64,
+    31, 0, 0, 128, 62, 0, 0, 2, 0, 16, 0, 100, 97, 116, 97, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0,
+];
+
+impl ArtifactMimeFixture {
+    /// Complete closed representative-artifact inventory.
+    pub const ALL: [Self; 5] = [
+        Self::Binary,
+        Self::Text,
+        Self::Image,
+        Self::Audio,
+        Self::Unknown,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parses an exact stable identifier.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+
+    /// Canonical MIME essence declared at import and at staging.
+    #[must_use]
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::Binary => "application/octet-stream",
+            Self::Text => "text/plain",
+            Self::Image => "image/png",
+            Self::Audio => "audio/wav",
+            Self::Unknown => "application/x-any-mcp-unknown",
+        }
+    }
+
+    /// Exact imported and exported bytes.
+    #[must_use]
+    pub const fn payload(self) -> &'static [u8] {
+        match self {
+            Self::Binary => b"\x00\x01\x02\x7f\x80\xfe\xffany-mcp-binary-artifact",
+            Self::Text => b"any-mcp acceptance text artifact\n",
+            Self::Image => &MIME_IMAGE_PAYLOAD,
+            Self::Audio => &MIME_AUDIO_PAYLOAD,
+            Self::Unknown => b"ANYMCPUNKNOWN\x01\x02\x03unknown-artifact-bytes",
+        }
+    }
+
+    /// File-name extension used for the seeded source and the export.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Binary => "bin",
+            Self::Text => "txt",
+            Self::Image => "png",
+            Self::Audio => "wav",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Exact Markdown source of the acceptance document create.
+pub const CONTENT_CREATE_MARKDOWN: &str = "# Artifact content\n\nFirst body line.\n";
+
+/// Exact plain-text source whose canonical form is statically known.
+///
+/// The value is Unicode alphanumeric text with internal ASCII spaces, which is
+/// the closed subset `anytype` models exactly: Anytype stores it with one
+/// appended hard-break suffix and nothing else.
+pub const CONTENT_PLAIN_TEXT: &str = "any mcp plain text canonicalization";
+
+/// Exact plain-text source containing a character the importer must escape.
+pub const CONTENT_PLAIN_ESCAPED: &str = "any_mcp plain text escape";
+
+/// Exact non-canonical Markdown source used for lossy-rewrite evidence.
+pub const CONTENT_NON_CANONICAL_MARKDOWN: &str =
+    "Artifact heading\n================\n\n\nSecond paragraph.\n";
+
+/// Closed inventory of observed canonicalization differences.
+///
+/// The categories describe what Anytype added, dropped, or rewrote between an
+/// operator's source bytes and the stored canonical body, without retaining
+/// either text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CanonicalizationEffect {
+    /// The stored body is byte-identical to the source.
+    Identical,
+    /// The stored body gained the Anytype plain hard-break suffix.
+    HardBreakSuffixAppended,
+    /// Every source underscore is stored backslash-escaped.
+    UnderscoreEscaped,
+    /// Carriage returns present in the source are absent from the body.
+    CarriageReturnDropped,
+    /// A trailing newline was added.
+    TrailingNewlineAdded,
+    /// A trailing newline was dropped.
+    TrailingNewlineDropped,
+    /// A run of consecutive blank lines became shorter.
+    BlankLinesCollapsed,
+    /// The stored body has a different number of lines.
+    LineCountChanged,
+    /// The bodies differ in a way none of the closed categories explains.
+    TextRewritten,
+}
+
+impl CanonicalizationEffect {
+    /// Complete closed effect inventory.
+    pub const ALL: [Self; 9] = [
+        Self::Identical,
+        Self::HardBreakSuffixAppended,
+        Self::UnderscoreEscaped,
+        Self::CarriageReturnDropped,
+        Self::TrailingNewlineAdded,
+        Self::TrailingNewlineDropped,
+        Self::BlankLinesCollapsed,
+        Self::LineCountChanged,
+        Self::TextRewritten,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identical => "identical",
+            Self::HardBreakSuffixAppended => "hard_break_suffix_appended",
+            Self::UnderscoreEscaped => "underscore_escaped",
+            Self::CarriageReturnDropped => "carriage_return_dropped",
+            Self::TrailingNewlineAdded => "trailing_newline_added",
+            Self::TrailingNewlineDropped => "trailing_newline_dropped",
+            Self::BlankLinesCollapsed => "blank_lines_collapsed",
+            Self::LineCountChanged => "line_count_changed",
+            Self::TextRewritten => "text_rewritten",
+        }
+    }
+
+    /// Parses an exact stable identifier.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+}
+
+/// Longest run of consecutive newlines, used to detect collapsed blank lines.
+fn longest_newline_run(value: &str) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for character in value.chars() {
+        if character == '\n' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
+/// Classifies exactly how a stored canonical body differs from its source.
+///
+/// The result is a sorted, deduplicated, closed category list. It is a pure
+/// function of the two texts, so every transport must reproduce it exactly.
+#[must_use]
+pub fn classify_canonicalization(source: &str, canonical: &str) -> Vec<&'static str> {
+    if source == canonical {
+        return vec![CanonicalizationEffect::Identical.as_str()];
+    }
+    let mut effects = Vec::new();
+    if canonical.ends_with(ANYTYPE_PLAIN_MARKDOWN_SUFFIX)
+        && !source.ends_with(ANYTYPE_PLAIN_MARKDOWN_SUFFIX)
+    {
+        effects.push(CanonicalizationEffect::HardBreakSuffixAppended);
+    }
+    let source_underscores = source.matches('_').count();
+    if source_underscores > 0
+        && !source.contains("\\_")
+        && canonical.matches("\\_").count() == source_underscores
+    {
+        effects.push(CanonicalizationEffect::UnderscoreEscaped);
+    }
+    if source.contains('\r') && !canonical.contains('\r') {
+        effects.push(CanonicalizationEffect::CarriageReturnDropped);
+    }
+    match (source.ends_with('\n'), canonical.ends_with('\n')) {
+        (false, true) => effects.push(CanonicalizationEffect::TrailingNewlineAdded),
+        (true, false) => effects.push(CanonicalizationEffect::TrailingNewlineDropped),
+        _ => {}
+    }
+    // A blank line needs two consecutive newlines, so a shorter run only means
+    // collapsed blank lines when the source actually had one.
+    let source_run = longest_newline_run(source);
+    if source_run >= 2 && longest_newline_run(canonical) < source_run {
+        effects.push(CanonicalizationEffect::BlankLinesCollapsed);
+    }
+    if source.lines().count() != canonical.lines().count() {
+        effects.push(CanonicalizationEffect::LineCountChanged);
+    }
+    if effects.is_empty() {
+        effects.push(CanonicalizationEffect::TextRewritten);
+    }
+    effects.sort_unstable();
+    effects.dedup();
+    effects
+        .into_iter()
+        .map(CanonicalizationEffect::as_str)
+        .collect()
+}
+
+/// Closed inventory of validator probes executed by a validator scenario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactValidatorProbe {
+    /// Declared MIME agrees with the detected MIME.
+    MatchedDeclaration,
+    /// Declared MIME is inside the validator scope but disagrees with the bytes.
+    MismatchedDeclaration,
+    /// Declared MIME is outside the validator scope, so no validator runs.
+    OutOfScope,
+}
+
+impl ArtifactValidatorProbe {
+    /// Complete closed validator probe inventory.
+    pub const ALL: [Self; 3] = [
+        Self::MatchedDeclaration,
+        Self::MismatchedDeclaration,
+        Self::OutOfScope,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MatchedDeclaration => "matched_declaration",
+            Self::MismatchedDeclaration => "mismatched_declaration",
+            Self::OutOfScope => "out_of_scope",
+        }
+    }
+
+    /// Parses an exact stable identifier.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+
+    /// Canonical MIME essence declared by this probe.
+    #[must_use]
+    pub const fn declared_media_type(self) -> &'static str {
+        match self {
+            // Both in-scope probes carry text bytes, so the mismatch is the
+            // declaration rather than the payload.
+            Self::MatchedDeclaration => "text/plain",
+            Self::MismatchedDeclaration => "image/png",
+            Self::OutOfScope => "application/octet-stream",
+        }
+    }
+
+    /// Exact bytes imported by this probe.
+    #[must_use]
+    pub const fn payload(self) -> &'static [u8] {
+        match self {
+            Self::MatchedDeclaration => b"validator matched text payload\n",
+            Self::MismatchedDeclaration => b"validator mismatched text payload\n",
+            Self::OutOfScope => b"\x00\x01\x02validator-out-of-scope-bytes",
+        }
+    }
+
+    /// MIME essence a real `file(1)` driver must detect for this payload.
+    #[must_use]
+    pub const fn detected_media_type(self) -> &'static str {
+        "text/plain"
+    }
+}
+
+/// Observed outcome of one validator probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactValidatorOutcome {
+    /// The import succeeded and reported exactly one validator finding.
+    Finding {
+        /// Closed completion category reported by the validator.
+        status: String,
+        /// Detected MIME essence, when the validator produced one.
+        detected_media_type: Option<String>,
+    },
+    /// The import succeeded and reported no validator finding at all.
+    NoFindings,
+    /// The import was refused with this stable domain error code.
+    Refused {
+        /// Stable machine-readable domain error code.
+        code: String,
+    },
+}
+
+/// Required outcome of one validator probe under one validator policy.
+///
+/// Platforms that do not activate validator execution admit the configuration
+/// and report the validator unavailable, which a required validator still
+/// treats as a refusal.
+#[must_use]
+pub fn validator_expectation(
+    policy: FixtureValidatorPolicy,
+    probe: ArtifactValidatorProbe,
+) -> ArtifactValidatorOutcome {
+    if !policy.is_declared() || probe == ArtifactValidatorProbe::OutOfScope {
+        return ArtifactValidatorOutcome::NoFindings;
+    }
+    if !VALIDATOR_PLATFORM_ACTIVATES {
+        return if policy.is_required() {
+            ArtifactValidatorOutcome::Refused {
+                code: VALIDATION_CODE.to_owned(),
+            }
+        } else {
+            ArtifactValidatorOutcome::Finding {
+                status: "unavailable".to_owned(),
+                detected_media_type: None,
+            }
+        };
+    }
+    match probe {
+        ArtifactValidatorProbe::MatchedDeclaration => ArtifactValidatorOutcome::Finding {
+            status: "accepted".to_owned(),
+            detected_media_type: Some(probe.detected_media_type().to_owned()),
+        },
+        ArtifactValidatorProbe::MismatchedDeclaration => {
+            if policy.is_required() {
+                ArtifactValidatorOutcome::Refused {
+                    code: VALIDATION_CODE.to_owned(),
+                }
+            } else {
+                ArtifactValidatorOutcome::Finding {
+                    status: "rejected".to_owned(),
+                    detected_media_type: Some(probe.detected_media_type().to_owned()),
+                }
+            }
+        }
+        ArtifactValidatorProbe::OutOfScope => ArtifactValidatorOutcome::NoFindings,
+    }
+}
+
+/// Closed inventory of content functional scenarios.
+///
+/// The smoke matrix proves one happy path per transport; these scenarios prove
+/// what the artifact *content* contract must do with representative MIME
+/// types, with Markdown and plain text, and with configured validators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactContentScenario {
+    /// Representative MIME artifacts imported and exported through both planes.
+    MimeMatrix,
+    /// Markdown and plain-text create/update/export canonicalization evidence.
+    DocumentCanonicalization,
+    /// One optional validator: a rejection is reported and the import proceeds.
+    ValidatorOptional,
+    /// One required validator: a rejection refuses the import.
+    ValidatorRequired,
+}
+
+impl ArtifactContentScenario {
+    /// Complete closed content scenario inventory.
+    pub const ALL: [Self; 4] = [
+        Self::MimeMatrix,
+        Self::DocumentCanonicalization,
+        Self::ValidatorOptional,
+        Self::ValidatorRequired,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MimeMatrix => "mime_matrix",
+            Self::DocumentCanonicalization => "document_canonicalization",
+            Self::ValidatorOptional => "validator_optional",
+            Self::ValidatorRequired => "validator_required",
+        }
+    }
+
+    /// Parses an exact stable identifier.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+
+    /// Configured validator shape realized by this scenario.
+    #[must_use]
+    pub const fn validator_policy(self) -> FixtureValidatorPolicy {
+        match self {
+            Self::MimeMatrix | Self::DocumentCanonicalization => FixtureValidatorPolicy::Absent,
+            Self::ValidatorOptional => FixtureValidatorPolicy::Optional,
+            Self::ValidatorRequired => FixtureValidatorPolicy::Required,
+        }
+    }
+
+    /// Exact fixture policy options that realize this scenario.
+    #[must_use]
+    pub const fn policy_options(self) -> ArtifactPolicyOptions {
+        ArtifactPolicyOptions {
+            staging: true,
+            read_only: false,
+            spaces: FixtureSpacePolicy::AllowedUnderTest,
+            validators: self.validator_policy(),
+        }
+    }
+
+    /// Exact configured and available validator counts reported by status.
+    #[must_use]
+    pub const fn expected_validator_counts(self) -> (u64, u64) {
+        if !self.validator_policy().is_declared() {
+            return (0, 0);
+        }
+        (1, if VALIDATOR_PLATFORM_ACTIVATES { 1 } else { 0 })
+    }
+}
+
+/// Content-free record of one representative MIME artifact round trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactFileRecord {
+    /// `<fixture>+<data plane>` identifier of this round trip.
+    pub case: String,
+    /// Canonical MIME essence asserted at import.
+    pub declared_media_type: String,
+    /// Canonical MIME essence reported by the stored representation.
+    pub stored_media_type: Option<String>,
+    /// Verified imported byte length.
+    pub size_bytes: u64,
+    /// Verified SHA-256 of the imported bytes.
+    pub sha256: String,
+    /// Verified exported byte length.
+    pub exported_size_bytes: u64,
+    /// Verified SHA-256 of the exported bytes.
+    pub exported_sha256: String,
+}
+
+/// Content-free record of one document mutation and its canonical readback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactDocumentRecord {
+    /// `<case>+<data plane>` identifier of this mutation.
+    pub case: String,
+    /// SHA-256 of the exact authorized source bytes.
+    pub source_sha256: String,
+    /// SHA-256 of the complete Markdown dispatched to Anytype.
+    pub dispatched_sha256: String,
+    /// SHA-256 of the complete canonical body read back from Anytype.
+    pub canonical_sha256: String,
+    /// Whether the mutation proved that no write was necessary.
+    pub no_op: bool,
+    /// Exact source byte count.
+    pub source_bytes: u64,
+    /// Exact canonical body byte count.
+    pub canonical_bytes: u64,
+    /// Closed categories describing what canonicalization changed.
+    pub effects: Vec<&'static str>,
+}
+
+/// Content-free record of one validator probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactValidatorRecord {
+    /// `<probe>+<data plane>` identifier of this probe.
+    pub case: String,
+    /// Observed probe outcome.
+    pub outcome: ArtifactValidatorOutcome,
+}
+
+/// Content-free result of one content scenario on one control plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactContentEvidence {
+    /// Stable content scenario identifier.
+    pub scenario: &'static str,
+    /// Stable control-plane identifier that produced this evidence.
+    pub control: &'static str,
+    /// Configured validator count reported by `artifact_status`.
+    pub validator_count: u64,
+    /// Available validator count reported by `artifact_status`.
+    pub validator_available_count: u64,
+    /// Ordered representative MIME round trips.
+    pub files: Vec<ArtifactFileRecord>,
+    /// Ordered document mutations and canonical readbacks.
+    pub documents: Vec<ArtifactDocumentRecord>,
+    /// Ordered validator probes.
+    pub validators: Vec<ArtifactValidatorRecord>,
+}
+
+impl ArtifactContentEvidence {
+    /// Whether two control planes observed identical content behavior.
+    ///
+    /// Only the control-plane identifier may differ.
+    #[must_use]
+    fn matches(&self, other: &Self) -> bool {
+        self.scenario == other.scenario
+            && self.validator_count == other.validator_count
+            && self.validator_available_count == other.validator_available_count
+            && self.files == other.files
+            && self.documents == other.documents
+            && self.validators == other.validators
+    }
+}
+
+/// Fixture inputs for one content scenario run.
+pub struct ArtifactContentRun<'a> {
+    /// Content scenario under test.
+    pub scenario: ArtifactContentScenario,
+    /// Control plane driving the production server.
+    pub control: ArtifactControlPlane,
+    /// Strict operator policy backing the server under test.
+    pub policy: &'a ArtifactPolicyFixture,
+    /// Disposable space context that owns every created resource.
+    pub ctx: &'a TestContext,
+}
+
+/// Runs one content scenario through one control plane and both data planes.
+///
+/// Every created Anytype resource is registered with the disposable context
+/// before the next step, every staged record is consumed or released, and no
+/// artifact byte, staging bearer, or upstream body is retained in the returned
+/// evidence.
+///
+/// # Errors
+///
+/// Returns a fixed message describing the first violated expectation.
+pub async fn run_artifact_content_scenario(
+    driver: &mut impl McpDriver,
+    run: &ArtifactContentRun<'_>,
+) -> Result<ArtifactContentEvidence, String> {
+    let scenario = run.scenario;
+    if run.policy.options() != scenario.policy_options() {
+        return Err(format!(
+            "content fixture does not realize scenario: {}",
+            scenario.as_str()
+        ));
+    }
+    let suffix = unique_suffix();
+
+    let descriptors = driver.list_tool_descriptors().await?;
+    let catalog = ArtifactCatalogSnapshot::from_descriptors(&descriptors)?;
+    ArtifactCatalogSnapshot::reviewed()?.compare(&catalog)?;
+
+    let status = driver.call_tool("artifact_status", json!({})).await?;
+    if required_u64(&status, "import_root_count")? != 1
+        || required_u64(&status, "export_root_count")? != 1
+        || status["staging_active"] != Value::Bool(true)
+    {
+        return Err("content scenario requires both planes to be active".to_owned());
+    }
+    let validator_count = required_u64(&status, "validator_count")?;
+    let validator_available_count = required_u64(&status, "validator_available_count")?;
+    if (validator_count, validator_available_count) != scenario.expected_validator_counts() {
+        return Err(format!(
+            "artifact status did not report the configured validators: {}",
+            scenario.as_str()
+        ));
+    }
+
+    let mut files = Vec::new();
+    let mut documents = Vec::new();
+    let mut validators = Vec::new();
+    match scenario {
+        ArtifactContentScenario::MimeMatrix => {
+            files = Box::pin(run_mime_family(driver, run, &suffix)).await?;
+        }
+        ArtifactContentScenario::DocumentCanonicalization => {
+            documents = Box::pin(run_document_family(driver, run, &suffix)).await?;
+        }
+        ArtifactContentScenario::ValidatorOptional | ArtifactContentScenario::ValidatorRequired => {
+            validators = Box::pin(run_validator_family(driver, run, &suffix)).await?;
+        }
+    }
+
+    Ok(ArtifactContentEvidence {
+        scenario: scenario.as_str(),
+        control: run.control.as_str(),
+        validator_count,
+        validator_available_count,
+        files,
+        documents,
+        validators,
+    })
+}
+
+/// Prepares one authorized source and returns any staged bearer it allocated.
+async fn content_source(
+    driver: &mut impl McpDriver,
+    transport: ArtifactTransport,
+    policy: &ArtifactPolicyFixture,
+    space_id: &str,
+    payload: &[u8],
+    media_type: &str,
+    relative: &str,
+) -> Result<(Value, Option<String>), String> {
+    match transport.data() {
+        ArtifactDataPlane::LocalRoots => {
+            policy.seed_import(relative, payload)?;
+            Ok((
+                json!({"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": relative}}),
+                None,
+            ))
+        }
+        ArtifactDataPlane::RemoteStaging => {
+            let handle = stage_upload(driver, space_id, payload, media_type).await?;
+            Ok((json!({"staged_handle": handle.clone()}), Some(handle)))
+        }
+    }
+}
+
+/// Imports and exports every representative MIME artifact on both planes.
+async fn run_mime_family(
+    driver: &mut impl McpDriver,
+    run: &ArtifactContentRun<'_>,
+    suffix: &str,
+) -> Result<Vec<ArtifactFileRecord>, String> {
+    let space_id = run.ctx.space_id.as_str();
+    let mut records =
+        Vec::with_capacity(ArtifactMimeFixture::ALL.len() * ArtifactDataPlane::ALL.len());
+    for data in ArtifactDataPlane::ALL {
+        let transport = ArtifactTransport::new(run.control, data);
+        for fixture in ArtifactMimeFixture::ALL {
+            let case = format!("{}+{}", fixture.as_str(), data.as_str());
+            let relative = format!(
+                "mime-{}-{}-{suffix}.{}",
+                fixture.as_str(),
+                data.as_str(),
+                fixture.extension()
+            );
+            let (source, _) = content_source(
+                driver,
+                transport,
+                run.policy,
+                space_id,
+                fixture.payload(),
+                fixture.media_type(),
+                &relative,
+            )
+            .await?;
+            let imported = driver
+                .call_tool(
+                    "file_import",
+                    json!({
+                        "space": space_id,
+                        "source": source,
+                        "name": relative,
+                        "media_type": fixture.media_type(),
+                        "idempotency_key": format!("content-import-{case}-{suffix}")
+                    }),
+                )
+                .await?;
+            let file_id = required_str(&imported, "/file_id")?;
+            run.ctx.register_file(&file_id);
+            let sha256 = required_str(&imported, "/receipt/sha256")?;
+            let size_bytes = imported
+                .pointer("/receipt/size_bytes")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("import {case} omitted its verified size"))?;
+            let declared_media_type = required_str(&imported, "/receipt/declared_media_type")?;
+            if sha256 != artifact_sha256(fixture.payload())
+                || size_bytes != fixture.payload().len() as u64
+                || declared_media_type != fixture.media_type()
+            {
+                return Err(format!("import {case} did not verify the exact fixture"));
+            }
+
+            let export_relative = format!(
+                "mime-export-{}-{}-{suffix}.{}",
+                fixture.as_str(),
+                data.as_str(),
+                fixture.extension()
+            );
+            let exported = driver
+                .call_tool(
+                    "file_export",
+                    json!({
+                        "space": space_id,
+                        "file_id": file_id,
+                        "destination": artifact_destination(&transport, &export_relative),
+                        "idempotency_key": format!("content-export-{case}-{suffix}")
+                    }),
+                )
+                .await?;
+            let exported_bytes =
+                read_exported_bytes(&transport, run.policy, &exported, &export_relative).await?;
+            let exported_sha256 = required_str(&exported, "/receipt/sha256")?;
+            let exported_size_bytes = exported
+                .pointer("/receipt/size_bytes")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("export {case} omitted its verified size"))?;
+            if exported_bytes != fixture.payload()
+                || exported_sha256 != sha256
+                || exported_size_bytes != size_bytes
+            {
+                return Err(format!("export {case} did not republish the exact bytes"));
+            }
+            release_remote_receipt(driver, &transport, &exported).await?;
+
+            records.push(ArtifactFileRecord {
+                case,
+                declared_media_type,
+                stored_media_type: imported
+                    .pointer("/receipt/stored_media_type")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                size_bytes,
+                sha256,
+                exported_size_bytes,
+                exported_sha256,
+            });
+        }
+    }
+    Ok(records)
+}
+
+/// One document under test on one data plane.
+///
+/// Every mutation and readback of that document shares this identity, so each
+/// step only names what actually varies: the source, the format, and a label.
+struct DocumentPlane<'a> {
+    run: &'a ArtifactContentRun<'a>,
+    transport: ArtifactTransport,
+    object_id: String,
+    plane: &'static str,
+    suffix: &'a str,
+}
+
+impl DocumentPlane<'_> {
+    /// Exports the current body and returns its exact canonical text.
+    async fn export_canonical(
+        &self,
+        driver: &mut impl McpDriver,
+        expected_sha256: &str,
+        label: &str,
+    ) -> Result<String, String> {
+        let relative = format!("document-{label}-{}-{}.md", self.plane, self.suffix);
+        let exported = driver
+            .call_tool(
+                "document_export",
+                json!({
+                    "space": self.run.ctx.space_id.as_str(),
+                    "object_id": self.object_id,
+                    "destination": artifact_destination(&self.transport, &relative),
+                    "expected_body_sha256": expected_sha256,
+                    "idempotency_key": format!(
+                        "content-document-export-{label}-{}-{}",
+                        self.plane, self.suffix
+                    )
+                }),
+            )
+            .await?;
+        if required_str(&exported, "/sha256")? != expected_sha256 {
+            return Err("document export did not publish the expected canonical body".to_owned());
+        }
+        let bytes =
+            read_exported_bytes(&self.transport, self.run.policy, &exported, &relative).await?;
+        if artifact_sha256(&bytes) != expected_sha256 {
+            return Err("document export bytes did not match the reported hash".to_owned());
+        }
+        release_remote_receipt(driver, &self.transport, &exported).await?;
+        String::from_utf8(bytes).map_err(|_| "canonical document body is not UTF-8".to_owned())
+    }
+
+    /// Replaces the document body from an authorized source on this plane.
+    async fn update(
+        &self,
+        driver: &mut impl McpDriver,
+        expected_body_sha256: &str,
+        source_text: &str,
+        source_format: &'static str,
+        label: &str,
+    ) -> Result<Value, String> {
+        let space_id = self.run.ctx.space_id.as_str();
+        let (source, _) = content_source(
+            driver,
+            self.transport,
+            self.run.policy,
+            space_id,
+            source_text.as_bytes(),
+            ARTIFACT_MARKDOWN_MEDIA_TYPE,
+            &format!("document-{label}-{}-{}.md", self.plane, self.suffix),
+        )
+        .await?;
+        driver
+            .call_tool(
+                "document_import_update",
+                json!({
+                    "space": space_id,
+                    "object_id": self.object_id,
+                    "source": source,
+                    "source_format": source_format,
+                    "expected_body_sha256": expected_body_sha256,
+                    "idempotency_key": format!(
+                        "content-document-update-{label}-{}-{}",
+                        self.plane, self.suffix
+                    )
+                }),
+            )
+            .await
+    }
+}
+
+/// Builds one content-free document record from a mutation result.
+fn document_record(
+    case: String,
+    source: &str,
+    canonical: &str,
+    result: &Value,
+) -> Result<ArtifactDocumentRecord, String> {
+    let source_sha256 = required_str(result, "/source_sha256")?;
+    if source_sha256 != artifact_sha256(source.as_bytes()) {
+        return Err(format!("document {case} did not verify its source bytes"));
+    }
+    let canonical_sha256 = required_str(result, "/canonical_sha256")?;
+    if canonical_sha256 != artifact_sha256(canonical.as_bytes()) {
+        return Err(format!("document {case} canonical readback disagreed"));
+    }
+    Ok(ArtifactDocumentRecord {
+        case,
+        source_sha256,
+        dispatched_sha256: required_str(result, "/dispatched_sha256")?,
+        canonical_sha256,
+        no_op: result["no_op"] == Value::Bool(true),
+        source_bytes: result
+            .pointer("/source_bytes")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "document mutation omitted its source size".to_owned())?,
+        canonical_bytes: canonical.len() as u64,
+        effects: classify_canonicalization(source, canonical),
+    })
+}
+
+/// Proves Markdown and plain-text create/update/export canonicalization.
+///
+/// The family covers three distinct obligations on each data plane: a create
+/// whose canonical readback is exported exactly; a round trip of that exact
+/// canonical body, which must be a proven no-op; and three non-canonical
+/// sources whose stored bodies are classified into closed effect categories.
+/// The plain-text case is additionally pinned to the statically known
+/// canonical form, so the evidence names exactly what Anytype appended.
+async fn run_document_family(
+    driver: &mut impl McpDriver,
+    run: &ArtifactContentRun<'_>,
+    suffix: &str,
+) -> Result<Vec<ArtifactDocumentRecord>, String> {
+    let space_id = run.ctx.space_id.as_str();
+    let mut records = Vec::new();
+    for data in ArtifactDataPlane::ALL {
+        let transport = ArtifactTransport::new(run.control, data);
+        let plane = data.as_str();
+        let (source, _) = content_source(
+            driver,
+            transport,
+            run.policy,
+            space_id,
+            CONTENT_CREATE_MARKDOWN.as_bytes(),
+            ARTIFACT_MARKDOWN_MEDIA_TYPE,
+            &format!("document-create-{plane}-{suffix}.md"),
+        )
+        .await?;
+        let created = driver
+            .call_tool(
+                "document_import_create",
+                json!({
+                    "space": space_id,
+                    "source": source,
+                    "source_format": "markdown",
+                    "object_type": "page",
+                    "name": format!("Artifact content {plane} {suffix}"),
+                    "idempotency_key": format!("content-document-create-{plane}-{suffix}")
+                }),
+            )
+            .await?;
+        let object_id = required_str(&created, "/object_id")?;
+        run.ctx.register_object(&object_id);
+        let document = DocumentPlane {
+            run,
+            transport,
+            object_id,
+            plane,
+            suffix,
+        };
+        let mut current = required_str(&created, "/canonical_sha256")?;
+        let mut canonical =
+            Box::pin(document.export_canonical(driver, &current, "created")).await?;
+        records.push(document_record(
+            format!("markdown_create+{plane}"),
+            CONTENT_CREATE_MARKDOWN,
+            &canonical,
+            &created,
+        )?);
+
+        // A round trip of the exact canonical body must change nothing: this
+        // is the explicit no-op obligation of the acceptance design.
+        let no_op =
+            Box::pin(document.update(driver, &current, &canonical, "markdown", "noop")).await?;
+        if no_op["no_op"] != Value::Bool(true) {
+            return Err("canonical round trip was not reported as a no-op".to_owned());
+        }
+        if required_str(&no_op, "/canonical_sha256")? != current {
+            return Err("no-op round trip changed the canonical body".to_owned());
+        }
+        records.push(document_record(
+            format!("canonical_no_op+{plane}"),
+            &canonical,
+            &canonical,
+            &no_op,
+        )?);
+
+        // Plain text is the closed subset whose canonical form is known before
+        // the call, so the lossy rewrite is asserted rather than only observed.
+        let updated =
+            Box::pin(document.update(driver, &current, CONTENT_PLAIN_TEXT, "plain_text", "plain"))
+                .await?;
+        let expected = format!("{CONTENT_PLAIN_TEXT}{ANYTYPE_PLAIN_MARKDOWN_SUFFIX}");
+        current = required_str(&updated, "/canonical_sha256")?;
+        if current != artifact_sha256(expected.as_bytes()) || updated["no_op"] != Value::Bool(false)
+        {
+            return Err("plain-text canonicalization did not match the modeled form".to_owned());
+        }
+        canonical = Box::pin(document.export_canonical(driver, &current, "plain")).await?;
+        if canonical != expected {
+            return Err("exported plain-text body was not the modeled canonical form".to_owned());
+        }
+        let record = document_record(
+            format!("plain_text_hard_break+{plane}"),
+            CONTENT_PLAIN_TEXT,
+            &canonical,
+            &updated,
+        )?;
+        if !record
+            .effects
+            .contains(&CanonicalizationEffect::HardBreakSuffixAppended.as_str())
+        {
+            return Err("plain-text canonicalization evidence lost its hard break".to_owned());
+        }
+        records.push(record);
+
+        // An escaped plain-text source proves the dispatched form differs from
+        // the operator's bytes before Anytype canonicalizes anything.
+        let escaped = Box::pin(document.update(
+            driver,
+            &current,
+            CONTENT_PLAIN_ESCAPED,
+            "plain_text",
+            "escaped",
+        ))
+        .await?;
+        if required_str(&escaped, "/dispatched_sha256")?
+            == artifact_sha256(CONTENT_PLAIN_ESCAPED.as_bytes())
+        {
+            return Err("plain-text escaping did not rewrite the dispatched body".to_owned());
+        }
+        current = required_str(&escaped, "/canonical_sha256")?;
+        canonical = Box::pin(document.export_canonical(driver, &current, "escaped")).await?;
+        records.push(document_record(
+            format!("plain_text_escaped+{plane}"),
+            CONTENT_PLAIN_ESCAPED,
+            &canonical,
+            &escaped,
+        )?);
+
+        let rewritten = Box::pin(document.update(
+            driver,
+            &current,
+            CONTENT_NON_CANONICAL_MARKDOWN,
+            "markdown",
+            "rewritten",
+        ))
+        .await?;
+        current = required_str(&rewritten, "/canonical_sha256")?;
+        canonical = Box::pin(document.export_canonical(driver, &current, "rewritten")).await?;
+        records.push(document_record(
+            format!("markdown_non_canonical+{plane}"),
+            CONTENT_NON_CANONICAL_MARKDOWN,
+            &canonical,
+            &rewritten,
+        )?);
+    }
+    Ok(records)
+}
+
+/// Runs every validator probe on both data planes.
+async fn run_validator_family(
+    driver: &mut impl McpDriver,
+    run: &ArtifactContentRun<'_>,
+    suffix: &str,
+) -> Result<Vec<ArtifactValidatorRecord>, String> {
+    let space_id = run.ctx.space_id.as_str();
+    let policy = run.scenario.validator_policy();
+    let mut records =
+        Vec::with_capacity(ArtifactValidatorProbe::ALL.len() * ArtifactDataPlane::ALL.len());
+    for data in ArtifactDataPlane::ALL {
+        let transport = ArtifactTransport::new(run.control, data);
+        for probe in ArtifactValidatorProbe::ALL {
+            let case = format!("{}+{}", probe.as_str(), data.as_str());
+            let relative = format!(
+                "validator-{}-{}-{suffix}.bin",
+                probe.as_str(),
+                data.as_str()
+            );
+            let (source, staged) = content_source(
+                driver,
+                transport,
+                run.policy,
+                space_id,
+                probe.payload(),
+                probe.declared_media_type(),
+                &relative,
+            )
+            .await?;
+            let arguments = json!({
+                "space": space_id,
+                "source": source,
+                "name": relative,
+                "media_type": probe.declared_media_type(),
+                "idempotency_key": format!("content-validator-{case}-{suffix}")
+            });
+            let expected = validator_expectation(policy, probe);
+            let outcome = match expected {
+                ArtifactValidatorOutcome::Refused { .. } => {
+                    let refusal = driver.call_tool_error("file_import", arguments).await?;
+                    // A refused import never consumes its staged source, so the
+                    // record is released instead of outliving the probe.
+                    if let Some(handle) = staged {
+                        let released = driver
+                            .call_tool("artifact_release", json!({"handle": handle}))
+                            .await?;
+                        if released["released"] != Value::Bool(true) {
+                            return Err(format!("probe {case} left a staged record allocated"));
+                        }
+                    }
+                    ArtifactValidatorOutcome::Refused {
+                        code: refusal.code().to_owned(),
+                    }
+                }
+                ArtifactValidatorOutcome::Finding { .. } | ArtifactValidatorOutcome::NoFindings => {
+                    let imported = driver.call_tool("file_import", arguments).await?;
+                    run.ctx.register_file(&required_str(&imported, "/file_id")?);
+                    validator_outcome(&imported, &case)?
+                }
+            };
+            if outcome != expected {
+                return Err(format!(
+                    "validator probe {case} produced an unexpected outcome"
+                ));
+            }
+            records.push(ArtifactValidatorRecord { case, outcome });
+        }
+    }
+    Ok(records)
+}
+
+/// Reads the single expected validator finding from an import receipt.
+fn validator_outcome(imported: &Value, case: &str) -> Result<ArtifactValidatorOutcome, String> {
+    let Some(findings) = imported.pointer("/receipt/validators") else {
+        return Ok(ArtifactValidatorOutcome::NoFindings);
+    };
+    let findings = findings
+        .as_array()
+        .ok_or_else(|| format!("probe {case} reported a malformed validator array"))?;
+    match findings.as_slice() {
+        [] => Ok(ArtifactValidatorOutcome::NoFindings),
+        [finding] => {
+            if finding["id"] != Value::String(FIXTURE_VALIDATOR_ID.to_owned()) {
+                return Err(format!("probe {case} reported an unconfigured validator"));
+            }
+            Ok(ArtifactValidatorOutcome::Finding {
+                status: finding["status"]
+                    .as_str()
+                    .ok_or_else(|| format!("probe {case} omitted its validator status"))?
+                    .to_owned(),
+                detected_media_type: finding["detected_media_type"]
+                    .as_str()
+                    .map(ToOwned::to_owned),
+            })
+        }
+        _ => Err(format!("probe {case} reported more than one finding")),
+    }
+}
+
+/// Proves that every control plane observed the same content behavior.
+///
+/// # Errors
+///
+/// Returns a fixed message naming the first divergent control plane, or
+/// reporting an incomplete, misordered, or duplicated executed matrix.
+pub fn assert_artifact_content_parity(
+    executed: &[ArtifactContentEvidence],
+    expected: &[ArtifactControlPlane],
+) -> Result<(), String> {
+    if executed.len() != expected.len() {
+        return Err("executed artifact content matrix is incomplete".to_owned());
+    }
+    let mut observed = Vec::with_capacity(executed.len());
+    for (evidence, control) in executed.iter().zip(expected) {
+        if evidence.control != control.as_str() {
+            return Err(format!(
+                "artifact content evidence out of order: {}",
+                evidence.control
+            ));
+        }
+        if observed.contains(&evidence.control) {
+            return Err(format!(
+                "duplicate artifact content evidence: {}",
+                evidence.control
+            ));
+        }
+        observed.push(evidence.control);
+    }
+    let Some(baseline) = executed.first() else {
+        return Err("artifact content parity requires at least one control plane".to_owned());
+    };
+    for evidence in executed.iter().skip(1) {
+        if !baseline.matches(evidence) {
+            return Err(format!(
+                "artifact content control plane diverged from {}: {}",
+                baseline.control, evidence.control
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Fixed upstream server-log error classes already isolated and tracked.
 pub const KNOWN_SERVER_LOG_CLASSES: [(&str, &str); 5] = [
     (
@@ -2030,6 +3473,36 @@ pub fn require_completed<T>(run: DisposableRun<T>, scenario: &str) -> Result<T, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_relative_names_admit_only_one_ordinary_component() {
+        for accepted in ["source.txt", "a", "name with spaces.png", "a.b.c"] {
+            assert!(
+                simple_relative_name(accepted),
+                "expected an admitted fixture name: {accepted}"
+            );
+        }
+        // Rejections are identical on every platform, including the spellings
+        // that only `Path::join` on Windows would resolve outside the fixture.
+        for rejected in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "sub/source.txt",
+            "sub\\source.txt",
+            "\\\\server\\share",
+            "C:\\evil",
+            "C:evil",
+            "/absolute",
+            "name\u{0}.txt",
+        ] {
+            assert!(
+                !simple_relative_name(rejected),
+                "expected a refused fixture name: {rejected:?}"
+            );
+        }
+    }
 
     #[test]
     fn transport_matrix_is_closed_complete_and_uniquely_identified() {
@@ -2570,6 +4043,372 @@ mod tests {
 
         descriptors.push(descriptor("artifact_status", "duplicate"));
         assert!(artifact_descriptor_digests(&descriptors).is_err());
+    }
+
+    #[test]
+    fn content_scenarios_are_closed_uniquely_named_and_permissive() {
+        let mut ids = std::collections::BTreeSet::new();
+        for scenario in ArtifactContentScenario::ALL {
+            assert!(ids.insert(scenario.as_str()), "duplicate content scenario");
+            assert_eq!(
+                ArtifactContentScenario::parse(scenario.as_str()),
+                Some(scenario)
+            );
+            let options = scenario.policy_options();
+            // Content scenarios must never re-test refusal: both planes stay
+            // active and the space under test stays authorized.
+            assert!(options.staging);
+            assert!(!options.read_only);
+            assert!(options.spaces.admits_space_under_test());
+            assert_eq!(options.validators, scenario.validator_policy());
+            let (configured, available) = scenario.expected_validator_counts();
+            assert_eq!(
+                configured,
+                u64::from(scenario.validator_policy().is_declared())
+            );
+            assert!(available <= configured);
+        }
+        assert_eq!(
+            ArtifactContentScenario::ALL
+                .into_iter()
+                .filter(|scenario| scenario.validator_policy().is_declared())
+                .count(),
+            2,
+            "exactly one optional and one required validator scenario"
+        );
+    }
+
+    #[test]
+    fn mime_fixtures_are_distinct_in_identity_bytes_and_media_type() {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut payloads = std::collections::BTreeSet::new();
+        let mut media_types = std::collections::BTreeSet::new();
+        for fixture in ArtifactMimeFixture::ALL {
+            assert!(ids.insert(fixture.as_str()), "duplicate fixture identifier");
+            assert_eq!(ArtifactMimeFixture::parse(fixture.as_str()), Some(fixture));
+            // Anytype files are content addressed, so shared bytes would
+            // collapse two fixtures into one upstream object.
+            assert!(
+                payloads.insert(fixture.payload()),
+                "duplicate fixture payload"
+            );
+            assert!(
+                media_types.insert(fixture.media_type()),
+                "duplicate fixture media type"
+            );
+            assert!(!fixture.payload().is_empty());
+            assert!(!fixture.extension().is_empty());
+        }
+        assert!(
+            ArtifactMimeFixture::Image
+                .payload()
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+        assert!(ArtifactMimeFixture::Audio.payload().starts_with(b"RIFF"));
+    }
+
+    #[test]
+    fn canonicalization_effects_are_closed_and_classified_exactly() {
+        for effect in CanonicalizationEffect::ALL {
+            assert_eq!(
+                CanonicalizationEffect::parse(effect.as_str()),
+                Some(effect),
+                "effect identifier must round trip"
+            );
+        }
+        let hard_break = format!("{CONTENT_PLAIN_TEXT}{ANYTYPE_PLAIN_MARKDOWN_SUFFIX}");
+        let cases: [(&str, &str, Vec<&'static str>); 7] = [
+            ("same", "same", vec!["identical"]),
+            (
+                CONTENT_PLAIN_TEXT,
+                hard_break.as_str(),
+                vec!["hard_break_suffix_appended", "trailing_newline_added"],
+            ),
+            (
+                "any_mcp",
+                "any\\_mcp   \n",
+                vec![
+                    "hard_break_suffix_appended",
+                    "underscore_escaped",
+                    "trailing_newline_added",
+                ],
+            ),
+            (
+                "first\r\nsecond\n",
+                "first\nsecond\n",
+                vec!["carriage_return_dropped"],
+            ),
+            ("body\n", "body", vec!["trailing_newline_dropped"]),
+            (
+                "one\n\n\ntwo\n",
+                "one\n\ntwo\n",
+                vec!["blank_lines_collapsed", "line_count_changed"],
+            ),
+            ("alpha\n", "beta\n", vec!["text_rewritten"]),
+        ];
+        for (source, canonical, expected) in &cases {
+            let observed = classify_canonicalization(source, canonical);
+            assert_eq!(
+                &observed, expected,
+                "source {source:?} canonical {canonical:?}"
+            );
+            // Every reported category must belong to the closed inventory.
+            for effect in observed {
+                assert!(CanonicalizationEffect::parse(effect).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn validator_expectations_cover_every_policy_and_probe_exactly() {
+        for probe in ArtifactValidatorProbe::ALL {
+            assert_eq!(ArtifactValidatorProbe::parse(probe.as_str()), Some(probe));
+            assert_eq!(
+                validator_expectation(FixtureValidatorPolicy::Absent, probe),
+                ArtifactValidatorOutcome::NoFindings,
+                "an undeclared validator never reports a finding"
+            );
+        }
+        // An out-of-scope declaration proves a configured validator does not
+        // run on every artifact, whatever its required flag.
+        for policy in FixtureValidatorPolicy::ALL {
+            assert_eq!(
+                validator_expectation(policy, ArtifactValidatorProbe::OutOfScope),
+                ArtifactValidatorOutcome::NoFindings
+            );
+        }
+        let matched = validator_expectation(
+            FixtureValidatorPolicy::Optional,
+            ArtifactValidatorProbe::MatchedDeclaration,
+        );
+        let mismatched_optional = validator_expectation(
+            FixtureValidatorPolicy::Optional,
+            ArtifactValidatorProbe::MismatchedDeclaration,
+        );
+        let mismatched_required = validator_expectation(
+            FixtureValidatorPolicy::Required,
+            ArtifactValidatorProbe::MismatchedDeclaration,
+        );
+        if VALIDATOR_PLATFORM_ACTIVATES {
+            assert_eq!(
+                matched,
+                ArtifactValidatorOutcome::Finding {
+                    status: "accepted".to_owned(),
+                    detected_media_type: Some("text/plain".to_owned())
+                }
+            );
+            assert_eq!(
+                mismatched_optional,
+                ArtifactValidatorOutcome::Finding {
+                    status: "rejected".to_owned(),
+                    detected_media_type: Some("text/plain".to_owned())
+                }
+            );
+            assert_eq!(
+                mismatched_required,
+                ArtifactValidatorOutcome::Refused {
+                    code: VALIDATION_CODE.to_owned()
+                }
+            );
+        } else {
+            assert_eq!(
+                matched,
+                ArtifactValidatorOutcome::Finding {
+                    status: "unavailable".to_owned(),
+                    detected_media_type: None
+                }
+            );
+            assert_eq!(mismatched_optional, matched);
+            assert_eq!(
+                mismatched_required,
+                ArtifactValidatorOutcome::Refused {
+                    code: VALIDATION_CODE.to_owned()
+                }
+            );
+        }
+        // The mismatch probe must stay inside the configured MIME scope, or it
+        // would prove scope gating instead of declaration checking.
+        assert!(
+            FIXTURE_VALIDATOR_MIME
+                .contains(&ArtifactValidatorProbe::MatchedDeclaration.declared_media_type())
+        );
+        assert!(
+            FIXTURE_VALIDATOR_MIME
+                .contains(&ArtifactValidatorProbe::MismatchedDeclaration.declared_media_type())
+        );
+        assert!(
+            !FIXTURE_VALIDATOR_MIME
+                .contains(&ArtifactValidatorProbe::OutOfScope.declared_media_type())
+        );
+    }
+
+    #[test]
+    fn declared_validator_policy_renders_a_parsable_pinned_declaration() {
+        let validator = PinnedValidatorExecutable {
+            path: PathBuf::from(if cfg!(windows) {
+                r"C:\tools\file.exe"
+            } else {
+                "/usr/bin/file"
+            }),
+            sha256: "a".repeat(64),
+        };
+        for policy in FixtureValidatorPolicy::ALL {
+            let options = ArtifactPolicyOptions {
+                validators: policy,
+                ..ArtifactPolicyOptions::default()
+            };
+            let rendered = render_policy(
+                "bafyrei-under-test",
+                Path::new("/tmp/import"),
+                Path::new("/tmp/export"),
+                Path::new("/tmp/staging"),
+                Some("http://127.0.0.1:18765/artifacts/v1/"),
+                Some(&validator),
+                options,
+            );
+            let parsed = rendered
+                .parse::<toml::Table>()
+                .expect("rendered fixture policy must be valid TOML");
+            let declared = parsed.get("validators").and_then(toml::Value::as_array);
+            if !policy.is_declared() {
+                assert!(declared.is_none(), "{}", policy.as_str());
+                continue;
+            }
+            let entries = declared.expect("declared validator table");
+            assert_eq!(entries.len(), 1);
+            let entry = &entries[0];
+            // `RawValidator` denies unknown fields and requires every one of
+            // these, so the rendered key set must match it exactly.
+            let mut keys = entry
+                .as_table()
+                .expect("validator entry")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "driver",
+                    "field_bytes",
+                    "fields",
+                    "id",
+                    "input_bytes",
+                    "memory_bytes",
+                    "mime",
+                    "path",
+                    "platform",
+                    "required",
+                    "sha256",
+                    "stderr_bytes",
+                    "stdout_bytes",
+                    "timeout_secs",
+                ]
+            );
+            // Bounds enforced by the production validator policy parser.
+            let integer = |key: &str| entry[key].as_integer().expect("integer field");
+            assert!(integer("timeout_secs") > 0);
+            assert!((16 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&integer("memory_bytes")));
+            assert!(integer("input_bytes") > 0);
+            assert!((1..=1024 * 1024).contains(&integer("stdout_bytes")));
+            assert!((1..=1024 * 1024).contains(&integer("stderr_bytes")));
+            assert!((1..=256).contains(&integer("fields")));
+            assert!((1..=64 * 1024).contains(&integer("field_bytes")));
+            assert_eq!(entry["id"].as_str(), Some(FIXTURE_VALIDATOR_ID));
+            assert_eq!(entry["driver"].as_str(), Some("file-mime"));
+            assert_eq!(entry["platform"].as_str(), Some("linux-retained-fd-v1"));
+            assert_eq!(entry["required"].as_bool(), Some(policy.is_required()));
+            assert_eq!(entry["sha256"].as_str(), Some(validator.sha256()));
+            assert_eq!(
+                entry["mime"]
+                    .as_array()
+                    .expect("mime scope")
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .collect::<Vec<_>>(),
+                FIXTURE_VALIDATOR_MIME.to_vec()
+            );
+        }
+    }
+
+    #[test]
+    fn discovered_validator_is_a_real_hash_pinned_executable() {
+        match PinnedValidatorExecutable::discover() {
+            Ok(pinned) => {
+                assert!(pinned.path().is_absolute());
+                assert!(pinned.path().is_file());
+                assert_eq!(pinned.sha256().len(), 64);
+                assert!(
+                    pinned
+                        .sha256()
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                );
+                // The pinned bytes must still hash to the declared digest, or
+                // production would refuse the executable at activation.
+                let bytes = fs::read(pinned.path()).expect("read pinned validator");
+                assert_eq!(artifact_sha256(&bytes), pinned.sha256());
+            }
+            Err(error) => assert_eq!(
+                error,
+                "artifact validator fixture requires a hash-pinnable file(1) executable"
+            ),
+        }
+    }
+
+    fn content_evidence(
+        scenario: ArtifactContentScenario,
+        control: ArtifactControlPlane,
+    ) -> ArtifactContentEvidence {
+        let (validator_count, validator_available_count) = scenario.expected_validator_counts();
+        ArtifactContentEvidence {
+            scenario: scenario.as_str(),
+            control: control.as_str(),
+            validator_count,
+            validator_available_count,
+            files: vec![ArtifactFileRecord {
+                case: "text+local_roots".to_owned(),
+                declared_media_type: "text/plain".to_owned(),
+                stored_media_type: None,
+                size_bytes: 3,
+                sha256: "a".repeat(64),
+                exported_size_bytes: 3,
+                exported_sha256: "a".repeat(64),
+            }],
+            documents: Vec::new(),
+            validators: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn content_parity_requires_the_complete_ordered_control_matrix() {
+        let scenario = ArtifactContentScenario::MimeMatrix;
+        let expected = ArtifactControlPlane::ALL;
+        let executed = expected
+            .into_iter()
+            .map(|control| content_evidence(scenario, control))
+            .collect::<Vec<_>>();
+        assert_eq!(assert_artifact_content_parity(&executed, &expected), Ok(()));
+
+        assert!(assert_artifact_content_parity(&executed[..2], &expected).is_err());
+        let mut reordered = executed.clone();
+        reordered.swap(0, 1);
+        assert!(assert_artifact_content_parity(&reordered, &expected).is_err());
+
+        let mut divergent = executed.clone();
+        divergent[3].files[0].stored_media_type = Some("text/plain".to_owned());
+        assert_eq!(
+            assert_artifact_content_parity(&divergent, &expected),
+            Err(format!(
+                "artifact content control plane diverged from {}: {}",
+                expected[0].as_str(),
+                expected[3].as_str()
+            ))
+        );
+
+        let mut relabeled = executed;
+        relabeled[1].validator_count += 1;
+        assert!(assert_artifact_content_parity(&relabeled, &expected).is_err());
     }
 
     #[test]

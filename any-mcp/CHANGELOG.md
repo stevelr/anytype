@@ -43,6 +43,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   local root operations for the rest of the session instead of falling back to
   the broader configured policy. Staged operations are unaffected, and client
   root URIs and display names never appear in diagnostics or receipts.
+- Add artifact content acceptance scenarios — a representative MIME matrix,
+  document canonicalization, and configured validators — to the multi-transport
+  artifact harness. Every scenario runs on the scripted, stable, and preview
+  stdio control planes over both the local-roots and staging data planes, and
+  all of them must observe identical content evidence. The MIME matrix round
+  trips binary, UTF-8 text, PNG, RIFF/WAVE, and out-of-tree payloads and
+  compares declared, stored, and exported essence with verified byte lengths
+  and hashes. The canonicalization scenario requires that re-importing an
+  exported canonical body is reported as a no-op, and records every lossy
+  difference as a closed category, including the appended plain-text hard
+  break and importer escaping that rewrites the dispatched bytes before
+  Anytype canonicalizes anything. The validator scenarios declare one real
+  host `file(1)`-compatible executable pinned by absolute path and SHA-256 and
+  probe matched, mismatched, and out-of-scope MIME declarations, so an
+  optional validator reports the rejection while the import proceeds and a
+  required one refuses it; `ANY_MCP_ACCEPTANCE_VALIDATOR` selects an exact
+  executable when the host keeps one outside `PATH`. Select the new live
+  target with `--features acceptance-harness --test headless_stdio_e2e
+  headless_artifact_content_spawned_scenarios`.
 - Add artifact policy and configuration acceptance scenarios — space policy
   omitted, empty, and restricted elsewhere, read-only mode, and disabled
   staging — to the multi-transport artifact harness. Each scenario is a
