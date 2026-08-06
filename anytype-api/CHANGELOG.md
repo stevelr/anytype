@@ -132,6 +132,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Correct the crate's coverage and Cargo-feature documentation. The README and
+  crate docs no longer claim 100% REST coverage; they now describe direct REST
+  coverage separately from gRPC-equivalent coverage and point at
+  `docs/http-grpc-overlap.md` for the current transport mapping. Space
+  backup docs no longer describe a `grpc` Cargo feature: `default = []`,
+  `anytype-rpc` is an unconditional dependency, and gRPC-backed methods are
+  gated only by run-time gRPC credentials.
+
 - Make shared integration-test contexts require `ANYTYPE_TEST_SPACE_PREFIX`,
   create a fresh uniquely named space for each test, and delete the exact
   cleanup-owned space after success, callback error, or panic. Missing and

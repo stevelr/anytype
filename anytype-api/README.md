@@ -22,7 +22,9 @@ and callers do not need a direct `anytype-rpc` dependency.
 
 ### Features
 
-- 100% coverage of Anytype API 2025-11-08
+- Broad coverage of the Anytype REST API 2025-11-08: nearly every documented REST
+  operation is called directly over HTTP (see [Status and Compatibility](#status-and-compatibility)
+  for the known exceptions)
 - gRPC back-end provides extensions not available in REST (rich file operations, structured chat blocks, and full event streaming)
 - Paginated responses and async Streams
 - Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
@@ -862,7 +864,26 @@ object, or subscription identifiers.
 
 ## Status and Compatibility
 
-The crate has 100% coverage of the Anytype REST api 2025-11-08.
+The crate targets the Anytype REST API dated 2025-11-08. Coverage is described
+in two parts, because the two transports do not cover the same ground:
+
+- **Direct REST coverage** - operations the crate performs over HTTP against
+  the documented REST surface. Nearly every documented operation is covered
+  directly, including auth, spaces, types, properties, tags, objects,
+  templates, views, members, search, basic file transfer (upload, byte
+  download, metadata, ranges, conditional requests, delete), and space-scoped
+  chats (list/create, plain message add/edit/get/list/search/delete, reactions,
+  read state, and the single-chat Server-Sent Events stream). No exact
+  percentage is published, because the upstream operation list changes with
+  each Anytype release, and a few surfaces (such as cross-space chat
+  discovery) are deliberately reached only through gRPC.
+- **gRPC-equivalent coverage** - capabilities reached through anytype-heart's
+  gRPC service where REST has no operation or returns less information. These
+  are additional coverage, not a substitute for a missing REST call, and they
+  require gRPC credentials at runtime.
+
+The current transport mapping - which method uses which transport, and why -
+is recorded in [API surface](./docs/http-grpc-overlap.md).
 
 Plus:
 
@@ -882,6 +903,19 @@ The current Anytype http backend api does not provide access to some data in Any
 - ~~Chats and Messages~~ *Update:* REST supports chat management and plain message operations; gRPC supplies structured messages and richer streams.
 - Blocks. Pages and other document-like objects can be exported as markdown, but markdown export is somewhat lossy, for example, in tables, markdown export preserves table layout, with bold and italic styling, but foreground and background colors are lost.
 - Relationships - only a subset of relation types are available in the REST api.
+
+### Cargo features
+
+The crate has no default features (`default = []`), and there is no `grpc`
+Cargo feature. `anytype-rpc` is an unconditional dependency, so every
+gRPC-backed method is always compiled and callable; what a gRPC-backed method
+needs is gRPC credentials in the keystore at run time, not a build-time flag.
+Building with `--no-default-features` therefore changes nothing.
+
+The only optional feature is `test-fixtures`, which is disabled by default,
+exposes narrow typed snapshot constructors and a boolean-only credential-leak
+check for downstream contract tests, and must not be enabled by production
+dependents.
 
 ## Keystore
 

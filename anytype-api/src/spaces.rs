@@ -15,7 +15,7 @@
 //! - [`revoke_space_invite`](AnytypeClient::revoke_space_invite) - revoke an invitation
 //! - [`enable_space_sharing`](AnytypeClient::enable_space_sharing) and
 //!   [`disable_space_sharing`](AnytypeClient::disable_space_sharing) - control sharing
-//! - [`backup_space`](AnytypeClient::backup_space) - back up a space (requires `grpc` feature)
+//! - [`backup_space`](AnytypeClient::backup_space) - back up a space (gRPC-backed; requires gRPC credentials)
 //!
 //! ## Quick Start
 //!
@@ -50,8 +50,8 @@
 //! - [`NewSpaceRequest`] - Builder for creating a space
 //! - [`UpdateSpaceRequest`] - Builder for updating a space
 //! - [`ListSpacesRequest`] - Builder for listing spaces
-//! - [`BackupSpaceRequest`] - Builder for backing up a space (requires `grpc` feature)
-//! - [`BackupExportFormat`] - Export format for backups (requires `grpc` feature)
+//! - [`BackupSpaceRequest`] - Builder for backing up a space (gRPC-backed; requires gRPC credentials)
+//! - [`BackupExportFormat`] - Export format for backups (gRPC-backed)
 //! - [`SpaceInvite`] - A generated space invitation
 //! - [`SpaceInviteType`] - Invitation approval and guest mode
 //! - [`SpaceInvitePermission`] - Access granted by an invitation
@@ -1677,7 +1677,8 @@ impl AnytypeClient {
 
     /// Creates a request builder for backing up a space.
     ///
-    /// Requires the `grpc` feature.
+    /// This method is gRPC-backed: it requires gRPC credentials in the
+    /// keystore. There is no `grpc` Cargo feature to enable.
     ///
     /// # Arguments
     /// * `space_id` - ID of the space to back up

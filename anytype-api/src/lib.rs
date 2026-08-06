@@ -11,7 +11,8 @@
 //!
 //! ## Features
 //!
-//! - supports Anytype API 2025-11-08
+//! - broad coverage of the Anytype REST API 2025-11-08 (see
+//!   [API coverage](#api-coverage))
 //! - paginated responses and async Streams
 //! - authentication
 //! - integrates with OS Keyring for secure key storage
@@ -21,6 +22,38 @@
 //! - parameter validation
 //! - metrics
 //! - companion cli tool
+//!
+//! ## API coverage
+//!
+//! [`AnytypeClient`](client::AnytypeClient) presents one Rust API over two
+//! transports, so coverage has
+//! two parts:
+//!
+//! - *Direct REST coverage*: nearly every documented operation of the Anytype
+//!   REST API dated 2025-11-08 is called directly over HTTP - auth, spaces,
+//!   types, properties, tags, objects, templates, views, members, search, basic
+//!   file transfer, and space-scoped chats. No exact percentage is claimed: the
+//!   upstream operation list changes with each Anytype release, and a few
+//!   surfaces (such as cross-space chat discovery) are deliberately reached
+//!   only through gRPC.
+//! - *gRPC-equivalent coverage*: capabilities that REST does not expose, or
+//!   exposes with less fidelity, are reached through anytype-heart's gRPC
+//!   service - rich file metadata and upload options, structured chat blocks
+//!   and event streams, typed body blocks, archived-object cleanup, space
+//!   backup, and process watching. These methods need gRPC credentials in the
+//!   keystore at run time.
+//!
+//! The current transport mapping is recorded in `docs/http-grpc-overlap.md` in
+//! the crate source tree.
+//!
+//! ## Cargo features
+//!
+//! The crate has no default features (`default = []`), and there is no `grpc`
+//! feature: `anytype-rpc` is an unconditional dependency, so gRPC-backed
+//! methods are always compiled and are gated only by run-time credentials. The
+//! single optional feature, `test-fixtures`, exposes narrow typed snapshot
+//! constructors for downstream contract tests and must not be enabled by
+//! production dependents.
 //!
 //!
 //! ## Quick Start
