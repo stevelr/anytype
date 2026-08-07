@@ -100,6 +100,27 @@ alone with `--ignored --exact --test-threads=1`; do not share its server with
 parallel mutation suites. Normal workspace tests remain offline because the
 live test stays ignored.
 
+### Restore Content-Fidelity Live Matrix
+
+Three ignored tests extend the protected disposable-space pattern beyond the
+smoke gate:
+
+- `e2e_restore_preserves_file_payload_metadata_and_host_attachment` compares
+  restored bytes exactly, checks the file name and MIME type through the current
+  file APIs, and resolves a restored host object's file property independently.
+- `e2e_restore_preserves_chat_order_reply_and_attachment` verifies two unique
+  messages in server order, a destination-resolved reply, and a restored file
+  attachment with stable metadata.
+- `e2e_restore_preserves_custom_schema_keys_formats_and_featured_membership`
+  verifies a custom type key, text/number/checkbox/URL property keys and formats,
+  and destination-resolved featured-property membership.
+
+Each test creates and removes unique prefix-owned source and destination spaces,
+requires healthy authenticated HTTP and gRPC pings plus a reviewed redacted
+server log, and fails rather than using an ambient fixture. Run one test at a
+time with `--ignored --exact --test-threads=1`; do not overlap these tests with
+another mutation suite.
+
 ### Integrity Testing
 
 Fuzz testing for backup/restore roundtrips:

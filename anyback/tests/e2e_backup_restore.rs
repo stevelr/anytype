@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -60,6 +60,94 @@ impl Drop for ChatMessageTokenCleanupGuard {
     fn drop(&mut self) {
         for (space, token) in &self.entries {
             let _ = delete_chat_messages_by_token(space, token);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RegisteredResource {
+    kind: &'static str,
+    id: String,
+}
+
+#[derive(Debug)]
+struct DisposableSpace {
+    name: String,
+    id: String,
+    resources: Vec<RegisteredResource>,
+    cleaned: bool,
+}
+
+impl DisposableSpace {
+    fn create(label: &str) -> Result<Self> {
+        require_disposable_admission()?;
+        let prefix = std::env::var("ANYTYPE_TEST_SPACE_PREFIX")?;
+        let name = format!("{prefix}-{label}-{}", anytype::test_util::unique_suffix());
+        let output = run_anyr(["space", "create", name.as_str()])?;
+        let value: Value = serde_json::from_str(&output)
+            .context("disposable space create returned invalid JSON")?;
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow!("disposable space create output missing id"))?
+            .to_string();
+        Ok(Self {
+            name,
+            id,
+            resources: Vec::new(),
+            cleaned: false,
+        })
+    }
+
+    fn register(&mut self, kind: &'static str, id: impl Into<String>) {
+        self.resources.push(RegisteredResource {
+            kind,
+            id: id.into(),
+        });
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        if self.cleaned {
+            return Ok(());
+        }
+        run_anyr([
+            "space",
+            "delete",
+            self.id.as_str(),
+            "--skip-archive",
+            "--confirm",
+        ])
+        .with_context(|| {
+            format!(
+                "failed to delete disposable space {} with registered resources {}",
+                self.name,
+                self.registered_resource_summary()
+            )
+        })?;
+        wait_for_space_absence(&self.name, &self.id)?;
+        self.cleaned = true;
+        Ok(())
+    }
+
+    fn registered_resource_summary(&self) -> String {
+        self.resources
+            .iter()
+            .map(|resource| format!("{}={}", resource.kind, resource.id))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+impl Drop for DisposableSpace {
+    fn drop(&mut self) {
+        if !self.cleaned
+            && let Err(error) = self.cleanup()
+        {
+            eprintln!(
+                "failed to clean disposable space {} during unwinding: {error:#}",
+                self.name
+            );
         }
     }
 }
@@ -539,6 +627,381 @@ async fn e2e_backup_restore_regular_space_chat_messages() -> Result<()> {
     assert_non_tty_output_clean(&restore_output);
 
     wait_chat_message_in_space(&dest_space.name, &token).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires protected disposable Anytype server admission"]
+async fn e2e_restore_preserves_file_payload_metadata_and_host_attachment() -> Result<()> {
+    verify_authenticated_pings_cli()?;
+    let mut source = DisposableSpace::create("file-fidelity-src")?;
+    let mut destination = match DisposableSpace::create("file-fidelity-dst") {
+        Ok(space) => space,
+        Err(error) => return finish_disposable_spaces(Err(error), &mut [&mut source]),
+    };
+
+    let result = exercise_file_restore_fidelity(&mut source, &mut destination).await;
+    finish_disposable_spaces(result, &mut [&mut destination, &mut source])
+}
+
+async fn exercise_file_restore_fidelity(
+    source: &mut DisposableSpace,
+    destination: &mut DisposableSpace,
+) -> Result<()> {
+    const MIME: &str = "application/octet-stream";
+    const PAYLOAD: &[u8] = b"anyback-file-fidelity\0payload\nwith deterministic bytes\xff";
+
+    let unique = anytype::test_util::unique_suffix();
+    let key_suffix = unique_alpha_key_suffix();
+    let type_key = format!("anybackfiletype{key_suffix}");
+    let attachment_key = format!("anyback_file_attachment_{key_suffix}");
+    let type_name = format!("Anyback File Fidelity {unique}");
+    let host_name = format!("anyback-file-host-{unique}");
+    let file_name = format!("anyback-file-payload-{unique}.bin");
+
+    let created_type = create_type_with_properties(
+        &source.id,
+        &type_key,
+        &type_name,
+        &[(attachment_key.as_str(), "files", "Restored Attachment")],
+    )?;
+    register_type_value(source, &created_type, &[attachment_key.as_str()])?;
+    sleep(Duration::from_millis(600)).await;
+
+    let upload_dir = tempfile::tempdir().context("failed to create file fixture directory")?;
+    let source_path = upload_dir.path().join(&file_name);
+    fs::write(&source_path, PAYLOAD)
+        .with_context(|| format!("failed to write file fixture {}", source_path.display()))?;
+    let source_file_id = upload_file_object_with_mime(&source.id, &source_path, MIME)?;
+    source.register("file", source_file_id.clone());
+
+    let host_id = create_typed_object_with_properties(
+        &source.id,
+        &type_key,
+        &host_name,
+        "file attachment host",
+        &[(attachment_key.as_str(), source_file_id.as_str())],
+    )?;
+    source.register("object", host_id.clone());
+
+    let client = anytype::test_util::test_client_named("anyback_file_restore_fidelity")
+        .map_err(|error| anyhow!("failed to build file fidelity client: {error}"))?;
+    let source_file = client
+        .files()
+        .get(&source.id, &source_file_id)
+        .get()
+        .await?;
+    let source_bytes = client
+        .files()
+        .download_bytes(&source.id, &source_file_id)
+        .await?;
+    ensure!(
+        source_bytes.as_ref() == PAYLOAD,
+        "source upload bytes changed before backup"
+    );
+    ensure!(
+        source_file.name.as_deref() == Some(file_name.as_str()),
+        "source file name mismatch"
+    );
+    ensure!(
+        source_file.mime.as_deref() == Some(MIME),
+        "source file MIME mismatch"
+    );
+
+    let archive_dir = tempfile::tempdir().context("failed to create archive directory")?;
+    let archive = create_full_backup(&source.id, archive_dir.path(), true)?;
+    restore_archive(&destination.id, &archive)?;
+
+    let destination_file_id = wait_find_file_id_by_name(&destination.id, &file_name).await?;
+    destination.register("file", destination_file_id.clone());
+    let destination_file = client
+        .files()
+        .get(&destination.id, &destination_file_id)
+        .get()
+        .await?;
+    let destination_metadata = client
+        .files()
+        .metadata(&destination.id, &destination_file_id)
+        .await?;
+    let destination_bytes = client
+        .files()
+        .download_bytes(&destination.id, &destination_file_id)
+        .await?;
+    ensure!(
+        destination_bytes == source_bytes,
+        "restored file bytes differ from source fixture"
+    );
+    ensure!(
+        destination_file.name == source_file.name,
+        "restored file name differs from source"
+    );
+    ensure!(
+        destination_file.mime == source_file.mime,
+        "restored file MIME differs from source"
+    );
+    ensure!(
+        destination_metadata.metadata.content_type.as_deref() == Some(MIME),
+        "restored HTTP file metadata MIME mismatch"
+    );
+
+    let restored_type = wait_resolve_type(&client, &destination.id, &type_key).await?;
+    destination.register("type", restored_type.id.clone());
+    for property in &restored_type.properties {
+        if property.key == attachment_key {
+            destination.register("property", property.id.clone());
+        }
+    }
+    let restored_host_id = wait_find_object_id_by_name(&destination.id, &host_name).await?;
+    destination.register("object", restored_host_id.clone());
+    let restored_host = client
+        .object(&destination.id, &restored_host_id)
+        .get()
+        .await?;
+    let attachment_ids = restored_host
+        .properties
+        .iter()
+        .find(|property| property.key == attachment_key)
+        .and_then(|property| match &property.value {
+            anytype::properties::PropertyValue::Files { files } => Some(files.as_slice()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("restored host is missing the file attachment property"))?;
+    ensure!(
+        attachment_ids.len() == 1
+            && attachment_ids.first().map(String::as_str) == Some(destination_file_id.as_str()),
+        "restored host does not reference the independently resolved destination file"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires protected disposable Anytype server admission"]
+async fn e2e_restore_preserves_chat_order_reply_and_attachment() -> Result<()> {
+    verify_authenticated_pings_cli()?;
+    let mut source = DisposableSpace::create("chat-fidelity-src")?;
+    let mut destination = match DisposableSpace::create("chat-fidelity-dst") {
+        Ok(space) => space,
+        Err(error) => return finish_disposable_spaces(Err(error), &mut [&mut source]),
+    };
+
+    let result = exercise_chat_restore_fidelity(&mut source, &mut destination).await;
+    finish_disposable_spaces(result, &mut [&mut destination, &mut source])
+}
+
+async fn exercise_chat_restore_fidelity(
+    source: &mut DisposableSpace,
+    destination: &mut DisposableSpace,
+) -> Result<()> {
+    const MIME: &str = "text/plain";
+    const PAYLOAD: &[u8] = b"anyback chat attachment fidelity\n";
+
+    let unique = anytype::test_util::unique_suffix();
+    let chat_name = format!("anyback-chat-fidelity-{unique}");
+    let first_token = format!("anyback-chat-first-{unique}");
+    let second_token = format!("anyback-chat-second-{unique}");
+    let file_name = format!("anyback-chat-attachment-{unique}.txt");
+
+    let source_chat_id = create_chat(&source.id, &chat_name)?;
+    source.register("chat", source_chat_id.clone());
+    let upload_dir = tempfile::tempdir().context("failed to create chat fixture directory")?;
+    let source_path = upload_dir.path().join(&file_name);
+    fs::write(&source_path, PAYLOAD)
+        .with_context(|| format!("failed to write chat fixture {}", source_path.display()))?;
+    let source_file_id = upload_file_object_with_mime(&source.id, &source_path, MIME)?;
+    source.register("file", source_file_id.clone());
+
+    let first_id = send_chat_message(&source.id, &source_chat_id, &first_token)?;
+    source.register("message", first_id.clone());
+    let second_id = send_chat_message_with_reply_and_attachment(
+        &source.id,
+        &source_chat_id,
+        &second_token,
+        &first_id,
+        &source_file_id,
+    )?;
+    source.register("message", second_id);
+
+    let archive_dir = tempfile::tempdir().context("failed to create archive directory")?;
+    let archive = create_full_backup(&source.id, archive_dir.path(), true)?;
+    restore_archive(&destination.id, &archive)?;
+
+    let client = anytype::test_util::test_client_named("anyback_chat_restore_fidelity")
+        .map_err(|error| anyhow!("failed to build chat fidelity client: {error}"))?;
+    let destination_chat_id = wait_resolve_chat(&client, &destination.id, &chat_name).await?;
+    destination.register("chat", destination_chat_id.clone());
+    let destination_file_id = wait_find_file_id_by_name(&destination.id, &file_name).await?;
+    destination.register("file", destination_file_id.clone());
+    let destination_file = client
+        .files()
+        .get(&destination.id, &destination_file_id)
+        .get()
+        .await?;
+    ensure!(
+        destination_file.name.as_deref() == Some(file_name.as_str())
+            && destination_file.mime.as_deref() == Some(MIME),
+        "restored chat attachment metadata mismatch"
+    );
+
+    let messages = wait_for_chat_messages(
+        &client,
+        &destination.id,
+        &destination_chat_id,
+        [&first_token, &second_token],
+    )
+    .await?;
+    let first_index = messages
+        .iter()
+        .position(|message| message.content.text.contains(&first_token))
+        .ok_or_else(|| anyhow!("restored first chat message is missing"))?;
+    let second_index = messages
+        .iter()
+        .position(|message| message.content.text.contains(&second_token))
+        .ok_or_else(|| anyhow!("restored second chat message is missing"))?;
+    ensure!(
+        first_index < second_index,
+        "restored chat messages are not in source order"
+    );
+    let first = messages
+        .get(first_index)
+        .ok_or_else(|| anyhow!("restored first chat message index disappeared"))?;
+    let second = messages
+        .get(second_index)
+        .ok_or_else(|| anyhow!("restored second chat message index disappeared"))?;
+    destination.register("message", first.id.clone());
+    destination.register("message", second.id.clone());
+    ensure!(
+        second.reply_to_message_id.as_deref() == Some(first.id.as_str()),
+        "restored reply does not target the destination first message"
+    );
+    ensure!(
+        second.attachments.iter().any(|attachment| {
+            attachment.target == destination_file_id
+                && matches!(
+                    &attachment.kind,
+                    anytype::chats::MessageAttachmentType::File
+                )
+        }),
+        "restored second message does not reference the destination attachment"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires protected disposable Anytype server admission"]
+async fn e2e_restore_preserves_custom_schema_keys_formats_and_featured_membership() -> Result<()> {
+    verify_authenticated_pings_cli()?;
+    let mut source = DisposableSpace::create("schema-fidelity-src")?;
+    let mut destination = match DisposableSpace::create("schema-fidelity-dst") {
+        Ok(space) => space,
+        Err(error) => return finish_disposable_spaces(Err(error), &mut [&mut source]),
+    };
+
+    let result = exercise_schema_restore_fidelity(&mut source, &mut destination).await;
+    finish_disposable_spaces(result, &mut [&mut destination, &mut source])
+}
+
+async fn exercise_schema_restore_fidelity(
+    source: &mut DisposableSpace,
+    destination: &mut DisposableSpace,
+) -> Result<()> {
+    let unique = anytype::test_util::unique_suffix();
+    let key_suffix = unique_alpha_key_suffix();
+    let type_key = format!("anybackschematype{key_suffix}");
+    let type_name = format!("Anyback Schema Fidelity {unique}");
+    let properties = [
+        (
+            format!("anyback_schema_text_{key_suffix}"),
+            "text",
+            "Schema Text",
+        ),
+        (
+            format!("anyback_schema_number_{key_suffix}"),
+            "number",
+            "Schema Number",
+        ),
+        (
+            format!("anyback_schema_checkbox_{key_suffix}"),
+            "checkbox",
+            "Schema Checkbox",
+        ),
+        (
+            format!("anyback_schema_url_{key_suffix}"),
+            "url",
+            "Schema URL",
+        ),
+    ];
+    let property_specs = properties
+        .iter()
+        .map(|(key, format, name)| (key.as_str(), *format, *name))
+        .collect::<Vec<_>>();
+    let created_type =
+        create_type_with_properties(&source.id, &type_key, &type_name, &property_specs)?;
+    let expected_property_keys = properties
+        .iter()
+        .map(|(key, _, _)| key.as_str())
+        .collect::<Vec<_>>();
+    register_type_value(source, &created_type, &expected_property_keys)?;
+    sleep(Duration::from_millis(600)).await;
+
+    let client = anytype::test_util::test_client_named("anyback_schema_restore_fidelity")
+        .map_err(|error| anyhow!("failed to build schema fidelity client: {error}"))?;
+    let source_type = wait_resolve_type(&client, &source.id, &type_key).await?;
+    let source_classification = client
+        .get_type(&source.id, &source_type.id)
+        .classify_properties()
+        .await?;
+    let source_featured_keys = source_classification
+        .featured
+        .iter()
+        .map(|property| property.key.clone())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        !source_featured_keys.is_empty(),
+        "source custom type has no visible featured properties"
+    );
+
+    let archive_dir = tempfile::tempdir().context("failed to create archive directory")?;
+    let archive = create_full_backup(&source.id, archive_dir.path(), false)?;
+    restore_archive(&destination.id, &archive)?;
+
+    let restored_type = wait_resolve_type(&client, &destination.id, &type_key).await?;
+    destination.register("type", restored_type.id.clone());
+    ensure!(
+        restored_type.key == type_key,
+        "restored custom type key changed"
+    );
+    let restored_classification = client
+        .get_type(&destination.id, &restored_type.id)
+        .classify_properties()
+        .await?;
+    let restored_formats = restored_classification
+        .recommended
+        .iter()
+        .filter(|property| properties.iter().any(|(key, _, _)| key == &property.key))
+        .map(|property| (property.key.clone(), property.format().to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let expected_formats = properties
+        .iter()
+        .map(|(key, format, _)| (key.clone(), (*format).to_string()))
+        .collect::<BTreeMap<_, _>>();
+    ensure!(
+        restored_formats == expected_formats,
+        "restored custom property keys or formats changed: {restored_formats:?}"
+    );
+    for property in &restored_classification.recommended {
+        if expected_formats.contains_key(&property.key) {
+            destination.register("property", property.id.clone());
+        }
+    }
+    let restored_featured_keys = restored_classification
+        .featured
+        .iter()
+        .map(|property| property.key.clone())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        restored_featured_keys == source_featured_keys,
+        "restored featured-property membership changed"
+    );
     Ok(())
 }
 
@@ -2762,6 +3225,340 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
 
     let _ = delete_object(&source_space.name, &object_id);
     Ok(())
+}
+
+fn require_disposable_admission() -> Result<()> {
+    ensure!(
+        std::env::var("ANYTYPE_DISPOSABLE_TEST_PROCESS").as_deref() == Ok("1"),
+        "ANYTYPE_DISPOSABLE_TEST_PROCESS=1 is required"
+    );
+    let prefix = std::env::var("ANYTYPE_TEST_SPACE_PREFIX")
+        .context("ANYTYPE_TEST_SPACE_PREFIX is required")?;
+    ensure!(!prefix.is_empty(), "ANYTYPE_TEST_SPACE_PREFIX is empty");
+    ensure!(prefix.len() <= 470, "ANYTYPE_TEST_SPACE_PREFIX is too long");
+    ensure!(
+        prefix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')),
+        "ANYTYPE_TEST_SPACE_PREFIX contains an unsafe character"
+    );
+    let server_log = std::env::var_os("ANYBACK_HEADLESS_REDACTED_LOG_FILE")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("ANYBACK_HEADLESS_REDACTED_LOG_FILE is required"))?;
+    ensure!(
+        server_log.is_absolute() && server_log.is_file(),
+        "ANYBACK_HEADLESS_REDACTED_LOG_FILE must name an absolute existing file"
+    );
+    ensure!(
+        fs::metadata(&server_log)?.len() > 0,
+        "ANYBACK_HEADLESS_REDACTED_LOG_FILE is empty"
+    );
+    Ok(())
+}
+
+fn verify_authenticated_pings_cli() -> Result<()> {
+    require_disposable_admission()?;
+    let output = run_anyr(["auth", "status"])?;
+    let value: Value =
+        serde_json::from_str(&output).context("auth status returned invalid JSON")?;
+    let ping = value
+        .get("ping")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("auth status output missing ping object"))?;
+    for transport in ["http", "grpc"] {
+        let status = ping
+            .get(transport)
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("auth status ping missing {transport}"))?;
+        ensure!(
+            status.to_ascii_lowercase().contains("ok"),
+            "auth status {transport} ping is not healthy"
+        );
+    }
+    Ok(())
+}
+
+fn finish_disposable_spaces(
+    primary: Result<()>,
+    spaces: &mut [&mut DisposableSpace],
+) -> Result<()> {
+    let cleanup_errors = spaces
+        .iter_mut()
+        .filter_map(|space| {
+            space
+                .cleanup()
+                .err()
+                .map(|error| format!("{}: {error:#}", space.name))
+        })
+        .collect::<Vec<_>>();
+    match (primary, cleanup_errors.is_empty()) {
+        (Ok(()), true) => Ok(()),
+        (Err(error), true) => Err(error),
+        (Ok(()), false) => bail!(
+            "disposable space cleanup failed: {}",
+            cleanup_errors.join("; ")
+        ),
+        (Err(error), false) => bail!(
+            "restore fidelity test failed: {error:#}; cleanup also failed: {}",
+            cleanup_errors.join("; ")
+        ),
+    }
+}
+
+fn wait_for_space_absence(name: &str, id: &str) -> Result<()> {
+    for _ in 0..30 {
+        let output = run_anyr(["space", "list", "--all"])?;
+        let value: Value = serde_json::from_str(&output)?;
+        let items = value
+            .get("items")
+            .and_then(Value::as_array)
+            .or_else(|| value.as_array())
+            .ok_or_else(|| anyhow!("space list output missing items array"))?;
+        let present = items.iter().any(|item| {
+            item.get("id").and_then(Value::as_str) == Some(id)
+                || item.get("name").and_then(Value::as_str) == Some(name)
+        });
+        if !present {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    bail!("disposable space {name} ({id}) remained after deletion")
+}
+
+fn register_type_value(
+    space: &mut DisposableSpace,
+    value: &Value,
+    expected_property_keys: &[&str],
+) -> Result<()> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow!("type create output missing id"))?;
+    space.register("type", id);
+    let properties = value
+        .get("properties")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("type create output missing properties array"))?;
+    for expected_key in expected_property_keys {
+        let property_id = properties
+            .iter()
+            .find(|property| property.get("key").and_then(Value::as_str) == Some(expected_key))
+            .and_then(|property| property.get("id").and_then(Value::as_str))
+            .filter(|property_id| !property_id.is_empty())
+            .ok_or_else(|| {
+                anyhow!("type create output missing property id for key {expected_key}")
+            })?;
+        space.register("property", property_id);
+    }
+    Ok(())
+}
+
+fn create_type_with_properties(
+    space: &str,
+    key: &str,
+    name: &str,
+    properties: &[(&str, &str, &str)],
+) -> Result<Value> {
+    let mut args = vec![
+        "type".to_string(),
+        "create".to_string(),
+        space.to_string(),
+        key.to_string(),
+        name.to_string(),
+    ];
+    for (property_key, format, property_name) in properties {
+        args.push("--prop".to_string());
+        args.push(format!("{property_key}:{format}:{property_name}"));
+    }
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_anyr_dyn(&refs)?;
+    serde_json::from_str(&output).context("failed to parse type create JSON")
+}
+
+fn create_typed_object_with_properties(
+    space: &str,
+    type_key: &str,
+    name: &str,
+    body: &str,
+    properties: &[(&str, &str)],
+) -> Result<String> {
+    let mut args = vec![
+        "object".to_string(),
+        "create".to_string(),
+        space.to_string(),
+        type_key.to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--body".to_string(),
+        body.to_string(),
+    ];
+    for (property_key, value) in properties {
+        args.push("--prop".to_string());
+        args.push(format!("{property_key}={value}"));
+    }
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_anyr_dyn(&refs)?;
+    let value: Value = serde_json::from_str(&output)?;
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("object create output missing id"))
+}
+
+fn upload_file_object_with_mime(space: &str, path: &Path, mime: &str) -> Result<String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow!("file fixture path is not UTF-8"))?;
+    let output = run_anyr(["file", "upload", space, "--file", path, "--mime", mime])?;
+    let value: Value = serde_json::from_str(&output)?;
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("file upload output missing id"))
+}
+
+fn create_chat(space: &str, name: &str) -> Result<String> {
+    let output = run_anyr(["chat", "create", space, name])?;
+    let value: Value = serde_json::from_str(&output)?;
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("chat create output missing id"))
+}
+
+fn send_chat_message_with_reply_and_attachment(
+    space: &str,
+    chat_id: &str,
+    text: &str,
+    reply_to: &str,
+    file_id: &str,
+) -> Result<String> {
+    let attachment = format!("file:{file_id}");
+    let output = run_anyr([
+        "chat",
+        "messages",
+        "send",
+        space,
+        chat_id,
+        "--text",
+        text,
+        "--reply-to",
+        reply_to,
+        "--attachment",
+        attachment.as_str(),
+    ])?;
+    let value: Value = serde_json::from_str(&output)?;
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("chat send output missing id"))
+}
+
+fn create_full_backup(space: &str, directory: &Path, include_files: bool) -> Result<PathBuf> {
+    let directory = directory
+        .to_str()
+        .ok_or_else(|| anyhow!("archive directory is not UTF-8"))?;
+    let mut args = vec!["create", "--space", space];
+    if include_files {
+        args.push("--include-files");
+    }
+    args.extend(["--dir", directory]);
+    let output = run_anyback_dyn(&args)?;
+    let archive = parse_archive_path(&output)
+        .ok_or_else(|| anyhow!("backup create output missing archive path: {output}"))?;
+    ensure!(
+        archive.is_file() && fs::metadata(&archive)?.len() > 0,
+        "backup archive is missing or empty: {}",
+        archive.display()
+    );
+    Ok(archive)
+}
+
+fn restore_archive(space: &str, archive: &Path) -> Result<()> {
+    let archive = archive
+        .to_str()
+        .ok_or_else(|| anyhow!("archive path is not UTF-8"))?;
+    let output = run_anyback(["restore", archive, "--space", space])?;
+    let summary = parse_import_report(&output)?;
+    ensure!(
+        summary.failed == 0,
+        "restore reported failed objects: {summary:?}"
+    );
+    Ok(())
+}
+
+async fn wait_resolve_type(
+    client: &AnytypeClient,
+    space_id: &str,
+    key: &str,
+) -> Result<anytype::types::Type> {
+    let mut last_error = None;
+    for _ in 0..40 {
+        match client.resolve_type(space_id, key).await {
+            Ok(typ) => return Ok(typ),
+            Err(error) => last_error = Some(error),
+        }
+        sleep(Duration::from_millis(750)).await;
+    }
+    Err(last_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("type {key} was not resolved in {space_id}")))
+}
+
+async fn wait_resolve_chat(client: &AnytypeClient, space_id: &str, name: &str) -> Result<String> {
+    let mut last_error = None;
+    for _ in 0..40 {
+        match client.resolve_chat_target(Some(space_id), name).await {
+            Ok(target) => return Ok(target.chat_id),
+            Err(error) => last_error = Some(error),
+        }
+        sleep(Duration::from_millis(750)).await;
+    }
+    Err(last_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("chat {name} was not resolved in {space_id}")))
+}
+
+async fn wait_for_chat_messages(
+    client: &AnytypeClient,
+    space_id: &str,
+    chat_id: &str,
+    tokens: [&str; 2],
+) -> Result<Vec<anytype::chats::ChatMessage>> {
+    let mut last_messages = Vec::new();
+    for _ in 0..40 {
+        let page = client
+            .chats()
+            .in_space(space_id)
+            .older_messages(chat_id)
+            .limit(100)
+            .get()
+            .await?;
+        let has_all = tokens.iter().all(|token| {
+            page.messages
+                .iter()
+                .any(|message| message.content.text.contains(token))
+        });
+        if has_all {
+            return Ok(page.messages);
+        }
+        last_messages = page.messages;
+        sleep(Duration::from_millis(750)).await;
+    }
+    bail!(
+        "restored chat messages were not visible; last message count={}",
+        last_messages.len()
+    )
 }
 
 async fn choose_writable_spaces_cli() -> Result<(Space, Space)> {
