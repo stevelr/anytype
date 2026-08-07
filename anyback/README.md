@@ -63,7 +63,8 @@ anyr backup inspect ARCHIVE [--max-cache SIZE]
   `inspect`, or a result file that aliases an input or generated artifact) instead
   of silently choosing one.
 - **Archive formats**: `list`, `diff`, `inspect`, and `restore` accept both `.zip` archives and unpacked archive directories.
-- **Manifest**: anyback writes manifest metadata to `<archive>.manifest.json`. Archives without manifests (e.g. desktop-generated backups) are still supported.
+- **Pre-delete archives**: `anyr space delete SPACE --archive PATH` writes a complete protobuf `.zip` to the exact non-existing path before deletion. Validate the selected file with `anyr backup list PATH --files`.
+- **Manifest**: anyback writes manifest metadata to `<archive>.manifest.json`. Archives without manifests (including direct pre-delete and desktop-generated backups) are still supported.
 
 ---
 

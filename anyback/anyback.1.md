@@ -101,6 +101,13 @@ Blank lines and lines starting with `#` are ignored.
 
 Backup writes `.zip` archives. Manifest metadata is written to a sidecar file `<archive>.manifest.json`.
 
+`anyr space delete SPACE --archive PATH` uses the same archive data plane to
+write a complete protobuf `.zip` to the exact non-existing path before deleting
+the source space. The delete command stops before deletion if backup creation,
+archive validation, or destination installation fails. Use
+`anyr backup list PATH --files` to validate the selected pre-delete archive;
+direct pre-delete archives may not have an anyback manifest sidecar.
+
 ## RESTORE OPTIONS
 
 - `--import-mode ignore-errors` (default): continue importing after object errors.

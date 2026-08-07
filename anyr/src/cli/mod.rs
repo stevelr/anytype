@@ -288,10 +288,22 @@ pub enum SpaceCommands {
         confirm: bool,
     },
 
-    /// Permanently delete a space after interactive confirmation
+    /// Permanently delete a space after guarded backup and confirmation
     Delete {
         /// space id or name
         space: String,
+
+        /// write the pre-delete backup to this exact path
+        #[arg(long, value_name = "PATH", conflicts_with = "skip_archive")]
+        archive: Option<PathBuf>,
+
+        /// delete without creating a backup
+        #[arg(long, conflicts_with = "archive")]
+        skip_archive: bool,
+
+        /// skip the exact-name deletion prompt
+        #[arg(long)]
+        confirm: bool,
     },
 
     /// Manage space invitations
@@ -2055,6 +2067,58 @@ pub fn resolve_icon_exists(
         return Ok(Some(Icon::File { file: path }));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod space_delete_arg_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_archive_and_confirmation_parse() {
+        let cli = Cli::try_parse_from([
+            "anyr",
+            "space",
+            "delete",
+            "space-id",
+            "--archive",
+            "chosen.zip",
+            "--confirm",
+        ])
+        .expect("space delete arguments should parse");
+        let Commands::Space(SpaceArgs {
+            command:
+                SpaceCommands::Delete {
+                    space,
+                    archive,
+                    skip_archive,
+                    confirm,
+                },
+        }) = cli.command
+        else {
+            panic!("expected space delete command");
+        };
+        assert_eq!(space, "space-id");
+        assert_eq!(archive, Some(PathBuf::from("chosen.zip")));
+        assert!(!skip_archive);
+        assert!(confirm);
+    }
+
+    #[test]
+    fn archive_and_skip_archive_conflict() {
+        let error = Cli::try_parse_from([
+            "anyr",
+            "space",
+            "delete",
+            "space-id",
+            "--archive",
+            "chosen.zip",
+            "--skip-archive",
+        ])
+        .expect_err("conflicting archive choices must fail");
+        let message = error.to_string();
+        assert!(message.contains("--archive"), "{message}");
+        assert!(message.contains("--skip-archive"), "{message}");
+    }
 }
 
 #[cfg(all(test, feature = "backup"))]

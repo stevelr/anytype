@@ -245,20 +245,81 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("space", "enable-sharing")
         self.assert_help_ok("space", "disable-sharing")
 
-    def test_space_delete_accepts_bash_stdin_confirmation(self) -> None:
-        space_name = f"{self.space_prefix}-delete-stdin-{int(time.time() * 1000)}"
-        created_space_id: str | None = None
-        deleted = False
+    def require_healthy_pings(self) -> None:
+        server_log = os.environ.get("ANYBACK_HEADLESS_REDACTED_LOG_FILE")
+        self.assertIsNotNone(
+            server_log,
+            "ANYBACK_HEADLESS_REDACTED_LOG_FILE is required for live deletion evidence",
+        )
+        self.assertTrue(
+            os.path.isabs(server_log) and os.path.isfile(server_log),
+            "ANYBACK_HEADLESS_REDACTED_LOG_FILE must name an absolute existing file",
+        )
+        self.assertGreater(
+            os.path.getsize(server_log),
+            0,
+            "reviewed redacted server log is empty",
+        )
+        status = run_anyr_json("auth", "status")
+        ping = status.get("ping")
+        self.assertIsInstance(ping, dict, "auth status is missing ping results")
+        for transport in ("http", "grpc"):
+            result = ping.get(transport)
+            self.assertIsInstance(result, str, f"missing {transport} ping result")
+            self.assertIn("ok", result.casefold(), f"{transport} ping is unhealthy")
+
+    @contextlib.contextmanager
+    def disposable_deletion_space(self, label: str):
+        space_name = f"{self.space_prefix}-{label}-{os.getpid()}-{time.time_ns()}"
+        created = run_anyr_json("space", "create", space_name)
+        space_id = created.get("id")
+        self.assertIsInstance(space_id, str, "space create missing id")
+        state = {"name": space_name, "id": space_id, "deleted": False}
         try:
-            created = run_anyr_json("space", "create", space_name)
-            created_space_id = created.get("id")
-            self.assertIsInstance(created_space_id, str)
+            yield state
+        finally:
+            if not state["deleted"]:
+                cleanup = run_anyr(
+                    "space",
+                    "delete",
+                    space_id,
+                    "--skip-archive",
+                    "--confirm",
+                )
+                try:
+                    self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
+                    wait_for_space_absence(space_name, space_id)
+                except AssertionError as exc:
+                    raise AssertionError(
+                        f"failed to clean up disposable space {space_name}:\n"
+                        f"delete stdout={cleanup.stdout}\n"
+                        f"delete stderr={cleanup.stderr}"
+                    ) from exc
+
+    def assert_space_exists(self, space_id: str, reason: str) -> None:
+        result = run_anyr("space", "get", space_id)
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=(f"{reason}:\nstdout={result.stdout}\nstderr={result.stderr}"),
+        )
+
+    def test_space_delete_prompted_cancellation_and_confirmation(self) -> None:
+        self.require_healthy_pings()
+        with self.disposable_deletion_space("delete-prompted") as space:
+            canceled = run_anyr_with_input("cancel\n", "space", "delete", space["id"])
+            self.assertEqual(canceled.returncode, 0, canceled.stderr)
+            self.assertIn("Space deletion canceled.", canceled.stderr)
+            self.assert_space_exists(
+                space["id"], "archive-choice cancellation deleted the source space"
+            )
 
             wrong_confirmation = run_anyr_with_input(
-                f'n\ndelete:{space_name}-wrong\n',
+                f'delete:{space["name"]}-wrong\n',
                 "space",
                 "delete",
-                created_space_id,
+                space["id"],
+                "--skip-archive",
             )
             self.assertEqual(
                 wrong_confirmation.returncode,
@@ -269,17 +330,16 @@ class TestAnyrCommands(unittest.TestCase):
                     f"stderr={wrong_confirmation.stderr}"
                 ),
             )
-            self.assertEqual(
-                run_anyr("space", "get", created_space_id).returncode,
-                0,
-                "space still needs to exist after a wrong confirmation",
+            self.assert_space_exists(
+                space["id"], "wrong typed confirmation deleted the source space"
             )
 
             confirmation = run_anyr_with_input(
-                f'n\ndelete:{space_name}\n',
+                f'delete:{space["name"]}\n',
                 "space",
                 "delete",
-                created_space_id,
+                space["id"],
+                "--skip-archive",
                 "--json",
             )
             self.assertEqual(
@@ -291,24 +351,84 @@ class TestAnyrCommands(unittest.TestCase):
                     f"stderr={confirmation.stderr}"
                 ),
             )
-            wait_for_space_absence(space_name, created_space_id)
-            deleted = True
-        finally:
-            if created_space_id and not deleted:
-                cleanup = run_anyr_with_input(
-                    f'n\ndelete:{space_name}\n',
-                    "space",
-                    "delete",
-                    created_space_id,
-                )
-                try:
-                    wait_for_space_absence(space_name, created_space_id)
-                except AssertionError as exc:
-                    raise AssertionError(
-                        f"failed to clean up disposable space {space_name}:\n"
-                        f"delete stdout={cleanup.stdout}\n"
-                        f"delete stderr={cleanup.stderr}"
-                    ) from exc
+            wait_for_space_absence(space["name"], space["id"])
+            space["deleted"] = True
+
+    def test_space_delete_backup_failure_preserves_source(self) -> None:
+        self.require_healthy_pings()
+        with (
+            self.disposable_deletion_space("delete-backup-failure") as space,
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            destination = os.path.join(directory, "must-not-exist.zip")
+            failed = run_anyr(
+                "--grpc",
+                "http://127.0.0.1:1",
+                "space",
+                "delete",
+                space["id"],
+                "--archive",
+                destination,
+                "--confirm",
+            )
+            self.assertNotEqual(
+                failed.returncode,
+                0,
+                msg="unreachable gRPC endpoint unexpectedly produced a backup",
+            )
+            self.assertIn("deletion was not attempted", failed.stderr)
+            self.assertFalse(
+                os.path.lexists(destination),
+                "failed backup left the selected destination behind",
+            )
+            self.assert_space_exists(
+                space["id"], "backup failure deleted the source space"
+            )
+
+    def test_space_delete_non_interactive_archive_is_exact_and_valid(self) -> None:
+        self.require_healthy_pings()
+        with (
+            self.disposable_deletion_space("delete-archive") as space,
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            decoy = os.path.join(directory, "candidate-old.zip")
+            selected = os.path.join(directory, "selected.zip")
+            with open(decoy, "wb") as handle:
+                handle.write(b"decoy archive candidate")
+
+            deleted = run_anyr(
+                "space",
+                "delete",
+                space["id"],
+                "--archive",
+                selected,
+                "--confirm",
+                "--json",
+            )
+            self.assertEqual(
+                deleted.returncode,
+                0,
+                msg=(
+                    "non-interactive backup-before-delete failed:\n"
+                    f"stdout={deleted.stdout}\n"
+                    f"stderr={deleted.stderr}"
+                ),
+            )
+            result = json.loads(deleted.stdout)
+            self.assertTrue(result.get("deleted"))
+            self.assertIn(f"Space archived to {selected}.", deleted.stderr)
+            self.assertGreater(os.path.getsize(selected), 0)
+            with open(decoy, "rb") as handle:
+                self.assertEqual(handle.read(), b"decoy archive candidate")
+
+            archive = run_anyr_json("backup", "list", selected, "--files")
+            self.assertEqual(archive.get("archive"), selected)
+            self.assertEqual(archive.get("source"), "zip")
+            self.assertGreater(archive.get("file_count", 0), 0)
+            self.assertIsInstance(archive.get("files"), list)
+
+            wait_for_space_absence(space["name"], space["id"])
+            space["deleted"] = True
 
     def test_object(self) -> None:
         self.assert_help_ok("object")
@@ -342,8 +462,8 @@ class TestAnyrCommands(unittest.TestCase):
         try:
             yield space_id
         finally:
-            deleted = run_anyr_with_input(
-                f"n\ndelete:{space_name}\n", "space", "delete", space_id
+            deleted = run_anyr(
+                "space", "delete", space_id, "--skip-archive", "--confirm"
             )
             self.assertEqual(
                 deleted.returncode,

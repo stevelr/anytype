@@ -38,6 +38,8 @@ anyr space disable-sharing "Work"
 
 # Permanently delete a space after an archive and exact-name confirmation
 anyr space delete "Old Work"
+# Automation must choose the archive policy and confirmation explicitly
+anyr space delete "Old Work" --archive ./old-work.zip --confirm
 
 # Count or delete archived objects in a space
 anyr space count-archived "Work"
@@ -98,10 +100,20 @@ is intentionally top-level; `anyr mcp --version` is rejected with guidance to
 use `anyr --version`. The archive inspector is included in the default anyr
 build.
 
-`anyr space delete` is deliberately interactive. It first offers to write a
-complete space backup in the current directory, then requires the exact
-confirmation string `delete:SPACE_NAME`; any other response leaves the space
-unchanged.
+`anyr space delete` defaults to an interactive, fail-closed flow. It first
+offers to write a complete space backup in the current directory, then requires
+the exact confirmation string `delete:SPACE_NAME`. An unrecognized archive
+choice or confirmation cancels deletion.
+
+For deterministic automation, `--archive PATH` writes the complete pre-delete
+backup to exactly `PATH`, refuses to overwrite any existing file or symlink, and
+bypasses the archive-choice prompt. `--skip-archive` explicitly declines the
+backup; the two archive-policy flags conflict. `--confirm` bypasses the final
+exact-name prompt, so a fully non-interactive invocation must state both its
+archive policy and `--confirm`. Backup creation, local archive validation, or
+destination installation must complete before deletion is attempted. The exact
+selected archive is reported on stderr and can be checked with
+`anyr backup list PATH --files`.
 
 ## Common options
 
@@ -558,11 +570,19 @@ Python CLI tests expect the same environment variables as the API tests:
 - `ANYTYPE_TEST_URL` (or `ANYTYPE_URL`)
 - `ANYTYPE_TEST_KEY_FILE` (or `ANYTYPE_KEY_FILE`)
 - `ANYTYPE_TEST_SPACE_PREFIX`
+- `ANYBACK_HEADLESS_REDACTED_LOG_FILE` (absolute reviewed redacted server log,
+  required by destructive space-deletion cases)
 
 ```sh
 source .test-env
 python tests/cli_commands.py
 ```
+
+Run the live suite as one process; Python `unittest` executes its cases serially,
+and it must not overlap another mutation suite. The guarded space-deletion cases
+first require healthy HTTP and gRPC pings, then cover prompted cancellation and
+exact-name confirmation, non-interactive backup-before-delete to an exact path,
+archive validation through `anyr backup list`, and backup-failure preservation.
 
 The real-operation case discovers exactly one current space whose name begins
 with `ANYTYPE_TEST_SPACE_PREFIX`; it skips rather than selecting ambiguously.

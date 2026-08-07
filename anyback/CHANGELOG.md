@@ -10,6 +10,8 @@
 
 ### Changed
 
+- Document validation of direct pre-delete archives through
+  `anyr backup list --files`.
 - The standalone `anyback` executable is replaced by the `anyr backup`
   command. Archive operations are available through the reusable CLI library;
   authentication is provided by `anyr auth`.

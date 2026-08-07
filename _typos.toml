@@ -9,7 +9,7 @@ extend-exclude = [
   "anyback/docs/cli-plan.md",
   "anytype-api/docs/cli-plan.md",
   "anytype-api/spec/*.yaml",
-  "anytype-rpc/src/gen/*.rs",
+  "**/anytype-rpc/src/gen/*.rs",
 ]
 
 [default.extend-identifiers]
