@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Verified authenticated Streamable HTTP interoperability with MCP Inspector
+  2.1.0 and Claude Code 2.1.220, including lifecycle, SSE, catalog parity, and
+  session termination.
+
 ---
 
 ## [Unreleased - 260806]
