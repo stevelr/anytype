@@ -566,6 +566,11 @@ python tests/cli_commands.py
 
 The real-operation case discovers exactly one current space whose name begins
 with `ANYTYPE_TEST_SPACE_PREFIX`; it skips rather than selecting ambiguously.
+Mutation cases create uniquely named, prefix-owned disposable spaces and do not
+consider cleanup complete until `space get` returns the explicit not-found
+outcome. Transport and server failures fail cleanup instead of being treated as
+proof of deletion, and diagnostic lines from `RUST_LOG` may precede the
+not-found message.
 
 The protected `anyr-anyback-live` workflow separately installs `anyr` as users
 do and runs the required backup create/restore smoke test. That gate never skips:

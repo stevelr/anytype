@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 # Wall-clock ceiling for one anyr invocation. Generous enough for a live
@@ -86,6 +87,77 @@ def run_anyr_json(*args: str) -> dict:
             f"invalid json for {' '.join(args)}: {exc}\nstdout: {result.stdout}\n"
             f"stderr: {result.stderr}"
         ) from exc
+
+
+def wait_for_space_absence(
+    space_name: str, space_id: str, timeout_seconds: float = 30
+) -> None:
+    """Wait until `space get` reports the explicit not-found outcome."""
+    deadline = time.monotonic() + timeout_seconds
+    expected_error = f'space "{space_id}" was not found'
+    while True:
+        result = run_anyr("space", "get", space_id)
+        if result.returncode != 0:
+            error_lines = [line.strip() for line in result.stderr.splitlines()]
+            if result.returncode == 1 and expected_error in error_lines:
+                return
+            raise AssertionError(
+                f"failed to verify deletion of disposable space {space_name}:\n"
+                f"stdout={result.stdout}\nstderr={result.stderr}"
+            )
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"disposable space {space_name} still resolves after deletion"
+            )
+        time.sleep(1)
+
+
+class TestDisposableSpaceCleanup(unittest.TestCase):
+    @staticmethod
+    def get_result(stderr: str, returncode: int = 1) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["anyr", "space", "get", "space-id"],
+            returncode=returncode,
+            stdout="",
+            stderr=stderr,
+        )
+
+    def test_explicit_not_found_proves_absence(self) -> None:
+        result = self.get_result(
+            'space "space-id" was not found\n'
+            "  hint: run `anyr space list -t` to see the spaces you can access\n"
+        )
+        with mock.patch(__name__ + ".run_anyr", return_value=result):
+            wait_for_space_absence("owned-space", "space-id", timeout_seconds=0)
+
+    def test_diagnostics_before_not_found_still_prove_absence(self) -> None:
+        result = self.get_result(
+            "DEBUG anytype::client: creating HTTP client\n"
+            'space "space-id" was not found\n'
+            "  hint: run `anyr space list -t` to see the spaces you can access\n"
+        )
+        with mock.patch(__name__ + ".run_anyr", return_value=result):
+            wait_for_space_absence("owned-space", "space-id", timeout_seconds=0)
+
+    def test_transport_failure_does_not_prove_absence(self) -> None:
+        result = self.get_result(
+            "HTTP transport error for GET /v1/spaces/space-id: connection refused\n"
+        )
+        with (
+            mock.patch(__name__ + ".run_anyr", return_value=result),
+            self.assertRaisesRegex(AssertionError, "HTTP transport error"),
+        ):
+            wait_for_space_absence("owned-space", "space-id", timeout_seconds=0)
+
+    def test_server_failure_does_not_prove_absence(self) -> None:
+        result = self.get_result(
+            "Anytype API error 500 for GET /v1/spaces/space-id: internal error\n"
+        )
+        with (
+            mock.patch(__name__ + ".run_anyr", return_value=result),
+            self.assertRaisesRegex(AssertionError, "Anytype API error 500"),
+        ):
+            wait_for_space_absence("owned-space", "space-id", timeout_seconds=0)
 
 
 class TestAnyrCommands(unittest.TestCase):
@@ -174,13 +246,7 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("space", "disable-sharing")
 
     def test_space_delete_accepts_bash_stdin_confirmation(self) -> None:
-        space_name = "xtest-123-xyz"
-        existing = run_anyr("space", "get", space_name)
-        if existing.returncode == 0:
-            self.skipTest(
-                f"refusing to operate on pre-existing disposable space {space_name}"
-            )
-
+        space_name = f"{self.space_prefix}-delete-stdin-{int(time.time() * 1000)}"
         created_space_id: str | None = None
         deleted = False
         try:
@@ -225,20 +291,24 @@ class TestAnyrCommands(unittest.TestCase):
                     f"stderr={confirmation.stderr}"
                 ),
             )
+            wait_for_space_absence(space_name, created_space_id)
             deleted = True
-            self.assertNotEqual(
-                run_anyr("space", "get", created_space_id).returncode,
-                0,
-                "deleted space should no longer be resolvable",
-            )
         finally:
             if created_space_id and not deleted:
-                run_anyr_with_input(
+                cleanup = run_anyr_with_input(
                     f'n\ndelete:{space_name}\n',
                     "space",
                     "delete",
                     created_space_id,
                 )
+                try:
+                    wait_for_space_absence(space_name, created_space_id)
+                except AssertionError as exc:
+                    raise AssertionError(
+                        f"failed to clean up disposable space {space_name}:\n"
+                        f"delete stdout={cleanup.stdout}\n"
+                        f"delete stderr={cleanup.stderr}"
+                    ) from exc
 
     def test_object(self) -> None:
         self.assert_help_ok("object")
@@ -280,29 +350,15 @@ class TestAnyrCommands(unittest.TestCase):
                 0,
                 msg=(
                     f"failed to delete disposable space {space_name}:\n"
-                    f"stdout={deleted.stdout}\n"
-                    f"stderr={deleted.stderr}"
+                    f"stdout={deleted.stdout}\nstderr={deleted.stderr}"
                 ),
             )
             # Prove the deletion landed before returning. Other tests select
             # their working space by prefix, so a space that lingers in the
-            # listing would silently be adopted by one of them. A successful
-            # listing is required so transport and authentication failures do
-            # not masquerade as proof of absence.
-            deadline = time.monotonic() + 30
-            while True:
-                spaces = run_anyr_json("space", "list", "--all")
-                self.assertIsInstance(spaces, list, "space list --all was not a list")
-                if not any(
-                    isinstance(space, dict) and space.get("id") == space_id
-                    for space in spaces
-                ):
-                    break
-                if time.monotonic() >= deadline:
-                    raise AssertionError(
-                        f"disposable space {space_name} still appears after deletion"
-                    )
-                time.sleep(1)
+            # listing would silently be adopted by one of them. Only the CLI's
+            # explicit not-found outcome proves absence; transport and server
+            # failures must fail cleanup rather than masquerade as deletion.
+            wait_for_space_absence(space_name, space_id)
 
     def test_file_operations(self) -> None:
         """Server-backed coverage for the migrated REST-default file surface."""

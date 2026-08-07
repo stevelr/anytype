@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- Make live CLI cleanup require Anytype's explicit not-found response before a
+  disposable space is considered deleted, and surface transport or server
+  failures instead of treating them as proof of deletion.
+
 ---
 
 ## [Unreleased - 260806]
