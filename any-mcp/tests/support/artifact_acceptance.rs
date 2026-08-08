@@ -5313,6 +5313,12 @@ impl ArtifactPolicyFixture {
         self.base.join("acceptance-pause-released")
     }
 
+    /// Returns the private fixture directory used for child-only test capabilities.
+    #[must_use]
+    pub fn acceptance_gate_base(&self) -> &Path {
+        &self.base
+    }
+
     /// Whether the complete private fixture tree still exists.
     #[must_use]
     pub fn tree_exists(&self) -> bool {
