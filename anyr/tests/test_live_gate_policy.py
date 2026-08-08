@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -82,6 +83,7 @@ class LiveGatePolicyTests(unittest.TestCase):
             failure = subprocess.run(
                 [
                     sys.executable,
+                    "-B",
                     "-m",
                     "anyr.tests.run_required_python_cli",
                     "--category-file",
@@ -90,11 +92,7 @@ class LiveGatePolicyTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 cwd=root,
-                env={
-                    "ANYR_PY_REQUIRE_LIVE": "1",
-                    "PATH": "",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                },
+                env={"ANYR_PY_REQUIRE_LIVE": "1", "PATH": ""},
                 text=True,
             )
             self.assertEqual(failure.returncode, 1)
@@ -119,10 +117,17 @@ class LiveGatePolicyTests(unittest.TestCase):
                 "unittest.defaultTestLoader.loadTestsFromName = load\n",
                 encoding="utf-8",
             )
+            package_root = Path(directory, "package")
+            shutil.copytree(
+                root / "anyr",
+                package_root / "anyr",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
             successful_category = Path(directory, "success.category")
             success = subprocess.run(
                 [
                     sys.executable,
+                    "-B",
                     "-m",
                     "anyr.tests.run_required_python_cli",
                     "--category-file",
@@ -130,14 +135,16 @@ class LiveGatePolicyTests(unittest.TestCase):
                 ],
                 check=False,
                 capture_output=True,
-                cwd=root,
-                env={"PYTHONPATH": directory, "PYTHONDONTWRITEBYTECODE": "1"},
+                cwd=package_root,
+                env={"PYTHONPATH": directory},
                 text=True,
             )
             self.assertEqual(success.returncode, 0, success.stderr)
             self.assertNotIn("ModuleNotFoundError", success.stderr)
             self.assertIn("Ran 24 tests", success.stderr)
             self.assertFalse(successful_category.exists())
+            self.assertFalse(list(package_root.rglob("__pycache__")))
+            self.assertFalse(list(package_root.rglob("*.pyc")))
 
     def test_python_test_manifest_matches_loader(self):
         classes = [

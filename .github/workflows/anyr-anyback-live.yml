@@ -102,11 +102,11 @@ jobs:
             local output="$gate_dir/gate-python-cli.log"
             local category_file="$gate_dir/gate-python-cli.category"
             set +e
-            env ANYR_PY_REQUIRE_LIVE=1 python3 -m anyr.tests.run_required_python_cli \
+            env ANYR_PY_REQUIRE_LIVE=1 python3 -B -m anyr.tests.run_required_python_cli \
               --category-file "$category_file" >"$output" 2>&1
             local status=$?
             set -e
-            if [[ "$status" -ne 0 ]] || ! python3 anyr/tests/live_gate_policy.py python "$output"; then
+            if [[ "$status" -ne 0 ]] || ! python3 -B anyr/tests/live_gate_policy.py python "$output"; then
               local category="required-test-failed"
               if [[ -f "$category_file" && ! -L "$category_file" ]] && \
                 [[ "$(stat -c '%u' -- "$category_file")" == "$(id -u)" ]] && \
@@ -131,7 +131,7 @@ jobs:
               --ignored --exact --test-threads=1 --nocapture >"$output" 2>&1
             local status=$?
             set -e
-            if [[ "$status" -ne 0 ]] || ! python3 anyr/tests/live_gate_policy.py rust "$output"; then
+            if [[ "$status" -ne 0 ]] || ! python3 -B anyr/tests/live_gate_policy.py rust "$output"; then
               rm -f -- "$output"
               printf '%s\n' "required anyr type-property gate failed" >&2
               return 1
