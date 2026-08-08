@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Reconcile the maintained HTTP/gRPC coverage inventory with the completed
+  any-dm9k campaign. Remaining gaps now distinguish direct crate coverage from
+  cross-crate evidence, reuse existing ticket owners, and define bounded
+  helper and loopback-fixture scope before filing.
 - Accept any bounded, sendable asynchronous reader for retained REST file
   uploads, allowing capability-owning callers to use cursor-independent readers
   without reopening a filesystem path. The stream rejects both shorter and

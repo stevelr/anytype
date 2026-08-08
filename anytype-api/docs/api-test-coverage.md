@@ -3,9 +3,9 @@
 Current status document for test coverage of the `anytype` crate's public
 network-facing surface. Originated as the fixed-scope audit for any-gc5
 (parent any-q1n, review gate any-jzn) dated 2026-07-21; now maintained as a
-living inventory. Status as of 2026-08-07, reconciled against the crate
-CHANGELOG `[Unreleased]` section. Planned coverage work is tracked in epic
-any-dm9k (see "Planned work" below).
+living inventory. Status as of 2026-08-08, reconciled against the crate
+CHANGELOG `[Unreleased]` section and the completed any-dm9k coverage campaign
+(see "Delivered coverage work" below).
 
 ## Scope and method
 
@@ -36,62 +36,62 @@ Coverage classes:
   variables are no longer consulted. Fixture-heavy suites (body, chats,
   discussions, space administration, Markdown fidelity, Kanban, compatibility
   matrices) run in the ignored disposable tier via
-  `with_disposable_space_context` — automation of that tier is planned work
-  (any-dm9k.7).
+  `with_disposable_space_context`. The closed manifest and protected serial
+  gate delivered by any-dm9k.7 automate that tier.
 - Status: **covered** (meaningful direct assertions), **partial** (only one
   path, only error paths, or only indirect exercise), **uncovered** (no test
   invokes it).
 
 ## Test asset inventory
 
-| Asset                                                                                                                                                                                                                                                    | Kind    | What it covers                                                                                                                                                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/http_client.rs` tests (35)                                                                                                                                                                                                                          | unit    | retry/replay policy, response-size ceilings, redirect policy, diagnostics redaction, Retry-After parsing, credential-generation counter                                                                                                                                                                                                                         |
-| `src/resolve.rs` tests (33)                                                                                                                                                                                                                              | unit    | all resolver classes: bounded scans, ambiguity candidates, dedup, direct-ID fast paths, chat/space/view/template resolution over paged fixtures                                                                                                                                                                                                                 |
-| `src/chats.rs` tests (31)                                                                                                                                                                                                                                | unit    | REST chat wire shapes, SSE stream robustness/bounds/buffer ceilings, gRPC block round-trips, route paths, timestamp conversion, before-anchor history paging, verified-edit readback                                                                                                                                                                            |
-| `src/body.rs` (33), `src/body_mutation.rs` (28), `src/body_rpc.rs` (11)                                                                                                                                                                                  | unit    | typed body-graph validation (identities, order, closed enums, fail-closed malformed/oversized graphs), verified block mutation state machines and constructors, finite show/close RPC seam (deadlines, decoder limits, payload-free counters)                                                                                                                   |
-| `src/attached_discussions.rs` tests (19)                                                                                                                                                                                                                 | unit    | discussion discovery/ensure lifecycle and state machines, closed payload-free error kinds, reconciliation outcomes                                                                                                                                                                                                                                              |
-| `src/files.rs` (19), `src/properties.rs` (20), `src/types.rs` (19), `src/spaces.rs` (12), `src/views.rs` (20), `src/objects.rs` (7), `src/members.rs` (5)                                                                                                | unit    | request-body serialization, model enums, direct-get scoping, tag-lookup budgets, upload backend selection and multipart byte ceilings, ranged/conditional downloads, space-administration validation, collection-membership seams, view path validation                                                                                                         |
-| `src/verify.rs` (9), `src/paged.rs` (12), `src/cache.rs` (3), `src/keystore.rs` (5), `src/error.rs` (3), `src/validation.rs` (4), `src/client.rs` (5), `src/chat_stream.rs` (1), `src/process_watcher.rs` (4), `src/search.rs` (1), `src/filters.rs` (2) | unit    | verification retry semantics, PagedResult iteration/streaming, cache ops, keystore storage and modifier parsing, error redaction/classification, port discovery helpers, stream sub-id routing, import-finish fallback correlation, search limit validation, #2879 query-encoding regressions                                                                   |
-| `src/test_util.rs` + `src/test_util/` + `tests/common/` (49 unit tests)                                                                                                                                                                                  | harness | disposable per-test space contexts with recovery ledger and sweeps, immediate `register_*` cleanup, retry helpers, template/collection-layout/second-view/Kanban/saved-view-filter fixtures, archive-evidence scans                                                                                                                                             |
-| `tests/` (21 files, ~225 tests)                                                                                                                                                                                                                          | live    | see matrix; largest: filters (32 incl. compatibility matrix), search (25), types (24), validation (24), integration (24), properties (23), tags (18), members (18), cache (14); new since the original audit: body (5), body mutations (2), attached discussions (1), space admin (2), chat prerequisites (1), Kanban fixture (1), Markdown fidelity (1 matrix) |
+| Asset                                                                                                                                                                                                                                                    | Kind    | What it covers                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/http_client.rs` tests (35)                                                                                                                                                                                                                          | unit    | retry/replay policy, response-size ceilings, redirect policy, diagnostics redaction, Retry-After parsing, credential-generation counter                                                                                                                                                       |
+| `src/resolve.rs` tests (33)                                                                                                                                                                                                                              | unit    | all resolver classes: bounded scans, ambiguity candidates, dedup, direct-ID fast paths, chat/space/view/template resolution over paged fixtures                                                                                                                                               |
+| `src/chats.rs` tests (31)                                                                                                                                                                                                                                | unit    | REST chat wire shapes, SSE stream robustness/bounds/buffer ceilings, gRPC block round-trips, route paths, timestamp conversion, before-anchor history paging, verified-edit readback                                                                                                          |
+| `src/body.rs` (33), `src/body_mutation.rs` (28), `src/body_rpc.rs` (11)                                                                                                                                                                                  | unit    | typed body-graph validation (identities, order, closed enums, fail-closed malformed/oversized graphs), verified block mutation state machines and constructors, finite show/close RPC seam (deadlines, decoder limits, payload-free counters)                                                 |
+| `src/attached_discussions.rs` tests (19)                                                                                                                                                                                                                 | unit    | discussion discovery/ensure lifecycle and state machines, closed payload-free error kinds, reconciliation outcomes                                                                                                                                                                            |
+| `src/files.rs` (20), `src/properties.rs` (20), `src/types.rs` (19), `src/spaces.rs` (12), `src/views.rs` (20), `src/objects.rs` (7), `src/members.rs` (5)                                                                                                | unit    | request-body serialization, model enums, direct-get scoping, tag-lookup budgets, upload backend selection and multipart byte ceilings, ranged/conditional downloads, space-administration validation, collection-membership seams, view path validation                                       |
+| `src/verify.rs` (9), `src/paged.rs` (12), `src/cache.rs` (3), `src/keystore.rs` (5), `src/error.rs` (3), `src/validation.rs` (4), `src/client.rs` (5), `src/chat_stream.rs` (1), `src/process_watcher.rs` (4), `src/search.rs` (1), `src/filters.rs` (2) | unit    | verification retry semantics, PagedResult iteration/streaming, cache ops, keystore storage and modifier parsing, error redaction/classification, port discovery helpers, stream sub-id routing, import-finish fallback correlation, search limit validation, #2879 query-encoding regressions |
+| `src/test_util.rs` + `src/test_util/` + `tests/common/`                                                                                                                                                                                                  | harness | disposable per-test space contexts with recovery ledger and sweeps, immediate `register_*` cleanup, retry helpers, template/collection-layout/second-view/Kanban/saved-view-filter fixtures, archive-evidence scans                                                                           |
+| `tests/` (26 integration targets)                                                                                                                                                                                                                        | live    | see matrix; includes filters, search, types, validation, integration, properties, tags, members, cache, body and body-mutation, attached-discussion, space-administration, chat-prerequisite, Kanban, Markdown-fidelity, and protected-manifest coverage                                      |
 
 ## Coverage matrix
 
 ### Auth and client lifecycle (REST unless noted)
 
-| Operation                                                               | Unit                                         | Live                                   | Status                                                     |
-| ----------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------- | ---------------------------------------------------------- |
-| `create_auth_challenge`                                                 | –                                            | –                                      | uncovered                                                  |
-| `create_api_key`                                                        | –                                            | –                                      | uncovered                                                  |
-| `authenticate_interactive`                                              | –                                            | –                                      | uncovered (needs a dedicated interactive protocol harness) |
-| `auth_status` / `logout`                                                | –                                            | –                                      | uncovered                                                  |
-| `ping_http` / `ping_grpc`                                               | –                                            | –                                      | uncovered (exercised only implicitly)                      |
-| `grpc_client`                                                           | –                                            | indirect (all gRPC tests)              | partial                                                    |
-| `find_grpc`                                                             | helpers only (`extract_port_*`, lsof filter) | –                                      | partial                                                    |
-| `http_metrics`                                                          | –                                            | asserted in `test_cache`, `smoke_test` | partial                                                    |
-| HTTP pipeline (retry/limits/redirect/diagnostics/credential generation) | 35 tests                                     | `test_retry_helpers` (3 live-relevant) | covered                                                    |
-| cache enable/disable/clear                                              | `cache.rs` (3)                               | `test_cache` (14)                      | covered                                                    |
-| keystore save/load/update + modifier parsing                            | `keystore.rs` (5)                            | –                                      | covered (unit is the right level)                          |
+| Operation                                                               | Unit                                         | Live                                   | Status                                                    |
+| ----------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------- | --------------------------------------------------------- |
+| `create_auth_challenge`                                                 | –                                            | –                                      | uncovered                                                 |
+| `create_api_key`                                                        | –                                            | –                                      | uncovered                                                 |
+| `authenticate_interactive`                                              | –                                            | –                                      | uncovered (owned by proposed auth lifecycle ticket)       |
+| `auth_status` / `logout`                                                | –                                            | –                                      | uncovered                                                 |
+| `ping_http` / `ping_grpc`                                               | –                                            | every disposable readiness preflight   | partial (success covered; failure classification missing) |
+| `grpc_client`                                                           | –                                            | indirect (all gRPC tests)              | partial                                                   |
+| `find_grpc`                                                             | helpers only (`extract_port_*`, lsof filter) | –                                      | partial                                                   |
+| `http_metrics`                                                          | –                                            | asserted in `test_cache`, `smoke_test` | partial                                                   |
+| HTTP pipeline (retry/limits/redirect/diagnostics/credential generation) | 35 tests                                     | `test_retry_helpers` (3 live-relevant) | covered                                                   |
+| cache enable/disable/clear                                              | `cache.rs` (3)                               | `test_cache` (14)                      | covered                                                   |
+| keystore save/load/update + modifier parsing                            | `keystore.rs` (5)                            | –                                      | covered (unit is the right level)                         |
 
 ### Spaces
 
-| Operation                                                                           | Transport | Unit                                                                    | Live                                                                                 | Status                                                                                            |
-| ----------------------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `spaces().list`                                                                     | REST      | –                                                                       | `smoke_test`, `test_cache`                                                           | covered                                                                                           |
-| `space(id).get`                                                                     | REST      | –                                                                       | `smoke_test`, `test_cache`, `test_validation`                                        | covered                                                                                           |
-| `space(id).get_direct` (cache-independent exact GET)                                | REST      | spaces unit tests                                                       | disposable readiness/preflight reads                                                 | covered                                                                                           |
-| `new_space(..).create`                                                              | REST      | body serialization + empty-name rejection                               | exercised by every disposable-context test; harness verifies create/readiness/delete | covered — former no-delete blocker resolved                                                       |
-| `update_space(..).update`                                                           | REST      | body serialization                                                      | –                                                                                    | partial                                                                                           |
-| `lookup_space_by_name`                                                              | REST      | – (resolver-space unit tests cover `resolve_space_id`, not this helper) | –                                                                                    | uncovered                                                                                         |
-| `create_chat_space`                                                                 | REST      | validation (`test_space_admin`)                                         | ignored disposable lifecycle (`space_administration_lifecycle`)                      | covered                                                                                           |
-| `delete_space` (permanent)                                                          | REST      | validation                                                              | disposable-context teardown on every fixture-heavy test; ignored lifecycle test      | covered                                                                                           |
-| space invites: `list_space_invites` / `create_space_invite` / `revoke_space_invite` | REST      | validation                                                              | ignored disposable lifecycle                                                         | covered                                                                                           |
-| `enable_space_sharing` / `disable_space_sharing`                                    | REST      | validation                                                              | ignored disposable lifecycle                                                         | covered                                                                                           |
-| `backup` (`backup_space`)                                                           | gRPC      | –                                                                       | –                                                                                    | uncovered — planned: any-dm9k.2/.4 exercise the surface end-to-end through anyr                   |
-| `list_archived(..).list`                                                            | gRPC      | –                                                                       | indirect (harness archive-evidence scans)                                            | partial                                                                                           |
-| `count_archived`                                                                    | gRPC      | –                                                                       | –                                                                                    | uncovered                                                                                         |
-| `delete_archived` / `delete_all_archived`                                           | gRPC      | –                                                                       | –                                                                                    | uncovered — planned: any-dm9k.5 covers archive selection for space deletion at the anyr/CLI level |
+| Operation                                                                           | Transport | Unit                                                                    | Live                                                                                 | Status                                                |
+| ----------------------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| `spaces().list`                                                                     | REST      | –                                                                       | `smoke_test`, `test_cache`                                                           | covered                                               |
+| `space(id).get`                                                                     | REST      | –                                                                       | `smoke_test`, `test_cache`, `test_validation`                                        | covered                                               |
+| `space(id).get_direct` (cache-independent exact GET)                                | REST      | spaces unit tests                                                       | disposable readiness/preflight reads                                                 | covered                                               |
+| `new_space(..).create`                                                              | REST      | body serialization + empty-name rejection                               | exercised by every disposable-context test; harness verifies create/readiness/delete | covered — former no-delete blocker resolved           |
+| `update_space(..).update`                                                           | REST      | body serialization                                                      | –                                                                                    | partial                                               |
+| `lookup_space_by_name`                                                              | REST      | – (resolver-space unit tests cover `resolve_space_id`, not this helper) | –                                                                                    | uncovered                                             |
+| `create_chat_space`                                                                 | REST      | validation (`test_space_admin`)                                         | ignored disposable lifecycle (`space_administration_lifecycle`)                      | covered                                               |
+| `delete_space` (permanent)                                                          | REST      | validation                                                              | disposable-context teardown on every fixture-heavy test; ignored lifecycle test      | covered                                               |
+| space invites: `list_space_invites` / `create_space_invite` / `revoke_space_invite` | REST      | validation                                                              | ignored disposable lifecycle                                                         | covered                                               |
+| `enable_space_sharing` / `disable_space_sharing`                                    | REST      | validation                                                              | ignored disposable lifecycle                                                         | covered                                               |
+| `backup` (`backup_space`)                                                           | gRPC      | –                                                                       | required anyr/anyback smoke and fidelity gates                                       | covered (cross-crate integration)                     |
+| `list_archived(..).list`                                                            | gRPC      | –                                                                       | indirect (harness archive-evidence scans)                                            | partial                                               |
+| `count_archived`                                                                    | gRPC      | –                                                                       | –                                                                                    | uncovered                                             |
+| `delete_archived` / `delete_all_archived`                                           | gRPC      | –                                                                       | `delete_archived` exercised by backup/restore cleanup                                | partial (`delete_all_archived` lacks direct coverage) |
 
 ### Objects and attached discussions
 
@@ -132,7 +132,7 @@ Coverage classes:
 | `lookup_property_by_key`                                                                                       | resolver unit tests                        | `tests/common`, `smoke_test`                                                                                                    | covered             |
 | `lookup_properties` (bulk)                                                                                     | –                                          | –                                                                                                                               | uncovered           |
 | `lookup_property_tag`                                                                                          | tag-budget unit tests                      | `test_tags`, `tests/common`                                                                                                     | covered             |
-| tags list/get/create/update/delete                                                                             | –                                          | `test_tags` (18)                                                                                                                | covered (live only) |
+| tags list/get/create/update/delete                                                                             | –                                          | `test_tags` (19)                                                                                                                | covered (live only) |
 | `template(..).get` / `templates(..).list`                                                                      | resolver template unit tests               | `test_types` template trio; `create_template_fixtures` harness                                                                  | covered             |
 
 ### Views, collections, members, search
@@ -146,23 +146,23 @@ Coverage classes:
 | `collection_membership_page` (canonical manual-collection pages, continuation arithmetic, bounded subscriptions) | views unit tests                     | disposable real-server evidence incl. Kanban fixture                                                         | covered                                                   |
 | `observe_collection_membership` (present/absent with index controls)                                             | views unit tests                     | disposable real-server coverage                                                                              | covered                                                   |
 | Kanban grouping fixture (grouping relation, column movement, two-item pages)                                     | –                                    | ignored disposable `test_kanban_fixture`                                                                     | covered (harness tier)                                    |
-| `member(..).get` / `members(..).list`                                                                            | model helpers (5)                    | `test_members` (18)                                                                                          | covered                                                   |
+| `member(..).get` / `members(..).list`                                                                            | model helpers (5)                    | `test_members` (16)                                                                                          | covered                                                   |
 | `search_global().execute` / space search                                                                         | limit validation (1)                 | `test_search` (25), `integration`                                                                            | covered (live; offline wire-shape tests still limited)    |
-| filter DSL (`filters.rs`)                                                                                        | #2879 query-encoding regressions (2) | `test_filters` (32 incl. ignored numeric/checkbox compatibility matrix vs `anytype-heart#2879`)              | covered (live-heavy; serialization unit tests still thin) |
+| filter DSL (`filters.rs`)                                                                                        | #2879 query-encoding regressions (2) | `test_filters` (24 incl. numeric/checkbox compatibility matrix vs `anytype-heart#2879`)                      | covered (live-heavy; serialization unit tests still thin) |
 
 ### Files
 
 | Operation                                                              | Transport | Unit                                                                      | Live                                                                       | Status                                   |
 | ---------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------- |
 | `upload` (path/bytes/reader, plain)                                    | REST      | backend selection, bounded multipart construction, response normalization | `test_files` backend auto-selection incl. reader and rich-option promotion | covered                                  |
-| `upload` (URL / rich options)                                          | gRPC      | backend-selection only                                                    | –                                                                          | partial — selection tested, transfer not |
+| `upload` (URL / rich options)                                          | gRPC      | backend-selection only                                                    | protected anyr rich-option upload                                          | partial (URL transfer remains uncovered) |
 | `download_bytes`                                                       | REST      | –                                                                         | `test_files`; cross-crate ignored exact restored-byte comparison           | covered                                  |
 | `download_request` (range/width/conditional, header-evidence ceilings) | REST      | ranged + conditional + 304 + ceiling unit tests                           | live `HEAD`/`206`/`412`/`416` + rejected zero-length range                 | covered                                  |
 | `metadata` / `head`                                                    | REST      | head-without-body + validator parsing                                     | live metadata `HEAD`; cross-crate restored MIME assertion                  | covered                                  |
 | `delete` / `delete_request(..).permanently`                            | REST      | skip_bin query unit test                                                  | `test_files` incl. permanent delete                                        | covered                                  |
-| `http_upload` / `http_download` / `http_delete` (legacy REST)          | REST      | upload schema deserialization only                                        | –                                                                          | partial/uncovered                        |
-| `list` / `search` / `get` (rich metadata)                              | gRPC      | –                                                                         | –                                                                          | uncovered                                |
-| `preload` / `discard_preload`                                          | gRPC      | –                                                                         | –                                                                          | uncovered                                |
+| `http_upload` / `http_download` / `http_delete` (legacy REST)          | REST      | delegates to covered modern builders                                      | –                                                                          | covered through delegated operations     |
+| `list` / `search` / `get` (rich metadata)                              | gRPC      | –                                                                         | protected anyr file-operation gate                                         | covered (cross-crate integration)        |
+| `preload` / `discard_preload`                                          | gRPC      | –                                                                         | protected anyr file-operation gate                                         | covered (cross-crate integration)        |
 | `download` (legacy, Heart writes to path)                              | gRPC      | –                                                                         | –                                                                          | uncovered                                |
 
 ### Chats
@@ -176,8 +176,8 @@ Coverage classes:
 | `send_text` / `toggle_reaction` / `read_all`                                                                                                  | gRPC      | –                                             | `test_chats` / `test_chat_discovery` (single paths)                                                                                                                               | partial                                                                                                                                                          |
 | `edit_text`                                                                                                                                   | gRPC      | –                                             | –                                                                                                                                                                                 | uncovered                                                                                                                                                        |
 | `search_chats_in` / `get_chat` / `resolve_chat_by_name`                                                                                       | gRPC      | resolver chat-discovery unit tests            | disposable `test_chat_discovery`                                                                                                                                                  | covered                                                                                                                                                          |
-| `list_chats` / `list_chats_in` (global; `list_chats_in` now REST)                                                                             | mixed     | –                                             | –                                                                                                                                                                                 | uncovered                                                                                                                                                        |
-| `space_chat` (default space chat)                                                                                                             | gRPC      | –                                             | –                                                                                                                                                                                 | uncovered                                                                                                                                                        |
+| `list_chats` / `list_chats_in` (global; `list_chats_in` now REST)                                                                             | mixed     | resolver and REST wire-shape tests            | disposable `list_chats_in` assertion                                                                                                                                              | partial (`list_chats` lacks direct coverage)                                                                                                                     |
+| `space_chat` (default space chat)                                                                                                             | gRPC      | –                                             | backup-integrity fixture setup                                                                                                                                                    | partial (cross-crate integration only)                                                                                                                           |
 | `chat_stream` + `subscribe_chat`                                                                                                              | gRPC      | sub-id routing unit test                      | disposable real-server receive and shutdown                                                                                                                                       | partial — ordinary semantics covered; disconnect/reconnect fault coverage removed with the semantic mock, deferred to the reviewed external fault-injection plan |
 | `unsubscribe_chat` / `shutdown` runtime control                                                                                               | gRPC      | –                                             | shutdown only                                                                                                                                                                     | partial                                                                                                                                                          |
 
@@ -189,90 +189,82 @@ Coverage classes:
 | `verify_semantic` / `ensure_available`                                                                                                                   | 9 verify tests (caps, backoff, classification, drop safety)     | –                                                                                  | covered (unit)                                                            |
 | `PagedResult::collect_all` / `into_stream`                                                                                                               | 12 paged tests                                                  | `test_pagination` (2)                                                              | covered                                                                   |
 | `ProcessWatcher` subscribe/wait/unsubscribe                                                                                                              | import-finish reducer + space-correlation cases (4)             | real-server Markdown import lifecycle + import-finish fallback on one subscription | covered — connection faults deferred to the external fault-injection plan |
-| disposable-space harness (`with_disposable_space_context`: lease, recovery ledger, sweeps, readiness convergence, child-command credential configurator) | 49 `test_util` unit tests                                       | exercised by every fixture-heavy suite                                             | covered                                                                   |
+| disposable-space harness (`with_disposable_space_context`: lease, recovery ledger, sweeps, readiness convergence, child-command credential configurator) | `test_util` unit suites                                         | exercised by every fixture-heavy suite                                             | covered                                                                   |
 
-## Planned work (epic any-dm9k — "Restore executable 0.5 backup and ignored-live-test coverage")
+## Delivered coverage work
 
-### Backup and restore (exercises `backup_space` and the anyr/anyback surface)
+Epic any-dm9k and all 18 descendants closed on 2026-08-08. The campaign
+delivered required backup/restore smoke coverage, cleanup-owned fidelity
+matrices, repaired CLI output contracts, backup-before-delete archive
+selection, exact ignored-test dispositions, and protected serial live gates
+for anytype-api, any-mcp, and anyr.
 
-- **any-dm9k.1** (p1 bug) — repair the anyback live harnesses
-  (`e2e_backup_restore`, `p1_cross_space`, `restore_matrix`,
-  `integrity_nightly`) to invoke the consolidated `anyr` backup CLI; today all
-  behavioral cases are ignored and would fail before reaching backup/restore.
-- **any-dm9k.2** (p1 task) — one required, non-skipping `anyr backup
-  create`/restore smoke gate over cleanup-owned source and destination spaces.
-- **any-dm9k.3** (p1 bug) — make embedded backup commands honor anyr's global
-  output contracts (quiet/pretty/table/output-file) instead of raw stdout.
-- **any-dm9k.4** (p1 task) — content-fidelity matrix. Implemented ignored,
-  cleanup-owned cross-space cases: `.4.1`
-  `e2e_restore_preserves_file_payload_metadata_and_host_attachment`, `.4.2`
-  `e2e_restore_preserves_chat_order_reply_and_attachment`, and `.4.3`
-  `e2e_restore_preserves_custom_schema_keys_formats_and_featured_membership`,
-  and `.4.4` `e2e_restore_preserves_typed_object_value_fidelity`. The latter
-  compares typed scalar values, a destination-resolved relation target, and
-  destination-resolved select and multi-select option IDs and keys.
+The anytype-api manifest now owns 17 required cases, three scheduled
+characterization cases, and two explicitly excluded probes. Seven superseded
+filter ignores were removed. The former ambient Set/view probes now create
+cleanup-owned source-backed Sets and collections. These cross-crate gates are
+meaningful integration evidence, but they do not erase a direct crate-level
+gap unless they exercise the same public operation and assertions.
 
-### Spaces and archives
+## Proposed gap-ticket filing set
 
-- **any-dm9k.5** (p1 task) — prove backup-before-delete and archive-selection
-  behavior for space deletion with a unique cleanup-owned space (replaces the
-  fixed ambient `xtest-123-xyz` fixture that can silently skip).
+The following bounded set is proposed for any-jzn approval. If approved, treat
+each numbered entry as p3 work and do not recreate work already owned by the
+tracker. Items 1, 2, and 5 through 9 require new tickets. Items 3, 4, and 10
+reuse existing owners.
 
-### Ignored-test automation and harness (anytype-api)
+1. Auth lifecycle: scripted challenge/key wire and error coverage;
+   `authenticate_interactive` fast, forced, callback-error, and persistence
+   paths; `auth_status`/`logout` state transitions; and ping failure
+   classification. Disposable setup already proves live HTTP and gRPC ping
+   success.
+2. Paged lookup helpers: `lookup_space_by_name`, `lookup_types`, and
+   `lookup_properties`, including cache modes, ambiguity, not-found, bounded
+   pagination, and partial failure.
+3. Archive aggregates: extend any-h94e with direct `count_archived` boundary
+   tests, and resume any-vjj for `delete_all_archived` coverage over a bounded
+   cleanup-owned archived fixture. Make any-vjj depend on any-h94e before that
+   shared fixture is implemented. `delete_archived` is already exercised
+   through the backup/restore integration tier.
+4. `get_share_link`: resume any-6s3 and require direct live gRPC coverage on a
+   cleanup-registered object as part of its command acceptance.
+5. Legacy gRPC download-to-path: download into an owned scratch directory and
+   compare exact bytes without reopening an untrusted path.
+6. URL upload: an owned loopback HTTP source with bounded response bytes,
+   exact uploaded-byte evidence, and explicit server shutdown. Rich-option
+   upload already has protected cross-crate coverage.
+7. Remaining gRPC chat reads and mutation: direct `list_chats`, `space_chat`,
+   and `edit_text` coverage. `list_chats_in` already has direct unit and live
+   coverage.
+8. Selective chat unsubscribe: subscribe two cleanup-owned chats, unsubscribe
+   one, and assert routing continues only for the retained subscription.
+9. Offline search/filter wire shapes: `SearchRequest` and filter-DSL
+   serialization beyond the #2879 regressions. Live negative-filter pagination
+   remains owned by any-gz2k.
+10. Second-view continuation pagination: extend existing any-v06h rather than
+    filing a duplicate, and limit its remaining scope to continuation over the
+    cleanup-owned multi-view fixture delivered by any-dm9k.9.
 
-- **any-dm9k.7** (p2, tracking container) — automate the anytype-api disposable
-  ignored-test suite; work delegated to:
-  - **any-dm9k.7.1** — exhaustive inventory + admit/exclude disposition of
-    every cleanup-owned disposable ignored test (bodies, chats, Markdown
-    fidelity, views, space administration, attached discussions, filters,
-    process watching), manifest format and gate design.
-  - **any-dm9k.7.2** — implement the manifest plus a protected/scheduled serial
-    gate with evidence capture and docs, executing the .7.1 dispositions.
-- **any-dm9k.9** (p2 task) — remove the seven legacy filter ignores superseded
-  by the cleanup-owned condition matrix and the two ambient-Set view ignores,
-  so the ignored tier lists only executable coverage.
+Do not file separate tickets for `update_space` (owned by any-e7ei.3),
+`backup_space` (covered by the required backup/restore gates), file
+list/search/get or preload/discard (covered by the protected anyr file suite),
+legacy REST aliases that delegate to covered modern builders, or rich-option
+upload. Existing any-q94w and the original ambient-view portion of any-v06h
+are superseded by closed any-dm9k work and require tracker cleanup, not new
+tickets.
 
-### Cross-crate ignored live tests (adjacent crates, tracked here for visibility)
+## Proposed test-helper tooling ticket
 
-- **any-dm9k.8** (p2, tracking container) — reconcile orphan ignored live tests
-  in any-mcp and anyr; delegated to:
-  - **any-dm9k.8.1** — inventory/disposition audit across any-mcp, anyr Rust,
-    and the Python CLI suite skips.
-  - **any-dm9k.8.2** — any-mcp: admit or retire the ignored real-server tests
-    outside the protected `headless_` matrix.
-  - **any-dm9k.8.3** — anyr: wire the lone ignored live type-property
-    preservation test into a gate; harden Python CLI skip paths.
+If approved, file one p2 ticket for a narrowly scoped, feature-gated
+scripted-HTTP fixture harness. It must capture method, path, and bounded body
+bytes, provide bounded scripted response sequences, and migrate exactly one
+existing private fixture. Gap tickets 1, 2, and 9 depend on it and may add
+their own consumers after that migration proves the boundary.
 
-## Remaining gap candidates (p3 unless noted, none filed)
-
-One line each: method — gap — suggested scope. Items from the original audit
-that have since been covered (files `metadata`, conditional/ranged download
-liveness, the space-delete blocker) are removed.
-
-1. auth challenge/key flow — no tests — scripted HTTP unit tests for `create_auth_challenge`/`create_api_key` wire shapes and error mapping.
-2. `auth_status`/`logout` — no tests — unit tests over keystore-backed credential state transitions.
-3. `ping_http`/`ping_grpc` — no direct tests — scripted HTTP coverage plus constructed classification cases and disposable real-server success coverage.
-4. `lookup_space_by_name` — no tests — paged-fixture unit tests (dedup, ambiguity, not-found) mirroring existing resolver suites.
-5. `update_space` — serialization only — live rename-and-revert test against a cleanup-owned disposable space (now unblocked by the disposable harness).
-6. `backup_space` — no direct crate-level tests — live gRPC smoke exporting a disposable space to a temp dir, asserting artifact presence per format option (the anyr-level surface is any-dm9k.2/.4).
-7. `count_archived`/`delete_archived`/`delete_all_archived` — no tests — live tests over self-created archived fixtures with type-scoped evidence (reuse harness archive-scan pattern).
-8. `get_share_link` — no tests — live gRPC smoke on a registered fixture object.
-9. files gRPC `list`/`search`/`get` — no tests — live tests reusing the uploaded-file fixture from `test_files`.
-10. files `preload`/`discard_preload` — no tests — live preload lifecycle test with cleanup registration.
-11. files legacy gRPC `download` (to path) — no tests — live test downloading to scratch dir and comparing bytes.
-12. files legacy `http_upload`/`http_download`/`http_delete` — schema-only — scripted HTTP unit tests for route/body parity with the modern builders.
-13. gRPC rich/URL upload transfer — selection-only — live URL-upload and rich-option upload test (needs reachable URL fixture or local server).
-14. chats gRPC `list_chats`/`list_chats_in`/`space_chat`/`edit_text` — no tests — extend `test_chat_discovery`/`test_chat_message_crud` with these calls.
-15. chat stream `unsubscribe_chat` runtime control — no tests — use cleanup-owned real chats to subscribe two chats, unsubscribe one, and assert routing; keep disconnect behavior in the reviewed external fault tier.
-16. search/filter wire shapes — live-heavy — offline serialization unit tests for `SearchRequest` and the filter DSL beyond the two #2879 encoding regressions.
-17. `lookup_types`/`lookup_properties` bulk helpers — no tests — paged-fixture unit tests for batch resolution and partial-failure behavior.
-18. views continuation pagination — previously blocked — now feasible via the second-view Heart-RPC test fixture; add a continuation case over a fixture-created multi-view collection.
-
-## Candidate test-helper tooling tickets (p2, none filed)
-
-1. Shared scripted-HTTP fixture harness — `http_client.rs`, `resolve.rs`, `chats.rs`, `files.rs`, and `properties.rs` still carry private in-process fixture servers; promote one reusable harness into `test_util` (feature-gated) so gap candidates 1–4, 12, 16–17 are cheap and duplication stops growing. Also directly useful to the shared MCP test harness (any-cwi).
-2. Surface-inventory drift check — a unit test that enumerates the public async surface and compares it against this document's matrix (same pattern as `test_retry_helpers::live_mutation_retry_inventory_is_current`), so this status document cannot silently rot.
-3. Fixture-registry extensions — archived-object fixture builder (registers then archives N objects of a fresh custom type) for the archive-surface gaps; the template, collection-layout, second-view, Kanban, and saved-view-filter fixtures from the original list have landed.
+Do not file the proposed Markdown-driven surface inventory check: it cannot
+soundly enumerate builder-returning public operations and would create a
+brittle second source of truth. Do not file a separate fixture-registry p2;
+the only remaining archived-object builder belongs inside gap ticket 3.
 
 ## Known fixture constraints
 
@@ -290,4 +282,4 @@ liveness, the space-delete blocker) are removed.
 - Live tests are tier-2 serial only and must never run from parallel
   workspaces. Fixture-heavy suites additionally require the ignored disposable
   tier (`ANYTYPE_TEST_SPACE_PREFIX`, environment keystore, full HTTP+gRPC
-  credentials); automating that tier is any-dm9k.7.
+  credentials), automated by the protected any-dm9k.7 manifest gate.

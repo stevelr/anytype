@@ -980,7 +980,12 @@ cargo build
 
 ## Testing
 
-Set environment flags for unit and integration tests. You'll also need a running anytype server (cli or desktop).
+The maintained [HTTP/gRPC coverage inventory](docs/api-test-coverage.md)
+separates direct unit and live coverage from cross-crate integration evidence
+and records the bounded remaining gap candidates.
+
+Set environment flags for unit and integration tests. You'll also need a
+running Anytype server (CLI or desktop).
 
 ```sh
 # HTTP endpoint. Default: http://127.0.0.1:31012
