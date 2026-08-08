@@ -76,10 +76,11 @@ jobs:
           test -n "$test_prefix" && test "${#test_prefix}" -le 485
           case "$test_prefix" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) exit 1 ;; esac
           test "${ANYTYPE_KEYSTORE:-}" = env
-          test -n "${ANYTYPE_KEYSTORE_SERVICE:-}" && test "${#ANYTYPE_KEYSTORE_SERVICE}" -le 485
-          case "$ANYTYPE_KEYSTORE_SERVICE" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*) exit 1 ;; esac
+          test -n "${ANYTYPE_KEYSTORE_SERVICE:-}" && test "${#ANYTYPE_KEYSTORE_SERVICE}" -le 128
+          case "$ANYTYPE_KEYSTORE_SERVICE" in [!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]*) exit 1 ;; esac
+          case "${ANYTYPE_KEYSTORE_SERVICE:1}" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*) exit 1 ;; esac
           test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
-          test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
+          test -n "${ANYTYPE_KEY_SESSION_TOKEN:-${ANYTYPE_KEY_ACCOUNT_KEY:-}}"
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
           start_bytes="$(wc -c < "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE")"
@@ -91,7 +92,6 @@ jobs:
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-          cargo run --locked -q -p anyr -- auth status --pretty
           python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gate-manifest.toml
       - name: Capture bounded reviewed server evidence on failure
         if: failure()
@@ -184,10 +184,11 @@ jobs:
           test -n "$test_prefix" && test "${#test_prefix}" -le 485
           case "$test_prefix" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) exit 1 ;; esac
           test "${ANYTYPE_KEYSTORE:-}" = env
-          test -n "${ANYTYPE_KEYSTORE_SERVICE:-}" && test "${#ANYTYPE_KEYSTORE_SERVICE}" -le 485
-          case "$ANYTYPE_KEYSTORE_SERVICE" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*) exit 1 ;; esac
+          test -n "${ANYTYPE_KEYSTORE_SERVICE:-}" && test "${#ANYTYPE_KEYSTORE_SERVICE}" -le 128
+          case "$ANYTYPE_KEYSTORE_SERVICE" in [!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]*) exit 1 ;; esac
+          case "${ANYTYPE_KEYSTORE_SERVICE:1}" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*) exit 1 ;; esac
           test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
-          test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
+          test -n "${ANYTYPE_KEY_SESSION_TOKEN:-${ANYTYPE_KEY_ACCOUNT_KEY:-}}"
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
           start_bytes="$(wc -c < "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE")"
@@ -199,7 +200,6 @@ jobs:
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-          cargo run --locked -q -p anyr -- auth status --pretty
           python3 anytype-api/scripts/run-live-gate.py soak anytype-api/tests/live-gate-manifest.toml
       - name: Capture bounded reviewed server evidence on failure
         if: failure()

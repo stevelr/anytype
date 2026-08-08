@@ -28,7 +28,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   test "${ANYTYPE_KEYSTORE:-}" = env
   test -n "${ANYTYPE_KEYSTORE_SERVICE:-}"
   test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
-  test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
+  test -n "${ANYTYPE_KEY_SESSION_TOKEN:-${ANYTYPE_KEY_ACCOUNT_KEY:-}}"
   export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
   python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gate-manifest.toml
   ```

@@ -1064,9 +1064,8 @@ failures through the configured gRPC endpoint. The adjacent dataview test was
 not formerly mock-backed, but shares the disposable tier so the body test file
 does not require ambient inventory.
 
-The body, chat-discovery, chat-prerequisites, and chat-stream files are ignored in ordinary test
-runs. Run each in its own admitted, single-threaded process; do not run these
-commands concurrently:
+The body, chat-discovery, chat-prerequisites, and chat-stream files are ignored
+in ordinary test runs. Run the required tier through its admitted serial driver:
 
 ```sh
 test -n "${ANY_MCP_HEADLESS_ENV_FILE:-}"
@@ -1077,7 +1076,7 @@ set +a
 test "${ANYTYPE_KEYSTORE:-}" = env
 test -n "${ANYTYPE_KEYSTORE_SERVICE:-}"
 test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
-test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
+test -n "${ANYTYPE_KEY_SESSION_TOKEN:-${ANYTYPE_KEY_ACCOUNT_KEY:-}}"
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
 python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gate-manifest.toml
 ```
@@ -1089,22 +1088,8 @@ scheduled soak, or excluded tier. Verify that closed inventory without a server:
 cargo test --locked -p anytype --test live_gate_manifest
 ```
 
-To reproduce the required gate exactly, use the same manifest driver. It runs
-every admitted entry in its own process and rejects zero-test and skip results.
-
-```sh
-test -n "${ANY_MCP_HEADLESS_ENV_FILE:-}"
-test -r "$ANY_MCP_HEADLESS_ENV_FILE"
-set -a
-source "$ANY_MCP_HEADLESS_ENV_FILE"
-set +a
-test "${ANYTYPE_KEYSTORE:-}" = env
-test -n "${ANYTYPE_KEYSTORE_SERVICE:-}"
-test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
-test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
-export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
-python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gate-manifest.toml
-```
+The driver runs every admitted entry in its own process and rejects zero-test
+and skip results.
 
 Process watcher import-finish coverage uses a real Markdown import in the fresh
 cleanup-owned space created by `with_disposable_space_context`. The watcher
