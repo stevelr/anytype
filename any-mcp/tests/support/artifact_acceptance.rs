@@ -39,6 +39,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -1373,6 +1374,196 @@ fn create_directory_symlink(target: &Path, link: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+struct RetainedRootNamespaceSwap {
+    configured: PathBuf,
+    retained: PathBuf,
+}
+
+#[cfg(unix)]
+impl RetainedRootNamespaceSwap {
+    fn replace_with_decoy(configured: &Path, decoy: &Path) -> Result<Self, String> {
+        let retained =
+            configured.with_file_name(format!("retained-import-root-{}", unique_suffix()));
+        fs::rename(configured, &retained)
+            .map_err(|_| "rename retained import root for SYM-13".to_owned())?;
+        if std::os::unix::fs::symlink(decoy, configured).is_err() {
+            let _ = fs::rename(&retained, configured);
+            return Err("substitute SYM-13 decoy root".to_owned());
+        }
+        Ok(Self {
+            configured: configured.to_owned(),
+            retained,
+        })
+    }
+
+    fn restore(mut self) -> Result<(), String> {
+        fs::remove_file(&self.configured)
+            .map_err(|_| "remove SYM-13 decoy root substitution".to_owned())?;
+        fs::rename(&self.retained, &self.configured)
+            .map_err(|_| "restore SYM-13 import root namespace".to_owned())?;
+        self.retained.clear();
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RetainedRootNamespaceSwap {
+    fn drop(&mut self) {
+        if self.retained.as_os_str().is_empty() {
+            return;
+        }
+        let _ = fs::remove_file(&self.configured);
+        let _ = fs::rename(&self.retained, &self.configured);
+    }
+}
+
+/// Proves that an already-opened import root keeps its authority when the
+/// configured pathname is replaced after server startup.
+#[cfg(unix)]
+async fn run_sym13(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let original = fs::read(
+        run.policy
+            .import_root()
+            .join(ArtifactPolicyFixture::FILE_SOURCE),
+    )
+    .map_err(|_| "read SYM-13 original fixture payload".to_owned())?;
+    let decoy = run
+        .policy
+        .base
+        .join(format!("sym13-decoy-{}", unique_suffix()));
+    fs::create_dir(&decoy).map_err(|_| "create SYM-13 decoy root".to_owned())?;
+    let decoy_source = decoy.join(ArtifactPolicyFixture::FILE_SOURCE);
+    let decoy_bytes = b"SYM-13 decoy payload";
+    fs::write(&decoy_source, decoy_bytes).map_err(|_| "write SYM-13 decoy payload".to_owned())?;
+    secure_directories(&[&decoy])?;
+    secure_files(std::slice::from_ref(&decoy_source))?;
+    let swap = RetainedRootNamespaceSwap::replace_with_decoy(run.policy.import_root(), &decoy)?;
+    let result = async {
+        let imported = driver
+            .call_tool(
+                "file_import",
+                file_import_arguments(
+                    &run.ctx.space_id,
+                    local_source(
+                        ArtifactPolicyFixture::IMPORT_ROOT,
+                        ArtifactPolicyFixture::FILE_SOURCE,
+                    ),
+                    "sym13-retained-root.bin",
+                    Some(ARTIFACT_FILE_MEDIA_TYPE),
+                ),
+            )
+            .await?;
+        let file_id = required_str(&imported, "/file_id")?;
+        run.ctx.register_file(&file_id);
+        let export_name = format!("sym13-export-{}", unique_suffix());
+        driver
+            .call_tool(
+                "file_export",
+                json!({
+                    "space": run.ctx.space_id,
+                    "file_id": file_id,
+                    "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &export_name),
+                    "idempotency_key": format!("sym13-export-{}", unique_suffix()),
+                }),
+            )
+            .await?;
+        let exported = run.policy.read_export(&export_name)?;
+        if artifact_sha256(&exported) != artifact_sha256(&original) {
+            return Err("SYM-13 imported bytes from the substituted root".to_owned());
+        }
+        Ok(())
+    }
+    .await;
+    let restored = swap.restore();
+    if fs::read(&decoy_source).ok().as_deref() != Some(decoy_bytes) {
+        return Err("SYM-13 changed the decoy fixture payload".to_owned());
+    }
+    result.and(restored)
+}
+
+/// Proves that this fixture volume reports a stable hard-link identity and a
+/// reliable link count before any hard-link scenario relies on either fact.
+///
+/// The probe is deliberately local to the fixture root. A successful
+/// `hard_link` alone is insufficient evidence: the two entries must report
+/// the same platform identity and an independently observed count transition
+/// from two back to one after the alias is removed.
+fn prove_hard_link_capability(root: &Path) -> Result<bool, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let origin = root.join(format!(".hlink-origin-{}", unique_suffix()));
+        let alias = root.join(format!(".hlink-alias-{}", unique_suffix()));
+        fs::write(&origin, b"any-mcp-hard-link-capability")
+            .map_err(|_| "seed hard-link capability probe".to_owned())?;
+        let result = (|| {
+            fs::hard_link(&origin, &alias)
+                .map_err(|_| "create hard-link capability probe".to_owned())?;
+            let original = fs::metadata(&origin)
+                .map_err(|_| "inspect hard-link capability origin".to_owned())?;
+            let linked = fs::metadata(&alias)
+                .map_err(|_| "inspect hard-link capability alias".to_owned())?;
+            if original.dev() != linked.dev()
+                || original.ino() != linked.ino()
+                || original.nlink() != 2
+                || linked.nlink() != 2
+            {
+                return Ok(false);
+            }
+            fs::remove_file(&alias).map_err(|_| "unlink hard-link capability alias".to_owned())?;
+            let restored = fs::metadata(&origin)
+                .map_err(|_| "inspect restored hard-link capability".to_owned())?;
+            Ok(restored.nlink() == 1)
+        })();
+        let _ = fs::remove_file(&alias);
+        let _ = fs::remove_file(&origin);
+        result
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        let origin = root.join(format!(".hlink-origin-{}", unique_suffix()));
+        let alias = root.join(format!(".hlink-alias-{}", unique_suffix()));
+        fs::write(&origin, b"any-mcp-hard-link-capability")
+            .map_err(|_| "seed hard-link capability probe".to_owned())?;
+        let result = (|| {
+            fs::hard_link(&origin, &alias)
+                .map_err(|_| "create hard-link capability probe".to_owned())?;
+            let original = fs::metadata(&origin)
+                .map_err(|_| "inspect hard-link capability origin".to_owned())?;
+            let linked = fs::metadata(&alias)
+                .map_err(|_| "inspect hard-link capability alias".to_owned())?;
+            if original.volume_serial_number().is_none()
+                || original.file_index().is_none()
+                || original.volume_serial_number() != linked.volume_serial_number()
+                || original.file_index() != linked.file_index()
+                || original.number_of_links() != Some(2)
+                || linked.number_of_links() != Some(2)
+            {
+                return Ok(false);
+            }
+            fs::remove_file(&alias).map_err(|_| "unlink hard-link capability alias".to_owned())?;
+            let restored = fs::metadata(&origin)
+                .map_err(|_| "inspect restored hard-link capability".to_owned())?;
+            Ok(restored.number_of_links() == Some(1))
+        })();
+        let _ = fs::remove_file(&alias);
+        let _ = fs::remove_file(&origin);
+        result
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = root;
+        Ok(false)
+    }
+}
+
 async fn run_sym01(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
@@ -1438,6 +1629,264 @@ async fn run_hlink01(
     if observe_file(&outside)? != before {
         return Err("HLINK-01 read or changed the outside file".to_owned());
     }
+    Ok(())
+}
+
+fn raw_content_range(start: u64, end: u64, total: u64) -> Result<HeaderValue, String> {
+    format!("bytes {start}-{end}/{total}")
+        .parse()
+        .map_err(|_| "encode raw staging content range".to_owned())
+}
+
+async fn raw_stage_head_offset(
+    client: &RawStagingClient,
+    allocation: &ArtifactStageAllocation,
+) -> Result<u64, String> {
+    let outcome = client
+        .send(
+            Method::HEAD,
+            allocation.url(),
+            allocation.handle(),
+            &[],
+            Vec::new(),
+        )
+        .await?;
+    if outcome.status != 200 {
+        return Err("raw staging HEAD did not return success".to_owned());
+    }
+    outcome
+        .upload_offset
+        .ok_or_else(|| "raw staging HEAD omitted committed offset".to_owned())
+}
+
+/// Runs RACE-07 through RACE-08, whose protocol interleavings need no
+/// filesystem synchronization seam.
+async fn run_raw_staging_races(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let payload = vec![0x5a; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_add(32)];
+    let total = u64::try_from(payload.len())
+        .map_err(|_| "RACE-07 payload exceeds addressable range".to_owned())?;
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        total,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(&payload)),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let client = RawStagingClient::new()?;
+    let before = raw_stage_head_offset(&client, &allocation).await?;
+    let ahead_start = u64::try_from(ACCEPTANCE_TRANSFER_CHUNK_BYTES)
+        .map_err(|_| "RACE-07 offset exceeds addressable range".to_owned())?;
+    let ahead_end = ahead_start
+        .checked_add(15)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or_else(|| "RACE-07 range overflow".to_owned())?;
+    let ahead = client
+        .send(
+            Method::PUT,
+            allocation.url(),
+            allocation.handle(),
+            &[
+                (
+                    CONTENT_TYPE,
+                    HeaderValue::from_static(ARTIFACT_FILE_MEDIA_TYPE),
+                ),
+                (
+                    CONTENT_RANGE,
+                    raw_content_range(ahead_start, ahead_end, total)?,
+                ),
+            ],
+            vec![0x5a; 16],
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 409,
+        body: b"conflict\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: ahead.status,
+        body: &ahead.body,
+    })?;
+    if raw_stage_head_offset(&client, &allocation).await? != before {
+        return Err("RACE-07 advanced the committed offset".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Race07)?;
+
+    let overlap = b"RACE-08 overlapping staging bytes".to_vec();
+    let overlap_total = u64::try_from(overlap.len())
+        .map_err(|_| "RACE-08 payload exceeds addressable range".to_owned())?;
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        overlap_total,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(&overlap)),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let end = overlap_total
+        .checked_sub(1)
+        .ok_or_else(|| "RACE-08 payload was empty".to_owned())?;
+    let headers = vec![
+        (
+            CONTENT_TYPE,
+            HeaderValue::from_static(ARTIFACT_FILE_MEDIA_TYPE),
+        ),
+        (CONTENT_RANGE, raw_content_range(0, end, overlap_total)?),
+    ];
+    let arrived = Arc::new(tokio::sync::Barrier::new(3));
+    let release = Arc::new(tokio::sync::Barrier::new(3));
+    let first_body = overlap.clone();
+    let first = tokio::spawn({
+        let client = RawStagingClient::new()?;
+        let url = allocation.url().to_owned();
+        let handle = Zeroizing::new(allocation.handle().to_owned());
+        let headers = headers.clone();
+        let arrived = Arc::clone(&arrived);
+        let release = Arc::clone(&release);
+        async move {
+            client
+                .send_with_body_barrier(
+                    Method::PUT,
+                    url,
+                    handle,
+                    headers,
+                    first_body,
+                    arrived,
+                    release,
+                )
+                .await
+        }
+    });
+    let second = tokio::spawn({
+        let client = RawStagingClient::new()?;
+        let url = allocation.url().to_owned();
+        let handle = Zeroizing::new(allocation.handle().to_owned());
+        let arrived = Arc::clone(&arrived);
+        let release = Arc::clone(&release);
+        async move {
+            client
+                .send_with_body_barrier(
+                    Method::PUT,
+                    url,
+                    handle,
+                    headers,
+                    overlap,
+                    arrived,
+                    release,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), arrived.wait())
+        .await
+        .map_err(|_| "RACE-08 requests did not reach their shared body barrier".to_owned())?;
+    tokio::time::timeout(Duration::from_secs(5), release.wait())
+        .await
+        .map_err(|_| "RACE-08 requests did not leave their shared body barrier".to_owned())?;
+    let first = first
+        .await
+        .map_err(|_| "RACE-08 first request task ended unexpectedly".to_owned())??;
+    let second = second
+        .await
+        .map_err(|_| "RACE-08 second request task ended unexpectedly".to_owned())??;
+    let outcomes = [&first, &second];
+    let accepted = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == 201)
+        .count();
+    let conflicted = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == 409)
+        .count();
+    if accepted != 1 || conflicted != 1 {
+        return Err("RACE-08 did not produce one accepted and one conflict response".to_owned());
+    }
+    for outcome in outcomes.iter().filter(|outcome| outcome.status == 409) {
+        ExpectedOutcome::Http {
+            status: 409,
+            body: b"conflict\n",
+        }
+        .assert_matches(ObservedOutcome::Http {
+            status: outcome.status,
+            body: &outcome.body,
+        })?;
+    }
+    if raw_stage_head_offset(&client, &allocation).await? != overlap_total {
+        return Err("RACE-08 final committed offset diverged from its declaration".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Race08)?;
+    Ok(())
+}
+
+/// Exercises the hostile-link release lifecycle after the shared capability
+/// probe has established that link counts are meaningful on this volume.
+#[cfg(unix)]
+async fn run_hlink05(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let payload = b"HLINK-05 staged payload";
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        u64::try_from(payload.len())
+            .map_err(|_| "HLINK-05 payload exceeds addressable range".to_owned())?,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(payload)),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    upload_stage_bytes(&allocation, payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    let quota_reserved = adversarial_quota_snapshot(driver).await?;
+    if quota_reserved == quota_before {
+        return Err("HLINK-05 allocation did not reserve staging quota".to_owned());
+    }
+    let record = run
+        .policy
+        .staging
+        .join(format!("{}.bin", allocation.record()));
+    let outside = run
+        .policy
+        .base
+        .join(format!("hlink05-outside-{}", unique_suffix()));
+    fs::hard_link(&record, &outside).map_err(|_| "create HLINK-05 outside link".to_owned())?;
+    if fs::read(&outside).ok().as_deref() != Some(payload)
+        || fs::read(&record).ok().as_deref() != Some(payload)
+    {
+        return Err("HLINK-05 link setup did not preserve staged bytes".to_owned());
+    }
+    adversarial_refusal(
+        driver,
+        "artifact_release",
+        json!({"handle": allocation.handle()}),
+        ExpectedToolErrorKind::Conflict,
+        &[],
+    )
+    .await?;
+    if fs::read(&outside).ok().as_deref() != Some(payload)
+        || fs::read(&record).ok().as_deref() != Some(payload)
+        || adversarial_quota_snapshot(driver).await? != quota_reserved
+    {
+        return Err("HLINK-05 failed cleanup did not retain its ownership state".to_owned());
+    }
+    fs::remove_file(&outside).map_err(|_| "remove HLINK-05 outside link".to_owned())?;
+    release_stage_upload(driver, &allocation).await?;
+    if run.policy.staging_snapshot()?.is_reaped() == false
+        || adversarial_quota_snapshot(driver).await? != quota_before
+    {
+        return Err("HLINK-05 retry did not reap record and restore quota".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Hlink05)?;
     Ok(())
 }
 
@@ -1613,57 +2062,75 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     }
     execution.record_executed(AdversarialCaseId::Sym09)?;
 
-    run_hlink01(driver, run).await?;
-    execution.record_executed(AdversarialCaseId::Hlink01)?;
+    // Every hard-link row shares this capability observation. A filesystem
+    // that cannot prove identity and the 2-to-1 count transition contributes
+    // an explicit unsupported partition instead of turning a missing
+    // primitive into an apparent product regression.
+    if !prove_hard_link_capability(run.policy.import_root()).unwrap_or(false) {
+        for id in [
+            AdversarialCaseId::Hlink01,
+            AdversarialCaseId::Hlink02,
+            AdversarialCaseId::Hlink03,
+            AdversarialCaseId::Hlink04,
+            AdversarialCaseId::Hlink05,
+            AdversarialCaseId::Hlink06,
+        ] {
+            execution.record_unsupported_with_reason(id, "link_count_unavailable")?;
+        }
+    } else {
+        execution.record_executed(AdversarialCaseId::Hlink06)?;
+        run_hlink01(driver, run).await?;
+        execution.record_executed(AdversarialCaseId::Hlink01)?;
 
-    let hlink02_name = format!("hlink02-link-{}", unique_suffix());
-    fs::hard_link(
-        run.policy.import.join(ArtifactPolicyFixture::FILE_SOURCE),
-        run.policy.import.join(&hlink02_name),
-    )
-    .map_err(|_| "create HLINK-02 hard link".to_owned())?;
-    adversarial_refusal(
-        driver,
-        "file_import",
-        file_import_arguments(
-            &run.ctx.space_id,
-            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &hlink02_name),
-            "hlink02.bin",
-            None,
-        ),
-        ExpectedToolErrorKind::NotFound,
-        &[&hlink02_name],
-    )
-    .await?;
-    execution.record_executed(AdversarialCaseId::Hlink02)?;
+        let hlink02_name = format!("hlink02-link-{}", unique_suffix());
+        fs::hard_link(
+            run.policy.import.join(ArtifactPolicyFixture::FILE_SOURCE),
+            run.policy.import.join(&hlink02_name),
+        )
+        .map_err(|_| "create HLINK-02 hard link".to_owned())?;
+        adversarial_refusal(
+            driver,
+            "file_import",
+            file_import_arguments(
+                &run.ctx.space_id,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &hlink02_name),
+                "hlink02.bin",
+                None,
+            ),
+            ExpectedToolErrorKind::NotFound,
+            &[&hlink02_name],
+        )
+        .await?;
+        execution.record_executed(AdversarialCaseId::Hlink02)?;
 
-    let hlink04_target = run
-        .policy
-        .base
-        .join(format!("hlink04-target-{}", unique_suffix()));
-    let hlink04_name = format!("hlink04-link-{}", unique_suffix());
-    let hlink04_bytes = b"HLINK-04 outside sentinel";
-    fs::write(&hlink04_target, hlink04_bytes).map_err(|_| "seed HLINK-04 target".to_owned())?;
-    secure_files(std::slice::from_ref(&hlink04_target))?;
-    fs::hard_link(&hlink04_target, run.policy.export.join(&hlink04_name))
-        .map_err(|_| "create HLINK-04 hard link".to_owned())?;
-    adversarial_refusal(
-        driver,
-        "file_export",
-        json!({
-            "space": run.ctx.space_id,
-            "file_id": file_id,
-            "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &hlink04_name),
-            "idempotency_key": format!("hlink04-export-{}", unique_suffix()),
-        }),
-        ExpectedToolErrorKind::Conflict,
-        &[&hlink04_name],
-    )
-    .await?;
-    if fs::read(&hlink04_target).ok().as_deref() != Some(hlink04_bytes) {
-        return Err("HLINK-04 changed the outside file".to_owned());
+        let hlink04_target = run
+            .policy
+            .base
+            .join(format!("hlink04-target-{}", unique_suffix()));
+        let hlink04_name = format!("hlink04-link-{}", unique_suffix());
+        let hlink04_bytes = b"HLINK-04 outside sentinel";
+        fs::write(&hlink04_target, hlink04_bytes).map_err(|_| "seed HLINK-04 target".to_owned())?;
+        secure_files(std::slice::from_ref(&hlink04_target))?;
+        fs::hard_link(&hlink04_target, run.policy.export.join(&hlink04_name))
+            .map_err(|_| "create HLINK-04 hard link".to_owned())?;
+        adversarial_refusal(
+            driver,
+            "file_export",
+            json!({
+                "space": run.ctx.space_id,
+                "file_id": file_id,
+                "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &hlink04_name),
+                "idempotency_key": format!("hlink04-export-{}", unique_suffix()),
+            }),
+            ExpectedToolErrorKind::Conflict,
+            &[&hlink04_name],
+        )
+        .await?;
+        if fs::read(&hlink04_target).ok().as_deref() != Some(hlink04_bytes) {
+            return Err("HLINK-04 changed the outside file".to_owned());
+        }
+        execution.record_executed(AdversarialCaseId::Hlink04)?;
     }
-    execution.record_executed(AdversarialCaseId::Hlink04)?;
 
     let objects_after = artifact_object_ids(run.ctx).await?;
     if !objects_before.is_subset(&objects_after)
@@ -3414,6 +3881,8 @@ pub struct RawStagingOutcome {
     pub status: u16,
     /// Complete fixed response body, capped before allocation can grow.
     pub body: Vec<u8>,
+    /// Committed offset reported by a successful or status response.
+    pub upload_offset: Option<u64>,
 }
 
 impl fmt::Debug for RawStagingClient {
@@ -3462,6 +3931,11 @@ impl RawStagingClient {
             .await
             .map_err(|_| "send raw staging request".to_owned())?;
         let status = response.status().as_u16();
+        let upload_offset = response
+            .headers()
+            .get("upload-offset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
         let mut body = Vec::with_capacity(4_096);
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -3471,7 +3945,69 @@ impl RawStagingClient {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok(RawStagingOutcome { status, body })
+        Ok(RawStagingOutcome {
+            status,
+            body,
+            upload_offset,
+        })
+    }
+
+    /// Starts a raw request whose sole body chunk waits at two test-owned
+    /// barriers. Callers wait for both body streams to reach `arrived` before
+    /// releasing `release`, which establishes a real overlapping-body race
+    /// rather than merely scheduling two independent client futures.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the request cannot be sent or read.
+    pub async fn send_with_body_barrier(
+        &self,
+        method: Method,
+        url: String,
+        bearer: Zeroizing<String>,
+        headers: Vec<(HeaderName, HeaderValue)>,
+        body: Vec<u8>,
+        arrived: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) -> Result<RawStagingOutcome, String> {
+        let mut additional = reqwest::header::HeaderMap::new();
+        for (name, value) in headers {
+            additional.append(name, value);
+        }
+        let body = reqwest::Body::wrap_stream(futures_util::stream::once(async move {
+            arrived.wait().await;
+            release.wait().await;
+            Ok::<Vec<u8>, std::io::Error>(body)
+        }));
+        let response = self
+            .client
+            .request(method, url)
+            .bearer_auth(bearer.as_str())
+            .headers(additional)
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| "send raw staged barrier request".to_owned())?;
+        let status = response.status().as_u16();
+        let upload_offset = response
+            .headers()
+            .get("upload-offset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        let mut response_body = Vec::with_capacity(4_096);
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "read raw staging response".to_owned())?;
+            if chunk.len() > 4_096usize.saturating_sub(response_body.len()) {
+                return Err("raw staging response exceeded its fixed bound".to_owned());
+            }
+            response_body.extend_from_slice(&chunk);
+        }
+        Ok(RawStagingOutcome {
+            status,
+            body: response_body,
+            upload_offset,
+        })
     }
 }
 /// Fixed canonical MIME essence asserted for the smoke file.
@@ -9350,5 +9886,17 @@ mod tests {
     fn raw_staging_client_is_constructible_and_redacted() {
         let client = RawStagingClient::new().expect("construct raw staging client");
         assert_eq!(format!("{client:?}"), "RawStagingClient");
+    }
+
+    #[test]
+    fn hard_link_capability_probe_requires_identity_and_count_round_trip() {
+        let policy = ArtifactPolicyFixture::create("hard-link-capability-fixture")
+            .expect("create hard-link capability fixture");
+        let observed = prove_hard_link_capability(policy.import_root())
+            .expect("run hard-link capability probe");
+        #[cfg(any(unix, windows))]
+        assert!(observed);
+        #[cfg(not(any(unix, windows)))]
+        assert!(!observed);
     }
 }
