@@ -21,7 +21,7 @@ TEST = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*\Z")
 PREFIX = re.compile(r"[A-Za-z0-9_-]{1,485}\Z")
 SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SUMMARY = re.compile(
-    rb"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;$"
+    rb"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s$"
 )
 SUMMARY_LINE = re.compile(rb"(?m)^test result:.*$")
 

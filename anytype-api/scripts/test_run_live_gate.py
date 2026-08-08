@@ -14,7 +14,7 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 GATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GATE)
-SUMMARY = b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
+SUMMARY = b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s"
 ENTRY = {
     "target": "test_body",
     "test": "test_case",
@@ -68,7 +68,8 @@ class LiveGateTests(unittest.TestCase):
                 b"",
                 b"skipped\n" + SUMMARY,
                 SUMMARY + b"\n" + SUMMARY,
-                b"test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;",
+                b"test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.68s",
+                b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in someday",
             ]:
                 GATE.run_bounded = (
                     lambda command, timeout=GATE.PROCESS_TIMEOUT, output=output: (
