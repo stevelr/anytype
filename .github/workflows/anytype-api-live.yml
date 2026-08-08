@@ -37,7 +37,9 @@ jobs:
         with:
           shared-key: anytype-api-inventory
       - name: Verify the closed ignored-test inventory and workflow policy
-        run: cargo test --locked -p anytype --test live_gate_manifest
+        run: |
+          cargo test --locked -p anytype --test live_gate_manifest
+          PYTHONDONTWRITEBYTECODE=1 python3 anytype-api/scripts/test_run_live_gate.py
 
   headless-required:
     name: protected disposable required tier
@@ -83,12 +85,15 @@ jobs:
           test -n "${ANYTYPE_KEY_SESSION_TOKEN:-${ANYTYPE_KEY_ACCOUNT_KEY:-}}"
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
-          start_bytes="$(wc -c < "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE")"
-          case "$start_bytes" in *[!0-9]*|'') exit 1 ;; esac
+          exec {reviewed_fd}<"$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          IFS='|' read -r file_type start_device start_inode start_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+          exec {reviewed_fd}<&-
+          test "$file_type" = "regular file"
+          case "$start_device:$start_inode:$start_bytes" in *[!0-9:]*|::|*::|:* ) exit 1 ;; esac
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
           context="$evidence_dir/context"
-          printf 'run_marker=%s\nstart_bytes=%s\n' "$run_marker" "$start_bytes" > "$context"
+          printf 'run_marker=%s\nstart_device=%s\nstart_inode=%s\nstart_bytes=%s\n' "$run_marker" "$start_device" "$start_inode" "$start_bytes" > "$context"
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
@@ -103,11 +108,11 @@ jobs:
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-failure-XXXXXX" 2>/dev/null)" || exit 1
           artifact="$evidence_dir/reviewed-server-events.txt"
-          marker=unavailable; start_bytes=unavailable
+          marker=unavailable; start_device=unavailable; start_inode=unavailable; start_bytes=unavailable
           context="${ANYTYPE_API_LIVE_EVIDENCE_CONTEXT:-}"
           if [[ -r "$context" ]]; then
             while IFS= read -r line; do
-              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
+              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_device=[0-9]*) start_device="${line#start_device=}" ;; start_inode=[0-9]*) start_inode="${line#start_inode=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
             done < "$context"
           fi
           {
@@ -116,14 +121,16 @@ jobs:
             if [[ "$source" != /* || ! -r "$source" ]]; then
               printf 'reviewed-source=unavailable\n'
             else
-              current_bytes="$(wc -c < "$source" 2>/dev/null)"
-              if [[ "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+              exec {reviewed_fd}<"$source"
+              IFS='|' read -r file_type current_device current_inode current_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+              if [[ "$file_type" == "regular file" && "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
                 printf 'reviewed-source=fresh-window\n'
-                tail -c "+$((start_bytes + 1))" -- "$source" 2>/dev/null | tail -c 65000 2>/dev/null || true
+                tail -c "+$((start_bytes + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | tail -c 65000 2>/dev/null || true
               else
-                printf 'reviewed-source=rotated-or-pre-marker-failure\n'
-                tail -c 65000 -- "$source" 2>/dev/null || true
+                printf 'reviewed-source=rotated-or-replaced-or-pre-marker-failure\n'
+                tail -c 65000 -- "/proc/self/fd/$reviewed_fd" 2>/dev/null || true
               fi
+              exec {reviewed_fd}<&-
             fi
           } > "$artifact"
           chmod 0600 "$artifact"
@@ -191,12 +198,15 @@ jobs:
           test -n "${ANYTYPE_KEY_SESSION_TOKEN:-${ANYTYPE_KEY_ACCOUNT_KEY:-}}"
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
-          start_bytes="$(wc -c < "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE")"
-          case "$start_bytes" in *[!0-9]*|'') exit 1 ;; esac
+          exec {reviewed_fd}<"$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          IFS='|' read -r file_type start_device start_inode start_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+          exec {reviewed_fd}<&-
+          test "$file_type" = "regular file"
+          case "$start_device:$start_inode:$start_bytes" in *[!0-9:]*|::|*::|:* ) exit 1 ;; esac
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
           context="$evidence_dir/context"
-          printf 'run_marker=%s\nstart_bytes=%s\n' "$run_marker" "$start_bytes" > "$context"
+          printf 'run_marker=%s\nstart_device=%s\nstart_inode=%s\nstart_bytes=%s\n' "$run_marker" "$start_device" "$start_inode" "$start_bytes" > "$context"
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
@@ -211,11 +221,11 @@ jobs:
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-failure-XXXXXX" 2>/dev/null)" || exit 1
           artifact="$evidence_dir/reviewed-server-events.txt"
-          marker=unavailable; start_bytes=unavailable
+          marker=unavailable; start_device=unavailable; start_inode=unavailable; start_bytes=unavailable
           context="${ANYTYPE_API_LIVE_EVIDENCE_CONTEXT:-}"
           if [[ -r "$context" ]]; then
             while IFS= read -r line; do
-              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
+              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_device=[0-9]*) start_device="${line#start_device=}" ;; start_inode=[0-9]*) start_inode="${line#start_inode=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
             done < "$context"
           fi
           {
@@ -224,14 +234,16 @@ jobs:
             if [[ "$source" != /* || ! -r "$source" ]]; then
               printf 'reviewed-source=unavailable\n'
             else
-              current_bytes="$(wc -c < "$source" 2>/dev/null)"
-              if [[ "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+              exec {reviewed_fd}<"$source"
+              IFS='|' read -r file_type current_device current_inode current_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+              if [[ "$file_type" == "regular file" && "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
                 printf 'reviewed-source=fresh-window\n'
-                tail -c "+$((start_bytes + 1))" -- "$source" 2>/dev/null | tail -c 65000 2>/dev/null || true
+                tail -c "+$((start_bytes + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | tail -c 65000 2>/dev/null || true
               else
-                printf 'reviewed-source=rotated-or-pre-marker-failure\n'
-                tail -c 65000 -- "$source" 2>/dev/null || true
+                printf 'reviewed-source=rotated-or-replaced-or-pre-marker-failure\n'
+                tail -c 65000 -- "/proc/self/fd/$reviewed_fd" 2>/dev/null || true
               fi
+              exec {reviewed_fd}<&-
             fi
           } > "$artifact"
           chmod 0600 "$artifact"
