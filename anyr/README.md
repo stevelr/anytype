@@ -584,9 +584,8 @@ first require healthy HTTP and gRPC pings, then cover prompted cancellation and
 exact-name confirmation, non-interactive backup-before-delete to an exact path,
 archive validation through `anyr backup list`, and backup-failure preservation.
 
-The real-operation case discovers exactly one current space whose name begins
-with `ANYTYPE_TEST_SPACE_PREFIX`; it skips rather than selecting ambiguously.
-Mutation cases create uniquely named, prefix-owned disposable spaces and do not
+The real-operation case creates its own uniquely named, prefix-owned disposable
+space rather than selecting an ambient prefix match. Mutation cases do not
 consider cleanup complete until `space get` returns the explicit not-found
 outcome. Transport and server failures fail cleanup instead of being treated as
 proof of deletion, and diagnostic lines from `RUST_LOG` may precede the

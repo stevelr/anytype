@@ -96,6 +96,26 @@ jobs:
           test "${ANYR_BIN#/}" != "$ANYR_BIN"
           test -x "$ANYR_BIN"
 
+          run_required_live_gate() {
+            local output="$gate_dir/gate-$1.log"
+            shift
+            set +e
+            "$@" >"$output" 2>&1
+            local status=$?
+            set -e
+            if [[ "$status" -ne 0 ]] || grep -Fqi skipped "$output" || ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s' "$output"; then
+              rm -f -- "$output"
+              printf '%s\n' "required anyr live gate failed" >&2
+              return 1
+            fi
+            rm -f -- "$output"
+          }
+          run_required_live_gate type-property cargo test --locked -p anyr --bins \
+            live_add_property_preserves_exact_replaceable_set -- \
+            --ignored --exact --test-threads=1 --nocapture
+          run_required_live_gate python-cli env ANYR_PY_REQUIRE_LIVE=1 \
+            python3 anyr/tests/cli_commands.py -v
+
           marker="$gate_dir/callback.marker"
           expected_marker="$gate_dir/callback.expected"
           nonce="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"

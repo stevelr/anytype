@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Require the protected live gate to run the ignored type-property preservation
+  test exactly and reject skipped Python CLI coverage. The CLI suite now fails
+  missing live prerequisites in required mode and creates its own real-operation
+  space instead of selecting an ambient prefix match.
 - Harden space deletion with deterministic no-overwrite pre-delete archives,
   explicit automation controls, and fail-closed archive validation.
 - Make live CLI cleanup require Anytype's explicit not-found response before a

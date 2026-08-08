@@ -494,7 +494,7 @@ mod tests {
         match run {
             DisposableRun::Completed(()) => {}
             DisposableRun::Skipped(reason) => {
-                eprintln!("disposable type property merge skipped: {reason:?}");
+                panic!("disposable type property merge skipped: {reason:?}")
             }
         }
     }

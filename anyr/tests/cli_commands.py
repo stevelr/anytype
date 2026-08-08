@@ -163,17 +163,20 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
 class TestAnyrCommands(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        def unavailable(message: str) -> None:
+            if os.environ.get("ANYR_PY_REQUIRE_LIVE") == "1":
+                raise AssertionError(message)
+            raise unittest.SkipTest(message)
+
         if not anyr_bin():
-            raise unittest.SkipTest(
-                "anyr binary not found; set ANYR_BIN or add to PATH"
-            )
+            unavailable("anyr binary not found; set ANYR_BIN or add to PATH")
         prefix = os.environ.get("ANYTYPE_TEST_SPACE_PREFIX")
         if not prefix:
-            raise unittest.SkipTest("ANYTYPE_TEST_SPACE_PREFIX is not set")
+            unavailable("ANYTYPE_TEST_SPACE_PREFIX is not set")
         if len(prefix) > 485 or not all(
             char.isascii() and (char.isalnum() or char in "-_") for char in prefix
         ):
-            raise unittest.SkipTest("ANYTYPE_TEST_SPACE_PREFIX is invalid")
+            unavailable("ANYTYPE_TEST_SPACE_PREFIX is invalid")
         cls.space_prefix = prefix
 
     def assert_help_ok(self, *args: str) -> None:
@@ -704,24 +707,12 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("list", "remove")
 
     def test_real_operations(self) -> None:
-        spaces = run_anyr_json("space", "list", "--limit", "200").get("items", [])
-        prefix = self.space_prefix.casefold()
-        matches = [
-            item
-            for item in spaces
-            if isinstance(item.get("name"), str)
-            and item["name"][: len(self.space_prefix)].casefold() == prefix
-        ]
-        if len(matches) != 1:
-            self.skipTest(
-                "real operations require exactly one current "
-                "ANYTYPE_TEST_SPACE_PREFIX-matching space"
-            )
-        space_id = matches[0].get("id")
-        if not isinstance(space_id, str) or not space_id:
-            self.fail("prefix-matching space is missing an id")
-        space = run_anyr_json("space", "get", space_id)
-        space_name = space.get("name")
+        space_name = (
+            f"{self.space_prefix}-real-operations-{os.getpid()}-{time.time_ns()}"
+        )
+        space = run_anyr_json("space", "create", space_name)
+        space_id = space.get("id")
+        self.assertIsInstance(space_id, str, "real-operations space create missing id")
         suffix = str(int(time.time() * 1000))
         type_key = f"cli_test_type_{suffix}"
         type_name = f"CLI Test Type {suffix}"
@@ -738,13 +729,6 @@ class TestAnyrCommands(unittest.TestCase):
         created_obj_id = None
 
         try:
-            if (
-                space_name
-                and len([item for item in spaces if item.get("name") == space_name])
-                != 1
-            ):
-                space_name = None
-
             typ = run_anyr_json(
                 "type",
                 "create",
@@ -905,6 +889,11 @@ class TestAnyrCommands(unittest.TestCase):
                 run_anyr("property", "delete", space_id, prop_key)
             if created_type_id:
                 run_anyr("type", "delete", space_id, type_key)
+            deleted = run_anyr(
+                "space", "delete", space_id, "--skip-archive", "--confirm"
+            )
+            self.assertEqual(deleted.returncode, 0, deleted.stderr)
+            wait_for_space_absence(space_name, space_id)
 
 
 if __name__ == "__main__":
