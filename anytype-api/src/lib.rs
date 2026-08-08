@@ -235,6 +235,7 @@ pub mod files;
 pub mod filters;
 pub(crate) mod grpc_util;
 mod http_client;
+mod http_timeout;
 pub mod keystore;
 pub mod members;
 pub mod objects;
@@ -296,7 +297,12 @@ pub mod prelude {
         // Filters, Query parameters, and sorting
         filters::{Condition, Filter, FilterExpression, FilterOperator, Sort, SortDirection},
         // HTTP server metrics
-        http_client::HttpMetricsSnapshot,
+        http_client::{HttpMetricsSnapshot, TimeoutMetricSnapshot},
+        http_timeout::{
+            ANYTYPE_HTTP_TIMEOUT_SECS, DEFAULT_LONG_HTTP_TIMEOUT, DEFAULT_SSE_ERROR_BODY_TIMEOUT,
+            DEFAULT_SSE_OPEN_TIMEOUT, DEFAULT_STANDARD_HTTP_TIMEOUT, HttpTimeoutClass,
+            HttpTimeoutPolicy, MAX_HTTP_TIMEOUT, TimeoutOutcome,
+        },
         // Key storage
         keystore::{HttpCredentials, KeyStore, KeyStoreType},
         // Space members

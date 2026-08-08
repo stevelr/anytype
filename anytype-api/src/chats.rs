@@ -1430,7 +1430,6 @@ impl ChatHttpMessageStreamRequest<'_> {
             .client
             .get_streaming_request(&path, query.into(), headers)
             .await?;
-        let diagnostic_path = chat_stream_diagnostic_path(response.url());
         let chunks = response.bytes_stream().boxed();
         let state = ChatHttpSseState {
             chunks,
@@ -1438,7 +1437,6 @@ impl ChatHttpMessageStreamRequest<'_> {
             pending: None,
             pending_offset: 0,
             finished: false,
-            path: diagnostic_path,
             event_limit: self.client.config.response_limits.chat_sse_event_bytes,
         };
         let inner = futures::stream::unfold(state, |mut state| async move {
@@ -1482,14 +1480,9 @@ impl ChatHttpMessageStreamRequest<'_> {
                         // so a chunk may safely contain several bounded events.
                         state.pending = Some(chunk);
                     }
-                    Some(Err(_source)) => {
+                    Some(Err(error)) => {
                         state.terminate();
-                        return Some((
-                            Err(AnytypeError::ChatSseTransport {
-                                path: state.path.clone(),
-                            }),
-                            state,
-                        ));
+                        return Some((Err(error), state));
                     }
                     None => {
                         if let Some(final_buffer) = state.finish_at_eof() {
@@ -1511,12 +1504,11 @@ impl ChatHttpMessageStreamRequest<'_> {
 }
 
 struct ChatHttpSseState {
-    chunks: BoxStream<'static, std::result::Result<bytes::Bytes, reqwest::Error>>,
+    chunks: BoxStream<'static, Result<bytes::Bytes>>,
     buffer: Vec<u8>,
     pending: Option<bytes::Bytes>,
     pending_offset: usize,
     finished: bool,
-    path: String,
     event_limit: u64,
 }
 
@@ -2189,6 +2181,7 @@ fn validate_chat_stream_path_id(name: &'static str, id: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn chat_stream_diagnostic_path(url: &reqwest::Url) -> String {
     url.path().to_owned()
 }
@@ -4915,7 +4908,6 @@ mod tests {
             pending: None,
             pending_offset: 0,
             finished: false,
-            path: "/v1/spaces/s/chats/c/messages/stream".to_string(),
             event_limit: 1024 * 1024,
         };
         state.buffer.extend_from_slice(b"delimiter-free prefix");
@@ -4935,7 +4927,6 @@ mod tests {
             pending: None,
             pending_offset: 0,
             finished: false,
-            path: "/v1/spaces/s/chats/c/messages/stream".to_string(),
             event_limit: 1024 * 1024,
         };
         state

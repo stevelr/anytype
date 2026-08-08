@@ -33,6 +33,55 @@ pub enum AnytypeError {
         /// It is omitted from standard formatting and the error source chain.
         #[snafu(source(false))]
         source: reqwest::Error,
+        /// Timeout outcome when the transport source is a caller timeout.
+        outcome: Option<crate::http_timeout::TimeoutOutcome>,
+        /// Elapsed logical-operation time when measured.
+        elapsed: Option<std::time::Duration>,
+        /// Physical sends when measured.
+        attempts: Option<u32>,
+    },
+
+    /// A library logical HTTP deadline expired.
+    ///
+    /// The server may continue work after the caller receives this error.
+    #[snafu(display(
+        "HTTP deadline expired class={class} outcome={outcome} {} path:{} elapsed_ms={} attempts={attempts}",
+        diagnostic_method(method),
+        crate::http_client::diagnostic_path(path),
+        elapsed.as_millis()
+    ))]
+    HttpTimeout {
+        /// Expired logical deadline class.
+        class: crate::http_timeout::HttpTimeoutClass,
+        /// Effect on the logical operation.
+        outcome: crate::http_timeout::TimeoutOutcome,
+        /// Sanitized HTTP method.
+        method: String,
+        /// Original target retained for programmatic inspection and sanitized
+        /// before formatting.
+        path: String,
+        /// Elapsed logical operation time.
+        elapsed: std::time::Duration,
+        /// Number of physical sends before expiration.
+        attempts: u32,
+    },
+
+    /// A non-timeout transport failure left a mutation outcome indeterminate.
+    #[snafu(display(
+        "HTTP mutation outcome indeterminate {} path:{} attempts={attempts}",
+        diagnostic_method(method),
+        crate::http_client::diagnostic_path(path)
+    ))]
+    HttpMutationIndeterminate {
+        /// Sanitized HTTP method.
+        method: String,
+        /// Original target retained for programmatic inspection and sanitized
+        /// before formatting.
+        path: String,
+        /// Number of physical sends before failure.
+        attempts: u32,
+        /// Completed ambiguous server status, or `None` for transport failure.
+        status: Option<u16>,
     },
 
     /// Anytype Server responded with error.
@@ -392,6 +441,16 @@ pub struct AnytypeDiagnostic {
     pub method: Option<String>,
     /// Bounded path-only request context when available.
     pub path: Option<String>,
+    /// Library timeout class when a logical deadline expired.
+    pub timeout_class: Option<crate::http_timeout::HttpTimeoutClass>,
+    /// Whether the timeout came from caller-configured reqwest transport policy.
+    pub transport_timeout: bool,
+    /// Timeout or ambiguous-mutation outcome when applicable.
+    pub timeout_outcome: Option<crate::http_timeout::TimeoutOutcome>,
+    /// Saturating elapsed milliseconds when measured.
+    pub elapsed_millis: Option<u64>,
+    /// Physical HTTP attempt count when measured.
+    pub attempts: Option<u32>,
 }
 
 impl fmt::Display for AnytypeDiagnostic {
@@ -405,6 +464,20 @@ impl fmt::Display for AnytypeDiagnostic {
         }
         if let Some(path) = self.path.as_deref() {
             write!(formatter, " path={path}")?;
+        }
+        if let Some(class) = self.timeout_class {
+            write!(formatter, " timeout_class={class}")?;
+        } else if self.transport_timeout {
+            formatter.write_str(" timeout_class=transport")?;
+        }
+        if let Some(outcome) = self.timeout_outcome {
+            write!(formatter, " outcome={outcome}")?;
+        }
+        if let Some(elapsed_millis) = self.elapsed_millis {
+            write!(formatter, " elapsed_ms={elapsed_millis}")?;
+        }
+        if let Some(attempts) = self.attempts {
+            write!(formatter, " attempts={attempts}")?;
         }
         Ok(())
     }
@@ -430,6 +503,25 @@ impl AnytypeError {
                 None,
                 Some(diagnostic_method(method).to_owned()),
                 Some(crate::http_client::diagnostic_path(url)),
+            ),
+            Self::HttpTimeout {
+                method, path, ..
+            } => (
+                "http_timeout",
+                None,
+                Some(diagnostic_method(method).to_owned()),
+                Some(crate::http_client::diagnostic_path(path)),
+            ),
+            Self::HttpMutationIndeterminate {
+                method,
+                path,
+                status,
+                ..
+            } => (
+                "http_mutation_indeterminate",
+                *status,
+                Some(diagnostic_method(method).to_owned()),
+                Some(crate::http_client::diagnostic_path(path)),
             ),
             Self::ApiError {
                 code, method, url, ..
@@ -489,11 +581,58 @@ impl AnytypeError {
             Self::VerifyTimeout { .. } => ("verify_timeout", None, None, None),
             Self::Other { .. } => ("other", None, None, None),
         };
+        let (timeout_class, timeout_outcome, elapsed_millis, attempts) = match self {
+            Self::HttpTimeout {
+                class,
+                outcome,
+                elapsed,
+                attempts,
+                ..
+            } => (
+                Some(*class),
+                Some(*outcome),
+                Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+                Some(*attempts),
+            ),
+            Self::HttpMutationIndeterminate { attempts, .. } => (
+                None,
+                Some(crate::http_timeout::TimeoutOutcome::MutationIndeterminate),
+                None,
+                Some(*attempts),
+            ),
+            Self::Http {
+                method,
+                source,
+                outcome,
+                elapsed,
+                attempts,
+                ..
+            } if source.is_timeout() => (
+                None,
+                outcome.or_else(|| {
+                    Some(if matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+                        crate::http_timeout::TimeoutOutcome::ReadAborted
+                    } else {
+                        crate::http_timeout::TimeoutOutcome::MutationIndeterminate
+                    })
+                }),
+                elapsed.map(|elapsed| {
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+                }),
+                *attempts,
+            ),
+            _ => (None, None, None, None),
+        };
         AnytypeDiagnostic {
             variant,
             status,
             method,
             path,
+            timeout_class,
+            transport_timeout: matches!(self, Self::Http { source, .. } if source.is_timeout()),
+            timeout_outcome,
+            elapsed_millis,
+            attempts,
         }
     }
 
@@ -519,6 +658,8 @@ impl AnytypeError {
             | Self::GrpcUnavailable { .. } => true,
             Self::Grpc { source } => grpc_error_is_authentication(source),
             Self::Http { .. }
+            | Self::HttpTimeout { .. }
+            | Self::HttpMutationIndeterminate { .. }
             | Self::ApiError { .. }
             | Self::ResponseTooLarge { .. }
             | Self::FileHeaderEvidenceTooLarge { .. }

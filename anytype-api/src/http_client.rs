@@ -8,14 +8,16 @@
 
 use std::{
     fmt,
+    future::Future,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
+use futures::{StreamExt, stream::BoxStream};
 use parking_lot::Mutex;
 use reqwest::{ClientBuilder, Method, Response, StatusCode, Url, header::HeaderMap};
 use serde::{Serialize, de::DeserializeOwned};
@@ -32,6 +34,7 @@ use crate::{
         RATE_LIMIT_WAIT_WARN_SECS,
     },
     filters::QueryWithFilters,
+    http_timeout::{HttpTimeoutClass, HttpTimeoutPolicy, TimeoutOutcome, timeout_outcome},
     prelude::*,
 };
 
@@ -61,6 +64,11 @@ pub struct HttpMetrics {
     rate_limit_errors: AtomicU64,
     /// Total seconds spent waiting for rate limit backoff
     rate_limit_delay_secs: AtomicU64,
+    timeout_counts: [AtomicU64; HttpTimeoutClass::COUNT],
+    timeout_elapsed_millis: [AtomicU64; HttpTimeoutClass::COUNT],
+    transport_timeout_count: AtomicU64,
+    transport_timeout_elapsed_millis: AtomicU64,
+    timeout_outcomes: [AtomicU64; TimeoutOutcome::COUNT],
 }
 
 impl HttpMetrics {
@@ -82,6 +90,19 @@ impl HttpMetrics {
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
             rate_limit_errors: self.rate_limit_errors.load(Ordering::Relaxed),
             rate_limit_delay_secs: self.rate_limit_delay_secs.load(Ordering::Relaxed),
+            timeout_counts: std::array::from_fn(|index| {
+                self.timeout_counts[index].load(Ordering::Relaxed)
+            }),
+            timeout_elapsed_millis: std::array::from_fn(|index| {
+                self.timeout_elapsed_millis[index].load(Ordering::Relaxed)
+            }),
+            transport_timeout_count: self.transport_timeout_count.load(Ordering::Relaxed),
+            transport_timeout_elapsed_millis: self
+                .transport_timeout_elapsed_millis
+                .load(Ordering::Relaxed),
+            timeout_outcomes: std::array::from_fn(|index| {
+                self.timeout_outcomes[index].load(Ordering::Relaxed)
+            }),
         }
     }
 
@@ -126,6 +147,43 @@ impl HttpMetrics {
         self.rate_limit_delay_secs
             .fetch_add(secs, Ordering::Relaxed);
     }
+
+    fn record_timeout(
+        &self,
+        class: HttpTimeoutClass,
+        outcome: TimeoutOutcome,
+        elapsed: Duration,
+    ) {
+        saturating_increment(&self.timeout_counts[class.index()]);
+        saturating_add(
+            &self.timeout_elapsed_millis[class.index()],
+            duration_millis_saturating(elapsed),
+        );
+        saturating_increment(&self.timeout_outcomes[outcome.index()]);
+    }
+
+    fn record_transport_timeout(&self, outcome: TimeoutOutcome, elapsed: Duration) {
+        saturating_increment(&self.transport_timeout_count);
+        saturating_add(
+            &self.transport_timeout_elapsed_millis,
+            duration_millis_saturating(elapsed),
+        );
+        saturating_increment(&self.timeout_outcomes[outcome.index()]);
+    }
+}
+
+fn saturating_increment(counter: &AtomicU64) {
+    saturating_add(counter, 1);
+}
+
+fn saturating_add(counter: &AtomicU64, amount: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(amount))
+    });
+}
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// A point-in-time snapshot of HTTP metrics with plain u64 values.
@@ -153,6 +211,46 @@ pub struct HttpMetricsSnapshot {
     pub rate_limit_errors: u64,
     /// Total seconds spent waiting for rate limit backoff
     pub rate_limit_delay_secs: u64,
+    timeout_counts: [u64; HttpTimeoutClass::COUNT],
+    timeout_elapsed_millis: [u64; HttpTimeoutClass::COUNT],
+    transport_timeout_count: u64,
+    transport_timeout_elapsed_millis: u64,
+    timeout_outcomes: [u64; TimeoutOutcome::COUNT],
+}
+
+/// Cumulative observations for one timeout class.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimeoutMetricSnapshot {
+    /// Number of observations.
+    pub count: u64,
+    /// Saturating cumulative elapsed milliseconds.
+    pub elapsed_millis: u64,
+}
+
+impl HttpMetricsSnapshot {
+    /// Returns observations for one library logical timeout class.
+    #[must_use]
+    pub const fn timeout(self, class: HttpTimeoutClass) -> TimeoutMetricSnapshot {
+        TimeoutMetricSnapshot {
+            count: self.timeout_counts[class.index()],
+            elapsed_millis: self.timeout_elapsed_millis[class.index()],
+        }
+    }
+
+    /// Returns caller transport timeout observations.
+    #[must_use]
+    pub const fn transport_timeouts(self) -> TimeoutMetricSnapshot {
+        TimeoutMetricSnapshot {
+            count: self.transport_timeout_count,
+            elapsed_millis: self.transport_timeout_elapsed_millis,
+        }
+    }
+
+    /// Returns observations for one timeout outcome.
+    #[must_use]
+    pub const fn timeout_outcome_count(self, outcome: TimeoutOutcome) -> u64 {
+        self.timeout_outcomes[outcome.index()]
+    }
 }
 
 impl std::fmt::Display for HttpMetricsSnapshot {
@@ -240,6 +338,119 @@ pub(crate) struct RawHttpResponse {
     pub(crate) body: Bytes,
 }
 
+/// Successful HTTP streaming response with established-stream deadlines.
+pub(crate) struct StreamingHttpResponse {
+    chunks: BoxStream<'static, Result<Bytes>>,
+}
+
+impl StreamingHttpResponse {
+    pub(crate) fn bytes_stream(self) -> BoxStream<'static, Result<Bytes>> {
+        self.chunks
+    }
+}
+
+struct EstablishedSseState {
+    chunks: BoxStream<'static, std::result::Result<Bytes, reqwest::Error>>,
+    metrics: Arc<HttpMetrics>,
+    path: String,
+    started: tokio::time::Instant,
+    last_progress: tokio::time::Instant,
+    idle: Option<Duration>,
+    lifetime: Option<Duration>,
+    terminated: bool,
+}
+
+impl EstablishedSseState {
+    async fn next(mut self) -> Option<(Result<Bytes>, Self)> {
+        if self.terminated {
+            return None;
+        }
+        let idle_deadline = self.idle.and_then(|idle| self.last_progress.checked_add(idle));
+        let lifetime_deadline = self
+            .lifetime
+            .and_then(|lifetime| self.started.checked_add(lifetime));
+        tokio::select! {
+            chunk = self.chunks.next() => match chunk {
+                Some(Ok(chunk)) => {
+                    if !chunk.is_empty() {
+                        self.last_progress = tokio::time::Instant::now();
+                    }
+                    Some((Ok(chunk), self))
+                }
+                Some(Err(source)) => {
+                    self.terminated = true;
+                    self.metrics.increment_errors();
+                    let error = if source.is_timeout() {
+                        let elapsed = self.started.elapsed();
+                        self.metrics.record_transport_timeout(
+                            TimeoutOutcome::StreamTerminated,
+                            elapsed,
+                        );
+                        AnytypeError::Http {
+                            method: "GET".to_owned(),
+                            url: self.path.clone(),
+                            source: reqwest::Error::without_url(source),
+                            outcome: Some(TimeoutOutcome::StreamTerminated),
+                            elapsed: Some(elapsed),
+                            attempts: Some(1),
+                        }
+                    } else {
+                        AnytypeError::ChatSseTransport {
+                            path: diagnostic_path(&self.path),
+                        }
+                    };
+                    Some((Err(error), self))
+                }
+                None => None,
+            },
+            () = wait_until(idle_deadline) => {
+                self.terminated = true;
+                let error = self.logical_timeout(HttpTimeoutClass::SseIdle);
+                Some((Err(error), self))
+            },
+            () = wait_until(lifetime_deadline) => {
+                self.terminated = true;
+                let error = self.logical_timeout(HttpTimeoutClass::SseLifetime);
+                Some((Err(error), self))
+            },
+        }
+    }
+
+    fn logical_timeout(&self, class: HttpTimeoutClass) -> AnytypeError {
+        let elapsed = self.started.elapsed();
+        self.metrics.increment_errors();
+        self.metrics
+            .record_timeout(class, TimeoutOutcome::StreamTerminated, elapsed);
+        warn!(
+            target: "anytype::http",
+            error_variant = "logical_timeout",
+            timeout_class = %class,
+            timeout_outcome = %TimeoutOutcome::StreamTerminated,
+            elapsed_millis = duration_millis_saturating(elapsed),
+            http_method = "GET",
+            http_path = %diagnostic_path(&self.path),
+            physical_attempt = 1_u32,
+            "HTTP established stream deadline expired"
+        );
+        AnytypeError::HttpTimeout {
+            class,
+            outcome: TimeoutOutcome::StreamTerminated,
+            method: "GET".to_owned(),
+            path: self.path.clone(),
+            elapsed,
+            attempts: 1,
+        }
+    }
+}
+
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Result of a completed mutation whose exact HTTP rejection status is part of
 /// the caller's safety decision.
 pub(crate) enum PreservedStatusResponse<T> {
@@ -299,6 +510,8 @@ pub struct HttpClient {
     // Max consecutive 429 retries before failing; 0 disables cap.
     rate_limit_max_retries: u32,
 
+    timeout_policy: HttpTimeoutPolicy,
+
     /// HTTP request/response metrics
     pub metrics: Arc<HttpMetrics>,
 }
@@ -315,6 +528,7 @@ impl fmt::Debug for HttpClient {
             .field("base_path", &diagnostic_path(&self.base_url))
             .field("api_key", &String::from("(MASKED)"))
             .field("rate_limit_max_retries", &self.rate_limit_max_retries)
+            .field("timeout_policy", &self.timeout_policy)
             .field("metrics", &self.metrics)
             .finish_non_exhaustive()
     }
@@ -404,6 +618,35 @@ struct ParsedRetry {
     duration: Duration,
 }
 
+#[derive(Clone)]
+struct OperationTiming {
+    started: tokio::time::Instant,
+    attempts: Arc<AtomicU32>,
+}
+
+impl OperationTiming {
+    fn start() -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            attempts: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    fn record_attempt(&self) -> u32 {
+        self.attempts
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
+
+    fn attempts(&self) -> u32 {
+        self.attempts.load(Ordering::Relaxed)
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+}
+
 /// Parse rate limit headers from a 429 response to determine retry duration.
 /// Anytype Heart uses github.com/didip/tollbooth/v8 (v8.0.1), which sets
 /// RateLimit-Reset and X-Rate-Limit-Duration as seconds to wait.
@@ -436,6 +679,7 @@ impl HttpClient {
         limits: ValidationLimits,
         response_limits: ResponseLimits,
         rate_limit_max_retries: u32,
+        timeout_policy: HttpTimeoutPolicy,
         http_creds: HttpCredentials,
     ) -> Result<Self> {
         // Keep this middleware as the sole retry authority. Reqwest follows
@@ -454,6 +698,9 @@ impl HttpClient {
                 method: "client-init".to_owned(),
                 url: String::new(),
                 source,
+                outcome: None,
+                elapsed: None,
+                attempts: None,
             })?;
         for (name, limit, maximum) in [
             (
@@ -500,6 +747,7 @@ impl HttpClient {
             limits,
             response_limits,
             rate_limit_max_retries,
+            timeout_policy,
             metrics: Arc::new(HttpMetrics::new()),
         })
     }
@@ -507,6 +755,140 @@ impl HttpClient {
     /// Returns a snapshot of current HTTP metrics
     pub fn metrics_snapshot(&self) -> HttpMetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    async fn with_deadline<T>(
+        &self,
+        class: HttpTimeoutClass,
+        outcome: TimeoutOutcome,
+        method: &Method,
+        path: &str,
+        timing: &OperationTiming,
+        operation: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let Some(duration) = self.timeout_policy.duration(class) else {
+            return match operation.await {
+                Err(AnytypeError::Http { source, .. }) => {
+                    Err(self.classify_transport_error(source, method, path, timing))
+                }
+                result => result,
+            };
+        };
+        let deadline = timing.started.checked_add(duration).ok_or_else(|| {
+            AnytypeError::Validation {
+                message: format!("{class} HTTP deadline cannot be represented"),
+            }
+        })?;
+        match tokio::time::timeout_at(deadline, operation).await {
+            Ok(Err(AnytypeError::Http { source, .. })) => {
+                Err(self.classify_transport_error(source, method, path, timing))
+            }
+            Ok(result) => result,
+            Err(_) => {
+                let elapsed = timing.elapsed();
+                let attempts = timing.attempts();
+                self.metrics.increment_errors();
+                self.metrics.record_timeout(class, outcome, elapsed);
+                warn!(
+                    target: "anytype::http",
+                    error_variant = "logical_timeout",
+                    timeout_class = %class,
+                    timeout_outcome = %outcome,
+                    elapsed_millis = duration_millis_saturating(elapsed),
+                    http_method = %method,
+                    http_path = %diagnostic_path(path),
+                    physical_attempt = attempts,
+                    "HTTP logical deadline expired"
+                );
+                Err(AnytypeError::HttpTimeout {
+                    class,
+                    outcome,
+                    method: method.as_str().to_owned(),
+                    path: path.to_owned(),
+                    elapsed,
+                    attempts,
+                })
+            }
+        }
+    }
+
+    fn transport_error(
+        &self,
+        source: reqwest::Error,
+        method: &Method,
+        path: &str,
+        _timing: &OperationTiming,
+    ) -> AnytypeError {
+        AnytypeError::Http {
+            method: method.as_str().to_owned(),
+            url: path.to_owned(),
+            source,
+            outcome: None,
+            elapsed: None,
+            attempts: None,
+        }
+    }
+
+    fn classify_transport_error(
+        &self,
+        source: reqwest::Error,
+        method: &Method,
+        path: &str,
+        timing: &OperationTiming,
+    ) -> AnytypeError {
+        let outcome = timeout_outcome(method);
+        if source.is_timeout() {
+            let elapsed = timing.elapsed();
+            self.metrics.record_transport_timeout(outcome, elapsed);
+            warn!(
+                target: "anytype::http",
+                error_variant = "transport_timeout",
+                timeout_outcome = %outcome,
+                elapsed_millis = duration_millis_saturating(elapsed),
+                http_method = %method,
+                http_path = %diagnostic_path(path),
+                physical_attempt = timing.attempts(),
+                "HTTP caller transport timeout"
+            );
+            AnytypeError::Http {
+                method: method.as_str().to_owned(),
+                url: path.to_owned(),
+                source,
+                outcome: Some(outcome),
+                elapsed: Some(elapsed),
+                attempts: Some(timing.attempts()),
+            }
+        } else if outcome == TimeoutOutcome::MutationIndeterminate && timing.attempts() > 0 {
+            AnytypeError::HttpMutationIndeterminate {
+                method: method.as_str().to_owned(),
+                path: path.to_owned(),
+                attempts: timing.attempts(),
+                status: None,
+            }
+        } else {
+            AnytypeError::Http {
+                method: method.as_str().to_owned(),
+                url: path.to_owned(),
+                source,
+                outcome: None,
+                elapsed: None,
+                attempts: None,
+            }
+        }
+    }
+
+    fn mutation_indeterminate(
+        method: &Method,
+        path: &str,
+        attempts: u32,
+        status: StatusCode,
+    ) -> AnytypeError {
+        AnytypeError::HttpMutationIndeterminate {
+            method: method.as_str().to_owned(),
+            path: path.to_owned(),
+            attempts,
+            status: Some(status.as_u16()),
+        }
     }
 
     pub(crate) const fn document_response_limit(&self) -> u64 {
@@ -552,6 +934,9 @@ impl HttpClient {
                 method: method.to_owned(),
                 url: path.to_owned(),
                 source,
+                outcome: None,
+                elapsed: None,
+                attempts: None,
             })?
         {
             self.metrics.add_bytes_received(chunk.len() as u64);
@@ -717,7 +1102,7 @@ impl HttpClient {
         path: &str,
         query: QueryWithFilters,
         headers: HeaderMap,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<StreamingHttpResponse> {
         query.validate().map_err(|err| AnytypeError::Validation {
             message: format!("get_streaming_request {} {err}", diagnostic_path(path)),
         })?;
@@ -732,24 +1117,48 @@ impl HttpClient {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "get_streaming_request");
         self.metrics.increment_logical_operations();
+        let open_timing = OperationTiming::start();
+        open_timing.record_attempt();
         self.metrics.increment_requests();
         let response = self
-            .client
-            .get(&full_url)
-            .query(&query.params)
-            .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
-            .bearer_auth(token)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|_source| AnytypeError::ChatSseTransport {
-                path: diagnostic_path(path),
-            })?;
+            .with_deadline(
+                HttpTimeoutClass::SseOpen,
+                TimeoutOutcome::ReadAborted,
+                &Method::GET,
+                path,
+                &open_timing,
+                async {
+                    self.client
+                        .get(&full_url)
+                        .query(&query.params)
+                        .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
+                        .bearer_auth(token)
+                        .headers(headers)
+                        .send()
+                        .await
+                        .map_err(reqwest::Error::without_url)
+                        .map_err(|source| {
+                            self.transport_error(source, &Method::GET, path, &open_timing)
+                        })
+                },
+            )
+            .await?;
 
         if !response.status().is_success() {
             self.metrics.increment_errors();
             let code = response.status().as_u16();
-            let message = self.read_error_body(response, "get", path).await?;
+            let error_timing = OperationTiming::start();
+            error_timing.record_attempt();
+            let message = self
+                .with_deadline(
+                    HttpTimeoutClass::SseErrorBody,
+                    TimeoutOutcome::ReadAborted,
+                    &Method::GET,
+                    path,
+                    &error_timing,
+                    self.read_error_body(response, "get", path),
+                )
+                .await?;
             return Err(AnytypeError::ApiError {
                 code,
                 method: "get".to_string(),
@@ -759,7 +1168,20 @@ impl HttpClient {
         }
 
         self.metrics.increment_success();
-        Ok(response)
+        let established = tokio::time::Instant::now();
+        let state = EstablishedSseState {
+            chunks: response.bytes_stream().boxed(),
+            metrics: self.metrics.clone(),
+            path: path.to_owned(),
+            started: established,
+            last_progress: established,
+            idle: self.timeout_policy.sse_idle,
+            lifetime: self.timeout_policy.sse_total_lifetime,
+            terminated: false,
+        };
+        Ok(StreamingHttpResponse {
+            chunks: futures::stream::unfold(state, EstablishedSseState::next).boxed(),
+        })
     }
 
     /// Makes an authenticated PATCH request with JSON body.
@@ -870,9 +1292,28 @@ impl HttpClient {
         path: &str,
         body: &Req,
     ) -> Result<Resp> {
+        let timing = OperationTiming::start();
+        self.with_deadline(
+            HttpTimeoutClass::StandardOperation,
+            TimeoutOutcome::MutationIndeterminate,
+            &Method::POST,
+            path,
+            &timing,
+            self.post_unauthenticated_inner(path, body, timing.clone()),
+        )
+        .await
+    }
+
+    async fn post_unauthenticated_inner<Resp: DeserializeOwned, Req: Serialize + Sync>(
+        &self,
+        path: &str,
+        body: &Req,
+        timing: OperationTiming,
+    ) -> Result<Resp> {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "post_unauthenticated");
         self.metrics.increment_logical_operations();
+        timing.record_attempt();
         self.metrics.increment_requests();
         let response = self
             .client
@@ -882,15 +1323,23 @@ impl HttpClient {
             .send()
             .await
             .map_err(reqwest::Error::without_url)
-            .map_err(|source| AnytypeError::Http {
-                method: "post".to_owned(),
-                url: path.to_owned(),
-                source,
-            })?;
+            .map_err(|source| self.transport_error(source, &Method::POST, path, &timing))?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
-            let code = response.status().as_u16();
+            let status = response.status();
+            let code = status.as_u16();
             let message = self.read_error_body(response, "post", path).await?;
+            if status == StatusCode::TOO_MANY_REQUESTS
+                || status == StatusCode::REQUEST_TIMEOUT
+                || status.is_server_error()
+            {
+                return Err(Self::mutation_indeterminate(
+                    &Method::POST,
+                    path,
+                    timing.attempts(),
+                    status,
+                ));
+            }
             return Err(AnytypeError::ApiError {
                 code,
                 method: "post".to_string(),
@@ -919,6 +1368,19 @@ impl HttpClient {
     /// response entity; file deletion (`DELETE /v1/spaces/{space_id}/files/{file_id}`)
     /// returns `204` with no body, so it needs this no-content variant.
     pub(crate) async fn delete_no_content(&self, path: &str) -> Result<()> {
+        let timing = OperationTiming::start();
+        self.with_deadline(
+            HttpTimeoutClass::StandardOperation,
+            TimeoutOutcome::MutationIndeterminate,
+            &Method::DELETE,
+            path,
+            &timing,
+            self.delete_no_content_inner(path, timing.clone()),
+        )
+        .await
+    }
+
+    async fn delete_no_content_inner(&self, path: &str, timing: OperationTiming) -> Result<()> {
         let api_key = self.get_api_key();
         let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
@@ -928,6 +1390,7 @@ impl HttpClient {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "delete_no_content");
         self.metrics.increment_logical_operations();
+        timing.record_attempt();
         self.metrics.increment_requests();
         let response = self
             .client
@@ -937,15 +1400,23 @@ impl HttpClient {
             .send()
             .await
             .map_err(reqwest::Error::without_url)
-            .map_err(|source| AnytypeError::Http {
-                method: "delete".to_owned(),
-                url: path.to_owned(),
-                source,
-            })?;
+            .map_err(|source| self.transport_error(source, &Method::DELETE, path, &timing))?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
-            let code = response.status().as_u16();
+            let status = response.status();
+            let code = status.as_u16();
             let message = self.read_error_body(response, "delete", path).await?;
+            if status == StatusCode::TOO_MANY_REQUESTS
+                || status == StatusCode::REQUEST_TIMEOUT
+                || status.is_server_error()
+            {
+                return Err(Self::mutation_indeterminate(
+                    &Method::DELETE,
+                    path,
+                    timing.attempts(),
+                    status,
+                ));
+            }
             return Err(AnytypeError::ApiError {
                 code,
                 method: "delete".to_string(),
@@ -996,6 +1467,42 @@ impl HttpClient {
         header_evidence_limit: u64,
         max_attempts: u32,
     ) -> Result<RawHttpResponse> {
+        let timing = OperationTiming::start();
+        let diagnostic_method = method.clone();
+        self.with_deadline(
+            HttpTimeoutClass::LongOperation,
+            timeout_outcome(&diagnostic_method),
+            &diagnostic_method,
+            path,
+            &timing,
+            self.file_request_with_limits_inner(
+                method,
+                path,
+                query,
+                headers,
+                success_body_limit,
+                error_body_limit,
+                header_evidence_limit,
+                max_attempts,
+                timing.clone(),
+            ),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn file_request_with_limits_inner(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        headers: HeaderMap,
+        success_body_limit: u64,
+        error_body_limit: u64,
+        header_evidence_limit: u64,
+        max_attempts: u32,
+        timing: OperationTiming,
+    ) -> Result<RawHttpResponse> {
         if success_body_limit == 0 || success_body_limit > self.response_limits.file_bytes {
             return Err(AnytypeError::Validation {
                 message: format!(
@@ -1039,10 +1546,9 @@ impl HttpClient {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(method = %method, path = %diagnostic_path(path), "file_request");
         let replay_safe = matches!(method, Method::GET | Method::HEAD);
-        let mut attempts = 0_u32;
         self.metrics.increment_logical_operations();
         loop {
-            attempts += 1;
+            let attempts = timing.record_attempt();
             self.metrics.increment_requests();
             let sent = self
                 .client
@@ -1059,7 +1565,7 @@ impl HttpClient {
                 Err(source)
                     if replay_safe
                         && attempts < max_attempts
-                        && (source.is_connect() || source.is_timeout()) =>
+                        && source.is_connect() =>
                 {
                     self.metrics.increment_retries();
                     log_and_backoff(attempts - 1, "file transport failure").await;
@@ -1067,11 +1573,7 @@ impl HttpClient {
                 }
                 Err(source) => {
                     self.metrics.increment_errors();
-                    return Err(AnytypeError::Http {
-                        method: method.as_str().to_owned(),
-                        url: path.to_owned(),
-                        source,
-                    });
+                    return Err(self.transport_error(source, &method, path, &timing));
                 }
             };
             let status = response.status();
@@ -1150,6 +1652,15 @@ impl HttpClient {
             }
 
             if !(status.is_success() || allowed_control_status) {
+                if !replay_safe
+                    && (status == StatusCode::TOO_MANY_REQUESTS
+                        || status == StatusCode::REQUEST_TIMEOUT
+                        || status.is_server_error())
+                {
+                    return Err(Self::mutation_indeterminate(
+                        &method, path, attempts, status,
+                    ));
+                }
                 return Err(AnytypeError::ApiError {
                     code: status.as_u16(),
                     method: method.as_str().to_ascii_lowercase(),
@@ -1176,6 +1687,37 @@ impl HttpClient {
         request_body_limit: Option<u64>,
         response_body_limit: Option<u64>,
         error_body_limit: Option<u64>,
+    ) -> Result<T> {
+        let timing = OperationTiming::start();
+        self.with_deadline(
+            HttpTimeoutClass::LongOperation,
+            TimeoutOutcome::MutationIndeterminate,
+            &Method::POST,
+            path,
+            &timing,
+            self.post_multipart_with_limits_inner(
+                path,
+                form,
+                serialized_body_bytes,
+                request_body_limit,
+                response_body_limit,
+                error_body_limit,
+                timing.clone(),
+            ),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn post_multipart_with_limits_inner<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: reqwest::multipart::Form,
+        serialized_body_bytes: Option<u64>,
+        request_body_limit: Option<u64>,
+        response_body_limit: Option<u64>,
+        error_body_limit: Option<u64>,
+        timing: OperationTiming,
     ) -> Result<T> {
         if let Some(limit) = request_body_limit {
             if limit == 0 {
@@ -1221,6 +1763,7 @@ impl HttpClient {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "post_multipart");
         self.metrics.increment_logical_operations();
+        timing.record_attempt();
         self.metrics.increment_requests();
         self.metrics.increment_multipart_posts();
         if let Some(actual) = serialized_body_bytes {
@@ -1235,20 +1778,28 @@ impl HttpClient {
             .send()
             .await
             .map_err(reqwest::Error::without_url)
-            .map_err(|source| AnytypeError::Http {
-                method: "post".to_owned(),
-                url: path.to_owned(),
-                source,
-            })?;
+            .map_err(|source| self.transport_error(source, &Method::POST, path, &timing))?;
         if !response.status().is_success() {
             self.metrics.increment_errors();
-            let code = response.status().as_u16();
+            let status = response.status();
+            let code = status.as_u16();
             let message = String::from_utf8_lossy(
                 &self
                     .read_bounded(response, error_body_limit, "post", path)
                     .await?,
             )
             .into_owned();
+            if status == StatusCode::TOO_MANY_REQUESTS
+                || status == StatusCode::REQUEST_TIMEOUT
+                || status.is_server_error()
+            {
+                return Err(Self::mutation_indeterminate(
+                    &Method::POST,
+                    path,
+                    timing.attempts(),
+                    status,
+                ));
+            }
             return Err(AnytypeError::ApiError {
                 code,
                 method: "post".to_string(),
@@ -1284,6 +1835,25 @@ impl HttpClient {
         &self,
         req: HttpRequest,
     ) -> Result<PreservedStatusResponse<T>> {
+        let timing = OperationTiming::start();
+        let method = req.method.clone();
+        let path = req.path.clone();
+        self.with_deadline(
+            HttpTimeoutClass::StandardOperation,
+            timeout_outcome(&method),
+            &method,
+            &path,
+            &timing,
+            self.send_preserving_status_inner(req, timing.clone()),
+        )
+        .await
+    }
+
+    async fn send_preserving_status_inner<T: DeserializeOwned>(
+        &self,
+        req: HttpRequest,
+        timing: OperationTiming,
+    ) -> Result<PreservedStatusResponse<T>> {
         self.limits.validate_query(&req.query)?;
         if let Some(ref body) = req.body {
             self.limits.validate_body(
@@ -1302,13 +1872,14 @@ impl HttpClient {
         let body = req.body.clone().unwrap_or_default();
         let body_size = body.len() as u64;
         log_request(&req);
+        let physical_attempt = timing.record_attempt();
         self.metrics.increment_requests();
         self.metrics.add_bytes_sent(body_size);
         debug!(
             target: "anytype::http",
             http_method = %req.method,
             http_path = %diagnostic_path(&req.path),
-            physical_attempt = 1,
+            physical_attempt,
             "HTTP physical attempt"
         );
         let response = self
@@ -1323,12 +1894,8 @@ impl HttpClient {
             .map_err(reqwest::Error::without_url)
             .map_err(|source| {
                 self.metrics.increment_errors();
-                log_http_transport(&req, 1);
-                AnytypeError::Http {
-                    method: req.method.to_string(),
-                    url: req.path.clone(),
-                    source,
-                }
+                log_http_transport(&req, physical_attempt);
+                self.transport_error(source, &req.method, &req.path, &timing)
             })?;
         let status = response.status();
         if !status.is_success() {
@@ -1337,7 +1904,7 @@ impl HttpClient {
             } else {
                 self.metrics.increment_errors();
             }
-            log_http_status(&req, status, "preserved_status", 1);
+            log_http_status(&req, status, "preserved_status", physical_attempt);
             return Ok(PreservedStatusResponse::Rejected {
                 status: status.as_u16(),
             });
@@ -1386,6 +1953,34 @@ impl HttpClient {
         response_limit: u64,
         allow_retries: bool,
     ) -> Result<T> {
+        let timing = OperationTiming::start();
+        let method = req.method.clone();
+        let path = req.path.clone();
+        let outcome = timeout_outcome(&method);
+        self.with_deadline(
+            HttpTimeoutClass::StandardOperation,
+            outcome,
+            &method,
+            &path,
+            &timing,
+            self.send_with_limit_and_retries_inner(
+                req,
+                response_limit,
+                allow_retries,
+                timing.clone(),
+            ),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn send_with_limit_and_retries_inner<T: DeserializeOwned>(
+        &self,
+        req: HttpRequest,
+        response_limit: u64,
+        allow_retries: bool,
+        timing: OperationTiming,
+    ) -> Result<T> {
         // A retry clones and replays the complete request. Restrict every
         // retry path, including rate-limit handling, to methods whose HTTP
         // semantics make that replay safe. In particular, a POST or PATCH
@@ -1396,7 +1991,6 @@ impl HttpClient {
         // one request-lifetime counter prevents mixed retry classes from
         // exceeding the common physical-attempt ceiling.
         let mut retry_attempt = 0u32;
-        let mut physical_attempt = 0u32;
         let mut rate_limit_retries = 0u32;
 
         // time to wait on next iteration
@@ -1411,11 +2005,11 @@ impl HttpClient {
             )?;
         }
         let api_key = self.get_api_key();
-        if api_key.token().is_none() {
+        let Some(token) = api_key.token() else {
             return Err(AnytypeError::Auth {
                 message: "HTTP credentials missing token. Client is not authenticated.".to_owned(),
             });
-        }
+        };
         self.metrics.increment_logical_operations();
         let full_url = format!("{}{}", self.base_url, req.path);
         let req_builder = self
@@ -1423,8 +2017,7 @@ impl HttpClient {
             .request(req.method.clone(), &full_url)
             .query(&req.query)
             .header(ANYTYPE_API_HEADER, ANYTYPE_API_VERSION)
-            // SAFETY: unwrap ok because we excluded token().is_none() above
-            .bearer_auth(api_key.token().unwrap());
+            .bearer_auth(token);
 
         // debug log (if tracing enabled)
         log_request(&req);
@@ -1449,7 +2042,7 @@ impl HttpClient {
                 .body(req.body.clone().unwrap_or_default());
 
             // Track request metrics
-            physical_attempt = physical_attempt.saturating_add(1);
+            let physical_attempt = timing.record_attempt();
             self.metrics.increment_requests();
             self.metrics.add_bytes_sent(body_size);
             debug!(
@@ -1501,19 +2094,18 @@ impl HttpClient {
                         StatusCode::TOO_MANY_REQUESTS /* 429 */ => {
                             self.metrics.increment_rate_limit_errors();
                             if !retryable_method {
-                                let message = self
-                                    .read_error_body(
-                                        response,
-                                        req.method.as_str(),
-                                        &req.path,
-                                    )
-                                    .await?;
-                                return Err(AnytypeError::ApiError {
-                                    code: code.as_u16(),
-                                    method: req.method.to_string(),
-                                    url: req.path,
-                                    message,
-                                });
+                                self.read_error_body(
+                                    response,
+                                    req.method.as_str(),
+                                    &req.path,
+                                )
+                                .await?;
+                                return Err(Self::mutation_indeterminate(
+                                    &req.method,
+                                    &req.path,
+                                    physical_attempt,
+                                    code,
+                                ));
                             }
                             rate_limit_retries = rate_limit_retries.saturating_add(1);
                             let headers = response.headers();
@@ -1646,6 +2238,16 @@ impl HttpClient {
                               retry_attempt += 1;
                               continue;
                             }
+                            if !retryable_method
+                                && (code.is_server_error() || retry_for_status(code))
+                            {
+                                return Err(Self::mutation_indeterminate(
+                                    &req.method,
+                                    &req.path,
+                                    physical_attempt,
+                                    code,
+                                ));
+                            }
                             return Err(AnytypeError::ApiError{
                                 code: code.as_u16(),
                                 method: req.method.to_string(),
@@ -1658,7 +2260,7 @@ impl HttpClient {
                 Err(err) => {
                     log_http_transport(&req, physical_attempt);
                     // Check for connection or timeout errors
-                    if (err.is_connect() || err.is_timeout()) && retryable_method {
+                    if err.is_connect() && retryable_method {
                         rate_limit_retries = 0;
                         if retry_attempt < MAX_RETRIES
                             && physical_attempt < MAX_HTTP_REQUEST_ATTEMPTS
@@ -1669,19 +2271,11 @@ impl HttpClient {
                             continue;
                         }
                         self.metrics.increment_errors();
-                        return Err(AnytypeError::Http {
-                            method: req.method.to_string(),
-                            url: req.path,
-                            source: err,
-                        });
+                        return Err(self.transport_error(err, &req.method, &req.path, &timing));
                     }
                     // Other non-recoverable errors (e.g., DNS error, invalid URL, etc.)
                     self.metrics.increment_errors();
-                    return Err(AnytypeError::Http {
-                        method: req.method.to_string(),
-                        url: req.path,
-                        source: err,
-                    });
+                    return Err(self.transport_error(err, &req.method, &req.path, &timing));
                 }
             }
         }
@@ -1883,7 +2477,7 @@ async fn log_and_backoff(attempt: u32, reason: &str) {
 fn is_idempotent_method(method: &Method) -> bool {
     matches!(
         *method,
-        Method::GET | Method::HEAD | Method::PUT | Method::DELETE | Method::OPTIONS
+        Method::GET | Method::HEAD | Method::OPTIONS
     )
 }
 
@@ -1899,10 +2493,13 @@ mod tests {
         ClientBuilder, Method, StatusCode,
         header::{HeaderMap, HeaderValue},
     };
+    use bytes::Bytes;
+    use futures::StreamExt;
     use serde::Deserialize;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
+        sync::oneshot,
         task::JoinHandle,
     };
     use tracing::Dispatch;
@@ -1914,9 +2511,10 @@ mod tests {
         parse_retry_after,
     };
     use crate::prelude::{
-        AnytypeClient, AnytypeError, ClientConfig, HttpCredentials, MAX_JSON_RESPONSE_BYTES,
-        ResponseLimits, ValidationLimits,
+        AnytypeClient, AnytypeError, ClientConfig, HttpCredentials, HttpTimeoutPolicy,
+        MAX_JSON_RESPONSE_BYTES, ResponseLimits, ValidationLimits,
     };
+    use crate::filters::QueryWithFilters;
 
     const TEST_SPACE_ID: &str =
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
@@ -1995,6 +2593,7 @@ mod tests {
                 ValidationLimits::default(),
                 test_limits(4, 8, 4),
                 1,
+                HttpTimeoutPolicy::default(),
                 HttpCredentials::new("old-token"),
             )
             .expect("credential test client"),
@@ -2096,9 +2695,68 @@ mod tests {
             ValidationLimits::default(),
             response_limits,
             1,
+            HttpTimeoutPolicy::default(),
             HttpCredentials::new("test-token"),
         )
         .expect("test client");
+        (Arc::new(client), server)
+    }
+
+    async fn sse_chunk_fixture(
+        policy: HttpTimeoutPolicy,
+        schedule: Vec<(Duration, &'static [u8])>,
+        finish: bool,
+    ) -> (Arc<HttpClient>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind SSE server");
+        let address = listener.local_addr().expect("SSE server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE request");
+            let _request = read_fixture_request(&mut socket).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .await
+                .expect("write SSE headers");
+            socket.flush().await.expect("flush SSE headers");
+            for (delay, chunk) in schedule {
+                tokio::time::sleep(delay).await;
+                let prefix = format!("{:x}\r\n", chunk.len());
+                socket
+                    .write_all(prefix.as_bytes())
+                    .await
+                    .expect("write SSE chunk prefix");
+                socket
+                    .write_all(chunk)
+                    .await
+                    .expect("write SSE chunk");
+                socket
+                    .write_all(b"\r\n")
+                    .await
+                    .expect("write SSE chunk suffix");
+                socket.flush().await.expect("flush SSE chunk");
+            }
+            if finish {
+                socket
+                    .write_all(b"0\r\n\r\n")
+                    .await
+                    .expect("finish SSE body");
+            } else {
+                std::future::pending::<()>().await;
+            }
+        });
+        let client = HttpClient::new(
+            ClientBuilder::new().no_proxy(),
+            format!("http://{address}"),
+            ValidationLimits::default(),
+            test_limits(4096, 4096, 4096),
+            1,
+            policy,
+            HttpCredentials::new("test-token"),
+        )
+        .expect("SSE client");
         (Arc::new(client), server)
     }
 
@@ -2117,6 +2775,441 @@ mod tests {
             body.len()
         )
         .into_bytes()
+    }
+
+    async fn deadline_fixture(
+        policy: HttpTimeoutPolicy,
+        prefix: Option<&'static [u8]>,
+        builder: ClientBuilder,
+    ) -> (Arc<HttpClient>, oneshot::Receiver<()>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind deadline fixture");
+        let address = listener.local_addr().expect("deadline fixture address");
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept deadline request");
+            let _request = read_fixture_request(&mut socket).await;
+            if let Some(prefix) = prefix {
+                socket
+                    .write_all(prefix)
+                    .await
+                    .expect("write deadline prefix");
+                socket.flush().await.expect("flush deadline prefix");
+            }
+            let _ = ready_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let client = HttpClient::new(
+            builder,
+            format!("http://{address}"),
+            ValidationLimits::default(),
+            test_limits(1024, 2048, 1024),
+            5,
+            policy,
+            HttpCredentials::new("test-token"),
+        )
+        .expect("deadline client");
+        (Arc::new(client), ready_rx, server)
+    }
+
+    fn one_second_standard_policy() -> HttpTimeoutPolicy {
+        HttpTimeoutPolicy {
+            standard_operation: Some(Duration::from_secs(1)),
+            ..HttpTimeoutPolicy::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn standard_deadline_bounds_stalled_headers_and_records_one_timeout() {
+        let (client, accepted, server) = deadline_fixture(
+            one_second_standard_policy(),
+            None,
+            ClientBuilder::new().no_proxy(),
+        )
+        .await;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
+        accepted.await.expect("request accepted");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = request.await.expect("request task").expect_err("deadline");
+        assert!(matches!(
+            error,
+            AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::StandardOperation,
+                outcome: crate::http_timeout::TimeoutOutcome::ReadAborted,
+                attempts: 1,
+                ..
+            }
+        ));
+        let metrics = client.metrics_snapshot();
+        assert_eq!(
+            metrics
+                .timeout(crate::http_timeout::HttpTimeoutClass::StandardOperation)
+                .count,
+            1
+        );
+        assert_eq!(
+            metrics.timeout_outcome_count(crate::http_timeout::TimeoutOutcome::ReadAborted),
+            1
+        );
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn standard_deadline_includes_success_and_error_bodies() {
+        for prefix in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n{".as_slice(),
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 8\r\n\r\n{".as_slice(),
+        ] {
+            let (client, prefix_written, server) = deadline_fixture(
+                one_second_standard_policy(),
+                Some(prefix),
+                ClientBuilder::new().no_proxy(),
+            )
+            .await;
+            let request = tokio::spawn(async move { client.send::<()>(get_request()).await });
+            prefix_written.await.expect("response prefix written");
+            tokio::time::advance(Duration::from_secs(1)).await;
+            assert!(matches!(
+                request.await.expect("request task"),
+                Err(AnytypeError::HttpTimeout {
+                    class: crate::http_timeout::HttpTimeoutClass::StandardOperation,
+                    ..
+                })
+            ));
+            server.abort();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mutation_deadline_is_indeterminate_and_dispatches_once() {
+        let (client, accepted, server) = deadline_fixture(
+            one_second_standard_policy(),
+            None,
+            ClientBuilder::new().no_proxy(),
+        )
+        .await;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            request_client
+                .send::<()>(HttpRequest {
+                    method: Method::POST,
+                    path: "/mutation?secret=redacted".to_owned(),
+                    query: Vec::new(),
+                    body: Some(Bytes::from_static(b"secret body")),
+                })
+                .await
+        });
+        accepted.await.expect("mutation accepted");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = request.await.expect("request task").expect_err("deadline");
+        assert!(matches!(
+            error,
+            AnytypeError::HttpTimeout {
+                outcome: crate::http_timeout::TimeoutOutcome::MutationIndeterminate,
+                attempts: 1,
+                ..
+            }
+        ));
+        assert_eq!(client.metrics_snapshot().physical_attempts, 1);
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shorter_caller_transport_timeout_wins_and_is_measured_once() {
+        let policy = HttpTimeoutPolicy {
+            standard_operation: Some(Duration::from_secs(10)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, accepted, server) = deadline_fixture(
+            policy,
+            None,
+            ClientBuilder::new()
+                .no_proxy()
+                .timeout(Duration::from_secs(1)),
+        )
+        .await;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
+        accepted.await.expect("request accepted");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = request.await.expect("request task").expect_err("transport timeout");
+        assert!(matches!(error, AnytypeError::Http { source, .. } if source.is_timeout()));
+        let metrics = client.metrics_snapshot();
+        assert_eq!(metrics.transport_timeouts().count, 1);
+        assert_eq!(
+            metrics.timeout_outcome_count(crate::http_timeout::TimeoutOutcome::ReadAborted),
+            1
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rate_limit_wait_cannot_reset_the_standard_deadline() {
+        let response = fixture_response(
+            "429 Too Many Requests",
+            "rate limited",
+            "RateLimit-Reset: 2\r\n",
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind rate-limit deadline fixture");
+        let address = listener.local_addr().expect("rate-limit fixture address");
+        let (sent_tx, sent_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept rate-limit request");
+            let _request = read_fixture_request(&mut socket).await;
+            socket
+                .write_all(&response)
+                .await
+                .expect("write rate-limit response");
+            let _ = sent_tx.send(());
+        });
+        let client = Arc::new(
+            HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                format!("http://{address}"),
+                ValidationLimits::default(),
+                test_limits(4096, 4096, 4096),
+                5,
+                one_second_standard_policy(),
+                HttpCredentials::new("test-token"),
+            )
+            .expect("rate-limit deadline client"),
+        );
+        let request_client = client.clone();
+        let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
+        sent_rx.await.expect("rate-limit response sent");
+        let error = request
+            .await
+            .expect("rate-limit request task")
+            .expect_err("shared deadline must expire during rate-limit wait");
+        assert!(matches!(
+            error,
+            AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::StandardOperation,
+                attempts: 1,
+                ..
+            }
+        ));
+        assert_eq!(client.metrics_snapshot().rate_limit_errors, 1);
+        server.await.expect("rate-limit server");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_file_response_uses_long_profile() {
+        let policy = HttpTimeoutPolicy {
+            standard_operation: Some(Duration::from_secs(120)),
+            long_operation: Some(Duration::from_secs(600)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, accepted, server) =
+            deadline_fixture(policy, None, ClientBuilder::new().no_proxy()).await;
+        let file_client = client.clone();
+        let file = tokio::spawn(async move {
+            file_client
+                .file_request(Method::GET, "/v1/files/id", &[], HeaderMap::new())
+                .await
+        });
+        accepted.await.expect("file request accepted");
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(matches!(
+            file.await.expect("file request task"),
+            Err(AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::LongOperation,
+                ..
+            })
+        ));
+        server.abort();
+
+        let timing = super::OperationTiming::start();
+        client
+            .with_deadline(
+                crate::http_timeout::HttpTimeoutClass::LongOperation,
+                crate::http_timeout::TimeoutOutcome::ReadAborted,
+                &Method::GET,
+                "/v1/files/id",
+                &timing,
+                async {
+                    tokio::time::sleep(Duration::from_secs(154)).await;
+                    Ok::<_, AnytypeError>(())
+                },
+            )
+            .await
+            .expect("154-second operation fits the long profile");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn multipart_uses_long_profile_instead_of_standard_profile() {
+        let policy = HttpTimeoutPolicy {
+            standard_operation: Some(Duration::from_secs(1)),
+            long_operation: Some(Duration::from_secs(10)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, accepted, server) =
+            deadline_fixture(policy, None, ClientBuilder::new().no_proxy()).await;
+        let form = reqwest::multipart::Form::new().text("field", "value");
+        let multipart = tokio::spawn(async move {
+            client
+                .post_multipart_with_limits::<serde_json::Value>(
+                    "/v1/upload",
+                    form,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+        accepted.await.expect("multipart accepted");
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(matches!(
+            multipart.await.expect("multipart task"),
+            Err(AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::LongOperation,
+                ..
+            })
+        ));
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sse_open_and_error_body_use_separate_timeout_classes() {
+        let policy = HttpTimeoutPolicy {
+            sse_open: Some(Duration::from_secs(1)),
+            sse_error_body: Some(Duration::from_secs(1)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, accepted, server) =
+            deadline_fixture(policy, None, ClientBuilder::new().no_proxy()).await;
+        let open_client = client.clone();
+        let open = tokio::spawn(async move {
+            open_client
+                .get_streaming_request("/events", QueryWithFilters::default(), HeaderMap::new())
+                .await
+        });
+        accepted.await.expect("SSE open accepted");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(matches!(
+            open.await.expect("SSE open task"),
+            Err(AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::SseOpen,
+                ..
+            })
+        ));
+        server.abort();
+
+        let prefix = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 8\r\n\r\n{";
+        let error_policy = HttpTimeoutPolicy {
+            sse_open: Some(Duration::from_secs(10)),
+            sse_error_body: Some(Duration::from_secs(1)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, prefix_written, server) =
+            deadline_fixture(error_policy, Some(prefix), ClientBuilder::new().no_proxy()).await;
+        let error_body = tokio::spawn(async move {
+            client
+                .get_streaming_request("/events", QueryWithFilters::default(), HeaderMap::new())
+                .await
+        });
+        prefix_written.await.expect("SSE error prefix");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = error_body
+            .await
+            .expect("SSE error task")
+            .err()
+            .expect("SSE error response must fail");
+        assert!(matches!(
+            error,
+            AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::SseErrorBody,
+                ..
+            }
+        ), "unexpected SSE error: {error:?}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn established_sse_default_outlives_buffered_deadline() {
+        let policy = HttpTimeoutPolicy {
+            standard_operation: Some(Duration::from_secs(1)),
+            sse_open: Some(Duration::from_secs(120)),
+            sse_idle: None,
+            sse_total_lifetime: None,
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, server) = sse_chunk_fixture(
+            policy,
+            vec![(Duration::from_secs(2), b"data: healthy\n\n")],
+            true,
+        )
+        .await;
+        let response = client
+            .get_streaming_request("/events", QueryWithFilters::default(), HeaderMap::new())
+            .await
+            .expect("SSE headers open promptly");
+        let mut chunks = response.bytes_stream();
+        assert_eq!(
+            chunks.next().await.expect("SSE chunk").expect("healthy SSE"),
+            Bytes::from_static(b"data: healthy\n\n")
+        );
+        server.await.expect("SSE server");
+    }
+
+    #[tokio::test]
+    async fn established_sse_idle_and_lifetime_are_independent() {
+        let idle_policy = HttpTimeoutPolicy {
+            sse_idle: Some(Duration::from_secs(1)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, server) = sse_chunk_fixture(idle_policy, Vec::new(), false).await;
+        let response = client
+            .get_streaming_request("/events", QueryWithFilters::default(), HeaderMap::new())
+            .await
+            .expect("SSE opens");
+        let mut chunks = response.bytes_stream();
+        assert!(matches!(
+            chunks.next().await,
+            Some(Err(AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::SseIdle,
+                outcome: crate::http_timeout::TimeoutOutcome::StreamTerminated,
+                ..
+            }))
+        ));
+        assert!(chunks.next().await.is_none(), "stream emits one terminal error");
+        server.abort();
+
+        let lifetime_policy = HttpTimeoutPolicy {
+            sse_idle: Some(Duration::from_secs(10)),
+            sse_total_lifetime: Some(Duration::from_secs(2)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, server) = sse_chunk_fixture(
+            lifetime_policy,
+            vec![
+                (Duration::from_secs(1), b": heartbeat\n\n"),
+                (Duration::from_secs(1), b": heartbeat\n\n"),
+                (Duration::from_secs(1), b"data: late\n\n"),
+            ],
+            false,
+        )
+        .await;
+        let response = client
+            .get_streaming_request("/events", QueryWithFilters::default(), HeaderMap::new())
+            .await
+            .expect("SSE opens");
+        let mut chunks = response.bytes_stream();
+        assert!(chunks.next().await.is_some(), "heartbeat counts as progress");
+        let terminal = chunks.next().await;
+        assert!(matches!(
+            terminal,
+            Some(Err(AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::SseLifetime,
+                ..
+            }))
+        ));
+        server.abort();
     }
 
     async fn read_fixture_request(socket: &mut TcpStream) -> String {
@@ -2225,7 +3318,14 @@ mod tests {
         let result = public_mutation(&client, &method).await;
         let error = result.expect_err("mutation fixture must reject");
         assert!(
-            matches!(&error, AnytypeError::ApiError { code: actual, .. } if *actual == code),
+            matches!(
+                &error,
+                AnytypeError::HttpMutationIndeterminate {
+                    status: Some(actual),
+                    attempts: 1,
+                    ..
+                } if *actual == code
+            ),
             "unexpected mutation error: {error:?}"
         );
 
@@ -2392,7 +3492,14 @@ mod tests {
         let error = public_mutation(&client, &Method::POST)
             .await
             .expect_err("caller retry policy must be overridden");
-        assert!(matches!(error, AnytypeError::ApiError { code: 408, .. }));
+        assert!(matches!(
+            error,
+            AnytypeError::HttpMutationIndeterminate {
+                status: Some(408),
+                attempts: 1,
+                ..
+            }
+        ));
         let requests = server.await.expect("custom retry fixture task");
         assert_eq!(requests.len(), 1);
         let metrics = client.http_metrics();
@@ -2414,7 +3521,7 @@ mod tests {
                 .await
                 .expect_err("disconnect must fail");
             assert!(
-                matches!(&error, AnytypeError::Http { .. }),
+                matches!(&error, AnytypeError::HttpMutationIndeterminate { .. }),
                 "unexpected disconnect error: {error:?}"
             );
             let requests = server.await.expect("disconnect fixture task");
@@ -2597,6 +3704,7 @@ mod tests {
                     ..ResponseLimits::default()
                 },
                 1,
+                HttpTimeoutPolicy::default(),
                 HttpCredentials::new("test-token"),
             )
             .expect_err("invalid response limit");
@@ -2616,6 +3724,7 @@ mod tests {
                     ..ResponseLimits::default()
                 },
                 1,
+                HttpTimeoutPolicy::default(),
                 HttpCredentials::new("test-token"),
             )
             .expect_err("invalid chat SSE event limit");
@@ -2916,6 +4025,7 @@ mod tests {
             ValidationLimits::default(),
             test_limits(1024, 2048, 1024),
             1,
+            HttpTimeoutPolicy::default(),
             HttpCredentials::new("test-token"),
         )
         .expect("streaming test client");
@@ -3345,6 +4455,7 @@ mod tests {
             ValidationLimits::default(),
             test_limits(1024, 2048, 1024),
             1,
+            HttpTimeoutPolicy::default(),
             HttpCredentials::new("AUTHORIZATION_TOKEN_SECRET"),
         )
         .expect("transport test client");

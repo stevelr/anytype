@@ -80,7 +80,11 @@ pub fn disposable_callback_error(stage: DisposableCallbackStage, error: TestErro
 
 fn failure_category_from_anytype(error: &AnytypeError) -> DisposableFailureCategory {
     match error {
-        AnytypeError::Http { .. } => DisposableFailureCategory::HttpTransport,
+        AnytypeError::Http { .. }
+        | AnytypeError::HttpTimeout { .. }
+        | AnytypeError::HttpMutationIndeterminate { .. } => {
+            DisposableFailureCategory::HttpTransport
+        }
         AnytypeError::ApiError { .. } => DisposableFailureCategory::ApiError,
         AnytypeError::ResponseTooLarge { .. } => DisposableFailureCategory::ResponseTooLarge,
         AnytypeError::FileHeaderEvidenceTooLarge { .. } => {

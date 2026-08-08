@@ -28,6 +28,7 @@ use crate::{
         RATE_LIMIT_MAX_RETRIES_ENV,
     },
     http_client::{HttpClient, diagnostic_path},
+    http_timeout::HttpTimeoutPolicy,
     prelude::*,
 };
 
@@ -124,6 +125,13 @@ pub struct ClientConfig {
     /// [`ResponseLimits::chat_sse_event_bytes`].
     pub response_limits: ResponseLimits,
 
+    /// Logical HTTP deadline policy.
+    ///
+    /// `None` inherits `ANYTYPE_HTTP_TIMEOUT_SECS` and then the library
+    /// defaults. A supplied policy ignores that environment variable; `None`
+    /// fields inside it disable their individual boundaries.
+    pub http_timeouts: Option<HttpTimeoutPolicy>,
+
     /// Maximum consecutive 429 retries before failing for replay-safe HTTP
     /// methods (0 disables this rate-limit-specific cap).
     ///
@@ -164,6 +172,7 @@ impl std::fmt::Debug for ClientConfig {
             )
             .field("limits", &self.limits)
             .field("response_limits", &self.response_limits)
+            .field("http_timeouts", &self.http_timeouts)
             .field("rate_limit_max_retries", &self.rate_limit_max_retries)
             .field("disable_cache", &self.disable_cache)
             .field("verify_configured", &self.verify.is_some())
@@ -182,6 +191,7 @@ impl Default for ClientConfig {
             app_name: DEFAULT_SERVICE_NAME.to_string(),
             limits: ValidationLimits::default(),
             response_limits: ResponseLimits::default(),
+            http_timeouts: None,
             rate_limit_max_retries: std::env::var(RATE_LIMIT_MAX_RETRIES_ENV)
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
@@ -208,6 +218,18 @@ impl ClientConfig {
     #[must_use]
     pub fn limits(self, limits: ValidationLimits) -> Self {
         Self { limits, ..self }
+    }
+
+    /// Sets an explicit logical HTTP deadline policy.
+    ///
+    /// Explicit policy ignores `ANYTYPE_HTTP_TIMEOUT_SECS`. Use `None` on an
+    /// individual policy field to disable that boundary.
+    #[must_use]
+    pub fn http_timeouts(self, policy: HttpTimeoutPolicy) -> Self {
+        Self {
+            http_timeouts: Some(policy),
+            ..self
+        }
     }
 
     #[must_use]
@@ -304,7 +326,9 @@ impl AnytypeClient {
     /// # }
     /// ```
     pub fn with_config(config: ClientConfig) -> Result<Self> {
-        let client = reqwest::Client::builder().no_proxy();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(30));
         Self::with_client(client, config)
     }
 
@@ -327,6 +351,7 @@ impl AnytypeClient {
     /// # }
     /// ```
     pub fn with_client(builder: reqwest::ClientBuilder, config: ClientConfig) -> Result<Self> {
+        let resolved_http_timeouts = HttpTimeoutPolicy::resolve(config.http_timeouts)?;
         let base_url = config.base_url.clone().unwrap_or_else(|| {
             std::env::var(ANYTYPE_URL_ENV).unwrap_or_else(|_| ANYTYPE_DESKTOP_URL.to_string())
         });
@@ -345,6 +370,7 @@ impl AnytypeClient {
             config.limits.clone(),
             config.response_limits,
             config.rate_limit_max_retries,
+            resolved_http_timeouts,
             http_creds,
         )?;
         let cache = if config.disable_cache {
@@ -369,6 +395,7 @@ impl AnytypeClient {
                 base_url: Some(base_url),
                 keystore_service: Some(keystore_service),
                 grpc_endpoint: Some(grpc_endpoint),
+                http_timeouts: Some(resolved_http_timeouts),
                 // other values unchanged
                 ..config
             },
