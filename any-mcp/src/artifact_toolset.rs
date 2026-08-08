@@ -969,6 +969,12 @@ impl ArtifactOperationState {
         self.settle_import_timeout_now(key);
     }
 
+    pub(crate) fn mark_indeterminate(&self, key: [u8; 32]) {
+        if let Some(entry) = self.entries().get_mut(&key) {
+            entry.outcome = OperationOutcome::Indeterminate;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn reserve_import(
         &self,
@@ -2503,29 +2509,29 @@ async fn file_export(
             #[cfg(any(test, feature = "acceptance-harness"))]
             let destination =
                 destination.with_acceptance_gate(runtime.artifact_acceptance_gates().clone(), key);
-            let committed = match tokio::task::spawn_blocking(move || destination.commit()).await {
-                Ok(committed) => committed,
-                Err(_) => {
-                    return Err(settle_export_failure(
-                        runtime.artifact_operations(),
-                        key,
-                        ArtifactToolError::Indeterminate,
-                    )
-                    .await);
-                }
-            };
-            let committed = match committed {
-                Ok(committed) => committed,
-                Err(error) if error.kind() == RootAccessErrorKind::Indeterminate => {
+            let committed = match runtime
+                .supervise_artifact_blocking(key, move || {
+                    destination.commit().map_err(|error| {
+                        if error.kind() == RootAccessErrorKind::Indeterminate {
+                            ArtifactToolError::Indeterminate
+                        } else {
+                            classify_root_error(&error)
+                        }
+                    })
+                })
+                .await
+            {
+                Ok(Ok(committed)) => committed,
+                Ok(Err(ArtifactToolError::Indeterminate)) | Err(_) => {
                     runtime
                         .artifact_operations()
                         .set_outcome(key, OperationOutcome::Indeterminate)
                         .await;
                     return Err(ArtifactToolError::Indeterminate);
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     runtime.artifact_operations().remove(key).await;
-                    return Err(classify_root_error(&error));
+                    return Err(error);
                 }
             };
             if committed != size {
@@ -3444,21 +3450,22 @@ async fn document_export(
             let bytes = body.into_bytes();
             #[cfg(any(test, feature = "acceptance-harness"))]
             let gates = runtime.artifact_acceptance_gates().clone();
-            let written = match tokio::task::spawn_blocking(move || {
-                let mut destination = roots
-                    .begin_atomic_export(&root_id, &path, maximum)
-                    .map_err(|error| classify_root_error(&error))?;
-                destination
-                    .write_all(&bytes)
-                    .map_err(|_| ArtifactToolError::NotFound)?;
-                #[cfg(any(test, feature = "acceptance-harness"))]
-                let destination = destination.with_acceptance_gate(gates, key);
-                let committed = destination
-                    .commit()
-                    .map_err(|error| classify_root_error(&error))?;
-                Ok::<_, ArtifactToolError>((committed, root_id))
-            })
-            .await
+            let written = match runtime
+                .supervise_artifact_blocking(key, move || {
+                    let mut destination = roots
+                        .begin_atomic_export(&root_id, &path, maximum)
+                        .map_err(|error| classify_root_error(&error))?;
+                    destination
+                        .write_all(&bytes)
+                        .map_err(|_| ArtifactToolError::NotFound)?;
+                    #[cfg(any(test, feature = "acceptance-harness"))]
+                    let destination = destination.with_acceptance_gate(gates, key);
+                    let committed = destination
+                        .commit()
+                        .map_err(|error| classify_root_error(&error))?;
+                    Ok::<_, ArtifactToolError>((committed, root_id))
+                })
+                .await
             {
                 Ok(Ok(written)) => written,
                 Ok(Err(error)) => {

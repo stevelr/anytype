@@ -532,6 +532,49 @@ impl RuntimeContext {
         receiver
     }
 
+    /// Owns one blocking local artifact operation through completion even if
+    /// its request waiter is cancelled. Shutdown drain observes the same task
+    /// counter used by import settlement, and a vanished waiter leaves a
+    /// terminal indeterminate ledger entry rather than an unowned commit.
+    pub(crate) fn supervise_artifact_blocking<T, F>(
+        &self,
+        key: [u8; 32],
+        operation: F,
+    ) -> tokio::sync::oneshot::Receiver<Result<T, ArtifactToolError>>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, ArtifactToolError> + Send + 'static,
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let gate = match self.settlement_gate.lock() {
+            Ok(gate) => gate,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !gate.accepting {
+            let _ = sender.send(Err(ArtifactToolError::Indeterminate));
+            return receiver;
+        }
+        self.settlement_active.fetch_add(1, Ordering::AcqRel);
+        drop(gate);
+        let active = Arc::clone(&self.settlement_active);
+        let notify = Arc::clone(&self.settlement_notify);
+        let operations = self.artifact_operations.clone();
+        tokio::spawn(async move {
+            let result = match tokio::task::spawn_blocking(operation).await {
+                Ok(result) => result,
+                Err(_) => Err(ArtifactToolError::Indeterminate),
+            };
+            if sender.send(result).is_err() {
+                operations.mark_indeterminate(key);
+            }
+            let _ = active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            });
+            notify.notify_waiters();
+        });
+        receiver
+    }
+
     /// Admits a settlement before an idempotency reservation is created.
     /// This prevents reserved operations from accumulating behind an
     /// unbounded internal task queue.
@@ -1556,6 +1599,41 @@ mod tests {
                 &only,
             )
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_local_publication_waiter_remains_owned_and_indeterminate() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let key = [51; 32];
+        let fingerprint = [52; 32];
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import_now(key, fingerprint),
+            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
+        ));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_entered = Arc::clone(&entered);
+        let worker_release = Arc::clone(&release);
+        let receiver = runtime.supervise_artifact_blocking(key, move || {
+            worker_entered.wait();
+            worker_release.wait();
+            Ok::<_, ArtifactToolError>(())
+        });
+        entered.wait();
+        drop(receiver);
+        release.wait();
+        runtime
+            .drain_artifact_settlements(Duration::from_secs(1))
+            .await;
+
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import_now(key, fingerprint),
+            Err(ArtifactToolError::Indeterminate)
+        ));
     }
 
     #[tokio::test]
