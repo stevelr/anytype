@@ -16,9 +16,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   records. Artifact status now exposes only aggregate remaining staging bytes
   and entries so acceptance runs can prove quota restoration without record
   metadata.
-- Add real-server coverage for `SYM-01` through `SYM-06`, `SYM-09`, startup
-  `SYM-11` and `SYM-12`, and `HLINK-01`, `HLINK-02`, and `HLINK-04`. Remaining
-  rename-race and dynamic filesystem rows stay pending in the closed inventory.
+- Complete real-server dynamic filesystem coverage for `SYM-01` through
+  `SYM-13`, `RACE-01` through `RACE-10`, and `HLINK-01` through `HLINK-06`.
+  Direct owners synchronize import, export, and document races at typed
+  one-shot gates; stable stdio repeats import and export gate rows in isolated
+  child processes. Windows junction and reparse rows verify native reparse tags
+  before containment checks, with fixed capability outcomes when unavailable.
+- Preserve staged bytes, registry ownership, and charged quota after the
+  `HLINK-05` hostile-link cleanup conflict. A later release returns the same
+  fixed conflict after the outside link is removed, preventing retry-pathname
+  deletion from changing the staged record.
 - Protect every cleanup-owned ignored live test with serial direct-router,
   spawned-stdio, and discussions-process gates. Closed offline manifests and
   executable-count checks reject renamed, missing, skipped, or zero-test

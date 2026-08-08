@@ -2276,6 +2276,21 @@ pub trait McpDriver {
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>>;
 
+    /// Dispatches two independent calls before awaiting either result.
+    ///
+    /// The default fails closed because a sequential driver cannot supply
+    /// evidence for a collision scenario.
+    fn call_tool_pair_concurrently<'a>(
+        &'a mut self,
+        _name: &'static str,
+        _left: Value,
+        _right: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<(Value, Value), String>> + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "driver does not expose concurrent tool calls".to_owned(),
+        )))
+    }
+
     fn list_tools<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>>;
@@ -4351,19 +4366,20 @@ pub use artifact_acceptance::{
     ARTIFACT_UPDATE_MARKDOWN, AdversarialCaseId, AdversarialExecution, ArtifactAdversarialRun,
     ArtifactCatalogSnapshot, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
     ArtifactControlPlane, ArtifactDataPlane, ArtifactDirectorySnapshot, ArtifactDocumentRecord,
-    ArtifactFileRecord, ArtifactFrameMeasurement, ArtifactLifecycleScenario, ArtifactLimitProfile,
-    ArtifactMimeFixture, ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyOptions,
-    ArtifactPolicyProbe, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactProbeExpectation,
-    ArtifactProbeOutcome, ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeEvidence,
-    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
-    ArtifactStatusEvidence, ArtifactSymlinkStartupTarget, ArtifactTransport,
-    ArtifactValidatorOutcome, ArtifactValidatorProbe, ArtifactValidatorRecord,
-    CanonicalizationEffect, ExpectedOutcome, FixtureSpacePolicy, FixtureValidatorPolicy,
-    ObservedOutcome, PinnedValidatorExecutable, UNAUTHORIZED_SPACE_ID, allocate_stage_upload,
-    artifact_catalog_snapshot, artifact_sha256, assert_artifact_content_parity,
-    assert_artifact_parity, assert_artifact_policy_parity, assert_payload_frame_independence,
-    audit_server_log, classify_canonicalization, classify_collision_frames, classify_server_log,
-    measure_artifact_frame, prepare_artifact_symlink_startup_case, probe_expectation,
+    ArtifactFileRecord, ArtifactFrameMeasurement, ArtifactGateHooks, ArtifactGateLease,
+    ArtifactLifecycleScenario, ArtifactLimitProfile, ArtifactMimeFixture, ArtifactPolicyEvidence,
+    ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyProbe, ArtifactPolicyRun,
+    ArtifactPolicyScenario, ArtifactProbeExpectation, ArtifactProbeOutcome, ArtifactServerLogAudit,
+    ArtifactServerLogBaseline, ArtifactSmokeEvidence, ArtifactSmokeFixture,
+    ArtifactStageAllocation, ArtifactStartupCaseOutcome, ArtifactStatusEvidence,
+    ArtifactSymlinkStartupTarget, ArtifactTransport, ArtifactValidatorOutcome,
+    ArtifactValidatorProbe, ArtifactValidatorRecord, CanonicalizationEffect, ExpectedOutcome,
+    FixtureSpacePolicy, FixtureValidatorPolicy, ObservedOutcome, PinnedValidatorExecutable,
+    UNAUTHORIZED_SPACE_ID, allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
+    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
+    assert_payload_frame_independence, audit_server_log, classify_canonicalization,
+    classify_collision_frames, classify_server_log, measure_artifact_frame,
+    prepare_artifact_symlink_startup_case, probe_expectation,
     record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
     release_stage_upload, require_completed, run_artifact_adversarial_default,
     run_artifact_adversarial_stdio_sentinels, run_artifact_alias_cases,
@@ -4371,9 +4387,9 @@ pub use artifact_acceptance::{
     run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_empty_client_roots_case,
     run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
     run_artifact_missing_roots_case, run_artifact_payload_boundary_cases,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
-    server_log_baseline, stage_head_status, upload_stage_bytes, validate_tool_frame,
-    wait_for_stage_reaped,
+    run_artifact_policy_scenario, run_artifact_race01, run_artifact_race04,
+    run_artifact_smoke_scenario, run_artifact_traversal_default, server_log_baseline,
+    stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
 
 /// Evidence tier required for every optional production operation.

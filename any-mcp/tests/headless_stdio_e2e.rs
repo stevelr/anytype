@@ -51,18 +51,19 @@ use support::live_scenario::{
     ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE,
     ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
     ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
-    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactLifecycleScenario,
-    ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
-    ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeFixture,
-    ArtifactStageAllocation, ArtifactStartupCaseOutcome, ArtifactSymlinkStartupTarget,
-    ArtifactTransport, ExpectedOutcome, ObservedOutcome, allocate_stage_upload,
-    artifact_catalog_snapshot, artifact_sha256, assert_artifact_content_parity,
-    assert_artifact_parity, assert_artifact_policy_parity, assert_payload_frame_independence,
-    audit_server_log, classify_collision_frames, measure_artifact_frame,
-    prepare_artifact_symlink_startup_case, record_artifact_dynamic_filesystem_startup_cases,
-    reject_oversized_stage_chunk, release_stage_upload, run_artifact_adversarial_stdio_sentinels,
-    run_artifact_content_scenario, run_artifact_dynamic_filesystem_stdio_sentinels,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_baseline,
+    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks,
+    ArtifactGateLease, ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
+    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
+    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
+    ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
+    allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
+    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
+    assert_payload_frame_independence, audit_server_log, classify_collision_frames,
+    measure_artifact_frame, prepare_artifact_symlink_startup_case,
+    record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
+    release_stage_upload, run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
+    run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_policy_scenario,
+    run_artifact_race01, run_artifact_race04, run_artifact_smoke_scenario, server_log_baseline,
     stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
 #[cfg(feature = "acceptance-harness")]
@@ -675,8 +676,7 @@ impl StdioDriver {
         &mut self,
         name: &'static str,
         arguments: Value,
-        pause_ready: &Path,
-        pause_released: &Path,
+        gate: &ChildArtifactGate,
     ) -> Result<u64, String> {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -693,35 +693,16 @@ impl StdioDriver {
             "method":"tools/call",
             "params":params
         }));
-        let deadline = std::time::Instant::now()
-            .checked_add(Duration::from_secs(30))
-            .ok_or_else(|| "artifact cancellation handshake deadline overflow".to_owned())?;
-        while !pause_ready.is_file() {
-            if std::time::Instant::now() >= deadline {
-                return Err("artifact cancellation never reached the pre-dispatch pause".to_owned());
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let marker = std::fs::read(pause_ready)
-            .map_err(|_| "read artifact cancellation handshake".to_owned())?;
-        if marker != b"ready\n" {
-            return Err("artifact cancellation handshake was malformed".to_owned());
-        }
+        gate.wait_ready()
+            .map_err(|_| "artifact cancellation never reached its gate".to_owned())?;
         self.process.notification(
             "notifications/cancelled",
             json!({"requestId": id, "reason": "artifact acceptance cancellation"}),
         );
-        while !pause_released.is_file() {
-            if std::time::Instant::now() >= deadline {
-                return Err("artifact cancellation did not release the paused operation".to_owned());
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let marker = std::fs::read(pause_released)
-            .map_err(|_| "read artifact cancellation release handshake".to_owned())?;
-        if marker != b"cancelled\n" {
-            return Err("artifact cancellation did not stop the paused operation".to_owned());
-        }
+        gate.release()
+            .map_err(|_| "artifact cancellation did not release the paused operation".to_owned())?;
+        gate.wait_done()
+            .map_err(|_| "artifact cancellation did not settle the paused operation".to_owned())?;
         let ping_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.process.send(json!({
@@ -2121,7 +2102,7 @@ fn spawn_disposable_artifact_driver(
     policy: Arc<ArtifactPolicyFixture>,
     options: DriverOptions,
 ) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
-    spawn_disposable_artifact_driver_configured(ctx, cleanup_record, policy, options, false)
+    spawn_disposable_artifact_driver_configured(ctx, cleanup_record, policy, options, None)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -2130,8 +2111,36 @@ fn spawn_disposable_paused_artifact_driver(
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
     policy: Arc<ArtifactPolicyFixture>,
     options: DriverOptions,
-) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
-    spawn_disposable_artifact_driver_configured(ctx, cleanup_record, policy, options, true)
+) -> TestResult<(Arc<Mutex<Option<StdioDriver>>>, ChildArtifactGate)> {
+    let key = format!("artifact-cancel-import-{}", unique_suffix());
+    spawn_disposable_gated_artifact_driver(
+        ctx,
+        cleanup_record,
+        policy,
+        options,
+        "import-first-upload-chunk",
+        key,
+    )
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn spawn_disposable_gated_artifact_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    policy: Arc<ArtifactPolicyFixture>,
+    options: DriverOptions,
+    point: &'static str,
+    key: String,
+) -> TestResult<(Arc<Mutex<Option<StdioDriver>>>, ChildArtifactGate)> {
+    let gate = ChildArtifactGate::create(policy.acceptance_gate_base(), point, &key)?;
+    let child = spawn_disposable_artifact_driver_configured(
+        ctx,
+        cleanup_record,
+        policy,
+        options,
+        Some((&gate, point, &key)),
+    )?;
+    Ok((child, gate))
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -2140,7 +2149,7 @@ fn spawn_disposable_artifact_driver_configured(
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
     policy: Arc<ArtifactPolicyFixture>,
     options: DriverOptions,
-    pause_file_import: bool,
+    gate: Option<(&ChildArtifactGate, &str, &str)>,
 ) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
     let child_environment = ctx
         .disposable_child_environment()
@@ -2150,23 +2159,8 @@ fn spawn_disposable_artifact_driver_configured(
     child_environment.configure(&mut command)?;
     configure_stdio_command(&mut command, options, Some("artifacts"));
     command.env("ANY_MCP_CONFIG", policy.config_path());
-    if pause_file_import {
-        let ready = policy.acceptance_pause_ready_path();
-        let released = policy.acceptance_pause_released_path();
-        let _ = std::fs::remove_file(&ready);
-        let _ = std::fs::remove_file(&released);
-        command
-            .env(
-                "ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE",
-                "file_import_pre_dispatch",
-            )
-            .env("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY", ready)
-            .env("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_RELEASED", released);
-    } else {
-        command
-            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE")
-            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY")
-            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_RELEASED");
+    if let Some((gate, point, key)) = gate {
+        gate.configure(&mut command, point, key);
     }
     ctx.spawn_owned_child(move || {
         // The fixture tree must outlive the child so no export or staged byte
@@ -5810,6 +5804,172 @@ const ARTIFACT_LOG_NEEDLE_BYTES: usize = 4 * 1024;
 #[cfg(feature = "acceptance-harness")]
 const ARTIFACT_SERVER_LOG_ENV: &str = "ANY_MCP_HEADLESS_REDACTED_LOG_FILE";
 
+/// Test-side capability directory for one private artifact child gate.
+///
+/// The production child treats this directory and its nonce as a capability;
+/// all marker names and payloads stay derived from the nonce.
+#[cfg(feature = "acceptance-harness")]
+#[allow(dead_code)]
+#[derive(Clone)]
+struct ChildArtifactGate {
+    directory: PathBuf,
+    nonce: String,
+    key: String,
+    owner: Arc<()>,
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[allow(dead_code)]
+impl ChildArtifactGate {
+    fn create(base: &Path, point: &str, key: &str) -> TestResult<Self> {
+        let digest = Sha256::digest(format!("{}:{}:{}", point, key, unique_suffix()).as_bytes());
+        let nonce = digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let directory = base.join(format!("artifact-gate-{nonce}"));
+        std::fs::create_dir(&directory)
+            .map_err(|_| sentinel_assertion("create artifact gate directory"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| sentinel_assertion("secure artifact gate directory"))?;
+        }
+        Ok(Self {
+            directory,
+            nonce,
+            key: key.to_owned(),
+            owner: Arc::new(()),
+        })
+    }
+
+    fn configure(&self, command: &mut Command, point: &str, key: &str) {
+        command
+            .env("ANY_MCP_ACCEPTANCE_GATE_DIR", &self.directory)
+            .env(
+                "ANY_MCP_ACCEPTANCE_GATE",
+                format!("v1|{point}|{key}|{}", self.nonce),
+            );
+    }
+
+    fn marker(&self, kind: &str) -> PathBuf {
+        self.directory.join(format!("{kind}-{}", self.nonce))
+    }
+
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn wait_ready(&self) -> TestResult<()> {
+        self.wait_marker("ready")
+    }
+    fn wait_done(&self) -> TestResult<()> {
+        self.wait_marker("done")
+    }
+
+    fn wait_marker(&self, kind: &str) -> TestResult<()> {
+        let path = self.marker(kind);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !path.exists() {
+            if std::time::Instant::now() >= deadline {
+                return Err(sentinel_assertion("artifact gate marker timeout"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| sentinel_assertion("inspect artifact gate marker"))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || std::fs::read(&path).ok().as_deref() != Some(format!("{}\n", self.nonce).as_bytes())
+        {
+            return Err(sentinel_assertion("artifact gate marker was invalid"));
+        }
+        Ok(())
+    }
+
+    fn release(&self) -> TestResult<()> {
+        use std::io::Write as _;
+        let path = self.marker("release");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| sentinel_assertion("create artifact gate release marker"))?;
+        file.write_all(format!("{}\n", self.nonce).as_bytes())
+            .map_err(|_| sentinel_assertion("write artifact gate release marker"))?;
+        file.sync_all()
+            .map_err(|_| sentinel_assertion("sync artifact gate release marker"))
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl Drop for ChildArtifactGate {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.owner) != 1 {
+            return;
+        }
+        let _ = self.release();
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+struct ChildArtifactGateHooks(ChildArtifactGate);
+
+#[cfg(feature = "acceptance-harness")]
+struct ChildArtifactGateLease(ChildArtifactGate);
+
+#[cfg(feature = "acceptance-harness")]
+impl ArtifactGateLease for ChildArtifactGateLease {
+    fn wait<'a>(
+        &'a mut self,
+        _timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { tokio::task::block_in_place(|| self.0.wait_ready().is_ok()) })
+    }
+
+    fn release(&self) {
+        let _ = self.0.release();
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl ArtifactGateHooks for ChildArtifactGateHooks {
+    fn arm_import<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            if key != self.0.key() {
+                return Err("stable child import gate key did not match".to_owned());
+            }
+            Ok(Box::new(ChildArtifactGateLease(self.0.clone())) as Box<dyn ArtifactGateLease>)
+        })
+    }
+
+    fn arm_export<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            if key != self.0.key() {
+                return Err("stable child export gate key did not match".to_owned());
+            }
+            Ok(Box::new(ChildArtifactGateLease(self.0.clone())) as Box<dyn ArtifactGateLease>)
+        })
+    }
+
+    fn arm_document<'a>(
+        &'a self,
+        _key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "stable child does not arm a document gate in this owner".to_owned(),
+        )))
+    }
+}
+
 #[cfg(feature = "acceptance-harness")]
 fn artifact_driver_options(control: ArtifactControlPlane) -> DriverOptions {
     // Every control plane uses the standard profile so the advertised artifact
@@ -6059,6 +6219,7 @@ async fn run_spawned_artifact_adversarial_default(
         ctx,
         root_access_attempts: None,
         successful_import_opens: None,
+        gate_hooks: None,
     };
     let observed = {
         let mut driver = OwnedStdioDriver {
@@ -6089,13 +6250,39 @@ async fn run_spawned_artifact_adversarial_default(
             "spawned adversarial artifact child exceeded its output bound",
         ));
     }
-    let execution = observed.map_err(|_| {
+    let mut execution = observed.map_err(|_| {
         eprintln!(
             "artifact adversarial control={} outcome=failed",
             control.as_str()
         );
         sentinel_assertion("spawned adversarial artifact scenarios failed")
     })?;
+    if control == ArtifactControlPlane::SpawnedStableStdio {
+        execution
+            .merge(
+                run_spawned_artifact_gated_race(
+                    ctx,
+                    Arc::new(Mutex::new(ChildCleanupRecord::NotRun)),
+                    audit_needles,
+                    "import-first-upload-chunk",
+                    AdversarialCaseId::Race01,
+                )
+                .await?,
+            )
+            .map_err(|_| sentinel_assertion("merge stable RACE-01 evidence"))?;
+        execution
+            .merge(
+                run_spawned_artifact_gated_race(
+                    ctx,
+                    Arc::new(Mutex::new(ChildCleanupRecord::NotRun)),
+                    audit_needles,
+                    "export-prepublication",
+                    AdversarialCaseId::Race04,
+                )
+                .await?,
+            )
+            .map_err(|_| sentinel_assertion("merge stable RACE-04 evidence"))?;
+    }
     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
     if control == ArtifactControlPlane::SpawnedStableStdio {
         expected.extend(DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS);
@@ -6106,6 +6293,66 @@ async fn run_spawned_artifact_adversarial_default(
     for needle in execution.forbidden_log_needles() {
         record_artifact_log_needle(audit_needles, needle)?;
     }
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_spawned_artifact_gated_race(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    point: &'static str,
+    case: AdversarialCaseId,
+) -> TestResult<AdversarialExecution> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| sentinel_assertion("create gated artifact fixture"))?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)?;
+    let key = format!(
+        "{}-stable-{}",
+        case.as_str().to_ascii_lowercase(),
+        unique_suffix()
+    );
+    let (child, gate) = spawn_disposable_gated_artifact_driver(
+        ctx,
+        cleanup_record,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+        point,
+        key.clone(),
+    )?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("registered gated child disappeared"))?
+        .initialize();
+    let hooks = ChildArtifactGateHooks(gate);
+    let run = ArtifactAdversarialRun {
+        control: ArtifactControlPlane::SpawnedStableStdio,
+        policy: policy.as_ref(),
+        ctx,
+        root_access_attempts: None,
+        successful_import_opens: None,
+        gate_hooks: Some(&hooks),
+    };
+    let observed = {
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&child),
+        };
+        match case {
+            AdversarialCaseId::Race01 => run_artifact_race01(&mut driver, &run, key).await,
+            AdversarialCaseId::Race04 => run_artifact_race04(&mut driver, &run, key).await,
+            _ => Err("unsupported stable gated race case".to_owned()),
+        }
+    };
+    finish_registered_artifact_child(&child, None)
+        .map_err(|_| sentinel_assertion("gated artifact child did not stop cleanly"))?;
+    observed.map_err(|_| sentinel_assertion("gated artifact race failed"))?;
+    let mut execution = AdversarialExecution::default();
+    execution
+        .record_executed(case)
+        .map_err(|_| sentinel_assertion("record gated artifact race"))?;
+    execution.record_quota_not_applicable();
     Ok(execution)
 }
 
@@ -6935,12 +7182,26 @@ async fn run_artifact_cancellation_acceptance(
     ctx: &TestContext,
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
+    gate: &ChildArtifactGate,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> Result<u64, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let objects_before = ctx
+        .client
+        .objects(&ctx.space_id)
+        .limit(200)
+        .list()
+        .await
+        .map_err(|_| "capture cancellation object inventory".to_owned())?
+        .collect_all()
+        .await
+        .map_err(|_| "capture cancellation object inventory".to_owned())?
+        .into_iter()
+        .map(|object| object.id)
+        .collect::<std::collections::BTreeSet<_>>();
     let payload = vec![0x5a; 256 * 1024];
     let expected = artifact_sha256(&payload);
     let allocation = allocate_stage_upload(
@@ -6959,17 +7220,28 @@ async fn run_artifact_cancellation_acceptance(
         "source": {"staged_handle": allocation.handle()},
         "name": format!("artifact-cancel-{suffix}.bin"),
         "media_type": ARTIFACT_FILE_MEDIA_TYPE,
-        "idempotency_key": format!("artifact-cancel-import-{suffix}")
+        "idempotency_key": gate.key()
     });
     let cancelled_id = lock_driver(child)
         .as_mut()
         .ok_or_else(|| "registered cancellation child disappeared".to_owned())?
-        .cancel_tool_call(
-            "file_import",
-            arguments.clone(),
-            &policy.acceptance_pause_ready_path(),
-            &policy.acceptance_pause_released_path(),
-        )?;
+        .cancel_tool_call("file_import", arguments.clone(), gate)?;
+    let objects_after_cancel = ctx
+        .client
+        .objects(&ctx.space_id)
+        .limit(200)
+        .list()
+        .await
+        .map_err(|_| "capture cancellation object inventory".to_owned())?
+        .collect_all()
+        .await
+        .map_err(|_| "capture cancellation object inventory".to_owned())?
+        .into_iter()
+        .map(|object| object.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if objects_after_cancel != objects_before {
+        return Err("cancelled artifact import created an object".to_owned());
+    }
     let imported = driver.call_tool("file_import", arguments).await?;
     let file_id = imported["file_id"]
         .as_str()
@@ -7204,21 +7476,25 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                         .get(cleanup_index)
                         .ok_or_else(|| sentinel_assertion("artifact lifecycle cleanup record missing"))?;
                     cleanup_index = cleanup_index.saturating_add(1);
-                    let child = if scenario == ArtifactLifecycleScenario::Cancellation {
-                        spawn_disposable_paused_artifact_driver(
+                    let (child, gate) = if scenario == ArtifactLifecycleScenario::Cancellation {
+                        let (child, gate) = spawn_disposable_paused_artifact_driver(
                             ctx.as_ref(),
                             Arc::clone(record),
                             Arc::clone(&policy),
                             DriverOptions::STANDARD,
-                        )
+                        )?;
+                        (child, Some(gate))
                     } else {
+                        (
                         spawn_disposable_artifact_driver(
                             ctx.as_ref(),
                             Arc::clone(record),
                             Arc::clone(&policy),
                             DriverOptions::STANDARD,
+                        )?,
+                        None,
                         )
-                    }?;
+                    };
                     lock_driver(&child)
                         .as_mut()
                         .ok_or_else(|| sentinel_assertion("artifact lifecycle child disappeared"))?
@@ -7251,6 +7527,7 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 ctx.as_ref(),
                                 &child,
                                 &policy,
+                                gate.as_ref().ok_or_else(|| sentinel_assertion("cancellation child omitted its gate"))?,
                                 &callback_audit_needles,
                             )
                             .await
