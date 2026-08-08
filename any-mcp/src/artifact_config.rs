@@ -1504,7 +1504,10 @@ fn validate_absolute_native(value: &OsStr) -> Result<PathBuf, ArtifactConfigErro
     use std::os::unix::ffi::OsStrExt;
 
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > NATIVE_PATH_UNITS || bytes[0] != b'/' || bytes.contains(&0)
+    if bytes.is_empty()
+        || bytes.len() > NATIVE_PATH_UNITS
+        || bytes[0] != b'/'
+        || bytes.iter().any(u8::is_ascii_control)
     {
         return Err(ArtifactConfigError::new(ConfigProblem::NativePath));
     }
@@ -1521,7 +1524,10 @@ fn validate_relative_native(value: &OsStr) -> Result<PathBuf, ArtifactConfigErro
     use std::os::unix::ffi::OsStrExt;
 
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > NATIVE_PATH_UNITS || bytes[0] == b'/' || bytes.contains(&0)
+    if bytes.is_empty()
+        || bytes.len() > NATIVE_PATH_UNITS
+        || bytes[0] == b'/'
+        || bytes.iter().any(u8::is_ascii_control)
     {
         return Err(ArtifactConfigError::new(ConfigProblem::RelativePath));
     }
@@ -1562,7 +1568,10 @@ fn validate_absolute_native(value: &OsStr) -> Result<PathBuf, ArtifactConfigErro
     use std::os::windows::ffi::OsStrExt;
 
     let units = value.encode_wide().collect::<Vec<_>>();
-    if units.is_empty() || units.len() > WINDOWS_PATH_UNITS || units.contains(&0) {
+    if units.is_empty()
+        || units.len() > WINDOWS_PATH_UNITS
+        || units.iter().any(|unit| native_windows_control(*unit))
+    {
         return Err(ArtifactConfigError::new(ConfigProblem::NativePath));
     }
     let path = PathBuf::from(value);
@@ -1575,7 +1584,10 @@ fn validate_relative_native(value: &OsStr) -> Result<PathBuf, ArtifactConfigErro
     use std::os::windows::ffi::OsStrExt;
 
     let units = value.encode_wide().collect::<Vec<_>>();
-    if units.is_empty() || units.len() > WINDOWS_PATH_UNITS || units.contains(&0) {
+    if units.is_empty()
+        || units.len() > WINDOWS_PATH_UNITS
+        || units.iter().any(|unit| native_windows_control(*unit))
+    {
         return Err(ArtifactConfigError::new(ConfigProblem::RelativePath));
     }
     let path = PathBuf::from(value);
@@ -1617,16 +1629,27 @@ fn validate_windows_components(path: &Path, absolute: bool) -> Result<(), Artifa
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(test, windows))]
 fn windows_device_name(units: &[u16]) -> bool {
-    let stem = units
+    let mut stem = Vec::new();
+    for unit in units
         .split(|unit| *unit == b'.' as u16)
         .next()
         .unwrap_or(units)
-        .iter()
-        .filter_map(|unit| u8::try_from(*unit).ok())
-        .map(|byte| byte.to_ascii_uppercase())
-        .collect::<Vec<_>>();
+    {
+        let byte = match *unit {
+            0x00b9 => b'1',
+            0x00b2 => b'2',
+            0x00b3 => b'3',
+            unit => {
+                let Ok(byte) = u8::try_from(unit) else {
+                    return false;
+                };
+                byte
+            }
+        };
+        stem.push(byte.to_ascii_uppercase());
+    }
     matches!(
         stem.as_slice(),
         b"CON"
@@ -1652,6 +1675,11 @@ fn windows_device_name(units: &[u16]) -> bool {
             | b"LPT8"
             | b"LPT9"
     )
+}
+
+#[cfg(any(test, windows))]
+fn native_windows_control(unit: u16) -> bool {
+    unit <= 0x1f || unit == 0x7f
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2028,6 +2056,65 @@ mod tests {
                 RelativeNativePath::from_utf8(invalid).is_err(),
                 "{invalid:?}"
             );
+        }
+    }
+
+    #[test]
+    fn native_relative_paths_reject_ascii_controls() {
+        #[cfg(unix)]
+        for path in [
+            b"safe/nul\0byte".as_slice(),
+            b"safe/line\nfeed".as_slice(),
+            b"safe/delete\x7f".as_slice(),
+        ] {
+            let encoded = URL_SAFE_NO_PAD.encode(path);
+            let error = RelativeNativePath::from_native("unix-bytes-base64url", &encoded)
+                .expect_err("native Unix control byte");
+            assert_eq!(error.to_string(), "invalid any-mcp relative artifact path");
+        }
+
+        #[cfg(windows)]
+        for path in ["safe/line\nfeed", "safe/delete\u{7f}"] {
+            let bytes = path
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>();
+            let encoded = URL_SAFE_NO_PAD.encode(bytes);
+            let error = RelativeNativePath::from_native("windows-wtf16le-base64url", &encoded)
+                .expect_err("native Windows control unit");
+            assert_eq!(error.to_string(), "invalid any-mcp relative artifact path");
+        }
+
+        for unit in [0, 0x1b, 0x1f, 0x7f] {
+            assert!(native_windows_control(unit));
+        }
+        for unit in [0x20, b'A' as u16, 0x80] {
+            assert!(!native_windows_control(unit));
+        }
+    }
+
+    #[test]
+    fn windows_reserved_device_components_are_path_syntax() {
+        for name in [
+            "CON",
+            "nul.txt",
+            "Com1",
+            "LPT9.log",
+            "COM¹",
+            "COM².bin",
+            "COM³",
+            "LPT¹",
+            "LPT².txt",
+            "LPT³",
+        ] {
+            assert!(windows_device_name(
+                &name.encode_utf16().collect::<Vec<_>>()
+            ));
+        }
+        for name in ["console", "COM10", "LPT0", "nulled.txt", "CéON"] {
+            assert!(!windows_device_name(
+                &name.encode_utf16().collect::<Vec<_>>()
+            ));
         }
     }
 

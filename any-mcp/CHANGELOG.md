@@ -30,6 +30,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reject ASCII control bytes and units in native artifact paths before I/O,
+  and classify Windows reserved device components as invalid path syntax with
+  the fixed validation response.
 - Reject import and export root identifiers that collide after ASCII case
   folding, preventing platform- and operator-ambiguous aliases while
   preserving the configured spelling of non-colliding IDs.

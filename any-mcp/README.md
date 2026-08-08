@@ -278,7 +278,10 @@ path_native = { encoding = "unix-bytes-base64url", value = "L2..." }
 
 Windows uses `windows-wtf16le-base64url`. The parser decodes these values
 directly into native OS strings and applies component, traversal, prefix, and
-length checks without lossy Unicode conversion. Root activation retains
+length checks without lossy Unicode conversion. ASCII C0 controls and DEL are
+invalid in either native representation; Windows reserved device components
+are also invalid path syntax, so both classes return fixed `validation` errors
+before root lookup or filesystem I/O. Root activation retains
 directory handles. The selected TOML policy is the only source of authority; on
 stable stdio an MCP client that advertises the roots capability can additionally
 narrow it (see [Client roots](#client-roots)), never widen it.
