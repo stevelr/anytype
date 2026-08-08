@@ -3183,8 +3183,8 @@ async fn headless_artifact_dynamic_filesystem_direct_scenarios() {
         .expect("bounded dynamic filesystem owner evidence");
 }
 
-/// Runs PART-01 through PART-06 against the raw staging listener and direct
-/// artifact handlers.
+/// Runs PART-01 through PART-07 and PART-11 against the raw staging listener
+/// and direct artifact handlers.
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
@@ -3197,10 +3197,15 @@ async fn headless_artifact_partial_write_direct_scenarios() {
             Box::pin(async move {
                 let log_baseline = required_artifact_log_baseline()?;
                 let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
-                let policy = ArtifactPolicyFixture::create(&ctx.space_id).map_err(|_| {
-                    TestError::Assertion {
-                        message: "create partial-write acceptance policy".to_owned(),
-                    }
+                let policy = ArtifactPolicyFixture::create_with(
+                    &ctx.space_id,
+                    ArtifactPolicyOptions {
+                        limits: ArtifactLimitProfile::Quota,
+                        ..ArtifactPolicyOptions::default()
+                    },
+                )
+                .map_err(|_| TestError::Assertion {
+                    message: "create partial-write acceptance policy".to_owned(),
                 })?;
                 log_needles.push(policy.forbidden_log_needle());
                 let execution = {
@@ -3228,6 +3233,8 @@ async fn headless_artifact_partial_write_direct_scenarios() {
                         AdversarialCaseId::Part04,
                         AdversarialCaseId::Part05,
                         AdversarialCaseId::Part06,
+                        AdversarialCaseId::Part07,
+                        AdversarialCaseId::Part11,
                     ])
                     .map_err(|_| TestError::Assertion {
                         message: "direct partial-write partition was incomplete".to_owned(),

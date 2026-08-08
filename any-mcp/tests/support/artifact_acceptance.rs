@@ -3439,6 +3439,103 @@ pub async fn run_artifact_partial_write_protocol_cases(
     execution.record_executed(AdversarialCaseId::Part06)?;
     release_stage_upload(driver, &allocation).await?;
 
+    let file_id = adversarial_seed_file(driver, run, "part11-source.bin").await?;
+    let exported = driver
+        .call_tool(
+            "file_export",
+            json!({
+                "space": run.ctx.space_id,
+                "file_id": file_id,
+                "destination": {"remote": true},
+                "idempotency_key": format!("part11-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    let export_handle = required_str(&exported, "/receipt/staging_handle")?;
+    let export_url = required_str(&exported, "/receipt/staging_url")?;
+    execution.record_forbidden_log_needle(export_handle.as_bytes())?;
+    let unsatisfiable = client
+        .send(
+            Method::GET,
+            &export_url,
+            &export_handle,
+            &[(RANGE, HeaderValue::from_static("bytes=999999-"))],
+            Vec::new(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 416,
+        body: b"invalid range\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: unsatisfiable.status,
+        body: &unsatisfiable.body,
+    })?;
+    let malformed = client
+        .send(
+            Method::GET,
+            &export_url,
+            &export_handle,
+            &[
+                (RANGE, HeaderValue::from_static("bytes=0-0")),
+                (RANGE, HeaderValue::from_static("bytes=1-1")),
+            ],
+            Vec::new(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 400,
+        body: b"invalid request\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: malformed.status,
+        body: &malformed.body,
+    })?;
+    if [unsatisfiable.body.as_slice(), malformed.body.as_slice()]
+        .iter()
+        .any(|body| {
+            body.windows(ARTIFACT_FILE_PAYLOAD.len())
+                .any(|window| window == ARTIFACT_FILE_PAYLOAD)
+        })
+    {
+        return Err("PART-11 emitted artifact payload bytes on a range refusal".to_owned());
+    }
+    driver
+        .call_tool("artifact_release", json!({"handle": export_handle}))
+        .await?;
+    execution.record_executed(AdversarialCaseId::Part11)?;
+
+    let quota_guard = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        400 * 1024,
+        "application/octet-stream",
+        None,
+    )
+    .await?;
+    execution.record_forbidden_log_needle(quota_guard.handle().as_bytes())?;
+    let staging_before_refusal = run.policy.staging_snapshot()?;
+    let status_before_refusal = adversarial_quota_snapshot(driver).await?;
+    let quota_refusal = driver
+        .call_tool_error(
+            "artifact_stage_upload",
+            json!({
+                "space": run.ctx.space_id,
+                "size_bytes": 700 * 1024,
+                "media_type": "application/octet-stream",
+            }),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::BoundedResult)
+        .assert_tool_error(&quota_refusal)?;
+    if run.policy.staging_snapshot()? != staging_before_refusal
+        || adversarial_quota_snapshot(driver).await? != status_before_refusal
+    {
+        return Err("PART-07 changed quota or staging state after allocation refusal".to_owned());
+    }
+    release_stage_upload(driver, &quota_guard).await?;
+    execution.record_executed(AdversarialCaseId::Part07)?;
+
     finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }

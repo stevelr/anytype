@@ -12,8 +12,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   regressions for uniform bearer refusal, route, direction, and space binding,
   strict request grammar, rate recovery, and request-permit shedding. The
   partial-write owner now drives malformed raw HTTP, disconnect/resume, offset,
-  hash, inventory, and quota assertions; the process-crash owner captures a
-  deterministic kill during a JSON-RPC frame. These and the remaining handle,
+  hash, inventory, quota-allocation, and download-range assertions; the
+  process-crash owner captures a deterministic kill during a JSON-RPC frame.
+  These and the remaining handle,
   process-crash, output-flood, and failure-cleanup rows stay pending until their
   live case-specific owners pass.
 - Add closed real-server adversarial artifact coverage for 43 traversal,

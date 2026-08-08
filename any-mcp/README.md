@@ -1867,7 +1867,8 @@ keeps unproved rows pending until their executable owner passes, while
 implemented rows are executed or explicitly unsupported for a required
 platform primitive. Pending closure owners include raw-listener assertions for
 partial offsets, short bodies, resumable disconnects, overruns, incomplete
-imports, and replayed chunks, plus a spawned kill-mid-frame assertion that
+imports, replayed chunks, allocation-time quota refusal, and rejected download
+ranges, plus a spawned kill-mid-frame assertion that
 accepts only complete JSON-RPC frames followed by one bounded, truncated final
 fragment. Their inventory status advances only after the live owner passes.
 Implemented coverage exercises traversal and native-path grammar,
