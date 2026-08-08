@@ -1287,10 +1287,23 @@ impl ArtifactStaging {
     }
 
     /// Activates private root authority and a fresh handle generation.
+    #[cfg(test)]
     pub(crate) async fn activate(
         config: &StagingConfig,
         limits: &ArtifactLimits,
         local_roots: &RootRegistry,
+        shutdown: CancellationToken,
+    ) -> Result<Self, StagingError> {
+        Self::activate_with_policy_digest(config, limits, local_roots, [0; 32], shutdown).await
+    }
+
+    /// Activates staging while binding handles and durable records to the
+    /// runtime's canonical, credential-free configuration evidence.
+    pub(crate) async fn activate_with_policy_digest(
+        config: &StagingConfig,
+        limits: &ArtifactLimits,
+        local_roots: &RootRegistry,
+        runtime_policy_digest: [u8; 32],
         shutdown: CancellationToken,
     ) -> Result<Self, StagingError> {
         if !config.enabled {
@@ -1311,6 +1324,7 @@ impl ArtifactStaging {
         let generation = bytes_hex(&digest(&[
             b"any-mcp/artifact-generation/v2",
             &generation_key,
+            &runtime_policy_digest,
             &policy_digest,
         ]));
         let public_base_url = config

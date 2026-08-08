@@ -21,6 +21,7 @@ use rmcp::{
     service::{QuitReason, RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{IntoTransport, Transport},
 };
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -37,8 +38,61 @@ use crate::{
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
     optional_toolsets::OptionalToolsetSelection,
     server::AnyMcpServer,
-    space_policy::{PolicyClient, SpaceAuthority},
+    space_policy::{PolicyClient, SpaceAuthority, SpacePolicy},
 };
+
+fn hash_generation_part(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn runtime_artifact_policy_digest(
+    profile: ApplicationProfile,
+    read_only: bool,
+    optional_toolsets: &OptionalToolsetSelection,
+    artifact: &ArtifactConfig,
+    authority: &SpaceAuthority,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"any-mcp/configuration-policy/v1\0");
+    hasher.update(1_u64.to_be_bytes());
+    hash_generation_part(&mut hasher, profile.as_str().as_bytes());
+    hasher.update([u8::from(read_only)]);
+    for name in optional_toolsets.names() {
+        hash_generation_part(&mut hasher, name.as_bytes());
+    }
+    match authority.policy() {
+        SpacePolicy::AllReadWrite => hasher.update([0]),
+        SpacePolicy::None => hasher.update([1]),
+        SpacePolicy::OnlyReadWrite(spaces) => {
+            hasher.update([2]);
+            for space in spaces {
+                hash_generation_part(&mut hasher, space.as_str().as_bytes());
+            }
+        }
+    }
+    for validator in artifact.validators() {
+        hash_generation_part(&mut hasher, validator.id.as_str().as_bytes());
+        hash_generation_part(&mut hasher, b"file-mime/v1");
+        hash_generation_part(&mut hasher, validator.sha256.as_bytes());
+        hasher.update([u8::from(validator.required)]);
+        for media_type in &validator.mime {
+            hash_generation_part(&mut hasher, media_type.as_bytes());
+        }
+        for value in [
+            validator.timeout.as_nanos(),
+            u128::from(validator.memory_bytes),
+            u128::from(validator.input_bytes),
+            u128::try_from(validator.stdout_bytes).unwrap_or(u128::MAX),
+            u128::try_from(validator.stderr_bytes).unwrap_or(u128::MAX),
+            u128::try_from(validator.fields).unwrap_or(u128::MAX),
+            u128::try_from(validator.field_bytes).unwrap_or(u128::MAX),
+        ] {
+            hasher.update(value.to_be_bytes());
+        }
+    }
+    hasher.finalize().into()
+}
 
 /// Availability established once during authenticated startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +291,13 @@ impl RuntimeContext {
         let authority = SpaceAuthority::initialize(&client, &config.artifact.spaces)
             .await
             .map_err(|_| StartupError::SpacePolicy)?;
+        let artifact_policy_digest = runtime_artifact_policy_digest(
+            config.profile,
+            config.read_only,
+            &config.optional_toolsets,
+            &config.artifact,
+            &authority,
+        );
         let mut runtime = Self::from_parts_with_authority(
             client,
             RuntimeParts {
@@ -254,10 +315,11 @@ impl RuntimeContext {
             config.artifact.staging().filter(|staging| staging.enabled),
         ) {
             (Some(roots), Some(staging)) => Some(
-                ArtifactStaging::activate(
+                ArtifactStaging::activate_with_policy_digest(
                     staging,
                     &config.artifact.limits,
                     roots,
+                    artifact_policy_digest,
                     runtime.shutdown.clone(),
                 )
                 .await
@@ -839,6 +901,13 @@ impl RuntimeContext {
         let authority = SpaceAuthority::initialize(&client, &artifact.spaces)
             .await
             .map_err(|_| StartupError::SpacePolicy)?;
+        let artifact_policy_digest = runtime_artifact_policy_digest(
+            ApplicationProfile::Standard,
+            read_only,
+            &optional_toolsets,
+            artifact,
+            &authority,
+        );
         let mut runtime = Self::from_parts_with_authority(
             client,
             RuntimeParts {
@@ -856,10 +925,11 @@ impl RuntimeContext {
             artifact.staging().filter(|staging| staging.enabled),
         ) {
             (Some(roots), Some(staging)) => Some(
-                ArtifactStaging::activate(
+                ArtifactStaging::activate_with_policy_digest(
                     staging,
                     &artifact.limits,
                     roots,
+                    artifact_policy_digest,
                     runtime.shutdown.clone(),
                 )
                 .await
@@ -1458,6 +1528,35 @@ mod tests {
     use tracing::instrument::WithSubscriber;
 
     use super::*;
+
+    #[test]
+    fn artifact_generation_evidence_binds_canonical_space_policy() {
+        let artifact = ArtifactConfig::default();
+        let optional = OptionalToolsetSelection::default();
+        let all = SpaceAuthority::from_policy_for_tests(SpacePolicy::AllReadWrite);
+        let only = SpaceAuthority::from_policy_for_tests(SpacePolicy::OnlyReadWrite(
+            [crate::domain::SpaceId::new("space-1").expect("space ID")]
+                .into_iter()
+                .collect(),
+        ));
+
+        assert_ne!(
+            runtime_artifact_policy_digest(
+                ApplicationProfile::Standard,
+                false,
+                &optional,
+                &artifact,
+                &all,
+            ),
+            runtime_artifact_policy_digest(
+                ApplicationProfile::Standard,
+                false,
+                &optional,
+                &artifact,
+                &only,
+            )
+        );
+    }
 
     #[tokio::test]
     async fn settlement_panic_is_terminal_and_drainable() {
