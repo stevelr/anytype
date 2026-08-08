@@ -3066,6 +3066,8 @@ mod tests {
             DisposableCallbackStage::CheckboxEqualFalse,
             DisposableCallbackStage::CheckboxNotEqualTrue,
             DisposableCallbackStage::CheckboxNotEqualFalse,
+            DisposableCallbackStage::NumberRange,
+            DisposableCallbackStage::NumberCheckboxAnd,
         ];
         assert_eq!(
             stages.map(DisposableCallbackStage::as_str),
@@ -3089,6 +3091,8 @@ mod tests {
                 "checkbox_equal_false",
                 "checkbox_not_equal_true",
                 "checkbox_not_equal_false",
+                "number_range",
+                "number_checkbox_and",
             ]
         );
     }

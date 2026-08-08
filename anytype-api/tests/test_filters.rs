@@ -25,7 +25,7 @@
 //! The configured prefix grants case-insensitive deletion authority over every
 //! matching space and must be reserved exclusively for this test. The ignored
 //! matrix first requires both unfiltered endpoints to converge to the complete
-//! four-object cohort, then executes all eleven fixed cases independently on
+//! four-object cohort, then executes all thirteen fixed cases independently on
 //! both endpoints. A semantic mismatch must repeat as the same sorted identity
 //! multiset three times before classification; otherwise it is `unstable`.
 //! After exact space deletion and final cleanup, the test reports static labels,
@@ -33,11 +33,11 @@
 //! validated HTTP status/class when available. Request values, URLs, response
 //! bodies, credentials, names, and fixture identities are never retained.
 //!
-//! On the `anytype-cli` 0.3.6 acceptance server, all eleven object-list cells
+//! On the `anytype-cli` 0.3.6 acceptance server, the original eleven object-list cells
 //! return HTTP 400. Scoped search passes number `eq`, `gt`, `gte`, negative
 //! decimal `eq`, checkbox `eq true`, and checkbox `ne false`; its other five
 //! cells stably return one extra cleanup-owned fixture. The expected test exit
-//! is therefore nonzero, but output is evidence only when all 22 rows and
+//! is therefore nonzero, but output is evidence only when all 26 rows and
 //! `cleanup=verified_absent` are present. Keep the test ignored as a deliberate
 //! compatibility probe until those upstream behaviors change.
 
@@ -53,7 +53,6 @@ use std::{
 
 use anytype::{
     prelude::*,
-    test_assert,
     test_util::{
         DisposableCallbackStage, DisposableFailureCategory, DisposableRun, TestContext, TestError,
         TestResult, disposable_callback_error, with_disposable_space_context, with_test_context,
@@ -177,10 +176,12 @@ enum NumericCheckboxCase {
     CheckboxEqualFalse,
     CheckboxNotEqualTrue,
     CheckboxNotEqualFalse,
+    NumberRange,
+    NumberCheckboxAnd,
 }
 
 impl NumericCheckboxCase {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::NumberEqualInteger,
         Self::NumberNotEqual,
         Self::NumberLess,
@@ -192,28 +193,38 @@ impl NumericCheckboxCase {
         Self::CheckboxEqualFalse,
         Self::CheckboxNotEqualTrue,
         Self::CheckboxNotEqualFalse,
+        Self::NumberRange,
+        Self::NumberCheckboxAnd,
     ];
 
-    fn filter(self) -> TestResult<Filter> {
-        let filter = match self {
-            Self::NumberEqualInteger => Filter::number_equal("priority", 5),
-            Self::NumberNotEqual => Filter::number_not_equal("priority", 5),
-            Self::NumberLess => Filter::number_less("priority", 5),
-            Self::NumberLessOrEqual => Filter::number_less_or_equal("priority", 5),
-            Self::NumberGreater => Filter::number_greater("priority", 5),
-            Self::NumberGreaterOrEqual => Filter::number_greater_or_equal("priority", 5),
-            Self::NumberEqualDecimal => Filter::number_equal(
+    fn filters(self) -> TestResult<Vec<Filter>> {
+        let filters = match self {
+            Self::NumberEqualInteger => vec![Filter::number_equal("priority", 5)],
+            Self::NumberNotEqual => vec![Filter::number_not_equal("priority", 5)],
+            Self::NumberLess => vec![Filter::number_less("priority", 5)],
+            Self::NumberLessOrEqual => vec![Filter::number_less_or_equal("priority", 5)],
+            Self::NumberGreater => vec![Filter::number_greater("priority", 5)],
+            Self::NumberGreaterOrEqual => vec![Filter::number_greater_or_equal("priority", 5)],
+            Self::NumberEqualDecimal => vec![Filter::number_equal(
                 "priority",
                 serde_json::Number::from_f64(-2.5).ok_or_else(|| TestError::Assertion {
                     message: "finite decimal filter must be representable".to_owned(),
                 })?,
-            ),
-            Self::CheckboxEqualTrue => Filter::checkbox_equal("done", true),
-            Self::CheckboxEqualFalse => Filter::checkbox_equal("done", false),
-            Self::CheckboxNotEqualTrue => Filter::checkbox_not_equal("done", true),
-            Self::CheckboxNotEqualFalse => Filter::checkbox_not_equal("done", false),
+            )],
+            Self::CheckboxEqualTrue => vec![Filter::checkbox_true("done")],
+            Self::CheckboxEqualFalse => vec![Filter::checkbox_false("done")],
+            Self::CheckboxNotEqualTrue => vec![Filter::checkbox_not_equal("done", true)],
+            Self::CheckboxNotEqualFalse => vec![Filter::checkbox_not_equal("done", false)],
+            Self::NumberRange => vec![
+                Filter::number_greater_or_equal("priority", 3),
+                Filter::number_less_or_equal("priority", 7),
+            ],
+            Self::NumberCheckboxAnd => vec![
+                Filter::number_less("priority", 5),
+                Filter::checkbox_true("done"),
+            ],
         };
-        Ok(filter)
+        Ok(filters)
     }
 
     const fn expected_indexes(self) -> &'static [usize] {
@@ -227,6 +238,8 @@ impl NumericCheckboxCase {
             Self::NumberEqualDecimal => &[0],
             Self::CheckboxEqualTrue | Self::CheckboxNotEqualFalse => &[0],
             Self::CheckboxEqualFalse | Self::CheckboxNotEqualTrue => &[1, 2],
+            Self::NumberRange => &[1],
+            Self::NumberCheckboxAnd => &[0],
         }
     }
 
@@ -243,6 +256,8 @@ impl NumericCheckboxCase {
             Self::CheckboxEqualFalse => "checkbox eq false",
             Self::CheckboxNotEqualTrue => "checkbox ne true",
             Self::CheckboxNotEqualFalse => "checkbox ne false",
+            Self::NumberRange => "number range",
+            Self::NumberCheckboxAnd => "number checkbox and",
         }
     }
 
@@ -259,6 +274,8 @@ impl NumericCheckboxCase {
             Self::CheckboxEqualFalse => DisposableCallbackStage::CheckboxEqualFalse,
             Self::CheckboxNotEqualTrue => DisposableCallbackStage::CheckboxNotEqualTrue,
             Self::CheckboxNotEqualFalse => DisposableCallbackStage::CheckboxNotEqualFalse,
+            Self::NumberRange => DisposableCallbackStage::NumberRange,
+            Self::NumberCheckboxAnd => DisposableCallbackStage::NumberCheckboxAnd,
         }
     }
 
@@ -275,6 +292,18 @@ impl NumericCheckboxCase {
             Self::CheckboxEqualFalse => 8,
             Self::CheckboxNotEqualTrue => 9,
             Self::CheckboxNotEqualFalse => 10,
+            Self::NumberRange => 11,
+            Self::NumberCheckboxAnd => 12,
+        }
+    }
+
+    const fn expected_checkbox(self) -> Option<bool> {
+        match self {
+            Self::CheckboxEqualTrue | Self::CheckboxNotEqualFalse | Self::NumberCheckboxAnd => {
+                Some(true)
+            }
+            Self::CheckboxEqualFalse | Self::CheckboxNotEqualTrue => Some(false),
+            _ => None,
         }
     }
 }
@@ -620,7 +649,7 @@ fn closed_filter_case_outcome(
 fn filter_case_inventory_aggregates_in_canonical_order() -> TestResult<()> {
     let incomplete = FilterCaseInventory::new()
         .render()
-        .expect_err("a partial 22-slot inventory must fail closed");
+        .expect_err("a partial 26-slot inventory must fail closed");
     assert!(matches!(incomplete, TestError::Assertion { .. }));
 
     let mut inventory = FilterCaseInventory::new();
@@ -654,7 +683,7 @@ fn filter_case_inventory_aggregates_in_canonical_order() -> TestResult<()> {
     assert_eq!(
         lines.last().copied(),
         Some(
-            "endpoint=scoped_search case=checkbox ne false result=pass identity=exact expected_count=1 observed_unique_count=1 missing_count=0 unexpected_fixture_count=0 non_fixture_count=0 duplicate_count=0"
+            "endpoint=scoped_search case=number checkbox and result=pass identity=exact expected_count=1 observed_unique_count=1 missing_count=0 unexpected_fixture_count=0 non_fixture_count=0 duplicate_count=0"
         )
     );
     assert_eq!(inventory.deviation_count(), 0);
@@ -889,7 +918,9 @@ async fn filter_endpoint_objects(
                 .filter(Filter::type_in([type_key]))
                 .limit(100);
             if let Some(case) = case {
-                request = request.filter(case.filter()?);
+                for filter in case.filters()? {
+                    request = request.filter(filter);
+                }
             }
             Ok(request.list().await?.collect_all().await?)
         }
@@ -900,7 +931,7 @@ async fn filter_endpoint_objects(
                 .types([type_key])
                 .limit(100);
             if let Some(case) = case {
-                request = request.filters(FilterExpression::from(vec![case.filter()?]));
+                request = request.filters(FilterExpression::from(case.filters()?));
             }
             Ok(request.execute().await?.collect_all().await?)
         }
@@ -957,6 +988,16 @@ async fn observe_filter_endpoint_case(
 
     for attempt in 1..=MAX_OBSERVATION_ATTEMPTS {
         let actual = filter_endpoint_objects(ctx, type_key, endpoint, Some(case)).await?;
+        if let Some(expected) = case.expected_checkbox()
+            && actual
+                .iter()
+                .any(|object| object.get_property_bool("done") != Some(expected))
+        {
+            return Err(TestError::Assertion {
+                message: "checkbox filter returned an object without the expected hydrated value"
+                    .to_owned(),
+            });
+        }
         let actual_ids = sorted_ids(&actual);
         let observation = IdentityObservation::classify(&expected, &fixtures, &actual_ids);
         if observation.relation == IdentityRelation::Exact {
@@ -1047,219 +1088,9 @@ async fn test_filter_is_empty() -> TestResult<()> {
     .await
 }
 
-#[tokio::test]
-#[test_log::test]
-#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
-#[serial]
-async fn test_filter_checkbox_true() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let task_name = unique_test_name("test checkbox task done");
-        let task = create_object_with_retry("Filter Checkbox True", || async {
-            ctx.client
-                .new_object(&ctx.space_id, "task")
-                .name(&task_name)
-                .body("Important task")
-                .set_checkbox("done", true)
-                .create()
-                .await
-        })
-        .await?;
-        ctx.register_object(&task.id);
-
-        // Filter for checked items
-        let results = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::checkbox_true("done"))
-            .limit(100)
-            .list()
-            .await?
-            .collect_all()
-            .await?;
-
-        let found = results.iter().any(|obj| obj.id == task.id);
-        test_assert!(found, "Expected to find object with done=true");
-
-        test_assert!(
-            results
-                .iter()
-                .all(|obj| obj.get_property_bool("done") == Some(true)),
-            "all 'done' should be true based on filter"
-        );
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[test_log::test]
-#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
-#[serial]
-async fn test_filter_checkbox_false() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let task_name = unique_test_name("test checkbox task not done");
-        let task = create_object_with_retry("Filter Checkbox False", || async {
-            ctx.client
-                .new_object(&ctx.space_id, "task")
-                .name(&task_name)
-                .body("Important task")
-                .set_checkbox("done", false)
-                .create()
-                .await
-        })
-        .await?;
-        ctx.register_object(&task.id);
-
-        // Filter for checked items
-        let results = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::checkbox_false("done"))
-            .limit(100)
-            .list()
-            .await?
-            .collect_all()
-            .await?;
-
-        let found = results.iter().any(|obj| obj.id == task.id);
-        test_assert!(found, "Expected to find object with done=false");
-
-        for t in results.iter() {
-            eprintln!(
-                "{}: {:?}",
-                t.name.as_deref().unwrap_or("(unnamed)"),
-                t.get_property("done"),
-            );
-        }
-        test_assert!(
-            results
-                .iter()
-                .all(|obj| obj.get_property_bool("done") == Some(false)),
-            "all 'done' should be false based on filter"
-        );
-
-        Ok(())
-    })
-    .await
-}
-
 // =============================================================================
 // Numeric Filter Tests
 // =============================================================================
-
-#[tokio::test]
-#[test_log::test]
-#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
-#[serial]
-async fn test_filter_number_equal() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let (test_objs, _type_key) = create_test_objects(&ctx).await?;
-
-        // Filter for priority equal to 5
-        let results = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::number_equal("priority", 5))
-            .limit(100)
-            .list()
-            .await?;
-
-        // Object 2 has priority=5
-        let found = results.iter().any(|obj| obj.id == test_objs[1].id);
-
-        assert!(found, "Expected to find object with priority=5");
-
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[test_log::test]
-#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
-#[serial]
-async fn test_filter_number_greater_than() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let (test_objs, _type_key) = create_test_objects(&ctx).await?;
-
-        // Filter for priority greater than 5
-        let results = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::number_greater("priority", 5))
-            .limit(100)
-            .list()
-            .await?;
-
-        // Object 3 has priority=10
-        let found = results.iter().any(|obj| obj.id == test_objs[2].id);
-
-        assert!(found, "Expected to find object with priority > 5");
-
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[test_log::test]
-#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
-#[serial]
-async fn test_filter_number_less_than() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let (test_objs, _type_key) = create_test_objects(&ctx).await?;
-
-        // Filter for priority less than 5
-        let results = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::number_less("priority", 5))
-            .limit(100)
-            .list()
-            .await?;
-
-        // Object 1 has priority=1
-        let found = results.iter().any(|obj| obj.id == test_objs[0].id);
-
-        assert!(found, "Expected to find object with priority < 5");
-
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[test_log::test]
-#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
-#[serial]
-async fn test_filter_number_range() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let (test_objs, _type_key) = create_test_objects(&ctx).await?;
-
-        // Filter for priority in range [3, 7] using >= 3 AND <= 7
-        let results = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::number_greater_or_equal("priority", 3))
-            .filter(Filter::number_less_or_equal("priority", 7))
-            .limit(100)
-            .list()
-            .await?;
-
-        // Only object 2 has priority=5 in range
-        let found_obj2 = results.iter().any(|obj| obj.id == test_objs[1].id);
-        let not_found_obj1 = !results.iter().any(|obj| obj.id == test_objs[0].id);
-        let not_found_obj3 = !results.iter().any(|obj| obj.id == test_objs[2].id);
-
-        assert!(
-            found_obj2 && not_found_obj1 && not_found_obj3,
-            "Expected only object with priority in range [3, 7]"
-        );
-
-        Ok(())
-    })
-    .await
-}
 
 #[tokio::test]
 #[ignore = "upstream compatibility probe; requires disposable real-server admission"]
@@ -1611,44 +1442,6 @@ async fn test_filter_select_not_in() -> TestResult<()> {
 // =============================================================================
 // FilterExpression Composition Tests
 // =============================================================================
-
-#[tokio::test]
-#[test_log::test]
-#[ignore = "legacy shared-space case; covered by the cleanup-owned condition matrix"]
-#[serial]
-async fn test_filter_expression_and() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let type_key = ensure_properties_and_type(&ctx).await?;
-
-        // create the object
-        let new_obj = create_object_with_retry("Filter Expression And", || async {
-            ctx.client
-                .new_object(&ctx.space_id, &type_key)
-                .set_number("priority", 3)
-                .set_checkbox("done", true)
-                .create()
-                .await
-        })
-        .await?;
-        ctx.register_object(&new_obj.id);
-
-        // Combine filters: priority < 5 AND done = true
-        let results = ctx
-            .client
-            .objects(&ctx.space_id)
-            .filter(Filter::number_less("priority", 5))
-            .filter(Filter::checkbox_true("done"))
-            .limit(100)
-            .list()
-            .await?;
-
-        assert!(!results.is_empty(), "filter should find a match");
-        assert!(results.iter().any(|obj| obj.id == new_obj.id));
-
-        Ok(())
-    })
-    .await
-}
 
 #[tokio::test]
 #[test_log::test]

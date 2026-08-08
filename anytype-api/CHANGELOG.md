@@ -16,8 +16,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Added
 
 - Add a closed ignored-test inventory and protected disposable live gate. The
-  manifest separates 15 required cleanup-owned tests, three scheduled
-  characterization probes, and 11 excluded ambient or manual probes. Reproduce
+  manifest separates 17 required cleanup-owned tests, three scheduled
+  characterization probes, and two excluded ambient or manual probes. Reproduce
   the offline inventory with:
 
   ```sh
@@ -39,6 +39,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
   python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gate-manifest.toml
   ```
+- Replace seven superseded ambient filter cases with stronger matrix rows for
+  checkbox hydration, inclusive ranges, and numeric-plus-checkbox conjunctions
+  across both list endpoints. The two former ambient Set/view probes now create
+  source-backed Sets and collections inside cleanup-owned disposable spaces and
+  run in the required live gate.
 
 ---
 

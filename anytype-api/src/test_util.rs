@@ -23,7 +23,7 @@ use anytype_rpc::{
                 relation::add as add_dataview_relation,
                 view::{create as create_dataview_view, update as update_dataview_view},
             },
-            object::{create_object_type, show as object_show},
+            object::{create_object_type, create_set, show as object_show},
             space::delete as space_delete,
             template::create_from_object as template_create_from_object,
         },
@@ -210,6 +210,10 @@ pub enum DisposableCallbackStage {
     CheckboxNotEqualTrue,
     /// Checkbox inequality with `false`.
     CheckboxNotEqualFalse,
+    /// Inclusive numeric range composition.
+    NumberRange,
+    /// Numeric and checkbox filter composition.
+    NumberCheckboxAnd,
 }
 
 /// Closed, payload-free disposable diagnostic category.
@@ -396,6 +400,8 @@ closed_diagnostic_display!(DisposableCallbackStage, {
     DisposableCallbackStage::CheckboxEqualFalse => "checkbox_equal_false",
     DisposableCallbackStage::CheckboxNotEqualTrue => "checkbox_not_equal_true",
     DisposableCallbackStage::CheckboxNotEqualFalse => "checkbox_not_equal_false",
+    DisposableCallbackStage::NumberRange => "number_range",
+    DisposableCallbackStage::NumberCheckboxAnd => "number_checkbox_and",
 });
 closed_diagnostic_display!(DisposableFailureCategory, {
     DisposableFailureCategory::HttpTransport => "http_transport",
@@ -911,6 +917,106 @@ impl TestContext {
                 .claim_collection_fixture(&self.space_id, &created.id, &exact_type.id)
         {
             return Err(collection_fixture_ownership_error());
+        }
+        Ok(created)
+    }
+
+    /// Creates and privately registers a cleanup-owned Set with one exact type source.
+    ///
+    /// REST object creation cannot supply Heart's internal `setOf` relation, so
+    /// live view tests use the authenticated Set RPC. The helper sends the
+    /// mutation once, then requires a complete pre-create snapshot plus fresh
+    /// REST and `ObjectShow` evidence before the returned ID gains cleanup
+    /// authority. An indeterminate mutation is contained by the caller's
+    /// cleanup-owned disposable space and is never retried here.
+    pub async fn create_set_fixture(
+        &self,
+        source_type: &Type,
+        name: impl Into<String>,
+    ) -> TestResult<Object> {
+        let name = name.into();
+        let limits = &self.client.get_config().limits;
+        limits.validate_id(&self.space_id, "space_id")?;
+        limits.validate_name(&name, "Set fixture")?;
+        limits.validate_id(&source_type.id, "Set source type")?;
+
+        let exact_source =
+            complete_fixture_type_by_key(&self.client, &self.space_id, &source_type.key).await?;
+        if exact_source.id != source_type.id || exact_source.key != "note" || exact_source.archived
+        {
+            return Err(set_fixture_ownership_error());
+        }
+        let source_url = exact_source.id.clone();
+        let set_type = complete_fixture_type_by_key(&self.client, &self.space_id, "set").await?;
+        if set_type.archived || set_type.layout != ObjectLayout::Set {
+            return Err(set_fixture_ownership_error());
+        }
+        let preexisting =
+            complete_type_object_id_snapshot(&self.client, &self.space_id, &set_type.id)
+                .await
+                .map_err(|_| set_fixture_ownership_error())?;
+
+        let grpc = self
+            .client
+            .grpc_client()
+            .await
+            .map_err(|_| set_fixture_ownership_error())?;
+        let request = create_set::Request {
+            source: vec![source_url.clone()],
+            details: Some(Struct {
+                fields: BTreeMap::from([("name".to_owned(), string_value(&name))]),
+            }),
+            template_id: String::new(),
+            internal_flags: Vec::new(),
+            space_id: self.space_id.clone(),
+            with_chat: false,
+        };
+        let request = with_token_request(Request::new(request), grpc.token())
+            .map_err(|_| set_fixture_ownership_error())?;
+        let response = grpc
+            .client_commands()
+            .object_create_set(request)
+            .await
+            .map_err(|_| set_fixture_ownership_error())?
+            .into_inner();
+        if !response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == create_set::response::error::Code::Null as i32)
+        {
+            return Err(set_fixture_ownership_error());
+        }
+        limits
+            .validate_id(&response.object_id, "created Set fixture")
+            .map_err(|_| set_fixture_ownership_error())?;
+        if preexisting.contains(&response.object_id) {
+            return Err(set_fixture_ownership_error());
+        }
+
+        let set_id = response.object_id;
+        let verify_config = self.client.config.verify.clone().unwrap_or_default();
+        let created = verify_semantic(
+            &verify_config,
+            "Set fixture",
+            &set_id,
+            || self.client.object(&self.space_id, &set_id).get(),
+            |object| {
+                object.id == set_id
+                    && object.space_id == self.space_id
+                    && !object.archived
+                    && object.layout == ObjectLayout::Set
+                    && object.r#type.as_ref().map(|typ| typ.id.as_str())
+                        == Some(set_type.id.as_str())
+            },
+        )
+        .await
+        .map_err(|_| set_fixture_ownership_error())?;
+        verify_set_source(&self.client, &self.space_id, &set_id, &source_url).await?;
+        if !self
+            .cleanup
+            .claim_set_fixture(&self.space_id, &set_id, &set_type.id, &source_url)
+        {
+            return Err(set_fixture_ownership_error());
         }
         Ok(created)
     }
@@ -1982,6 +2088,98 @@ fn collection_fixture_transport_error(_: tonic::Status) -> AnytypeError {
     AnytypeError::Other {
         message: "collection type fixture gRPC request failed".to_owned(),
     }
+}
+
+async fn verify_set_source(
+    client: &AnytypeClient,
+    space_id: &str,
+    set_id: &str,
+    source_type_id: &str,
+) -> TestResult<()> {
+    let grpc = client
+        .grpc_client()
+        .await
+        .map_err(|_| set_fixture_ownership_error())?;
+    let request = object_show::Request {
+        object_id: set_id.to_owned(),
+        space_id: space_id.to_owned(),
+        ..Default::default()
+    };
+    let request = with_token_request(Request::new(request), grpc.token())
+        .map_err(|_| set_fixture_ownership_error())?;
+    let response = grpc
+        .client_commands()
+        .object_show(request)
+        .await
+        .map_err(|_| set_fixture_ownership_error())?
+        .into_inner();
+    if !object_show_succeeded(response.error.as_ref().map(|error| error.code)) {
+        return Err(set_fixture_ownership_error());
+    }
+    let object_view = response
+        .object_view
+        .ok_or_else(set_fixture_ownership_error)?;
+    if object_view.root_id != set_id {
+        return Err(set_fixture_ownership_error());
+    }
+    let matching = object_view
+        .details
+        .iter()
+        .filter(|details| details.id == set_id)
+        .collect::<Vec<_>>();
+    let [details_set] = matching.as_slice() else {
+        return Err(set_fixture_ownership_error());
+    };
+    let details = details_set
+        .details
+        .as_ref()
+        .ok_or_else(set_fixture_ownership_error)?;
+    let Some(Kind::ListValue(set_of)) = details
+        .fields
+        .get("setOf")
+        .and_then(|value| value.kind.as_ref())
+    else {
+        return Err(set_fixture_ownership_error());
+    };
+    if set_of.values.as_slice()
+        != [Value {
+            kind: Some(Kind::StringValue(source_type_id.to_owned())),
+        }]
+    {
+        return Err(set_fixture_ownership_error());
+    }
+    Ok(())
+}
+
+async fn complete_fixture_type_by_key(
+    client: &AnytypeClient,
+    space_id: &str,
+    key: &str,
+) -> TestResult<Type> {
+    let response = client
+        .types(space_id)
+        .limit(COLLECTION_VIEW_FIXTURE_SCAN_LIMIT)
+        .offset(0)
+        .list()
+        .await
+        .map_err(|_| set_fixture_ownership_error())?
+        .into_response();
+    if response.pagination.offset != 0
+        || response.pagination.has_more
+        || response.pagination.total != response.items.len()
+        || response.items.len() > COLLECTION_VIEW_FIXTURE_SCAN_LIMIT as usize
+    {
+        return Err(set_fixture_ownership_error());
+    }
+    let matching = response
+        .items
+        .into_iter()
+        .filter(|typ| typ.key == key && !typ.archived)
+        .collect::<Vec<_>>();
+    let [typ] = matching.as_slice() else {
+        return Err(set_fixture_ownership_error());
+    };
+    Ok(typ.clone())
 }
 
 struct ResolvedCollectionDataview {
@@ -3602,6 +3800,7 @@ pub struct TestCleanup {
     objects: Mutex<Vec<(String, String, DataModel)>>,
     chat_messages: Mutex<BTreeSet<(String, String, String)>>,
     collection_fixtures: Mutex<BTreeSet<(String, String, String)>>,
+    set_fixtures: Mutex<BTreeSet<(String, String, String, String)>>,
     collection_view_fixtures: Mutex<BTreeSet<(String, String, String)>>,
     kanban_tag_fixtures: Mutex<BTreeSet<(String, String, String)>>,
     space_fixtures: Mutex<BTreeMap<String, String>>,
@@ -3719,6 +3918,7 @@ impl TestCleanup {
         let objects_empty = self.objects.lock().is_empty();
         let chat_messages_empty = self.chat_messages.lock().is_empty();
         let collections_empty = self.collection_fixtures.lock().is_empty();
+        let sets_empty = self.set_fixtures.lock().is_empty();
         let collection_views_empty = self.collection_view_fixtures.lock().is_empty();
         let kanban_tags_empty = self.kanban_tag_fixtures.lock().is_empty();
         let spaces_empty = self.space_fixtures.lock().is_empty();
@@ -3728,6 +3928,7 @@ impl TestCleanup {
         objects_empty
             && chat_messages_empty
             && collections_empty
+            && sets_empty
             && collection_views_empty
             && kanban_tags_empty
             && spaces_empty
@@ -3789,6 +3990,38 @@ impl TestCleanup {
         let registered = registered_ids.insert(id.to_owned());
         objects.push((space_id.to_owned(), id.to_owned(), DataModel::Object));
         let proven = fixtures.insert((space_id.to_owned(), id.to_owned(), type_id.to_owned()));
+        debug_assert!(registered && proven);
+        true
+    }
+
+    fn claim_set_fixture(
+        &self,
+        space_id: &str,
+        id: &str,
+        type_id: &str,
+        source_type_id: &str,
+    ) -> bool {
+        let mut registered_ids = self.registered_ids.lock();
+        let mut objects = self.objects.lock();
+        let mut fixtures = self.set_fixtures.lock();
+        if registered_ids.contains(id)
+            || objects
+                .iter()
+                .any(|(_, registered_id, _)| registered_id == id)
+            || fixtures
+                .iter()
+                .any(|(_, registered_id, _, _)| registered_id == id)
+        {
+            return false;
+        }
+        let registered = registered_ids.insert(id.to_owned());
+        objects.push((space_id.to_owned(), id.to_owned(), DataModel::Object));
+        let proven = fixtures.insert((
+            space_id.to_owned(),
+            id.to_owned(),
+            type_id.to_owned(),
+            source_type_id.to_owned(),
+        ));
         debug_assert!(registered && proven);
         true
     }
@@ -4067,6 +4300,7 @@ impl TestCleanup {
             }
         }
         self.collection_fixtures.lock().clear();
+        self.set_fixtures.lock().clear();
         self.collection_view_fixtures.lock().clear();
         self.kanban_tag_fixtures.lock().clear();
 
@@ -4205,6 +4439,12 @@ async fn complete_type_object_id_snapshot(
 fn collection_fixture_ownership_error() -> TestError {
     TestError::Assertion {
         message: "cleanup-safe collection fixture ownership could not be established".to_owned(),
+    }
+}
+
+fn set_fixture_ownership_error() -> TestError {
+    TestError::Assertion {
+        message: "cleanup-safe Set fixture ownership could not be established".to_owned(),
     }
 }
 

@@ -4,9 +4,12 @@
 
 mod common;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anytype::{
@@ -206,6 +209,178 @@ async fn view_list_objects_with_retry(
     })
 }
 
+struct OwnedCollectionAndSet {
+    collection: Object,
+    set: Object,
+    source: Object,
+}
+
+async fn create_owned_collection_and_set(
+    ctx: &anytype::test_util::TestContext,
+) -> TestResult<OwnedCollectionAndSet> {
+    let types = ctx
+        .client
+        .types(&ctx.space_id)
+        .limit(1_000)
+        .offset(0)
+        .list()
+        .await?
+        .into_response();
+    if types.pagination.offset != 0
+        || types.pagination.has_more
+        || types.pagination.total != types.items.len()
+        || types.items.len() > 1_000
+    {
+        return Err(TestError::Assertion {
+            message: "Set source type inventory is incomplete".to_owned(),
+        });
+    }
+    let matching = types
+        .items
+        .iter()
+        .filter(|typ| typ.key == "note" && !typ.archived)
+        .collect::<Vec<_>>();
+    let [source_type] = matching.as_slice() else {
+        return Err(TestError::Assertion {
+            message: "Set source type identity is ambiguous".to_owned(),
+        });
+    };
+    let source_type = (*source_type).clone();
+    let verify = VerifyConfig::default();
+    let source_type = verify_semantic(
+        &verify,
+        "Set source type",
+        &source_type.id,
+        || {
+            ctx.client
+                .get_type(&ctx.space_id, &source_type.id)
+                .get_direct()
+        },
+        |observed| {
+            observed.id == source_type.id && observed.key == source_type.key && !observed.archived
+        },
+    )
+    .await?;
+    let source = create_owned_set_source(ctx, &source_type).await?;
+    let set = ctx
+        .create_set_fixture(&source_type, format!("Owned Set {}", unique_suffix()))
+        .await?;
+    let collection_type = ctx
+        .create_collection_type_fixture(format!("Owned Collection Type {}", unique_suffix()))
+        .await?;
+    let collection = ctx
+        .create_collection_fixture(
+            &collection_type,
+            format!("Owned Collection {}", unique_suffix()),
+        )
+        .await?;
+    Ok(OwnedCollectionAndSet {
+        collection,
+        set,
+        source,
+    })
+}
+
+async fn create_owned_set_source(
+    ctx: &anytype::test_util::TestContext,
+    source_type: &Type,
+) -> TestResult<Object> {
+    const SNAPSHOT_LIMIT: u32 = 1_000;
+
+    let snapshot = ctx
+        .client
+        .objects(&ctx.space_id)
+        .filter(Filter::type_in([&source_type.id]))
+        .limit(SNAPSHOT_LIMIT)
+        .offset(0)
+        .list()
+        .await?
+        .into_response();
+    if snapshot.pagination.offset != 0
+        || snapshot.pagination.has_more
+        || snapshot.pagination.total != snapshot.items.len()
+        || snapshot.items.len() > SNAPSHOT_LIMIT as usize
+        || snapshot.items.iter().any(|object| {
+            object.space_id != ctx.space_id
+                || object.r#type.as_ref().map(|typ| typ.id.as_str())
+                    != Some(source_type.id.as_str())
+        })
+    {
+        return Err(TestError::Assertion {
+            message: "Set source pre-create inventory is incomplete".to_owned(),
+        });
+    }
+    let preexisting = snapshot
+        .items
+        .into_iter()
+        .map(|object| object.id)
+        .collect::<BTreeSet<_>>();
+    if preexisting.len() != snapshot.pagination.total {
+        return Err(TestError::Assertion {
+            message: "Set source pre-create inventory contains duplicate identities".to_owned(),
+        });
+    }
+
+    let name = format!("Owned Set Source {}", unique_suffix());
+    let source = retry_definitive_rate_limit("Set source object", || async {
+        ctx.client
+            .new_object(&ctx.space_id, &source_type.key)
+            .name(&name)
+            .no_verify()
+            .create()
+            .await
+    })
+    .await?;
+    ctx.client
+        .get_config()
+        .limits
+        .validate_id(&source.id, "Set source object")?;
+    if preexisting.contains(&source.id) {
+        return Err(TestError::Assertion {
+            message: "cleanup-owned Set source identity could not be established".to_owned(),
+        });
+    }
+    let source_id = source.id;
+    let verify = VerifyConfig::default();
+    let verified = verify_semantic(
+        &verify,
+        "Set source object",
+        &source_id,
+        || ctx.client.object(&ctx.space_id, &source_id).get(),
+        |object| {
+            object.id == source_id
+                && object.space_id == ctx.space_id
+                && !object.archived
+                && object.layout == source_type.layout
+                && object.r#type.as_ref().map(|typ| typ.id.as_str())
+                    == Some(source_type.id.as_str())
+        },
+    )
+    .await?;
+    ctx.register_object(&verified.id);
+    Ok(verified)
+}
+
+async fn wait_for_owned_view_member(
+    ctx: &anytype::test_util::TestContext,
+    list_id: &str,
+    view_id: &str,
+    member_id: &str,
+) -> TestResult<PagedResult<Object>> {
+    for attempt in 0..20 {
+        let listed = view_list_objects_with_retry(ctx, list_id, Some(view_id), 100).await?;
+        if listed.items.iter().any(|object| object.id == member_id) {
+            return Ok(listed);
+        }
+        if attempt < 19 {
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Err(TestError::Assertion {
+        message: "cleanup-owned view member did not converge".to_owned(),
+    })
+}
+
 #[tokio::test]
 #[test_log::test]
 #[serial]
@@ -257,85 +432,106 @@ async fn test_view_list_objects() -> TestResult<()> {
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "requires a configured Set with an internal set_of source"]
-#[serial]
-async fn test_views_list_collection_and_set() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let collection = ensure_list_object(ctx.as_ref(), ObjectLayout::Collection).await?;
-        let set = ensure_list_object(ctx.as_ref(), ObjectLayout::Set).await?;
+#[ignore = "requires a configured real server and disposable test admission"]
+#[serial(disposable_anytype_api)]
+async fn test_views_list_collection_and_set() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let outcome = Box::pin(with_disposable_space_context(
+        "views-list-collection-set",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let fixtures = create_owned_collection_and_set(&ctx).await?;
 
-        let collection_views = list_views_with_retry(ctx.as_ref(), &collection.id).await?;
-        assert!(
-            !collection_views.items.is_empty(),
-            "expected views for collection {}, got none",
-            collection.id
-        );
-        for view in collection_views.iter() {
-            assert!(
-                !view.id.is_empty(),
-                "Collection view id should not be empty"
-            );
-        }
+                let collection_views = list_views_with_retry(&ctx, &fixtures.collection.id).await?;
+                assert!(!collection_views.items.is_empty());
+                assert!(collection_views.iter().all(|view| !view.id.is_empty()));
 
-        let set_views = list_views_with_retry(ctx.as_ref(), &set.id).await?;
-        assert!(
-            !set_views.items.is_empty(),
-            "expected views for set {}, got none",
-            set.id
-        );
-        for view in set_views.iter() {
-            assert!(!view.id.is_empty(), "Set view id should not be empty");
-        }
+                let set_views = list_views_with_retry(&ctx, &fixtures.set.id).await?;
+                assert!(!set_views.items.is_empty());
+                assert!(set_views.iter().all(|view| !view.id.is_empty()));
 
-        Ok(())
-    })
+                Ok(())
+            })
+        },
+    ))
     .await
+    .expect("cleanup-safe collection and Set view-list harness");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            panic!("collection and Set view-list produced no evidence: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]
 #[test_log::test]
-#[ignore = "requires a configured Set with an internal set_of source"]
-#[serial]
-async fn test_view_list_objects_collection_and_set() -> TestResult<()> {
-    with_test_context(|ctx| async move {
-        let collection = ensure_list_object(ctx.as_ref(), ObjectLayout::Collection).await?;
-        let set = ensure_list_object(ctx.as_ref(), ObjectLayout::Set).await?;
+#[ignore = "requires a configured real server and disposable test admission"]
+#[serial(disposable_anytype_api)]
+async fn test_view_list_objects_collection_and_set() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&callback_ran);
+    let outcome = Box::pin(with_disposable_space_context(
+        "view-objects-collection-set",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let fixtures = create_owned_collection_and_set(&ctx).await?;
+                ctx.client
+                    .view_add_objects(
+                        &ctx.space_id,
+                        &fixtures.collection.id,
+                        [&fixtures.source.id],
+                    )
+                    .await?;
 
-        let collection_views = list_views_with_retry(ctx.as_ref(), &collection.id).await?;
-        let collection_view =
-            collection_views
-                .items
-                .first()
-                .ok_or_else(|| TestError::Assertion {
-                    message: format!("expected views for collection {}", collection.id),
-                })?;
-        let collection_listed = view_list_objects_with_retry(
-            ctx.as_ref(),
-            &collection.id,
-            Some(&collection_view.id),
-            10,
-        )
-        .await?;
-        println!(
-            "Collection {} returned {} objects",
-            collection.id,
-            collection_listed.items.len()
-        );
+                let collection_views = list_views_with_retry(&ctx, &fixtures.collection.id).await?;
+                let collection_view =
+                    collection_views
+                        .items
+                        .first()
+                        .ok_or_else(|| TestError::Assertion {
+                            message: "cleanup-owned collection has no default view".to_owned(),
+                        })?;
+                wait_for_owned_view_member(
+                    &ctx,
+                    &fixtures.collection.id,
+                    &collection_view.id,
+                    &fixtures.source.id,
+                )
+                .await?;
 
-        let set_views = list_views_with_retry(ctx.as_ref(), &set.id).await?;
-        let set_view = set_views
-            .items
-            .first()
-            .ok_or_else(|| TestError::Assertion {
-                message: format!("expected views for set {}", set.id),
-            })?;
-        let set_listed =
-            view_list_objects_with_retry(ctx.as_ref(), &set.id, Some(&set_view.id), 10).await?;
-        println!("Set {} returned {} objects", set.id, set_listed.items.len());
+                let set_views = list_views_with_retry(&ctx, &fixtures.set.id).await?;
+                let set_view = set_views
+                    .items
+                    .first()
+                    .ok_or_else(|| TestError::Assertion {
+                        message: "cleanup-owned Set has no default view".to_owned(),
+                    })?;
+                wait_for_owned_view_member(
+                    &ctx,
+                    &fixtures.set.id,
+                    &set_view.id,
+                    &fixtures.source.id,
+                )
+                .await?;
 
-        Ok(())
-    })
+                Ok(())
+            })
+        },
+    ))
     .await
+    .expect("cleanup-safe collection and Set object-list harness");
+    match outcome {
+        DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+        DisposableRun::Skipped(reason) => {
+            assert!(!callback_ran.load(Ordering::SeqCst));
+            panic!("collection and Set object-list produced no evidence: {reason:?}");
+        }
+    }
 }
 
 #[tokio::test]

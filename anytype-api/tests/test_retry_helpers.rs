@@ -140,7 +140,7 @@ fn live_mutation_retry_inventory_is_current() {
             "test_filters.rs",
             include_str!("test_filters.rs"),
             0,
-            25,
+            22,
             0,
             0,
         ),
@@ -179,7 +179,7 @@ fn live_mutation_retry_inventory_is_current() {
             0,
             12,
         ),
-        ("test_views.rs", include_str!("test_views.rs"), 6, 0, 0, 0),
+        ("test_views.rs", include_str!("test_views.rs"), 7, 0, 0, 0),
     ];
 
     let count = |source: &str, needle: &str| source.matches(needle).count();
@@ -226,6 +226,6 @@ fn live_mutation_retry_inventory_is_current() {
         excluded_calls += excluded;
     }
 
-    assert_eq!(setup_calls, 126);
+    assert_eq!(setup_calls, 124);
     assert_eq!(excluded_calls, 69);
 }

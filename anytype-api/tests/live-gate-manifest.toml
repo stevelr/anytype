@@ -77,6 +77,16 @@ target = "test_views"
 test = "test_direct_collection_membership_present_absent_and_query_rejection"
 serial_group = "disposable_anytype_api"
 
+[[required]]
+target = "test_views"
+test = "test_views_list_collection_and_set"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_views"
+test = "test_view_list_objects_collection_and_set"
+serial_group = "disposable_anytype_api"
+
 [[soak]]
 target = "test_filters"
 test = "test_filter_number_checkbox_condition_matrix"
@@ -93,54 +103,9 @@ test = "attached_discussions::tests::live_upstream_raw_object_add_discussion_rep
 serial_group = "disposable_anytype_api"
 
 [[excluded]]
-target = "test_views"
-test = "test_views_list_collection_and_set"
-reason = "ambient configured Set fixture cannot be safely mutated"
-
-[[excluded]]
-target = "test_views"
-test = "test_view_list_objects_collection_and_set"
-reason = "ambient configured Set fixture cannot be safely mutated"
-
-[[excluded]]
 target = "integration"
 test = "object_crud::test_object_body_update_converges_before_exact_followup"
 reason = "ambient-space mutation duplicates disposable body coverage"
-
-[[excluded]]
-target = "test_filters"
-test = "test_filter_checkbox_true"
-reason = "legacy ambient shared-space duplicate of the disposable matrix"
-
-[[excluded]]
-target = "test_filters"
-test = "test_filter_checkbox_false"
-reason = "legacy ambient shared-space duplicate of the disposable matrix"
-
-[[excluded]]
-target = "test_filters"
-test = "test_filter_number_equal"
-reason = "legacy ambient shared-space duplicate of the disposable matrix"
-
-[[excluded]]
-target = "test_filters"
-test = "test_filter_number_greater_than"
-reason = "legacy ambient shared-space duplicate of the disposable matrix"
-
-[[excluded]]
-target = "test_filters"
-test = "test_filter_number_less_than"
-reason = "legacy ambient shared-space duplicate of the disposable matrix"
-
-[[excluded]]
-target = "test_filters"
-test = "test_filter_number_range"
-reason = "legacy ambient shared-space duplicate of the disposable matrix"
-
-[[excluded]]
-target = "test_filters"
-test = "test_filter_expression_and"
-reason = "legacy ambient shared-space duplicate of the disposable matrix"
 
 [[excluded]]
 target = "lib"

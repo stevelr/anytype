@@ -277,9 +277,9 @@ fn source_ignore_attribute_inventory(path: &PathBuf) -> (usize, usize) {
 fn manifest_is_a_complete_partition_of_ignored_tests() {
     let manifest = manifest();
     assert_eq!(manifest.version, 1, "unexpected manifest version");
-    assert_eq!(manifest.required.len(), 15, "required inventory changed");
+    assert_eq!(manifest.required.len(), 17, "required inventory changed");
     assert_eq!(manifest.soak.len(), 3, "soak inventory changed");
-    assert_eq!(manifest.excluded.len(), 11, "excluded inventory changed");
+    assert_eq!(manifest.excluded.len(), 2, "excluded inventory changed");
 
     let mut expected_by_target = BTreeMap::<String, BTreeSet<String>>::new();
     for entry in manifest.required.iter().chain(&manifest.soak) {
@@ -343,7 +343,7 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
     let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     assert_eq!(
         source_ignore_attribute_inventory(&source_root),
-        (29, 0),
+        (22, 0),
         "source ignore-attribute inventory drifted"
     );
 }

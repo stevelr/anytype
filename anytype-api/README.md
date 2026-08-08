@@ -1065,8 +1065,11 @@ failures through the configured gRPC endpoint. The adjacent dataview test was
 not formerly mock-backed, but shares the disposable tier so the body test file
 does not require ambient inventory.
 
-The body, chat-discovery, chat-prerequisites, and chat-stream files are ignored
-in ordinary test runs. Run the required tier through its admitted serial driver:
+The required tier also creates a disposable collection and a source-backed Set,
+then proves both server-created views and their object listings without reading
+or registering ambient list objects. The Set fixture uses the authenticated
+Heart creation RPC because REST object creation cannot supply its internal
+source. Run every required case through the admitted serial driver:
 
 ```sh
 test -n "${ANY_MCP_HEADLESS_ENV_FILE:-}"
@@ -1091,6 +1094,14 @@ cargo test --locked -p anytype --test live_gate_manifest
 
 The driver runs every admitted entry in its own process and rejects zero-test
 and skip results.
+
+With the same protected environment loaded, reproduce the two focused Set/view
+entries exactly:
+
+```sh
+cargo test --locked -p anytype --test test_views test_views_list_collection_and_set -- --ignored --exact --test-threads=1 --nocapture
+cargo test --locked -p anytype --test test_views test_view_list_objects_collection_and_set -- --ignored --exact --test-threads=1 --nocapture
+```
 
 Process watcher import-finish coverage uses a real Markdown import in the fresh
 cleanup-owned space created by `with_disposable_space_context`. The watcher
