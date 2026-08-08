@@ -55,14 +55,14 @@ pub(super) mod live_scenario;
 use live_scenario::{
     ADVERSARIAL_DEFAULT_CASE_IDS, ADVERSARIAL_SPECIAL_CASE_IDS, AdversarialExecution,
     ArtifactAdversarialRun, ArtifactControlPlane, ArtifactLimitProfile, ArtifactPolicyFixture,
-    ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogBaseline,
-    ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy, FixtureValidatorPolicy,
-    UNAUTHORIZED_SPACE_ID, assert_artifact_parity, assert_artifact_policy_parity, audit_server_log,
-    require_completed, run_artifact_alias_cases, run_artifact_empty_client_roots_case,
-    run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
-    run_artifact_missing_roots_case, run_artifact_payload_boundary_cases,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
-    server_log_baseline,
+    ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit,
+    ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy,
+    FixtureValidatorPolicy, UNAUTHORIZED_SPACE_ID, assert_artifact_parity,
+    assert_artifact_policy_parity, audit_server_log, require_completed, run_artifact_alias_cases,
+    run_artifact_empty_client_roots_case, run_artifact_hostile_validator_case,
+    run_artifact_malicious_metadata_default, run_artifact_missing_roots_case,
+    run_artifact_payload_boundary_cases, run_artifact_policy_scenario, run_artifact_smoke_scenario,
+    run_artifact_traversal_default, server_log_baseline,
 };
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
@@ -2663,7 +2663,7 @@ fn audit_direct_adversarial_log(
     baseline: &ArtifactServerLogBaseline,
     owned_needles: &[Zeroizing<Vec<u8>>],
     execution: &AdversarialExecution,
-) -> Result<(), TestError> {
+) -> Result<ArtifactServerLogAudit, TestError> {
     let mut needles = owned_needles
         .iter()
         .map(|needle| needle.as_slice())
@@ -2685,7 +2685,7 @@ fn audit_direct_adversarial_log(
             message: "direct adversarial log audit was not clean".to_owned(),
         });
     }
-    Ok(())
+    Ok(audit)
 }
 
 /// Builds a read-write direct-router server that owns the fixture's policy.
@@ -2873,9 +2873,11 @@ async fn headless_artifact_direct_transport_matrix_scenario() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_artifact_traversal_direct_scenarios() {
+    let owner_evidence = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let callback_evidence = std::sync::Arc::clone(&owner_evidence);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-artifact-traversal",
-        |ctx| {
+        move |ctx| {
             Box::pin(async move {
                 let log_baseline = required_artifact_log_baseline()?;
                 let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
@@ -2965,7 +2967,10 @@ async fn headless_artifact_traversal_direct_scenarios() {
                     .map_err(|_| TestError::Assertion {
                         message: "direct traversal execution partition was incomplete".to_owned(),
                     })?;
-                audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                *callback_evidence.lock().map_err(|_| TestError::Assertion {
+                    message: "retain traversal owner evidence".to_owned(),
+                })? = Some((execution, audit));
                 Ok(())
             })
         },
@@ -2974,6 +2979,14 @@ async fn headless_artifact_traversal_direct_scenarios() {
     .expect("cleanup-safe direct traversal acceptance");
     require_completed(outcome, "direct traversal acceptance")
         .expect("prefix-authorized disposable admission");
+    let (execution, audit) = owner_evidence
+        .lock()
+        .expect("traversal owner evidence lock")
+        .take()
+        .expect("traversal owner evidence");
+    execution
+        .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
+        .expect("bounded traversal owner evidence");
 }
 
 /// Runs the default-policy alias and hostile-metadata direct-router cases.
@@ -2981,9 +2994,11 @@ async fn headless_artifact_traversal_direct_scenarios() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_artifact_alias_metadata_direct_scenarios() {
+    let owner_evidence = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let callback_evidence = std::sync::Arc::clone(&owner_evidence);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-artifact-alias-metadata",
-        |ctx| {
+        move |ctx| {
             Box::pin(async move {
                 let log_baseline = required_artifact_log_baseline()?;
                 let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
@@ -3031,7 +3046,10 @@ async fn headless_artifact_alias_metadata_direct_scenarios() {
                         message: "direct alias-metadata execution partition was incomplete"
                             .to_owned(),
                     })?;
-                audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                *callback_evidence.lock().map_err(|_| TestError::Assertion {
+                    message: "retain alias-metadata owner evidence".to_owned(),
+                })? = Some((execution, audit));
                 Ok(())
             })
         },
@@ -3040,6 +3058,14 @@ async fn headless_artifact_alias_metadata_direct_scenarios() {
     .expect("cleanup-safe direct alias-metadata acceptance");
     require_completed(outcome, "direct alias-metadata acceptance")
         .expect("prefix-authorized disposable admission");
+    let (execution, audit) = owner_evidence
+        .lock()
+        .expect("alias-metadata owner evidence lock")
+        .take()
+        .expect("alias-metadata owner evidence");
+    execution
+        .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
+        .expect("bounded alias-metadata owner evidence");
 }
 
 /// Runs payload-boundary and hostile-validator cases under their exact policies.
@@ -3047,9 +3073,11 @@ async fn headless_artifact_alias_metadata_direct_scenarios() {
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
 async fn headless_artifact_bounded_metadata_direct_scenarios() {
+    let owner_evidence = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let callback_evidence = std::sync::Arc::clone(&owner_evidence);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-artifact-bounded-metadata",
-        |ctx| {
+        move |ctx| {
             Box::pin(async move {
                 let log_baseline = required_artifact_log_baseline()?;
                 let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
@@ -3119,7 +3147,10 @@ async fn headless_artifact_bounded_metadata_direct_scenarios() {
                         message: "direct bounded-metadata execution partition was incomplete"
                             .to_owned(),
                     })?;
-                audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                *callback_evidence.lock().map_err(|_| TestError::Assertion {
+                    message: "retain bounded-metadata owner evidence".to_owned(),
+                })? = Some((execution, audit));
                 Ok(())
             })
         },
@@ -3128,6 +3159,14 @@ async fn headless_artifact_bounded_metadata_direct_scenarios() {
     .expect("cleanup-safe direct bounded-metadata acceptance");
     require_completed(outcome, "direct bounded-metadata acceptance")
         .expect("prefix-authorized disposable admission");
+    let (execution, audit) = owner_evidence
+        .lock()
+        .expect("bounded-metadata owner evidence lock")
+        .take()
+        .expect("bounded-metadata owner evidence");
+    execution
+        .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
+        .expect("bounded metadata owner evidence");
 }
 
 /// Proves offline that every policy scenario renders a loadable strict policy.

@@ -336,6 +336,7 @@ pub const ADVERSARIAL_STDIO_SENTINEL_IDS: &[AdversarialCaseId] = &[
     AdversarialCaseId::Trav01,
     AdversarialCaseId::Alias06,
     AdversarialCaseId::Mal01,
+    AdversarialCaseId::Mal02,
 ];
 
 /// Whether a case is executed now, explicitly unsupported, or still pending.
@@ -605,10 +606,11 @@ fn adversarial_tool_error(kind: ExpectedToolErrorKind) -> ExpectedOutcome {
 }
 
 /// Content-free execution partition for one adversarial acceptance run.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct AdversarialExecution {
     executed: BTreeSet<AdversarialCaseId>,
     unsupported: BTreeSet<AdversarialCaseId>,
+    unsupported_reasons: BTreeMap<AdversarialCaseId, &'static str>,
     quota_restored: BTreeSet<AdversarialCaseId>,
     forbidden_log_needles: Vec<Zeroizing<Vec<u8>>>,
     uniform_not_found_digest: Option<String>,
@@ -636,9 +638,12 @@ impl AdversarialExecution {
 
     /// Records one matrix-approved platform-unsupported case.
     pub fn record_unsupported(&mut self, id: AdversarialCaseId) -> Result<(), String> {
+        let reason = unsupported_reason(id)
+            .ok_or_else(|| "adversarial case has no approved unsupported reason".to_owned())?;
         if self.executed.contains(&id) || !self.unsupported.insert(id) {
             return Err("adversarial case partitioned more than once".to_owned());
         }
+        self.unsupported_reasons.insert(id, reason);
         Ok(())
     }
 
@@ -703,6 +708,55 @@ impl AdversarialExecution {
             .collect()
     }
 
+    /// Emits one bounded, content-free owner summary after teardown succeeds.
+    pub fn emit_owner_evidence(
+        &self,
+        control: ArtifactControlPlane,
+        audit: &ArtifactServerLogAudit,
+    ) -> Result<(), String> {
+        let observed = self
+            .executed
+            .union(&self.unsupported)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !observed.is_subset(&self.quota_restored) || !audit.is_clean() {
+            return Err("adversarial owner evidence was incomplete".to_owned());
+        }
+        let case_ids = observed.iter().map(|id| id.as_str()).collect::<Vec<_>>();
+        let families = observed
+            .iter()
+            .map(|id| id.family().as_str())
+            .collect::<BTreeSet<_>>();
+        let unsupported = self
+            .unsupported_reasons
+            .iter()
+            .map(|(id, reason)| json!({"case_id": id.as_str(), "reason": reason}))
+            .collect::<Vec<_>>();
+        let evidence = json!({
+            "case_ids": case_ids,
+            "families": families,
+            "transport": control.as_str(),
+            "outcomes": {
+                "executed": self.executed.len(),
+                "unsupported": unsupported,
+            },
+            "log_audit": {
+                "panic_or_fatal": audit.panic_or_fatal_lines,
+                "unclassified": audit.unclassified_error_lines,
+                "known_noise": audit.known_classes.values().copied().sum::<u64>(),
+            },
+            "teardown": {
+                "space_deleted": true,
+                "prefix_inventory": 0,
+                "quota_restored": true,
+            },
+        });
+        let encoded = serde_json::to_string(&evidence)
+            .map_err(|_| "encode adversarial owner evidence".to_owned())?;
+        eprintln!("{encoded}");
+        Ok(())
+    }
+
     /// Records the canonical payload digest shared by uniform not-found cases.
     pub fn record_uniform_not_found_payload(&mut self, result: &Value) -> Result<(), String> {
         let encoded = serde_json::to_vec(result)
@@ -721,6 +775,11 @@ impl AdversarialExecution {
     fn record_quota_restored(&mut self) {
         self.quota_restored.extend(self.executed.iter().copied());
         self.quota_restored.extend(self.unsupported.iter().copied());
+    }
+
+    /// Records that a startup-rejection case cannot activate staging quota.
+    pub fn record_quota_not_applicable(&mut self) {
+        self.record_quota_restored();
     }
 
     /// Number of cases actually executed on this platform.
@@ -763,7 +822,7 @@ impl AdversarialExecution {
             || self
                 .unsupported
                 .iter()
-                .any(|id| !capability_unsupported(*id))
+                .any(|id| !self.unsupported_reasons.contains_key(id))
             || !observed.is_subset(&self.quota_restored)
         {
             return Err("adversarial ticket execution partition was incomplete".to_owned());
@@ -791,9 +850,16 @@ impl AdversarialExecution {
     }
 }
 
-fn capability_unsupported(id: AdversarialCaseId) -> bool {
-    id.status() == AdversarialCaseStatus::PlatformUnsupported
-        || cfg!(windows) && id == AdversarialCaseId::Alias04
+fn unsupported_reason(id: AdversarialCaseId) -> Option<&'static str> {
+    match id {
+        AdversarialCaseId::Alias03 | AdversarialCaseId::Alias05 if !cfg!(windows) => {
+            Some("windows_only")
+        }
+        AdversarialCaseId::Alias04 if !cfg!(windows) => Some("windows_only"),
+        AdversarialCaseId::Alias04 if cfg!(windows) => Some("windows_8dot3_unavailable"),
+        AdversarialCaseId::Mal13 if !VALIDATOR_PLATFORM_ACTIVATES => Some("validator_not_active"),
+        _ => None,
+    }
 }
 
 /// Fixture inputs for the path, alias, and hostile-metadata scenarios.
@@ -862,7 +928,7 @@ fn windows_short_alias(path: &Path) -> Result<Option<String>, String> {
     // first call supplies no output buffer and obtains the exact bound.
     let required = unsafe { GetShortPathNameW(source.as_ptr(), std::ptr::null_mut(), 0) };
     if required == 0 {
-        return Ok(None);
+        return Err("inspect Windows short-name capability".to_owned());
     }
     let capacity = usize::try_from(required)
         .map_err(|_| "inspect Windows short-name capability".to_owned())?;
@@ -873,14 +939,14 @@ fn windows_short_alias(path: &Path) -> Result<Option<String>, String> {
     let length =
         usize::try_from(length).map_err(|_| "inspect Windows short-name capability".to_owned())?;
     if length == 0 || length >= output.len() {
-        return Ok(None);
+        return Err("inspect Windows short-name capability".to_owned());
     }
     let short_path = PathBuf::from(OsString::from_wide(&output[..length]));
     let Some(short_name) = short_path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(None);
+        return Err("inspect Windows short-name capability".to_owned());
     };
     let Some(long_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(None);
+        return Err("inspect Windows short-name capability".to_owned());
     };
     if short_name.eq_ignore_ascii_case(long_name) || !short_name.contains('~') {
         return Ok(None);
@@ -2198,6 +2264,37 @@ pub async fn run_artifact_adversarial_stdio_sentinels(
         return Err("MAL-01 created an Anytype object".to_owned());
     }
     execution.record_executed(AdversarialCaseId::Mal01)?;
+
+    let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
+    execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
+    let imported = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                &bidi_name,
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    let bidi_file_id = required_str(&imported, "/file_id")?;
+    run.ctx.register_file(&bidi_file_id);
+    let fetched = run
+        .ctx
+        .client
+        .files()
+        .get(space, &bidi_file_id)
+        .get()
+        .await
+        .map_err(|_| "read back stdio adversarial file name".to_owned())?;
+    if fetched.name.as_deref() != Some(bidi_name.as_str()) {
+        return Err("MAL-02 stdio name did not round-trip exactly".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal02)?;
     finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     execution.assert_exact(ADVERSARIAL_STDIO_SENTINEL_IDS)?;
     Ok(execution)

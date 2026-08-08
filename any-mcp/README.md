@@ -1868,7 +1868,7 @@ exercise traversal and native-path grammar, capability-indistinguishable root
 refusals, volume case and normalization aliases, Windows device names,
 staging-record case sensitivity, bounded names and payloads, MIME conflicts,
 invalid document encodings, and hostile upstream metadata. Direct owners
-execute the 42 non-startup cases. Stable and preview stdio each repeat three
+execute the 42 non-startup cases. Stable and preview stdio each repeat four
 sentinels, while the spawned gate separately owns the production startup
 rejection. Each owner records a fixed case
 ID only after its exact outcome, resource inventory, staging state, and cleanup

@@ -53,12 +53,13 @@ use support::live_scenario::{
     ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
     ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactLifecycleScenario,
     ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
-    ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactTransport,
-    ExpectedOutcome, ObservedOutcome, allocate_stage_upload, artifact_catalog_snapshot,
-    artifact_sha256, assert_artifact_content_parity, assert_artifact_parity,
-    assert_artifact_policy_parity, assert_payload_frame_independence, audit_server_log,
-    classify_collision_frames, measure_artifact_frame, reject_oversized_stage_chunk,
-    release_stage_upload, run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
+    ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeFixture,
+    ArtifactStageAllocation, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
+    allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
+    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
+    assert_payload_frame_independence, audit_server_log, classify_collision_frames,
+    measure_artifact_frame, reject_oversized_stage_chunk, release_stage_upload,
+    run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
     run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_baseline,
     stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
@@ -5897,7 +5898,7 @@ fn assert_artifact_server_log_clean(
     baseline: &ArtifactServerLogBaseline,
     needles: &Arc<Mutex<Vec<Vec<u8>>>>,
     workflow: &'static str,
-) {
+) -> ArtifactServerLogAudit {
     let needles = needles.lock().expect("artifact log-audit needles lock");
     let borrowed = needles.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let audit = audit_server_log(baseline, &borrowed).expect("audit captured artifact server log");
@@ -5912,6 +5913,7 @@ fn assert_artifact_server_log_clean(
         audit.is_clean() && audit.forbidden_needle_matches == 0,
         "captured server log violated the fixed-category or redaction contract"
     );
+    audit
 }
 
 /// Runs the complete spawned artifact acceptance matrix in one disposable space.
@@ -6029,7 +6031,7 @@ async fn run_spawned_artifact_adversarial_default(
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
     control: ArtifactControlPlane,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
-) -> TestResult<()> {
+) -> TestResult<AdversarialExecution> {
     let policy = Arc::new(
         ArtifactPolicyFixture::create(&ctx.space_id)
             .map_err(|_| sentinel_assertion("create adversarial artifact fixture"))?,
@@ -6086,7 +6088,7 @@ async fn run_spawned_artifact_adversarial_default(
     for needle in execution.forbidden_log_needles() {
         record_artifact_log_needle(audit_needles, needle)?;
     }
-    Ok(())
+    Ok(execution)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -6198,6 +6200,7 @@ fn run_alias07_startup_rejection(
     execution
         .record_executed(AdversarialCaseId::Alias07)
         .map_err(|_| sentinel_assertion("record ALIAS-07 startup rejection"))?;
+    execution.record_quota_not_applicable();
     Ok(execution)
 }
 
@@ -6209,6 +6212,8 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
     let cleanup: [Arc<Mutex<ChildCleanupRecord>>; ADVERSARIAL_STDIO_CONTROLS.len()] =
         std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
     let callback_cleanup = cleanup.clone();
+    let owner_evidence = Arc::new(Mutex::new(Vec::new()));
+    let callback_evidence = Arc::clone(&owner_evidence);
     let log_baseline = artifact_server_log_baseline();
     let audit_needles = Arc::new(Mutex::new(Vec::new()));
     let callback_audit_needles = Arc::clone(&audit_needles);
@@ -6221,14 +6226,36 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                     let record = callback_cleanup
                         .get(index)
                         .ok_or_else(|| sentinel_assertion("adversarial cleanup record missing"))?;
-                    run_spawned_artifact_adversarial_default(
+                    let mut execution = run_spawned_artifact_adversarial_default(
                         ctx.as_ref(),
                         Arc::clone(record),
                         control,
                         &callback_audit_needles,
                     )
                     .await?;
-                    run_alias07_startup_rejection(ctx.as_ref(), control, &callback_audit_needles)?;
+                    let startup = run_alias07_startup_rejection(
+                        ctx.as_ref(),
+                        control,
+                        &callback_audit_needles,
+                    )?;
+                    startup
+                        .assert_exact(&[AdversarialCaseId::Alias07])
+                        .map_err(|_| sentinel_assertion("ALIAS-07 owner inventory diverged"))?;
+                    execution
+                        .merge(startup)
+                        .map_err(|_| sentinel_assertion("merge spawned adversarial evidence"))?;
+                    let expected = ADVERSARIAL_STDIO_SENTINEL_IDS
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(AdversarialCaseId::Alias07))
+                        .collect::<Vec<_>>();
+                    execution
+                        .assert_exact(&expected)
+                        .map_err(|_| sentinel_assertion("spawned owner inventory diverged"))?;
+                    callback_evidence
+                        .lock()
+                        .map_err(|_| sentinel_assertion("retain spawned adversarial evidence"))?
+                        .push((control, execution));
                 }
                 Ok(())
             })
@@ -6245,7 +6272,17 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                     ChildCleanupRecord::Stopped
                 );
             }
-            assert_artifact_server_log_clean(&log_baseline, &audit_needles, "adversarial");
+            let audit =
+                assert_artifact_server_log_clean(&log_baseline, &audit_needles, "adversarial");
+            let evidence = owner_evidence
+                .lock()
+                .expect("spawned adversarial evidence lock");
+            assert_eq!(evidence.len(), ADVERSARIAL_STDIO_CONTROLS.len());
+            for (control, execution) in evidence.iter() {
+                execution
+                    .emit_owner_evidence(*control, &audit)
+                    .expect("bounded spawned adversarial owner evidence");
+            }
         }
         DisposableRun::Skipped(_) => {
             panic!("artifact adversarial scenarios require disposable admission");
