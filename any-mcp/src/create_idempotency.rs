@@ -191,6 +191,12 @@ pub(crate) struct ResumeClaim {
     pub(crate) metadata: RichReceiptMetadata,
 }
 
+/// An atomically observed cached rich receipt and its proof metadata.
+pub(crate) struct CachedRichReceipt {
+    pub(crate) result: CallToolResult,
+    pub(crate) metadata: Option<RichReceiptMetadata>,
+}
+
 /// A token-matched terminal reduction for one recovery attempt.
 pub(crate) enum ResumeFinish {
     /// Closes eligibility and restores the prior receipt because no write polled.
@@ -443,6 +449,19 @@ impl IdempotencyStore {
         candidate: &PendingCandidate,
         result: CallToolResult,
     ) -> bool {
+        self.complete_pending_candidate_with_metadata(key, fingerprint, candidate, result, None)
+            .await
+    }
+
+    /// Replaces a proven pending page candidate with a rich receipt.
+    pub(crate) async fn complete_pending_candidate_with_metadata(
+        &self,
+        key: &IdempotencyKey,
+        fingerprint: [u8; 32],
+        candidate: &PendingCandidate,
+        result: CallToolResult,
+        metadata: Option<RichReceiptMetadata>,
+    ) -> bool {
         let mut entries = self.entries.lock().await;
         let matches = entries.get(key).is_some_and(|entry| {
             matches!(
@@ -459,7 +478,7 @@ impl IdempotencyStore {
                 StoredAttempt::Complete(CompleteAttempt {
                     fingerprint,
                     result,
-                    replay_metadata: None,
+                    replay_metadata: metadata,
                     resume_consumed: false,
                 }),
             );
@@ -513,6 +532,30 @@ impl IdempotencyStore {
             }
             _ => None,
         }
+    }
+
+    /// Reads a cached rich result and its proof metadata under one lock.
+    pub(crate) async fn cached_rich_receipt(
+        &self,
+        key: &IdempotencyKey,
+        fingerprint: [u8; 32],
+    ) -> Option<CachedRichReceipt> {
+        let entries = self.entries.lock().await;
+        let complete = match entries.get(key) {
+            Some(StoredAttempt::Complete(complete)) if complete.fingerprint == fingerprint => {
+                complete
+            }
+            Some(StoredAttempt::ResumeRunning { prior, .. })
+                if prior.fingerprint == fingerprint =>
+            {
+                prior
+            }
+            _ => return None,
+        };
+        Some(CachedRichReceipt {
+            result: complete.result.clone(),
+            metadata: complete.replay_metadata.clone(),
+        })
     }
 
     /// Reports whether a retained rich receipt can be claimed without I/O.
@@ -614,6 +657,7 @@ impl IdempotencyStore {
             return false;
         }
         let mut restored = prior.clone();
+        let attempt = attempt.clone();
         let result = match &finish {
             ResumeFinish::BeforeWritePoll => restored.result.clone(),
             ResumeFinish::Indeterminate(result) => result.clone(),

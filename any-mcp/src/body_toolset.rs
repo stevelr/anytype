@@ -6446,8 +6446,11 @@ impl BodyHandlers {
             Ok(projected) => projected,
             Err(_) => return tool_error(&ToolError::conflict()),
         };
-        let root_append_index =
-            replay_witness.map(|ReplayWitness::RichRootAppendIndex(value)| value);
+        let root_append_index = match replay_witness {
+            Some(ReplayWitness::RichRootAppendIndex(value)) => Some(value),
+            Some(ReplayWitness::RichRecoveredCandidate | ReplayWitness::RichResumedRelative)
+            | None => None,
+        };
         if value
             .get("final_snapshot_hash")
             .and_then(serde_json::Value::as_str)
