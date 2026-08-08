@@ -1975,6 +1975,71 @@ fn contains_forbidden_diagnostic_field(value: &Value) -> bool {
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn run_spawned_read_only_cleanup_cases(
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+) -> Result<AdversarialExecution, String> {
+    const NOT_FOUND_MESSAGE: &str =
+        "The requested Anytype entity was not found. Verify its identifier and space.";
+    let staging_before = policy.staging_snapshot()?;
+    let export_before = policy.export_snapshot()?;
+    let mut execution = AdversarialExecution::default();
+    let mut guard = lock_driver(child);
+    let driver = guard
+        .as_mut()
+        .ok_or_else(|| "registered read-only artifact child disappeared".to_owned())?;
+    for name in ARTIFACT_TOOL_NAMES
+        .into_iter()
+        .filter(|name| *name != "artifact_status")
+    {
+        let response = driver.request("tools/call", json!({"name": name, "arguments": {}}));
+        let object = response
+            .as_object()
+            .ok_or_else(|| "CLEAN-07 response was not an object".to_owned())?;
+        let error = response
+            .get("error")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "CLEAN-07 mutation was routed in read-only mode".to_owned())?;
+        if object.len() != 3
+            || response["jsonrpc"] != "2.0"
+            || error.len() != 2
+            || error.get("code") != Some(&json!(-32601))
+            || error.get("message") != Some(&json!("Method not found"))
+        {
+            return Err("CLEAN-07 did not return exact method-not-found".to_owned());
+        }
+    }
+    execution.record_executed(AdversarialCaseId::Clean07)?;
+
+    let handle = format!("clean08-{}", unique_suffix());
+    execution.record_forbidden_log_needle(handle.as_bytes())?;
+    let response = driver.request(
+        "tools/call",
+        json!({"name": "artifact_status", "arguments": {"handle": handle}}),
+    );
+    let result = response
+        .get("result")
+        .ok_or_else(|| "CLEAN-08 did not return a bounded tool result".to_owned())?;
+    let refusal = ToolErrorEvidence::from_result(result, driver.options.preview)?;
+    if refusal.code() != "not_found"
+        || refusal
+            .normalized_result()
+            .pointer("/structuredContent/message")
+            .and_then(Value::as_str)
+            != Some(NOT_FOUND_MESSAGE)
+    {
+        return Err("CLEAN-08 did not return the uniform not-found result".to_owned());
+    }
+    drop(guard);
+    if policy.staging_snapshot()? != staging_before || policy.export_snapshot()? != export_before {
+        return Err("spawned read-only cleanup cases changed private artifact state".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean08)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
 enum ArtifactDiagnostic<'a> {
     RuntimeReady,
     Operation {
@@ -6931,6 +6996,14 @@ async fn run_spawned_artifact_policy_scenario(
         Box::pin(run_artifact_policy_scenario(&mut driver, &run)).await
     };
 
+    if scenario == ArtifactPolicyScenario::ReadOnly {
+        run_spawned_read_only_cleanup_cases(&child, &policy)
+            .and_then(|execution| {
+                execution.assert_exact(&[AdversarialCaseId::Clean07, AdversarialCaseId::Clean08])
+            })
+            .map_err(|_| sentinel_assertion("spawned read-only cleanup cases failed"))?;
+    }
+
     // Stop this scenario's child before reporting, so a failure never leaves a
     // production process holding the fixture policy.
     let stopped = lock_driver(&child)
@@ -7187,11 +7260,12 @@ async fn run_artifact_quota_acceptance(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
-) -> Result<(), String> {
+) -> Result<AdversarialExecution, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let mut execution = AdversarialExecution::default();
     let first = allocate_stage_upload(
         &mut driver,
         &ctx.space_id,
@@ -7229,6 +7303,13 @@ async fn run_artifact_quota_acceptance(
     }
 
     release_stage_upload(&mut driver, &first).await?;
+    let released_again = driver
+        .call_tool_error("artifact_release", json!({"handle": first.handle()}))
+        .await?;
+    if released_again.code() != "not_found" || policy.staging_snapshot()?.temporary_files != 1 {
+        return Err("CLEAN-03 did not remove and invalidate the released record".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean03)?;
     let third = allocate_stage_upload(
         &mut driver,
         &ctx.space_id,
@@ -7256,7 +7337,9 @@ async fn run_artifact_quota_acceptance(
     if !policy.staging_snapshot()?.is_reaped() {
         return Err("quota scenario did not release its exact staging state".to_owned());
     }
-    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -7265,11 +7348,13 @@ async fn run_artifact_ttl_acceptance(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
-) -> Result<(), String> {
+) -> Result<AdversarialExecution, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let quota_before = driver.call_tool("artifact_status", json!({})).await?;
+    let mut execution = AdversarialExecution::default();
     let allocation = allocate_stage_upload(
         &mut driver,
         &ctx.space_id,
@@ -7294,7 +7379,18 @@ async fn run_artifact_ttl_acceptance(
     if !reaped.is_reaped() {
         return Err("TTL cleanup did not produce the exact reaped snapshot".to_owned());
     }
-    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+    let expired = driver
+        .call_tool_error("artifact_release", json!({"handle": allocation.handle()}))
+        .await?;
+    if expired.code() != "not_found"
+        || driver.call_tool("artifact_status", json!({})).await? != quota_before
+    {
+        return Err("CLEAN-04 did not invalidate the expired handle and restore quota".to_owned());
+    }
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    execution.record_executed(AdversarialCaseId::Clean04)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -7710,6 +7806,9 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 &callback_audit_needles,
                             )
                             .await
+                            .and_then(|execution| {
+                                execution.assert_exact(&[AdversarialCaseId::Clean03])
+                            })
                         }
                         ArtifactLifecycleScenario::TtlCleanup => {
                             run_artifact_ttl_acceptance(
@@ -7719,6 +7818,9 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 &callback_audit_needles,
                             )
                             .await
+                            .and_then(|execution| {
+                                execution.assert_exact(&[AdversarialCaseId::Clean04])
+                            })
                         }
                         ArtifactLifecycleScenario::Collision => {
                             run_artifact_collision_acceptance(ctx.as_ref(), &child, &policy).await

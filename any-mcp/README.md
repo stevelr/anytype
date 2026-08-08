@@ -1871,6 +1871,9 @@ imports, replayed chunks, allocation-time quota refusal, and rejected download
 ranges, plus a spawned kill-mid-frame assertion that
 accepts only complete JSON-RPC frames followed by one bounded, truncated final
 fragment. Their inventory status advances only after the live owner passes.
+Cleanup owners likewise assert failed import/export rollback, single-use
+release, TTL invalidation, required-validator refusal, and read-only catalog
+isolation without promoting those rows before live execution.
 Implemented coverage exercises traversal and native-path grammar,
 capability-indistinguishable root refusals, volume case and normalization
 aliases, Windows device names, staging-record case sensitivity, bounded names

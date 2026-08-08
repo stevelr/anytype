@@ -14,9 +14,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   partial-write owner now drives malformed raw HTTP, disconnect/resume, offset,
   hash, inventory, quota-allocation, and download-range assertions; the
   process-crash owner captures a deterministic kill during a JSON-RPC frame.
-  These and the remaining handle,
-  process-crash, output-flood, and failure-cleanup rows stay pending until their
-  live case-specific owners pass.
+  Cleanup owners cover failed import/export rollback, release and TTL
+  invalidation, required-validator refusal, and read-only catalog isolation.
+  These and the remaining handle, process-crash, output-flood, and
+  failure-cleanup rows stay pending until their live case-specific owners pass.
 - Add closed real-server adversarial artifact coverage for 43 traversal,
   filesystem-alias, filename, MIME, and metadata cases. Direct-router and
   stable/preview stdio owners enforce exact case partitions, fixed refusal

@@ -3540,6 +3540,127 @@ pub async fn run_artifact_partial_write_protocol_cases(
     Ok(execution)
 }
 
+/// Executes the failed-import and failed-export cleanup rows against a
+/// writable artifact runtime.
+///
+/// # Errors
+///
+/// Returns a fixed category if either refusal changes Anytype inventory,
+/// export-root bytes, staging quota, or private staging state.
+pub async fn run_artifact_failed_operation_cleanup_cases(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let staging_before = run.policy.staging_snapshot()?;
+    let mut execution = AdversarialExecution::default();
+
+    let missing = format!("clean01-missing-{}", unique_suffix());
+    let refusal = driver
+        .call_tool_error(
+            "file_import",
+            file_import_arguments(
+                &run.ctx.space_id,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &missing),
+                "clean01.bin",
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::NotFound).assert_tool_error(&refusal)?;
+    if artifact_object_ids(run.ctx).await? != objects_before
+        || run.policy.staging_snapshot()? != staging_before
+    {
+        return Err("CLEAN-01 retained state after a failed import".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean01)?;
+
+    let file_id = adversarial_seed_file(driver, run, "clean02-source.bin").await?;
+    let destination = format!("clean02-existing-{}", unique_suffix());
+    let competing = b"CLEAN-02 existing destination";
+    let destination_path = run.policy.export_root().join(&destination);
+    fs::write(&destination_path, competing)
+        .map_err(|_| "seed CLEAN-02 existing destination".to_owned())?;
+    secure_files(std::slice::from_ref(&destination_path))?;
+    let export_before = RootInventory::capture(run.policy.export_root())?;
+    let refusal = driver
+        .call_tool_error(
+            "file_export",
+            json!({
+                "space": run.ctx.space_id,
+                "file_id": file_id,
+                "destination": local_destination(
+                    ArtifactPolicyFixture::EXPORT_ROOT,
+                    &destination,
+                ),
+                "idempotency_key": format!("clean02-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+    export_before.assert_unchanged()?;
+    if fs::read(&destination_path).ok().as_deref() != Some(competing)
+        || run.policy.staging_snapshot()? != staging_before
+    {
+        return Err("CLEAN-02 retained a temp file or changed the destination".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean02)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    Ok(execution)
+}
+
+/// Executes CLEAN-06 with a required validator that is unavailable at launch
+/// time (or unsupported by the current platform).
+///
+/// # Errors
+///
+/// Returns a fixed category if the import is not refused with validation or
+/// if the refusal retains Anytype, export, staging, or quota state.
+pub async fn run_artifact_required_validator_cleanup_case(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    if run.policy.options().validators != FixtureValidatorPolicy::Required {
+        return Err("CLEAN-06 requires the required-validator policy".to_owned());
+    }
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let staging_before = run.policy.staging_snapshot()?;
+    let export_before = RootInventory::capture(run.policy.export_root())?;
+    if VALIDATOR_PLATFORM_ACTIVATES {
+        run.policy
+            .validator()
+            .ok_or_else(|| "CLEAN-06 fixture omitted its validator".to_owned())?
+            .invalidate_after_activation()?;
+    }
+    let refusal = driver
+        .call_tool_error(
+            "file_import",
+            file_import_arguments(
+                &run.ctx.space_id,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                "clean06.txt",
+                Some("text/plain"),
+            ),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::Validation).assert_tool_error(&refusal)?;
+    if artifact_object_ids(run.ctx).await? != objects_before
+        || run.policy.staging_snapshot()? != staging_before
+    {
+        return Err("CLEAN-06 retained object or staging state".to_owned());
+    }
+    export_before.assert_unchanged()?;
+    let mut execution = AdversarialExecution::default();
+    execution.record_executed(AdversarialCaseId::Clean06)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    Ok(execution)
+}
+
 /// Executes TRAV-01 through TRAV-18 against one production router.
 ///
 /// TRAV-19 and TRAV-20 require distinct runtime root policies and are exposed
@@ -5974,6 +6095,22 @@ impl PinnedValidatorExecutable {
         Err("artifact validator fixture requires a hash-pinnable file(1) executable".to_owned())
     }
 
+    /// Copies one admitted host detector into the private fixture tree and
+    /// pins the copy used by the production runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if the executable cannot be copied, frozen,
+    /// or pinned under the same boundary as production.
+    pub fn discover_private(base: &Path) -> Result<Self, String> {
+        let host = Self::discover()?;
+        let target = base.join("validator-bin");
+        fs::copy(host.path(), &target)
+            .map_err(|_| "copy artifact validator into private fixture".to_owned())?;
+        freeze_validator_fixture(&target)?;
+        Self::pin(&target).ok_or_else(|| "pin private artifact validator fixture".to_owned())
+    }
+
     /// Absolute path declared in the rendered policy.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -5984,6 +6121,24 @@ impl PinnedValidatorExecutable {
     #[must_use]
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+
+    /// Changes the pinned fixture inode after runtime activation so the
+    /// production launch-time hash recheck reports it unavailable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the private executable cannot be changed
+    /// and frozen again.
+    pub fn invalidate_after_activation(&self) -> Result<(), String> {
+        permit_validator_fixture_write(&self.path)?;
+        let result = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"invalidated"))
+            .map_err(|_| "invalidate private artifact validator fixture".to_owned());
+        let frozen = freeze_validator_fixture(&self.path);
+        result.and(frozen)
     }
 
     /// Pins one candidate, mirroring the production executable boundary.
@@ -6010,6 +6165,42 @@ impl PinnedValidatorExecutable {
             sha256: artifact_sha256(&bytes),
         })
     }
+}
+
+#[cfg(unix)]
+fn freeze_validator_fixture(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500))
+        .map_err(|_| "freeze private artifact validator fixture".to_owned())
+}
+
+#[cfg(not(unix))]
+fn freeze_validator_fixture(path: &Path) -> Result<(), String> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|_| "inspect private artifact validator fixture".to_owned())?
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions)
+        .map_err(|_| "freeze private artifact validator fixture".to_owned())
+}
+
+#[cfg(unix)]
+fn permit_validator_fixture_write(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|_| "permit private artifact validator fixture mutation".to_owned())
+}
+
+#[cfg(not(unix))]
+fn permit_validator_fixture_write(path: &Path) -> Result<(), String> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|_| "inspect private artifact validator fixture".to_owned())?
+        .permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .map_err(|_| "permit private artifact validator fixture mutation".to_owned())
 }
 
 /// Candidate validator executables in priority order.
@@ -6399,7 +6590,7 @@ impl ArtifactPolicyFixture {
             None
         };
         let validator = if options.validators.is_declared() {
-            Some(PinnedValidatorExecutable::discover()?)
+            Some(PinnedValidatorExecutable::discover_private(&base)?)
         } else {
             None
         };
@@ -10473,6 +10664,27 @@ mod tests {
             assert!(contents.contains("read_only = false"));
             assert!(!contents.contains("read_only = true"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn required_validator_fixture_uses_an_invalidatable_private_copy() {
+        let fixture = ArtifactPolicyFixture::create_with(
+            "bafyrei-validator-cleanup",
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Required,
+                ..ArtifactPolicyOptions::default()
+            },
+        )
+        .expect("required-validator fixture");
+        let validator = fixture.validator().expect("private validator");
+        assert!(validator.path().starts_with(&fixture.base));
+        let pinned = validator.sha256().to_owned();
+        validator
+            .invalidate_after_activation()
+            .expect("invalidate private validator inode");
+        let changed = fs::read(validator.path()).expect("read invalidated validator");
+        assert_ne!(artifact_sha256(&changed), pinned);
     }
 
     #[test]

@@ -115,11 +115,12 @@ use live_scenario::{
     ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy, FixtureValidatorPolicy,
     UNAUTHORIZED_SPACE_ID, assert_artifact_parity, assert_artifact_policy_parity, audit_server_log,
     require_completed, run_artifact_alias_cases, run_artifact_dynamic_filesystem_cases,
-    run_artifact_empty_client_roots_case, run_artifact_hostile_validator_case,
-    run_artifact_malicious_metadata_default, run_artifact_missing_roots_case,
-    run_artifact_partial_write_protocol_cases, run_artifact_payload_boundary_cases,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
-    server_log_baseline,
+    run_artifact_empty_client_roots_case, run_artifact_failed_operation_cleanup_cases,
+    run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
+    run_artifact_missing_roots_case, run_artifact_partial_write_protocol_cases,
+    run_artifact_payload_boundary_cases, run_artifact_policy_scenario,
+    run_artifact_required_validator_cleanup_case, run_artifact_smoke_scenario,
+    run_artifact_traversal_default, server_log_baseline,
 };
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
@@ -2856,6 +2857,68 @@ async fn live_artifact_runtime(
     })
 }
 
+async fn run_direct_read_only_cleanup_cases(
+    server: &AnyMcpServer,
+    policy: &ArtifactPolicyFixture,
+) -> Result<AdversarialExecution, String> {
+    const NOT_FOUND_MESSAGE: &str =
+        "The requested Anytype entity was not found. Verify its identifier and space.";
+    let staging_before = policy.staging_snapshot()?;
+    let export_before = policy.export_snapshot()?;
+    let mut execution = AdversarialExecution::default();
+    for name in live_scenario::ARTIFACT_TOOL_NAMES
+        .into_iter()
+        .filter(|name| *name != "artifact_status")
+    {
+        let cancellation = CancellationToken::new();
+        let result = server
+            .dispatch_tool(
+                CallToolRequestParams::new(name).with_arguments(arguments(json!({}))),
+                &cancellation,
+            )
+            .await;
+        let error = result
+            .err()
+            .ok_or_else(|| "CLEAN-07 mutation was routed in read-only mode".to_owned())?;
+        if error.code != rmcp::model::ErrorCode::METHOD_NOT_FOUND
+            || error.message.as_ref() != "Method not found"
+        {
+            return Err("CLEAN-07 did not return exact method-not-found".to_owned());
+        }
+    }
+    execution.record_executed(AdversarialCaseId::Clean07)?;
+
+    let handle = format!("clean08-{}", unique_suffix());
+    execution.record_forbidden_log_needle(handle.as_bytes())?;
+    let cancellation = CancellationToken::new();
+    let result = server
+        .dispatch_tool(
+            CallToolRequestParams::new("artifact_status")
+                .with_arguments(arguments(json!({"handle": handle}))),
+            &cancellation,
+        )
+        .await
+        .map_err(|_| "CLEAN-08 did not return a bounded tool result".to_owned())?;
+    let value =
+        serde_json::to_value(result).map_err(|_| "serialize CLEAN-08 status result".to_owned())?;
+    let refusal = ToolErrorEvidence::from_result(&value, false)?;
+    if refusal.code() != "not_found"
+        || refusal
+            .normalized_result()
+            .pointer("/structuredContent/message")
+            .and_then(Value::as_str)
+            != Some(NOT_FOUND_MESSAGE)
+    {
+        return Err("CLEAN-08 did not return the uniform not-found result".to_owned());
+    }
+    if policy.staging_snapshot()? != staging_before || policy.export_snapshot()? != export_before {
+        return Err("read-only cleanup cases changed private artifact state".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean08)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
 #[derive(Debug)]
 struct EmptyClientRootsSource;
 
@@ -3262,6 +3325,113 @@ async fn headless_artifact_partial_write_direct_scenarios() {
         .expect("bounded partial-write owner evidence");
 }
 
+/// Runs CLEAN-01 and CLEAN-02 against failed direct-router operations.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_failed_operation_cleanup_direct_scenarios() {
+    let owner_evidence = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let callback_evidence = std::sync::Arc::clone(&owner_evidence);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-failed-cleanup",
+        move |ctx| {
+            Box::pin(async move {
+                let log_baseline = required_artifact_log_baseline()?;
+                let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
+                let policy = ArtifactPolicyFixture::create(&ctx.space_id).map_err(|_| {
+                    TestError::Assertion {
+                        message: "create failed-cleanup acceptance policy".to_owned(),
+                    }
+                })?;
+                log_needles.push(policy.forbidden_log_needle());
+                let mut execution = {
+                    let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                    let run = ArtifactAdversarialRun {
+                        control: ArtifactControlPlane::DirectRouter,
+                        policy: &policy,
+                        ctx: ctx.as_ref(),
+                        root_access_attempts: None,
+                        successful_import_opens: None,
+                        gate_hooks: None,
+                    };
+                    let mut driver = DirectRouterDriver { server: &server };
+                    Box::pin(run_artifact_failed_operation_cleanup_cases(
+                        &mut driver,
+                        &run,
+                    ))
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct failed-operation cleanup acceptance failed".to_owned(),
+                    })?
+                };
+                let validator_policy = ArtifactPolicyFixture::create_with(
+                    &ctx.space_id,
+                    ArtifactPolicyOptions {
+                        validators: FixtureValidatorPolicy::Required,
+                        ..ArtifactPolicyOptions::default()
+                    },
+                )
+                .map_err(|_| TestError::Assertion {
+                    message: "create required-validator cleanup policy".to_owned(),
+                })?;
+                log_needles.push(validator_policy.forbidden_log_needle());
+                let validator_cleanup = {
+                    let server = live_artifact_server(ctx.as_ref(), &validator_policy).await?;
+                    let run = ArtifactAdversarialRun {
+                        control: ArtifactControlPlane::DirectRouter,
+                        policy: &validator_policy,
+                        ctx: ctx.as_ref(),
+                        root_access_attempts: None,
+                        successful_import_opens: None,
+                        gate_hooks: None,
+                    };
+                    let mut driver = DirectRouterDriver { server: &server };
+                    Box::pin(run_artifact_required_validator_cleanup_case(
+                        &mut driver,
+                        &run,
+                    ))
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct required-validator cleanup acceptance failed".to_owned(),
+                    })?
+                };
+                execution
+                    .merge(validator_cleanup)
+                    .map_err(|_| TestError::Assertion {
+                        message: "merge failed-operation cleanup evidence".to_owned(),
+                    })?;
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Clean01,
+                        AdversarialCaseId::Clean02,
+                        AdversarialCaseId::Clean06,
+                    ])
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct failed-cleanup partition was incomplete".to_owned(),
+                    })?;
+                *callback_evidence.lock().map_err(|_| TestError::Assertion {
+                    message: "retain failed-cleanup owner evidence".to_owned(),
+                })? = Some((log_baseline, log_needles, execution));
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct failed-operation cleanup acceptance");
+    require_completed(outcome, "direct failed-operation cleanup acceptance")
+        .expect("prefix-authorized disposable admission");
+    let (log_baseline, log_needles, execution) = owner_evidence
+        .lock()
+        .expect("failed-cleanup owner evidence lock")
+        .take()
+        .expect("failed-cleanup owner evidence");
+    let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)
+        .expect("post-cleanup failed-operation log audit");
+    execution
+        .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
+        .expect("bounded failed-cleanup owner evidence");
+}
+
 /// Runs the default-policy alias and hostile-metadata direct-router cases.
 #[tokio::test]
 #[serial_test::serial]
@@ -3518,24 +3688,38 @@ async fn headless_artifact_policy_direct_scenarios() {
                     let server =
                         live_artifact_server_with(ctx.as_ref(), &policy, scenario.is_read_only())
                             .await?;
-                    let mut driver = DirectRouterDriver { server: &server };
                     let run = ArtifactPolicyRun {
                         scenario,
                         control: ArtifactControlPlane::DirectRouter,
                         policy: &policy,
                         ctx: ctx.as_ref(),
                     };
-                    let evidence = Box::pin(run_artifact_policy_scenario(&mut driver, &run))
-                        .await
-                        .map_err(|error| {
-                            eprintln!(
-                                "artifact policy scenario={} failure={error}",
-                                scenario.as_str()
-                            );
-                            TestError::Assertion {
-                                message: "direct artifact policy scenario failed".to_owned(),
-                            }
-                        })?;
+                    let evidence = {
+                        let mut driver = DirectRouterDriver { server: &server };
+                        Box::pin(run_artifact_policy_scenario(&mut driver, &run))
+                            .await
+                            .map_err(|error| {
+                                eprintln!(
+                                    "artifact policy scenario={} failure={error}",
+                                    scenario.as_str()
+                                );
+                                TestError::Assertion {
+                                    message: "direct artifact policy scenario failed".to_owned(),
+                                }
+                            })?
+                    };
+                    if scenario == ArtifactPolicyScenario::ReadOnly {
+                        let cleanup = run_direct_read_only_cleanup_cases(&server, &policy)
+                            .await
+                            .map_err(|_| TestError::Assertion {
+                                message: "direct read-only cleanup cases failed".to_owned(),
+                            })?;
+                        cleanup
+                            .assert_exact(&[AdversarialCaseId::Clean07, AdversarialCaseId::Clean08])
+                            .map_err(|_| TestError::Assertion {
+                                message: "direct read-only cleanup inventory diverged".to_owned(),
+                            })?;
+                    }
                     assert_artifact_policy_parity(
                         std::slice::from_ref(&evidence),
                         &[ArtifactControlPlane::DirectRouter],
