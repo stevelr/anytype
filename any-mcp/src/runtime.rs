@@ -9,7 +9,7 @@ use std::{
     fmt,
     future::Future,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -30,7 +30,9 @@ use crate::{
     artifact_config::ArtifactConfig,
     artifact_roots::RootRegistry,
     artifact_staging::ArtifactStaging,
-    artifact_toolset::{ArtifactOperationState, ArtifactToolError, FileImportOutput},
+    artifact_toolset::{
+        ArtifactOperationState, ArtifactToolError, FileImportOutput, ImportIdempotency,
+    },
     artifact_validators::ValidatorRunner,
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
     optional_toolsets::OptionalToolsetSelection,
@@ -72,6 +74,7 @@ pub struct RuntimeContext {
     settlement_permits: Arc<Semaphore>,
     settlement_active: Arc<AtomicUsize>,
     settlement_notify: Arc<Notify>,
+    settlement_gate: Arc<Mutex<SettlementAdmissionGate>>,
     artifact_acceptance_gates: ArtifactAcceptanceGates,
     client_roots: Arc<ClientRootsGate>,
 }
@@ -84,6 +87,66 @@ struct RuntimeParts {
     read_only: bool,
     optional_toolsets: OptionalToolsetSelection,
     space_authority: SpaceAuthority,
+}
+
+#[derive(Debug)]
+struct SettlementAdmissionGate {
+    accepting: bool,
+}
+
+/// One bounded settlement slot registered with shutdown drain ownership.
+///
+/// A reserved import key is terminalized synchronously if this admission is
+/// dropped before or after supervision, closing the reservation/supervision
+/// cancellation gap without an unbounded cleanup task.
+pub(crate) struct ImportSettlementAdmission {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    active: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+    gate: Arc<Mutex<SettlementAdmissionGate>>,
+    terminalize: Option<(ArtifactOperationState, [u8; 32])>,
+}
+
+impl ImportSettlementAdmission {
+    fn gate(&self) -> MutexGuard<'_, SettlementAdmissionGate> {
+        match self.gate.lock() {
+            Ok(gate) => gate,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub(crate) fn reserve_import(
+        &mut self,
+        operations: &ArtifactOperationState,
+        key: [u8; 32],
+        fingerprint: [u8; 32],
+    ) -> Result<ImportIdempotency, ArtifactToolError> {
+        let reservation = operations.reserve_import_now(key, fingerprint)?;
+        if matches!(
+            reservation,
+            ImportIdempotency::Dispatch | ImportIdempotency::VerifyCandidate { .. }
+        ) {
+            self.terminalize = Some((operations.clone(), key));
+        }
+        Ok(reservation)
+    }
+}
+
+impl Drop for ImportSettlementAdmission {
+    fn drop(&mut self) {
+        if let Some((operations, key)) = self.terminalize.take() {
+            operations.settle_import_timeout_now(key);
+        }
+        {
+            let _gate = self.gate();
+            let _ = self
+                .active
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                    active.checked_sub(1)
+                });
+        }
+        self.notify.notify_waiters();
+    }
 }
 
 impl fmt::Debug for RuntimeContext {
@@ -352,6 +415,13 @@ impl RuntimeContext {
     /// This operation is idempotent. The stdio transport invokes it as soon as
     /// EOF is observed, before rmcp performs its bounded in-flight drain.
     pub fn begin_shutdown(&self) {
+        {
+            let mut gate = match self.settlement_gate.lock() {
+                Ok(gate) => gate,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            gate.accepting = false;
+        }
         self.permits.close();
         self.settlement_permits.close();
         self.shutdown.cancel();
@@ -364,21 +434,15 @@ impl RuntimeContext {
     pub(crate) fn supervise_import_settlement<F>(
         &self,
         key: [u8; 32],
-        permit: tokio::sync::OwnedSemaphorePermit,
+        admission: ImportSettlementAdmission,
         operation: F,
     ) -> tokio::sync::oneshot::Receiver<Result<FileImportOutput, ArtifactToolError>>
     where
         F: Future<Output = Result<FileImportOutput, ArtifactToolError>> + Send + 'static,
     {
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let active = Arc::clone(&self.settlement_active);
-        let notify = Arc::clone(&self.settlement_notify);
         let shutdown = self.shutdown.clone();
         let operations = self.artifact_operations.clone();
-        // Count the worker before spawning so shutdown drain includes it from
-        // admission through terminal settlement; the owned permit prevents an
-        // unbounded post-reservation queue.
-        active.fetch_add(1, Ordering::AcqRel);
         tokio::spawn(async move {
             let mut child = tokio::spawn(operation);
             let result = tokio::select! {
@@ -396,9 +460,7 @@ impl RuntimeContext {
                     Err(ArtifactToolError::Indeterminate)
                 },
             };
-            drop(permit);
-            active.fetch_sub(1, Ordering::AcqRel);
-            notify.notify_waiters();
+            drop(admission);
             let _ = sender.send(result);
         });
         receiver
@@ -410,14 +472,30 @@ impl RuntimeContext {
     pub(crate) async fn admit_import_settlement(
         &self,
         deadline: Instant,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, ArtifactToolError> {
+    ) -> Result<ImportSettlementAdmission, ArtifactToolError> {
         let acquire = Arc::clone(&self.settlement_permits).acquire_owned();
-        tokio::select! {
+        let permit = tokio::select! {
             result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), acquire) => {
                 result.ok().and_then(Result::ok).ok_or(ArtifactToolError::Bounded)
             }
             () = self.shutdown.cancelled() => Err(ArtifactToolError::Indeterminate),
+        }?;
+        let gate = match self.settlement_gate.lock() {
+            Ok(gate) => gate,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !gate.accepting {
+            return Err(ArtifactToolError::Indeterminate);
         }
+        self.settlement_active.fetch_add(1, Ordering::AcqRel);
+        let admission = ImportSettlementAdmission {
+            _permit: permit,
+            active: Arc::clone(&self.settlement_active),
+            notify: Arc::clone(&self.settlement_notify),
+            gate: Arc::clone(&self.settlement_gate),
+            terminalize: None,
+        };
+        Ok(admission)
     }
 
     /// Waits only a bounded interval for owned artifact settlement tasks.
@@ -425,9 +503,14 @@ impl RuntimeContext {
         let drained = async {
             loop {
                 let notified = self.settlement_notify.notified();
+                let gate = match self.settlement_gate.lock() {
+                    Ok(gate) => gate,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 if self.settlement_active.load(Ordering::Acquire) == 0 {
                     return;
                 }
+                drop(gate);
                 notified.await;
             }
         };
@@ -795,6 +878,7 @@ impl RuntimeContext {
             settlement_permits: Arc::new(Semaphore::new(parts.max_concurrency)),
             settlement_active: Arc::new(AtomicUsize::new(0)),
             settlement_notify: Arc::new(Notify::new()),
+            settlement_gate: Arc::new(Mutex::new(SettlementAdmissionGate { accepting: true })),
             artifact_acceptance_gates: ArtifactAcceptanceGates::disabled(),
             client_roots: Arc::new(ClientRootsGate::default()),
         }
@@ -1337,18 +1421,15 @@ mod tests {
         let runtime = runtime(1, Duration::from_secs(1));
         let key = [7; 32];
         let fingerprint = [9; 32];
-        assert!(matches!(
-            runtime
-                .artifact_operations()
-                .reserve_import(key, fingerprint)
-                .await,
-            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
-        ));
-        let permit = runtime
+        let mut admission = runtime
             .admit_import_settlement(runtime.request_deadline())
             .await
             .expect("settlement permit");
-        let receiver = runtime.supervise_import_settlement(key, permit, async move {
+        assert!(matches!(
+            admission.reserve_import(runtime.artifact_operations(), key, fingerprint),
+            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
+        ));
+        let receiver = runtime.supervise_import_settlement(key, admission, async move {
             panic!("test settlement panic");
             #[allow(unreachable_code)]
             Ok::<_, ArtifactToolError>(unreachable!())
@@ -1383,8 +1464,45 @@ mod tests {
             runtime.admit_import_settlement(deadline).await,
             Err(ArtifactToolError::Bounded)
         ));
-        assert_eq!(runtime.settlement_active.load(Ordering::Acquire), 0);
+        assert_eq!(runtime.settlement_active.load(Ordering::Acquire), 1);
         drop(held);
+        assert_eq!(runtime.settlement_active.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_between_admission_and_supervision_waits_and_terminalizes() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let key = [5; 32];
+        let fingerprint = [6; 32];
+        let mut admission = runtime
+            .admit_import_settlement(runtime.request_deadline())
+            .await
+            .expect("settlement admission");
+        assert!(matches!(
+            admission.reserve_import(runtime.artifact_operations(), key, fingerprint),
+            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
+        ));
+
+        runtime.begin_shutdown();
+        let draining_runtime = runtime.clone();
+        let drain = tokio::spawn(async move {
+            draining_runtime
+                .drain_artifact_settlements(Duration::from_secs(1))
+                .await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished(), "drain must retain admitted ownership");
+
+        drop(admission);
+        drain.await.expect("drain task");
+        assert_eq!(runtime.settlement_active.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import(key, fingerprint)
+                .await,
+            Err(ArtifactToolError::Indeterminate)
+        ));
     }
 
     #[tokio::test]
@@ -1392,18 +1510,15 @@ mod tests {
         let runtime = runtime(1, Duration::from_secs(1));
         let key = [3; 32];
         let fingerprint = [4; 32];
-        assert!(matches!(
-            runtime
-                .artifact_operations()
-                .reserve_import(key, fingerprint)
-                .await,
-            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
-        ));
-        let permit = runtime
+        let mut admission = runtime
             .admit_import_settlement(runtime.request_deadline())
             .await
             .expect("settlement permit");
-        let receiver = runtime.supervise_import_settlement(key, permit, async {
+        assert!(matches!(
+            admission.reserve_import(runtime.artifact_operations(), key, fingerprint),
+            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
+        ));
+        let receiver = runtime.supervise_import_settlement(key, admission, async {
             std::future::pending::<Result<FileImportOutput, ArtifactToolError>>().await
         });
         tokio::task::yield_now().await;
