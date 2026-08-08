@@ -48,12 +48,13 @@ mod support;
 
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE,
-    ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
-    ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
-    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks,
-    ArtifactGateLease, ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
-    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
+    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
+    ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD,
+    ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution, ArtifactAdversarialRun,
+    ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane,
+    ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks, ArtifactGateLease,
+    ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun,
+    ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
     ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
     ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
     allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
@@ -5789,9 +5790,6 @@ const ADVERSARIAL_STDIO_CONTROLS: [ArtifactControlPlane; 2] = [
     ArtifactControlPlane::SpawnedPreviewStdio,
 ];
 
-const DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS: [AdversarialCaseId; 2] =
-    [AdversarialCaseId::Sym01, AdversarialCaseId::Hlink01];
-
 /// Aggregate diagnostic limits for one complete adversarial production child.
 #[cfg(feature = "acceptance-harness")]
 const ADVERSARIAL_CHILD_OUTPUT_BYTES: u64 = 1_048_576;
@@ -6285,7 +6283,7 @@ async fn run_spawned_artifact_adversarial_default(
     }
     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
     if control == ArtifactControlPlane::SpawnedStableStdio {
-        expected.extend(DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS);
+        expected.extend(ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS);
     }
     execution
         .assert_exact(&expected)
@@ -6623,7 +6621,7 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                     }
                     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
                     if control == ArtifactControlPlane::SpawnedStableStdio {
-                        expected.extend(DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS);
+                        expected.extend(ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS);
                         expected.extend([AdversarialCaseId::Sym11, AdversarialCaseId::Sym12]);
                     }
                     expected.push(AdversarialCaseId::Alias07);
