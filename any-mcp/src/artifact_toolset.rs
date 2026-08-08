@@ -853,7 +853,7 @@ pub(crate) enum ArtifactToolError {
 }
 
 #[derive(Clone, Debug)]
-enum ImportIdempotency {
+pub(crate) enum ImportIdempotency {
     Dispatch,
     VerifyCandidate(EntityId),
     Reuse(Box<FileImportOutput>),
@@ -884,7 +884,8 @@ enum DocumentExportIdempotency {
 #[derive(Clone, Debug)]
 enum OperationOutcome {
     ImportInFlight,
-    ImportSettling(EntityId),
+    ImportVerifying(EntityId),
+    ImportCleaning(EntityId),
     ImportCandidate(EntityId),
     ImportIndeterminate(EntityId),
     ImportComplete(FileImportOutput),
@@ -904,7 +905,8 @@ enum OperationOutcome {
 impl OperationOutcome {
     fn retained_import_candidate(&self) -> Option<&EntityId> {
         match self {
-            Self::ImportSettling(candidate)
+            Self::ImportVerifying(candidate)
+            | Self::ImportCleaning(candidate)
             | Self::ImportCandidate(candidate)
             | Self::ImportIndeterminate(candidate) => Some(candidate),
             _ => None,
@@ -931,7 +933,10 @@ impl ArtifactOperationState {
     pub(crate) async fn settle_import_timeout(&self, key: [u8; 32]) {
         if let Some(entry) = self.entries.lock().await.get_mut(&key) {
             entry.outcome = match &entry.outcome {
-                OperationOutcome::ImportSettling(candidate) => {
+                OperationOutcome::ImportVerifying(candidate) => {
+                    OperationOutcome::ImportCandidate(candidate.clone())
+                }
+                OperationOutcome::ImportCleaning(candidate) => {
                     OperationOutcome::ImportIndeterminate(candidate.clone())
                 }
                 OperationOutcome::ImportInFlight => OperationOutcome::Indeterminate,
@@ -940,7 +945,7 @@ impl ArtifactOperationState {
         }
     }
 
-    async fn reserve_import(
+    pub(crate) async fn reserve_import(
         &self,
         key: [u8; 32],
         fingerprint: [u8; 32],
@@ -968,7 +973,8 @@ impl ArtifactOperationState {
                 Ok(ImportIdempotency::Reuse(Box::new(output.clone())))
             }
             OperationOutcome::ImportInFlight
-            | OperationOutcome::ImportSettling(_)
+            | OperationOutcome::ImportVerifying(_)
+            | OperationOutcome::ImportCleaning(_)
             | OperationOutcome::ImportIndeterminate(_)
             | OperationOutcome::ExportInFlight
             | OperationOutcome::ExportComplete(_)
@@ -1005,7 +1011,8 @@ impl ArtifactOperationState {
                 Ok(ExportIdempotency::Reuse(Box::new(output.clone())))
             }
             OperationOutcome::ImportInFlight
-            | OperationOutcome::ImportSettling(_)
+            | OperationOutcome::ImportVerifying(_)
+            | OperationOutcome::ImportCleaning(_)
             | OperationOutcome::ImportCandidate(_)
             | OperationOutcome::ImportIndeterminate(_)
             | OperationOutcome::ImportComplete(_)
@@ -1895,9 +1902,15 @@ async fn settle_reserved_import(
     };
     runtime
         .artifact_operations()
-        .set_outcome(key, OperationOutcome::ImportSettling(candidate.clone()))
+        .set_outcome(key, OperationOutcome::ImportVerifying(candidate.clone()))
         .await;
     if let Err(source_error) = source.verify_unchanged() {
+        if source_error == ArtifactToolError::Conflict {
+            runtime
+                .artifact_operations()
+                .set_outcome(key, OperationOutcome::ImportCleaning(candidate.clone()))
+                .await;
+        }
         if source_error == ArtifactToolError::Conflict
             && cleanup_changed_import_candidate(&runtime, &space_id, &candidate).await
         {
@@ -3868,6 +3881,39 @@ mod tests {
                 .reserve_import(key, digest_fields(b"fingerprint", &[b"different"]))
                 .await,
             Err(ArtifactToolError::Conflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn import_timeout_preserves_candidate_only_while_verifying() {
+        let state = ArtifactOperationState::default();
+        let key = digest_fields(b"key", &[b"phase"]);
+        let fingerprint = digest_fields(b"fingerprint", &[b"phase"]);
+        let candidate = EntityId::new(
+            "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ".to_owned(),
+        )
+        .expect("candidate");
+
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        state
+            .set_outcome(key, OperationOutcome::ImportVerifying(candidate.clone()))
+            .await;
+        state.settle_import_timeout(key).await;
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Ok(ImportIdempotency::VerifyCandidate(actual)) if actual == candidate
+        ));
+
+        state
+            .set_outcome(key, OperationOutcome::ImportCleaning(candidate))
+            .await;
+        state.settle_import_timeout(key).await;
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Err(ArtifactToolError::Indeterminate)
         ));
     }
 

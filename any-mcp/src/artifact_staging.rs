@@ -2279,7 +2279,7 @@ mod tests {
             .expect("ready status");
         assert_eq!(status.state, "ready");
         assert_eq!(status.sha256.as_deref(), Some(expected));
-        let source = test
+        let mut source = test
             .staging
             .import_source(&allocation.handle, &space_id())
             .await
@@ -2291,56 +2291,34 @@ mod tests {
             .read_to_end(&mut bytes)
             .expect("read retained import");
         assert_eq!(bytes, b"hello");
-        let concurrent = tokio::time::timeout(
-            Duration::from_millis(20),
-            test.staging.import_source(&allocation.handle, &space_id()),
-        )
-        .await;
-        assert!(concurrent.is_err());
-        let reader = source.try_clone_reader().expect("blocking reader clone");
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-        let blocking_reader = tokio::task::spawn_blocking(move || {
-            let _reader = reader;
-            let _ = started_tx.send(());
-            let _ = release_rx.recv();
-            source
-        });
-        started_rx.await.expect("blocking reader started");
-        blocking_reader.abort();
-        drop(blocking_reader);
+        test.staging
+            .bind_import_operation(&mut source, [1; 32])
+            .expect("bind import operation");
         assert!(
-            tokio::time::timeout(
-                Duration::from_millis(20),
-                test.staging.import_source(&allocation.handle, &space_id()),
-            )
-            .await
-            .is_err(),
-            "cancelling a blocking join must not release its source lease"
+            test.staging
+                .import_source(&allocation.handle, &space_id())
+                .await
+                .is_err(),
+            "a second caller cannot acquire reconciliation authority"
         );
-        release_tx.send(()).expect("release blocking reader");
-        let mut source = tokio::time::timeout(
-            Duration::from_secs(1),
-            test.staging.import_source(&allocation.handle, &space_id()),
-        )
-        .await
-        .expect("blocking reader released its lease")
-        .expect("reacquire retained import source");
         test.staging
             .consume(&mut source)
             .await
             .expect("consume source");
         drop(source);
+        let same = test
+            .staging
+            .reconciliation_import(&allocation.handle, &space_id(), [1; 32])
+            .await
+            .expect("same operation can inspect consumed metadata");
+        assert_eq!(same.sha256, expected);
         assert!(
             test.staging
-                .import_source(&allocation.handle, &space_id())
+                .reconciliation_import(&allocation.handle, &space_id(), [2; 32])
                 .await
-                .is_err()
+                .is_err(),
+            "a wrong key cannot inspect consumed authority"
         );
-        test.staging
-            .release(&allocation.handle)
-            .await
-            .expect("release consumed source");
     }
 
     #[tokio::test]

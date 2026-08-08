@@ -1322,6 +1322,33 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn settlement_panic_is_terminal_and_drainable() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let key = [7; 32];
+        let fingerprint = [9; 32];
+        assert!(matches!(
+            runtime.artifact_operations().reserve_import(key, fingerprint).await,
+            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
+        ));
+        let receiver = runtime.supervise_import_settlement(key, async move {
+            panic!("test settlement panic");
+            #[allow(unreachable_code)]
+            Ok::<_, ArtifactToolError>(unreachable!())
+        });
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ArtifactToolError::Indeterminate))
+        ));
+        runtime
+            .drain_artifact_settlements(Duration::from_millis(100))
+            .await;
+        assert!(matches!(
+            runtime.artifact_operations().reserve_import(key, fingerprint).await,
+            Err(ArtifactToolError::Indeterminate)
+        ));
+    }
+
     #[derive(Clone)]
     struct CancellationToolServer {
         runtime: RuntimeContext,
