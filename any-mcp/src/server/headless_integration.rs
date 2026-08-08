@@ -45,6 +45,61 @@ use crate::optional_toolsets::{
     OptionalToolsetSelection, production_optional_metadata, production_optional_registries,
 };
 use crate::runtime::{RuntimeContext, StartupStatus};
+use crate::{ArtifactAcceptanceGateLease, ArtifactAcceptanceGates};
+
+struct DirectArtifactGateHooks(ArtifactAcceptanceGates);
+struct DirectArtifactGateLease(ArtifactAcceptanceGateLease);
+
+impl ArtifactGateLease for DirectArtifactGateLease {
+    fn wait<'a>(
+        &'a mut self,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(self.0.wait_until_reached(timeout))
+    }
+    fn release(&self) {
+        self.0.release();
+    }
+}
+
+impl ArtifactGateHooks for DirectArtifactGateHooks {
+    fn arm_import<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.0
+                .arm_file_import(key)
+                .await
+                .map(|lease| Box::new(DirectArtifactGateLease(lease)) as Box<dyn ArtifactGateLease>)
+                .map_err(|_| "arm direct import acceptance gate".to_owned())
+        })
+    }
+    fn arm_export<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.0
+                .arm_file_export(key)
+                .await
+                .map(|lease| Box::new(DirectArtifactGateLease(lease)) as Box<dyn ArtifactGateLease>)
+                .map_err(|_| "arm direct export acceptance gate".to_owned())
+        })
+    }
+    fn arm_document<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.0
+                .arm_document_import(key)
+                .await
+                .map(|lease| Box::new(DirectArtifactGateLease(lease)) as Box<dyn ArtifactGateLease>)
+                .map_err(|_| "arm direct document acceptance gate".to_owned())
+        })
+    }
+}
 
 #[cfg(windows)]
 pub(super) use crate::artifact_roots::acceptance_owner_private_file;
@@ -54,16 +109,16 @@ pub(super) mod live_scenario;
 
 use live_scenario::{
     ADVERSARIAL_DEFAULT_CASE_IDS, ADVERSARIAL_SPECIAL_CASE_IDS, AdversarialCaseId,
-    AdversarialExecution, ArtifactAdversarialRun, ArtifactControlPlane, ArtifactLimitProfile,
-    ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario,
-    ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactTransport,
-    FixtureSpacePolicy, FixtureValidatorPolicy, UNAUTHORIZED_SPACE_ID, assert_artifact_parity,
-    assert_artifact_policy_parity, audit_server_log, require_completed, run_artifact_alias_cases,
-    run_artifact_dynamic_filesystem_cases, run_artifact_empty_client_roots_case,
-    run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
-    run_artifact_missing_roots_case, run_artifact_payload_boundary_cases,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
-    server_log_baseline,
+    AdversarialExecution, ArtifactAdversarialRun, ArtifactControlPlane, ArtifactGateHooks,
+    ArtifactGateLease, ArtifactLimitProfile, ArtifactPolicyFixture, ArtifactPolicyOptions,
+    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
+    ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy, FixtureValidatorPolicy,
+    UNAUTHORIZED_SPACE_ID, assert_artifact_parity, assert_artifact_policy_parity, audit_server_log,
+    require_completed, run_artifact_alias_cases, run_artifact_dynamic_filesystem_cases,
+    run_artifact_empty_client_roots_case, run_artifact_hostile_validator_case,
+    run_artifact_malicious_metadata_default, run_artifact_missing_roots_case,
+    run_artifact_payload_boundary_cases, run_artifact_policy_scenario, run_artifact_smoke_scenario,
+    run_artifact_traversal_default, server_log_baseline,
 };
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
@@ -2923,13 +2978,16 @@ async fn headless_artifact_traversal_direct_scenarios() {
                         let root_access_attempts = || root_registry.acceptance_access_attempts();
                         let successful_import_opens =
                             || root_registry.acceptance_successful_import_opens();
+                        let gate_hooks = DirectArtifactGateHooks(
+                            server.runtime().artifact_acceptance_gates().clone(),
+                        );
                         let run = ArtifactAdversarialRun {
                             control: ArtifactControlPlane::DirectRouter,
                             policy: &policy,
                             ctx: ctx.as_ref(),
                             root_access_attempts: Some(&root_access_attempts),
                             successful_import_opens: Some(&successful_import_opens),
-                            gate_hooks: None,
+                            gate_hooks: Some(&gate_hooks),
                         };
                         Box::pin(run_artifact_traversal_default(&mut driver, &run))
                             .await
