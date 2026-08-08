@@ -1682,6 +1682,14 @@ async fn file_import(
         &input.name,
         declared_media_type.as_deref(),
     );
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(ArtifactAcceptanceGatePoint::ImportBeforeDispatch, key)
+        .await
+    {
+        return Err(ArtifactToolError::Indeterminate);
+    }
     match runtime
         .artifact_operations()
         .reserve_import(key, fingerprint)
@@ -2368,12 +2376,17 @@ async fn verify_document_source_before_dispatch(
     #[cfg(not(any(test, feature = "acceptance-harness")))] _runtime: &RuntimeContext,
     operations: &ArtifactOperationState,
     key: [u8; 32],
+    #[cfg(any(test, feature = "acceptance-harness"))] acceptance_key: [u8; 32],
+    #[cfg(not(any(test, feature = "acceptance-harness")))] _acceptance_key: [u8; 32],
     source: &PreparedDocument,
 ) -> Result<(), ArtifactToolError> {
     #[cfg(any(test, feature = "acceptance-harness"))]
     let released = runtime
         .artifact_acceptance_gates()
-        .reach(ArtifactAcceptanceGatePoint::DocumentFinalRevalidation, key)
+        .reach(
+            ArtifactAcceptanceGatePoint::DocumentFinalRevalidation,
+            acceptance_key,
+        )
         .await;
     #[cfg(any(test, feature = "acceptance-harness"))]
     if !released {
@@ -2698,6 +2711,7 @@ async fn document_import_create(
     let validator_findings =
         run_configured_validators(runtime, &source.source, Some("text/markdown")).await?;
     let key = idempotency_key(b"document-create", &input.idempotency_key);
+    let acceptance_key = idempotency_key(b"document", &input.idempotency_key);
     let encoded_properties =
         serde_json::to_vec(&properties).map_err(|_| ArtifactToolError::Upstream)?;
     let fingerprint = document_mutation_fingerprint(
@@ -2773,8 +2787,14 @@ async fn document_import_create(
     for property in &properties {
         request = property.apply(request);
     }
-    verify_document_source_before_dispatch(runtime, runtime.artifact_operations(), key, &source)
-        .await?;
+    verify_document_source_before_dispatch(
+        runtime,
+        runtime.artifact_operations(),
+        key,
+        acceptance_key,
+        &source,
+    )
+    .await?;
     let created = match request.create().await {
         Ok(created) => created,
         Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -2882,6 +2902,7 @@ async fn document_import_update(
     let validator_findings =
         run_configured_validators(runtime, &source.source, Some("text/markdown")).await?;
     let key = idempotency_key(b"document-update", &input.idempotency_key);
+    let acceptance_key = idempotency_key(b"document", &input.idempotency_key);
     let fingerprint = document_mutation_fingerprint(
         b"any-mcp/artifact/document-update/v1",
         &space_id,
@@ -2946,6 +2967,7 @@ async fn document_import_update(
             runtime,
             runtime.artifact_operations(),
             key,
+            acceptance_key,
             &source,
         )
         .await?;
@@ -2978,8 +3000,14 @@ async fn document_import_update(
     let wire = representation
         .as_ref()
         .map_or(source.dispatched.as_str(), |value| value.wire());
-    verify_document_source_before_dispatch(runtime, runtime.artifact_operations(), key, &source)
-        .await?;
+    verify_document_source_before_dispatch(
+        runtime,
+        runtime.artifact_operations(),
+        key,
+        acceptance_key,
+        &source,
+    )
+    .await?;
     let updated = match runtime
         .client()
         .update_object(space_id.as_str(), object_id.as_str())

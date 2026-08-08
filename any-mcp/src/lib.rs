@@ -266,7 +266,7 @@ fn production_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 async fn run_server(
     arguments: Vec<std::ffi::OsString>,
     keystore: Option<String>,
-    acceptance_process: bool,
+    _acceptance_process: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Transport and HTTP configuration are validated before any Anytype
     // credential access, probe, or listener bind.
@@ -275,10 +275,19 @@ async fn run_server(
     let protocol_mode = config.protocol_mode;
     match transport {
         http::TransportSelection::Stdio => {
-            let mut runtime = RuntimeContext::start(&config).await?;
+            let runtime = RuntimeContext::start(&config).await?;
             #[cfg(feature = "acceptance-harness")]
-            if acceptance_process {
+            let mut runtime = runtime;
+            #[cfg(feature = "acceptance-harness")]
+            let mut acceptance_gate_coordinator = None;
+            #[cfg(feature = "acceptance-harness")]
+            if _acceptance_process {
                 runtime.enable_artifact_acceptance_gates();
+                acceptance_gate_coordinator =
+                    artifact_acceptance_gates::configure_acceptance_gate_from_environment(
+                        runtime.artifact_acceptance_gates(),
+                    )
+                    .await?;
             }
             tracing::info!(
                 http_available = runtime.startup_status().http_available,
@@ -286,13 +295,24 @@ async fn run_server(
                 "authenticated Anytype runtime ready"
             );
             serve_stdio(runtime, protocol_mode).await?;
+            #[cfg(feature = "acceptance-harness")]
+            drop(acceptance_gate_coordinator);
         }
         http::TransportSelection::StreamableHttp(http_config) => {
             let auth = http::prepare_http_auth(&http_config, config.startup_timeout).await?;
-            let mut runtime = RuntimeContext::start(&config).await?;
+            let runtime = RuntimeContext::start(&config).await?;
             #[cfg(feature = "acceptance-harness")]
-            if acceptance_process {
+            let mut runtime = runtime;
+            #[cfg(feature = "acceptance-harness")]
+            let mut acceptance_gate_coordinator = None;
+            #[cfg(feature = "acceptance-harness")]
+            if _acceptance_process {
                 runtime.enable_artifact_acceptance_gates();
+                acceptance_gate_coordinator =
+                    artifact_acceptance_gates::configure_acceptance_gate_from_environment(
+                        runtime.artifact_acceptance_gates(),
+                    )
+                    .await?;
             }
             tracing::info!(
                 http_available = runtime.startup_status().http_available,
@@ -300,6 +320,8 @@ async fn run_server(
                 "authenticated Anytype runtime ready"
             );
             http::serve_http(runtime, protocol_mode, *http_config, auth).await?;
+            #[cfg(feature = "acceptance-harness")]
+            drop(acceptance_gate_coordinator);
         }
     }
     Ok(())

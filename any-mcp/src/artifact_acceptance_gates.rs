@@ -7,26 +7,91 @@
 
 use std::{
     collections::HashMap,
-    io,
+    env, io,
+    path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
 
+use cap_std::fs::{Dir, OpenOptions};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Mutex, watch};
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    task::JoinHandle,
+};
 
 /// An exact artifact operation point exposed only to the acceptance harness.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum ArtifactAcceptanceGatePoint {
+    /// The import reservation is about to dispatch its first upload request.
+    ImportBeforeDispatch,
     /// At least one upload chunk has been consumed by the import request.
     ImportFirstUploadChunk,
     /// The final export namespace check succeeded and publication is next.
     ExportPrepublication,
     /// A document import is about to perform its final source check.
     DocumentFinalRevalidation,
+}
+
+/// Capability-directory environment variable used only by the private child.
+pub const ACCEPTANCE_GATE_DIRECTORY_ENV: &str = "ANY_MCP_ACCEPTANCE_GATE_DIR";
+/// Bounded structured gate configuration used only by the private child.
+pub const ACCEPTANCE_GATE_ENV: &str = "ANY_MCP_ACCEPTANCE_GATE";
+const GATE_CONFIG_VERSION: &str = "v1";
+const MAX_GATE_CONFIG_BYTES: usize = 1024;
+const MAX_IDEMPOTENCY_KEY_CHARS: usize = 256;
+const NONCE_HEX_BYTES: usize = 64;
+const MARKER_CONTENT_BYTES: usize = NONCE_HEX_BYTES + 1;
+const GATE_DEADLINE: Duration = Duration::from_secs(30);
+const GATE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// A redacted error from private acceptance-child setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AcceptanceGateSetupError {
+    /// The paired environment configuration was missing or malformed.
+    Configuration,
+    /// The supplied directory was not a safe capability directory.
+    Directory,
+    /// A marker was stale, invalid, or could not be safely accessed.
+    Marker,
+    /// The requested point could not be armed in this runtime.
+    Arm,
+}
+
+impl std::fmt::Display for AcceptanceGateSetupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Configuration => "acceptance gate configuration rejected",
+            Self::Directory => "acceptance gate capability directory rejected",
+            Self::Marker => "acceptance gate marker rejected",
+            Self::Arm => "acceptance gate could not be armed",
+        })
+    }
+}
+
+impl std::error::Error for AcceptanceGateSetupError {}
+
+#[derive(Clone, Debug)]
+struct AcceptanceGateConfig {
+    point: ArtifactAcceptanceGatePoint,
+    raw_key: String,
+    nonce: String,
+    directory: PathBuf,
+}
+
+/// Retains the owned coordinator task for a private child gate.
+///
+/// Dropping a join handle deliberately detaches this bounded task: the lease
+/// remains owned until it releases or its deadline elapses.
+#[derive(Debug)]
+pub(crate) struct AcceptanceGateCoordinator {
+    _task: JoinHandle<()>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -39,6 +104,7 @@ struct GateKey {
 struct ArmedGate {
     entered: watch::Sender<bool>,
     released: watch::Receiver<bool>,
+    failed: Arc<AtomicBool>,
 }
 
 /// One runtime's opt-in acceptance synchronization state.
@@ -56,6 +122,7 @@ pub struct ArtifactAcceptanceGates {
 pub struct ArtifactAcceptanceGateLease {
     entered: watch::Receiver<bool>,
     released: watch::Sender<bool>,
+    failed: Arc<AtomicBool>,
 }
 
 /// Describes why an acceptance point could not be armed.
@@ -68,6 +135,17 @@ pub enum ArtifactAcceptanceGateError {
 }
 
 impl ArtifactAcceptanceGates {
+    /// Arms an import at the last point before reservation and dispatch.
+    pub async fn arm_import_before_dispatch(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::ImportBeforeDispatch,
+            operation_key(b"import", idempotency_key),
+        )
+        .await
+    }
     /// Arms the exact import operation selected by its caller idempotency key.
     pub async fn arm_file_import(
         &self,
@@ -133,13 +211,16 @@ impl ArtifactAcceptanceGates {
         let key = GateKey { point, operation };
         let (entered, entered_receiver) = watch::channel(false);
         let (released, released_receiver) = watch::channel(false);
+        let failed = Arc::new(AtomicBool::new(false));
         let gate = ArmedGate {
             entered,
             released: released_receiver,
+            failed: failed.clone(),
         };
         let lease = ArtifactAcceptanceGateLease {
             entered: entered_receiver,
             released,
+            failed,
         };
         let mut arms = self.arms.lock().await;
         if let std::collections::hash_map::Entry::Vacant(slot) = arms.entry(key) {
@@ -164,14 +245,281 @@ impl ArtifactAcceptanceGates {
             return true;
         };
         let _ = gate.entered.send(true);
+        let failed = gate.failed.clone();
         let mut released = gate.released;
         if *released.borrow() {
-            return true;
+            return !failed.load(Ordering::Acquire);
         }
         tokio::time::timeout(Duration::from_secs(30), released.changed())
             .await
-            .is_ok_and(|result| result.is_ok() && *released.borrow())
+            .is_ok_and(|result| {
+                result.is_ok() && *released.borrow() && !failed.load(Ordering::Acquire)
+            })
     }
+}
+
+impl AcceptanceGateConfig {
+    fn from_environment() -> Result<Option<Self>, AcceptanceGateSetupError> {
+        let directory = env::var_os(ACCEPTANCE_GATE_DIRECTORY_ENV);
+        let encoded = env::var_os(ACCEPTANCE_GATE_ENV);
+        let (directory, encoded) = match (directory, encoded) {
+            (None, None) => return Ok(None),
+            (Some(directory), Some(encoded)) => (directory, encoded),
+            _ => return Err(AcceptanceGateSetupError::Configuration),
+        };
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() {
+            return Err(AcceptanceGateSetupError::Directory);
+        }
+        let encoded = encoded
+            .into_string()
+            .map_err(|_| AcceptanceGateSetupError::Configuration)?;
+        if encoded.len() > MAX_GATE_CONFIG_BYTES {
+            return Err(AcceptanceGateSetupError::Configuration);
+        }
+        let mut fields = encoded.split('|');
+        let (Some(version), Some(point), Some(raw_key), Some(nonce)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(AcceptanceGateSetupError::Configuration);
+        };
+        if fields.next().is_some() || version != GATE_CONFIG_VERSION {
+            return Err(AcceptanceGateSetupError::Configuration);
+        }
+        let point = match point {
+            "import-first-upload-chunk" => ArtifactAcceptanceGatePoint::ImportFirstUploadChunk,
+            "export-prepublication" => ArtifactAcceptanceGatePoint::ExportPrepublication,
+            "document-final-revalidation" => ArtifactAcceptanceGatePoint::DocumentFinalRevalidation,
+            "import-before-dispatch" => ArtifactAcceptanceGatePoint::ImportBeforeDispatch,
+            _ => return Err(AcceptanceGateSetupError::Configuration),
+        };
+        if raw_key.is_empty()
+            || raw_key.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS
+            || raw_key.contains('|')
+            || raw_key.bytes().any(|byte| byte.is_ascii_control())
+            || nonce.len() != NONCE_HEX_BYTES
+            || !nonce.bytes().all(lowercase_hex)
+        {
+            return Err(AcceptanceGateSetupError::Configuration);
+        }
+        Ok(Some(Self {
+            point,
+            raw_key: raw_key.to_owned(),
+            nonce: nonce.to_owned(),
+            directory,
+        }))
+    }
+
+    async fn arm(
+        &self,
+        gates: &ArtifactAcceptanceGates,
+    ) -> Result<ArtifactAcceptanceGateLease, AcceptanceGateSetupError> {
+        let operation = match self.point {
+            ArtifactAcceptanceGatePoint::ImportFirstUploadChunk
+            | ArtifactAcceptanceGatePoint::ImportBeforeDispatch => {
+                operation_key(b"import", &self.raw_key)
+            }
+            ArtifactAcceptanceGatePoint::ExportPrepublication => {
+                operation_key(b"export", &self.raw_key)
+            }
+            ArtifactAcceptanceGatePoint::DocumentFinalRevalidation => {
+                operation_key(b"document", &self.raw_key)
+            }
+        };
+        gates
+            .arm(self.point, operation)
+            .await
+            .map_err(|_| AcceptanceGateSetupError::Arm)
+    }
+}
+
+/// Reads and arms a private child-process gate. Ordinary entrypoints never
+/// call this function, so feature unification cannot activate environment I/O.
+pub(crate) async fn configure_acceptance_gate_from_environment(
+    gates: &ArtifactAcceptanceGates,
+) -> Result<Option<AcceptanceGateCoordinator>, AcceptanceGateSetupError> {
+    let Some(config) = AcceptanceGateConfig::from_environment()? else {
+        return Ok(None);
+    };
+    let directory = GateDirectory::open(&config.directory, &config.nonce)?;
+    let lease = config.arm(gates).await?;
+    let task = tokio::spawn(async move {
+        coordinate_gate(directory, lease).await;
+    });
+    Ok(Some(AcceptanceGateCoordinator { _task: task }))
+}
+
+#[derive(Debug)]
+struct GateDirectory {
+    directory: Dir,
+    ready: String,
+    release: String,
+    done: String,
+    nonce: String,
+}
+
+impl GateDirectory {
+    fn open(path: &Path, nonce: &str) -> Result<Self, AcceptanceGateSetupError> {
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|_| AcceptanceGateSetupError::Directory)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(AcceptanceGateSetupError::Directory);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(AcceptanceGateSetupError::Directory);
+            }
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| AcceptanceGateSetupError::Directory)?;
+        let directory = Dir::from_std_file(file);
+        let ready = format!("ready-{nonce}");
+        let release = format!("release-{nonce}");
+        let done = format!("done-{nonce}");
+        for marker in [&ready, &release, &done] {
+            match directory.symlink_metadata(marker) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                _ => return Err(AcceptanceGateSetupError::Marker),
+            }
+        }
+        Ok(Self {
+            directory,
+            ready,
+            release,
+            done,
+            nonce: nonce.to_owned(),
+        })
+    }
+
+    fn create_marker(&self, marker: &str) -> Result<(), AcceptanceGateSetupError> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        let mut file = self
+            .directory
+            .open_with(marker, &options)
+            .map_err(|_| AcceptanceGateSetupError::Marker)?;
+        use std::io::Write as _;
+        file.write_all(self.nonce.as_bytes())
+            .map_err(|_| AcceptanceGateSetupError::Marker)?;
+        file.write_all(b"\n")
+            .map_err(|_| AcceptanceGateSetupError::Marker)?;
+        file.sync_all()
+            .map_err(|_| AcceptanceGateSetupError::Marker)
+    }
+
+    fn release_is_valid(&self) -> Result<bool, AcceptanceGateSetupError> {
+        let metadata = match self.directory.symlink_metadata(&self.release) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Ok(metadata) => metadata,
+            Err(_) => return Err(AcceptanceGateSetupError::Marker),
+        };
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != MARKER_CONTENT_BYTES as u64
+        {
+            return Err(AcceptanceGateSetupError::Marker);
+        }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        let file = self
+            .directory
+            .open_with(&self.release, &options)
+            .map_err(|_| AcceptanceGateSetupError::Marker)?;
+        let mut payload = Vec::with_capacity(MARKER_CONTENT_BYTES);
+        use std::io::Read as _;
+        file.take((MARKER_CONTENT_BYTES + 1) as u64)
+            .read_to_end(&mut payload)
+            .map_err(|_| AcceptanceGateSetupError::Marker)?;
+        if payload.len() != MARKER_CONTENT_BYTES
+            || payload != format!("{}\n", self.nonce).as_bytes()
+        {
+            return Err(AcceptanceGateSetupError::Marker);
+        }
+        Ok(true)
+    }
+}
+
+async fn coordinate_gate(directory: GateDirectory, lease: ArtifactAcceptanceGateLease) {
+    let deadline = tokio::time::Instant::now() + GATE_DEADLINE;
+    if !wait_for_reach(&lease, deadline).await {
+        return;
+    }
+    if directory.create_marker(&directory.ready).is_err() {
+        lease.fail_closed();
+        return;
+    }
+    loop {
+        match directory.release_is_valid() {
+            Ok(true) => {
+                lease.release();
+                let _ = directory.create_marker(&directory.done);
+                return;
+            }
+            Err(_) => {
+                lease.fail_closed();
+                return;
+            }
+            Ok(false) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            lease.fail_closed();
+            return;
+        }
+        tokio::time::sleep(GATE_POLL_INTERVAL).await;
+    }
+}
+
+async fn wait_for_reach(
+    lease: &ArtifactAcceptanceGateLease,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    !remaining.is_zero() && lease.wait_until_reached(remaining).await
+}
+
+fn lowercase_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
 }
 
 /// An upload reader that pauses only after it has yielded its first nonempty
@@ -273,6 +621,10 @@ impl ArtifactAcceptanceGateLease {
     pub fn release(&self) {
         let _ = self.released.send(true);
     }
+
+    fn fail_closed(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for ArtifactAcceptanceGateLease {
@@ -284,6 +636,39 @@ impl Drop for ArtifactAcceptanceGateLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs::{self, OpenOptions as StdOpenOptions},
+        io::Write as _,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    fn nonce() -> String {
+        "a".repeat(NONCE_HEX_BYTES)
+    }
+
+    fn test_directory() -> PathBuf {
+        let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!("any-mcp-gate-{}-{sequence}", std::process::id()));
+        fs::create_dir(&path).expect("create test gate directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .expect("make test directory private");
+        }
+        path
+    }
+
+    fn write_file(path: &Path, contents: &[u8]) {
+        let mut file = StdOpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("create test marker");
+        file.write_all(contents).expect("write test marker");
+    }
 
     #[tokio::test]
     async fn arm_is_one_shot_and_scoped_to_one_operation() {
@@ -314,5 +699,121 @@ mod tests {
                 operation,
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn dropping_a_lease_releases_the_waiting_operation() {
+        let gates = ArtifactAcceptanceGates::enabled();
+        let operation = [9_u8; 32];
+        let lease = gates
+            .arm(ArtifactAcceptanceGatePoint::ImportBeforeDispatch, operation)
+            .await
+            .expect("arm gate");
+        let reached = gates.clone();
+        let task = tokio::spawn(async move {
+            reached
+                .reach(ArtifactAcceptanceGatePoint::ImportBeforeDispatch, operation)
+                .await
+        });
+        assert!(lease.wait_until_reached(Duration::from_secs(1)).await);
+        drop(lease);
+        assert!(task.await.expect("gate task"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn malformed_or_unbounded_environment_is_rejected() {
+        let directory = test_directory();
+        // SAFETY: this serial test restores the process environment before returning.
+        unsafe {
+            env::set_var(ACCEPTANCE_GATE_DIRECTORY_ENV, &directory);
+            env::set_var(
+                ACCEPTANCE_GATE_ENV,
+                "v1|unknown|key|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            );
+        }
+        assert!(matches!(
+            AcceptanceGateConfig::from_environment(),
+            Err(AcceptanceGateSetupError::Configuration)
+        ));
+        // SAFETY: this serial test restores the process environment before returning.
+        unsafe {
+            env::set_var(
+                ACCEPTANCE_GATE_ENV,
+                format!("v1|import-before-dispatch|{}|{}", "k".repeat(257), nonce()),
+            );
+        }
+        assert!(matches!(
+            AcceptanceGateConfig::from_environment(),
+            Err(AcceptanceGateSetupError::Configuration)
+        ));
+        // SAFETY: this serial test restores the process environment before returning.
+        unsafe {
+            env::remove_var(ACCEPTANCE_GATE_DIRECTORY_ENV);
+            env::remove_var(ACCEPTANCE_GATE_ENV);
+        }
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn stale_and_invalid_markers_fail_closed() {
+        let directory = test_directory();
+        let nonce = nonce();
+        write_file(&directory.join(format!("ready-{nonce}")), b"stale\n");
+        assert!(matches!(
+            GateDirectory::open(&directory, &nonce),
+            Err(AcceptanceGateSetupError::Marker)
+        ));
+        fs::remove_file(directory.join(format!("ready-{nonce}"))).expect("remove stale marker");
+        let capability = GateDirectory::open(&directory, &nonce).expect("open capability");
+        write_file(
+            &directory.join(format!("release-{nonce}")),
+            format!("{}\n", "b".repeat(NONCE_HEX_BYTES)).as_bytes(),
+        );
+        assert_eq!(
+            capability.release_is_valid(),
+            Err(AcceptanceGateSetupError::Marker)
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_release_marker_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_directory();
+        let nonce = nonce();
+        let capability = GateDirectory::open(&directory, &nonce).expect("open capability");
+        let target = directory.join("target");
+        write_file(&target, b"target");
+        symlink(&target, directory.join(format!("release-{nonce}"))).expect("create test symlink");
+        assert_eq!(
+            capability.release_is_valid(),
+            Err(AcceptanceGateSetupError::Marker)
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn normal_process_path_does_not_read_acceptance_environment() {
+        // SAFETY: this serial test restores the process environment before returning.
+        unsafe {
+            env::set_var(
+                ACCEPTANCE_GATE_DIRECTORY_ENV,
+                "/definitely/not/a/capability",
+            );
+            env::set_var(ACCEPTANCE_GATE_ENV, "not-valid");
+        }
+        assert_eq!(
+            crate::run_process([std::ffi::OsString::from("--version")]),
+            std::process::ExitCode::SUCCESS
+        );
+        // SAFETY: this serial test restores the process environment before returning.
+        unsafe {
+            env::remove_var(ACCEPTANCE_GATE_DIRECTORY_ENV);
+            env::remove_var(ACCEPTANCE_GATE_ENV);
+        }
     }
 }
