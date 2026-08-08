@@ -359,6 +359,26 @@ impl McpDriver for DirectRouterDriver<'_> {
         })
     }
 
+    fn call_tool_pair_concurrently<'a>(
+        &'a mut self,
+        name: &'static str,
+        left: Value,
+        right: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<(Value, Value), String>> + 'a>> {
+        Box::pin(async move {
+            let left_call = call(self.server, name, left);
+            let right_call = call(self.server, name, right);
+            let (left, right) = tokio::join!(left_call, right_call);
+            let left = left.structured_content.ok_or_else(|| {
+                "left concurrent tool result omitted structured content".to_owned()
+            })?;
+            let right = right.structured_content.ok_or_else(|| {
+                "right concurrent tool result omitted structured content".to_owned()
+            })?;
+            Ok((left, right))
+        })
+    }
+
     fn list_tools<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>> {
@@ -2677,18 +2697,25 @@ fn dynamic_filesystem_direct_runtime_case_ids() -> Vec<AdversarialCaseId> {
         AdversarialCaseId::Sym04,
         AdversarialCaseId::Sym05,
         AdversarialCaseId::Sym06,
+        AdversarialCaseId::Sym07,
+        AdversarialCaseId::Sym08,
         AdversarialCaseId::Sym09,
+        AdversarialCaseId::Sym10,
         #[cfg(unix)]
         AdversarialCaseId::Sym13,
         AdversarialCaseId::Race01,
         AdversarialCaseId::Race02,
         AdversarialCaseId::Race03,
         AdversarialCaseId::Race04,
+        AdversarialCaseId::Race05,
         AdversarialCaseId::Race06,
         AdversarialCaseId::Race07,
         AdversarialCaseId::Race08,
+        AdversarialCaseId::Race09,
+        AdversarialCaseId::Race10,
         AdversarialCaseId::Hlink01,
         AdversarialCaseId::Hlink02,
+        AdversarialCaseId::Hlink03,
         AdversarialCaseId::Hlink04,
         #[cfg(unix)]
         AdversarialCaseId::Hlink05,

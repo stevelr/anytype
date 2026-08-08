@@ -2276,6 +2276,21 @@ pub trait McpDriver {
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>>;
 
+    /// Dispatches two independent calls before awaiting either result.
+    ///
+    /// The default fails closed because a sequential driver cannot supply
+    /// evidence for a collision scenario.
+    fn call_tool_pair_concurrently<'a>(
+        &'a mut self,
+        _name: &'static str,
+        _left: Value,
+        _right: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<(Value, Value), String>> + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "driver does not expose concurrent tool calls".to_owned(),
+        )))
+    }
+
     fn list_tools<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>>;

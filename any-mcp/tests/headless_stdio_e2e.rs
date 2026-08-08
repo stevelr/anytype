@@ -51,18 +51,19 @@ use support::live_scenario::{
     ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE,
     ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
     ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
-    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactLifecycleScenario,
-    ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
-    ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeFixture,
-    ArtifactStageAllocation, ArtifactStartupCaseOutcome, ArtifactSymlinkStartupTarget,
-    ArtifactTransport, ExpectedOutcome, ObservedOutcome, allocate_stage_upload,
-    artifact_catalog_snapshot, artifact_sha256, assert_artifact_content_parity,
-    assert_artifact_parity, assert_artifact_policy_parity, assert_payload_frame_independence,
-    audit_server_log, classify_collision_frames, measure_artifact_frame,
-    prepare_artifact_symlink_startup_case, record_artifact_dynamic_filesystem_startup_cases,
-    reject_oversized_stage_chunk, release_stage_upload, run_artifact_adversarial_stdio_sentinels,
-    run_artifact_content_scenario, run_artifact_dynamic_filesystem_stdio_sentinels,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_baseline,
+    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks,
+    ArtifactGateLease, ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
+    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
+    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
+    ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
+    allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
+    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
+    assert_payload_frame_independence, audit_server_log, classify_collision_frames,
+    measure_artifact_frame, prepare_artifact_symlink_startup_case,
+    record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
+    release_stage_upload, run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
+    run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_policy_scenario,
+    run_artifact_race01, run_artifact_race04, run_artifact_smoke_scenario, server_log_baseline,
     stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
 #[cfg(feature = "acceptance-harness")]
@@ -2117,7 +2118,7 @@ fn spawn_disposable_paused_artifact_driver(
         cleanup_record,
         policy,
         options,
-        "file_import_first_hash_chunk",
+        "import-first-upload-chunk",
         key,
     )
 }
@@ -5809,10 +5810,12 @@ const ARTIFACT_SERVER_LOG_ENV: &str = "ANY_MCP_HEADLESS_REDACTED_LOG_FILE";
 /// all marker names and payloads stay derived from the nonce.
 #[cfg(feature = "acceptance-harness")]
 #[allow(dead_code)]
+#[derive(Clone)]
 struct ChildArtifactGate {
     directory: PathBuf,
     nonce: String,
     key: String,
+    owner: Arc<()>,
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -5837,15 +5840,16 @@ impl ChildArtifactGate {
             directory,
             nonce,
             key: key.to_owned(),
+            owner: Arc::new(()),
         })
     }
 
     fn configure(&self, command: &mut Command, point: &str, key: &str) {
         command
-            .env("ANY_MCP_ACCEPTANCE_GATE_DIRECTORY", &self.directory)
+            .env("ANY_MCP_ACCEPTANCE_GATE_DIR", &self.directory)
             .env(
                 "ANY_MCP_ACCEPTANCE_GATE",
-                format!("1|{point}|{key}|{}", self.nonce),
+                format!("v1|{point}|{key}|{}", self.nonce),
             );
     }
 
@@ -5902,8 +5906,67 @@ impl ChildArtifactGate {
 #[cfg(feature = "acceptance-harness")]
 impl Drop for ChildArtifactGate {
     fn drop(&mut self) {
+        if Arc::strong_count(&self.owner) != 1 {
+            return;
+        }
         let _ = self.release();
         let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+struct ChildArtifactGateHooks(ChildArtifactGate);
+
+#[cfg(feature = "acceptance-harness")]
+struct ChildArtifactGateLease(ChildArtifactGate);
+
+#[cfg(feature = "acceptance-harness")]
+impl ArtifactGateLease for ChildArtifactGateLease {
+    fn wait<'a>(
+        &'a mut self,
+        _timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { tokio::task::block_in_place(|| self.0.wait_ready().is_ok()) })
+    }
+
+    fn release(&self) {
+        let _ = self.0.release();
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl ArtifactGateHooks for ChildArtifactGateHooks {
+    fn arm_import<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            if key != self.0.key() {
+                return Err("stable child import gate key did not match".to_owned());
+            }
+            Ok(Box::new(ChildArtifactGateLease(self.0.clone())) as Box<dyn ArtifactGateLease>)
+        })
+    }
+
+    fn arm_export<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            if key != self.0.key() {
+                return Err("stable child export gate key did not match".to_owned());
+            }
+            Ok(Box::new(ChildArtifactGateLease(self.0.clone())) as Box<dyn ArtifactGateLease>)
+        })
+    }
+
+    fn arm_document<'a>(
+        &'a self,
+        _key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "stable child does not arm a document gate in this owner".to_owned(),
+        )))
     }
 }
 
@@ -6187,13 +6250,35 @@ async fn run_spawned_artifact_adversarial_default(
             "spawned adversarial artifact child exceeded its output bound",
         ));
     }
-    let execution = observed.map_err(|_| {
+    let mut execution = observed.map_err(|_| {
         eprintln!(
             "artifact adversarial control={} outcome=failed",
             control.as_str()
         );
         sentinel_assertion("spawned adversarial artifact scenarios failed")
     })?;
+    if control == ArtifactControlPlane::SpawnedStableStdio {
+        execution.merge(
+            run_spawned_artifact_gated_race(
+                ctx,
+                Arc::new(Mutex::new(ChildCleanupRecord::NotStarted)),
+                audit_needles,
+                "import-first-upload-chunk",
+                AdversarialCaseId::Race01,
+            )
+            .await?,
+        )?;
+        execution.merge(
+            run_spawned_artifact_gated_race(
+                ctx,
+                Arc::new(Mutex::new(ChildCleanupRecord::NotStarted)),
+                audit_needles,
+                "export-prepublication",
+                AdversarialCaseId::Race04,
+            )
+            .await?,
+        )?;
+    }
     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
     if control == ArtifactControlPlane::SpawnedStableStdio {
         expected.extend(DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS);
@@ -6204,6 +6289,66 @@ async fn run_spawned_artifact_adversarial_default(
     for needle in execution.forbidden_log_needles() {
         record_artifact_log_needle(audit_needles, needle)?;
     }
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_spawned_artifact_gated_race(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    point: &'static str,
+    case: AdversarialCaseId,
+) -> TestResult<AdversarialExecution> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| sentinel_assertion("create gated artifact fixture"))?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)?;
+    let key = format!(
+        "{}-stable-{}",
+        case.as_str().to_ascii_lowercase(),
+        unique_suffix()
+    );
+    let (child, gate) = spawn_disposable_gated_artifact_driver(
+        ctx,
+        cleanup_record,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+        point,
+        key.clone(),
+    )?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("registered gated child disappeared"))?
+        .initialize();
+    let hooks = ChildArtifactGateHooks(gate);
+    let run = ArtifactAdversarialRun {
+        control: ArtifactControlPlane::SpawnedStableStdio,
+        policy: policy.as_ref(),
+        ctx,
+        root_access_attempts: None,
+        successful_import_opens: None,
+        gate_hooks: Some(&hooks),
+    };
+    let observed = {
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&child),
+        };
+        match case {
+            AdversarialCaseId::Race01 => run_artifact_race01(&mut driver, &run, key).await,
+            AdversarialCaseId::Race04 => run_artifact_race04(&mut driver, &run, key).await,
+            _ => Err("unsupported stable gated race case".to_owned()),
+        }
+    };
+    finish_registered_artifact_child(&child, None)
+        .map_err(|_| sentinel_assertion("gated artifact child did not stop cleanly"))?;
+    observed.map_err(|_| sentinel_assertion("gated artifact race failed"))?;
+    let mut execution = AdversarialExecution::default();
+    execution
+        .record_executed(case)
+        .map_err(|_| sentinel_assertion("record gated artifact race"))?;
+    execution.record_quota_not_applicable();
     Ok(execution)
 }
 

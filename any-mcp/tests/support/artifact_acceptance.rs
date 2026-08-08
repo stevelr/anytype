@@ -414,8 +414,12 @@ pub const ADVERSARIAL_DYNAMIC_RUNTIME_CASE_IDS: &[AdversarialCaseId] = &[
 ];
 
 /// Implemented dynamic-filesystem sentinels repeated through stable stdio.
-pub const ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS: &[AdversarialCaseId] =
-    &[AdversarialCaseId::Sym01, AdversarialCaseId::Hlink01];
+pub const ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Sym01,
+    AdversarialCaseId::Hlink01,
+    AdversarialCaseId::Race01,
+    AdversarialCaseId::Race04,
+];
 
 /// Fixture root replaced by a directory symlink before a startup probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,8 +494,25 @@ const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStat
                 AdversarialCaseStatus::PlatformUnsupported
             }
         }
+        AdversarialCaseId::Sym07 | AdversarialCaseId::Sym08 | AdversarialCaseId::Sym10 => {
+            if cfg!(windows) {
+                AdversarialCaseStatus::Executed
+            } else {
+                AdversarialCaseStatus::PlatformUnsupported
+            }
+        }
         AdversarialCaseId::Sym13 | AdversarialCaseId::Hlink05 => {
             if cfg!(unix) {
+                AdversarialCaseStatus::Executed
+            } else {
+                AdversarialCaseStatus::PlatformUnsupported
+            }
+        }
+        AdversarialCaseId::Race05
+        | AdversarialCaseId::Race09
+        | AdversarialCaseId::Race10
+        | AdversarialCaseId::Hlink03 => {
+            if cfg!(any(unix, windows)) {
                 AdversarialCaseStatus::Executed
             } else {
                 AdversarialCaseStatus::PlatformUnsupported
@@ -1729,6 +1750,7 @@ async fn run_import_gate_race(
     run: &ArtifactAdversarialRun<'_>,
     id: AdversarialCaseId,
     mutation: ImportRaceMutation,
+    key: String,
 ) -> Result<(), String> {
     let gates = run
         .gate_hooks
@@ -1742,11 +1764,6 @@ async fn run_import_gate_race(
     let bytes = vec![0x41; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_mul(2)];
     fs::write(&source, &bytes).map_err(|_| "seed gated import race source".to_owned())?;
     secure_files(std::slice::from_ref(&source))?;
-    let key = format!(
-        "{}-gate-{}",
-        id.as_str().to_ascii_lowercase(),
-        unique_suffix()
-    );
     let mut lease = gates.arm_import(&key).await?;
     let request = driver.call_tool_error(
         "file_import",
@@ -1798,6 +1815,25 @@ async fn run_import_gate_race(
     Ok(())
 }
 
+/// Executes the first-chunk replacement case through an already armed gate.
+///
+/// This is exported for the stable stdio owner, which supplies its private
+/// child-process gate adapter.
+pub async fn run_artifact_race01(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+    key: String,
+) -> Result<(), String> {
+    run_import_gate_race(
+        driver,
+        run,
+        AdversarialCaseId::Race01,
+        ImportRaceMutation::Replace,
+        key,
+    )
+    .await
+}
+
 #[derive(Clone, Copy)]
 enum ImportRaceMutation {
     Replace,
@@ -1811,13 +1847,13 @@ enum ImportRaceMutation {
 async fn run_export_gate_race(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
+    key: String,
 ) -> Result<(), String> {
     let gates = run
         .gate_hooks
         .ok_or_else(|| "dynamic export race requires direct acceptance gates".to_owned())?;
     let file_id = adversarial_seed_file(driver, run, "race04-seed.bin").await?;
     let destination = format!("race04-destination-{}", unique_suffix());
-    let key = format!("race04-gate-{}", unique_suffix());
     let mut lease = gates.arm_export(&key).await?;
     let request = driver.call_tool_error(
         "file_export",
@@ -1848,6 +1884,229 @@ async fn run_export_gate_race(
     adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
     if fs::read(&path).ok().as_deref() != Some(competing) {
         return Err("RACE-04 changed the competing destination".to_owned());
+    }
+    Ok(())
+}
+
+/// Executes the prepublication competing-destination case through an armed
+/// gate. The stable stdio owner calls this with its child-process adapter.
+pub async fn run_artifact_race04(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+    key: String,
+) -> Result<(), String> {
+    run_export_gate_race(driver, run, key).await
+}
+
+/// Replaces the configured export pathname after the retained-root check.
+/// The opened root remains authoritative, so a successful publication belongs
+/// only to the moved namespace and the replacement remains empty.
+#[cfg(unix)]
+async fn run_export_root_rename_race(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let gates = run
+        .gate_hooks
+        .ok_or_else(|| "RACE-05 requires direct acceptance gates".to_owned())?;
+    let file_id = adversarial_seed_file(driver, run, "race05-seed.bin").await?;
+    let destination = format!("race05-destination-{}", unique_suffix());
+    let key = format!("race05-gate-{}", unique_suffix());
+    let mut lease = gates.arm_export(&key).await?;
+    let request = driver.call_tool(
+        "file_export",
+        json!({
+            "space": run.ctx.space_id,
+            "file_id": file_id,
+            "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &destination),
+            "idempotency_key": key,
+        }),
+    );
+    tokio::pin!(request);
+    tokio::select! {
+        reached = lease.wait(Duration::from_secs(10)) => {
+            if !reached { return Err("RACE-05 did not reach publication gate".to_owned()); }
+        }
+        _ = &mut request => return Err("RACE-05 completed before publication gate".to_owned()),
+    }
+    let configured = run.policy.export_root().to_path_buf();
+    let moved = configured.with_file_name(format!("race05-retained-{}", unique_suffix()));
+    fs::rename(&configured, &moved).map_err(|_| "move RACE-05 retained export root".to_owned())?;
+    fs::create_dir(&configured).map_err(|_| "create RACE-05 replacement export root".to_owned())?;
+    secure_directories(&[&configured])?;
+    lease.release();
+    let result = request.await;
+    let moved_file = moved.join(&destination);
+    let replacement_entries = fs::read_dir(&configured)
+        .map_err(|_| "inspect RACE-05 replacement export root".to_owned())?
+        .count();
+    let moved_bytes = fs::read(&moved_file).ok();
+    let restore = (|| {
+        fs::remove_dir_all(&configured)
+            .map_err(|_| "remove RACE-05 replacement export root".to_owned())?;
+        fs::rename(&moved, &configured).map_err(|_| "restore RACE-05 export root".to_owned())
+    })();
+    restore?;
+    match result {
+        Ok(_)
+            if moved_bytes.as_deref() == Some(ARTIFACT_FILE_PAYLOAD)
+                && replacement_entries == 0 =>
+        {
+            Ok(())
+        }
+        Err(_) if moved_bytes.is_none() && replacement_entries == 0 => Ok(()),
+        _ => Err("RACE-05 publication inventory was not confined to one namespace".to_owned()),
+    }
+}
+
+/// Changes document source bytes after parsing but before the final retained
+/// descriptor check. A conflict is required and no new document may appear.
+async fn run_document_final_revalidation_race(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let gates = run
+        .gate_hooks
+        .ok_or_else(|| "RACE-10 requires direct acceptance gates".to_owned())?;
+    let source_name = format!("race10-source-{}.md", unique_suffix());
+    let source = run.policy.import_root().join(&source_name);
+    let original = b"# RACE-10 original\n";
+    let replacement = b"# RACE-10 replacement\n";
+    fs::write(&source, original).map_err(|_| "seed RACE-10 document".to_owned())?;
+    secure_files(std::slice::from_ref(&source))?;
+    let before = artifact_object_ids(run.ctx).await?;
+    let key = format!("race10-gate-{}", unique_suffix());
+    let mut lease = gates.arm_document(&key).await?;
+    let request = driver.call_tool_error(
+        "document_import_create",
+        json!({
+            "space": run.ctx.space_id,
+            "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source_name),
+            "source_format": "markdown", "object_type": "page",
+            "name": "race10", "idempotency_key": key,
+        }),
+    );
+    tokio::pin!(request);
+    tokio::select! {
+        reached = lease.wait(Duration::from_secs(10)) => {
+            if !reached { return Err("RACE-10 did not reach final revalidation gate".to_owned()); }
+        }
+        _ = &mut request => return Err("RACE-10 completed before final revalidation gate".to_owned()),
+    }
+    fs::write(&source, replacement).map_err(|_| "replace RACE-10 document bytes".to_owned())?;
+    lease.release();
+    let refusal = request
+        .await
+        .map_err(|_| "RACE-10 accepted replaced document bytes".to_owned())?;
+    adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+    if fs::read(&source).ok().as_deref() != Some(replacement)
+        || artifact_object_ids(run.ctx).await? != before
+    {
+        return Err("RACE-10 changed document source or object inventory".to_owned());
+    }
+    Ok(())
+}
+
+/// Starts two independent export requests for one destination. The direct
+/// owner supplies a transport that constructs both futures before it awaits
+/// either response, which makes the create-new winner observable.
+async fn run_export_collision_race(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let file_id = adversarial_seed_file(driver, run, "race09-seed.bin").await?;
+    let destination = format!("race09-destination-{}", unique_suffix());
+    let arguments = |key: String| {
+        json!({
+            "space": run.ctx.space_id,
+            "file_id": file_id,
+            "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &destination),
+            "idempotency_key": key,
+        })
+    };
+    let (left, right) = driver
+        .call_tool_pair_concurrently(
+            "file_export",
+            arguments(format!("race09-left-{}", unique_suffix())),
+            arguments(format!("race09-right-{}", unique_suffix())),
+        )
+        .await?;
+    let outcomes = [&left, &right];
+    let accepted = outcomes
+        .iter()
+        .filter(|outcome| outcome["isError"] == Value::Bool(false))
+        .count();
+    let conflicts = outcomes
+        .iter()
+        .filter(|outcome| {
+            ToolErrorEvidence::from_result(outcome, false)
+                .is_ok_and(|evidence| evidence.code() == "conflict")
+        })
+        .count();
+    if accepted != 1 || conflicts != 1 {
+        return Err("RACE-09 did not produce one export winner and one conflict".to_owned());
+    }
+    if run.policy.read_export(&destination)? != ARTIFACT_FILE_PAYLOAD {
+        return Err("RACE-09 winner bytes differed from the imported file".to_owned());
+    }
+    let snapshot = run.policy.export_snapshot()?;
+    if snapshot.ordinary_files != 1
+        || snapshot.total_file_bytes != ARTIFACT_FILE_PAYLOAD.len() as u64
+        || snapshot.unexpected_entries != 0
+    {
+        return Err("RACE-09 export inventory was not a single winner".to_owned());
+    }
+    Ok(())
+}
+
+/// Adds a second link after the first import chunk. Candidate cleanup must
+/// settle to a conflict without creating an object or consuming either link.
+async fn run_hlink03(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let gates = run
+        .gate_hooks
+        .ok_or_else(|| "HLINK-03 requires direct acceptance gates".to_owned())?;
+    let source_name = format!("hlink03-source-{}", unique_suffix());
+    let source = run.policy.import_root().join(&source_name);
+    let outside = run
+        .policy
+        .base
+        .join(format!("hlink03-outside-{}", unique_suffix()));
+    let bytes = vec![0x51; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_mul(2)];
+    fs::write(&source, &bytes).map_err(|_| "seed HLINK-03 source".to_owned())?;
+    secure_files(std::slice::from_ref(&source))?;
+    let before = artifact_object_ids(run.ctx).await?;
+    let key = format!("hlink03-gate-{}", unique_suffix());
+    let mut lease = gates.arm_import(&key).await?;
+    let request = driver.call_tool_error(
+        "file_import",
+        json!({
+            "space": run.ctx.space_id,
+            "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source_name),
+            "name": "hlink03.bin", "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+            "idempotency_key": key,
+        }),
+    );
+    tokio::pin!(request);
+    tokio::select! {
+        reached = lease.wait(Duration::from_secs(10)) => {
+            if !reached { return Err("HLINK-03 did not reach import gate".to_owned()); }
+        }
+        _ = &mut request => return Err("HLINK-03 completed before import gate".to_owned()),
+    }
+    fs::hard_link(&source, &outside).map_err(|_| "create HLINK-03 second link".to_owned())?;
+    lease.release();
+    let refusal = request
+        .await
+        .map_err(|_| "HLINK-03 accepted a linked source".to_owned())?;
+    adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+    if fs::read(&source).ok().as_deref() != Some(bytes.as_slice())
+        || fs::read(&outside).ok().as_deref() != Some(bytes.as_slice())
+        || artifact_object_ids(run.ctx).await? != before
+    {
+        return Err("HLINK-03 did not preserve link bytes and object inventory".to_owned());
     }
     Ok(())
 }
@@ -2259,6 +2518,12 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     }
     execution.record_executed(AdversarialCaseId::Sym06)?;
 
+    #[cfg(not(windows))]
+    {
+        execution.record_unsupported(AdversarialCaseId::Sym07)?;
+        execution.record_unsupported(AdversarialCaseId::Sym08)?;
+    }
+
     let sym09_path = "file.bin:evil";
     let root_access = run
         .root_access_attempts
@@ -2287,6 +2552,8 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         run_sym10(driver, run).await?;
         execution.record_executed(AdversarialCaseId::Sym10)?;
     }
+    #[cfg(not(windows))]
+    execution.record_unsupported(AdversarialCaseId::Sym10)?;
 
     #[cfg(unix)]
     {
@@ -2299,6 +2566,7 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         run,
         AdversarialCaseId::Race01,
         ImportRaceMutation::Replace,
+        format!("race01-gate-{}", unique_suffix()),
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Race01)?;
@@ -2307,6 +2575,7 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         run,
         AdversarialCaseId::Race02,
         ImportRaceMutation::Rename,
+        format!("race02-gate-{}", unique_suffix()),
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Race02)?;
@@ -2315,6 +2584,7 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         run,
         AdversarialCaseId::Race03,
         ImportRaceMutation::Symlink,
+        format!("race03-gate-{}", unique_suffix()),
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Race03)?;
@@ -2323,12 +2593,27 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         run,
         AdversarialCaseId::Race06,
         ImportRaceMutation::HardLink,
+        format!("race06-gate-{}", unique_suffix()),
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Race06)?;
 
-    run_export_gate_race(driver, run).await?;
+    run_export_gate_race(driver, run, format!("race04-gate-{}", unique_suffix())).await?;
     execution.record_executed(AdversarialCaseId::Race04)?;
+
+    #[cfg(unix)]
+    {
+        run_export_root_rename_race(driver, run).await?;
+        execution.record_executed(AdversarialCaseId::Race05)?;
+    }
+    #[cfg(not(unix))]
+    execution.record_unsupported(AdversarialCaseId::Race05)?;
+
+    run_export_collision_race(driver, run).await?;
+    execution.record_executed(AdversarialCaseId::Race09)?;
+
+    run_document_final_revalidation_race(driver, run).await?;
+    execution.record_executed(AdversarialCaseId::Race10)?;
 
     run_raw_staging_races(driver, run, &mut execution).await?;
 
@@ -2351,6 +2636,9 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         execution.record_executed(AdversarialCaseId::Hlink06)?;
         run_hlink01(driver, run).await?;
         execution.record_executed(AdversarialCaseId::Hlink01)?;
+
+        run_hlink03(driver, run).await?;
+        execution.record_executed(AdversarialCaseId::Hlink03)?;
 
         let hlink02_name = format!("hlink02-link-{}", unique_suffix());
         fs::hard_link(
@@ -9978,7 +10266,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 65;
+        let implemented = 72;
         assert_eq!(
             partition
                 .iter()
@@ -9999,7 +10287,12 @@ mod tests {
         );
         assert_eq!(
             ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
-            [AdversarialCaseId::Sym01, AdversarialCaseId::Hlink01]
+            [
+                AdversarialCaseId::Sym01,
+                AdversarialCaseId::Hlink01,
+                AdversarialCaseId::Race01,
+                AdversarialCaseId::Race04,
+            ]
         );
         for case in AdversarialCaseId::ALL {
             assert_eq!(
