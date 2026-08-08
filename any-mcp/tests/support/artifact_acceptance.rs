@@ -2187,12 +2187,12 @@ pub async fn run_artifact_adversarial_default(
     Ok(execution)
 }
 
-/// Executes the three canonical adversarial cases through one stdio child.
+/// Executes the four canonical adversarial cases through one stdio child.
 ///
 /// # Errors
 ///
 /// Returns a fixed category when a sentinel outcome, no-mutation assertion, or
-/// exact three-case ownership partition diverges.
+/// exact four-case ownership partition diverges.
 pub async fn run_artifact_adversarial_stdio_sentinels(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
