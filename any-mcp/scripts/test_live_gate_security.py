@@ -87,6 +87,17 @@ class RunnerTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and mode policy")
+    def test_non_private_source_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, context = root / "source", root / "context"
+            source.write_bytes(b"reviewed event\n")
+            source.chmod(0o640)
+            with self.assertRaises(OSError):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    reviewed_evidence.start(source, context)
+
     def test_only_post_start_bytes_are_captured(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -100,11 +111,15 @@ class EvidenceTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 reviewed_evidence.start(source, context)
             with source.open("ab") as output:
-                output.write(b"fresh-event\n")
+                output.write(b'{"severity":"info","category":"body_acceptance"}\n')
             reviewed_evidence.capture(source, context, artifact)
             payload = artifact.read_bytes()
             self.assertNotIn(b"stale-allowlisted-event", payload)
-            self.assertIn(b"fresh-event", payload)
+            self.assertNotIn(b"body_acceptance", payload)
+            self.assertEqual(
+                payload,
+                b"any-mcp reviewed failure evidence\nreviewed_log_valid\nevent_count=1\n",
+            )
             self.assertLessEqual(len(payload), 65_536)
             self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
 
@@ -131,7 +146,38 @@ class EvidenceTests(unittest.TestCase):
                 reviewed_evidence.capture(source, context, artifact)
                 self.assertEqual(
                     artifact.read_bytes(),
-                    b"any-mcp reviewed failure evidence\nreviewed-source=unavailable\n",
+                    b"any-mcp reviewed failure evidence\nreviewed_log_unavailable\nevent_count=0\n",
+                )
+
+    def test_invalid_or_credential_like_fresh_bytes_are_never_disclosed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, fresh in [
+                ("malformed", b"PRIVATE_MALFORMED\n"),
+                (
+                    "duplicate",
+                    b'{"severity":"info","severity":"error","category":"safe"}\n',
+                ),
+                (
+                    "credential",
+                    b'{"severity":"info","category":"bearer PRIVATE_SECRET"}\n',
+                ),
+            ]:
+                source, context, artifact = (
+                    root / f"source-{name}",
+                    root / f"context-{name}",
+                    root / f"artifact-{name}",
+                )
+                source.write_bytes(b"baseline\n")
+                source.chmod(0o600)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    reviewed_evidence.start(source, context)
+                with source.open("ab") as output:
+                    output.write(fresh)
+                reviewed_evidence.capture(source, context, artifact)
+                self.assertEqual(
+                    artifact.read_bytes(),
+                    b"any-mcp reviewed failure evidence\nreviewed_log_invalid\nevent_count=0\n",
                 )
 
 

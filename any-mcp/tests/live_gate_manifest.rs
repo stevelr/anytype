@@ -2,6 +2,8 @@
 
 use std::{collections::BTreeSet, path::Path, process::Command};
 
+use sha2::{Digest, Sha256};
+
 const ADMITTED_IGNORED_LIB_TESTS: &[&str] = &[
     "chat_add_toolset::tests::headless_direct_and_preview_stdio_add_concurrent_replay_and_capacity_paths",
     "chat_delete_toolset::tests::headless_direct_and_spawned_stdio_delete_conflict_and_absence",
@@ -311,14 +313,23 @@ fn inventory_comparison_rejects_a_same_count_replacement() {
 #[test]
 fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     let workflow = include_str!("../../.github/workflows/any-mcp.yml");
+    let digest = Sha256::digest(workflow.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        digest, "aaf410bfad40a39a1d1c5fc272064f3fef1f48cabc4a2c1b4ab191389d58b2ad",
+        "workflow policy is an exact reviewed representation; audit before updating this digest"
+    );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
     let live = workflow_job(workflow, "headless-e2e", Some("headless-clean-server-soak"));
     let clean = workflow_job(workflow, "headless-clean-server-soak", None);
-    let predicate = "if: >- github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')";
 
+    let predicate = "if: >- github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')";
     assert!(workflow.contains("  pull_request:\n"));
     assert!(!workflow.contains("  schedule:\n"));
     assert!(!portable.contains("self-hosted"));
+    assert_eq!(occurrences(portable, "if: runner.os == 'Linux'"), 2);
     for block in [live, clean] {
         assert!(compact_whitespace(block).contains(predicate));
         assert!(block.contains("needs: portable-contracts"));
@@ -326,20 +337,26 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         assert!(block.contains("      - linux"));
         assert!(block.contains("      - anytype-headless"));
         assert!(block.contains("group: anytype-headless-live"));
-        assert!(!block.contains("pull_request"));
-        assert!(!block.contains("schedule"));
         assert!(!block.contains("tee"));
         assert!(block.contains("reviewed-evidence.py start"));
         assert!(block.contains("reviewed-evidence.py capture"));
         assert!(block.contains("ANY_MCP_HEADLESS_EVIDENCE_CONTEXT"));
         assert!(block.contains("retention-days: 7"));
         assert!(block.contains("\"$RUNNER_TEMP\"/any-mcp-live-??????"));
+        assert!(block.contains("systemctl --user show-environment"));
         for label in ["direct", "stdio", "discussions"] {
-            assert!(block.contains(&format!("run-live-gate.py test {label} --")));
+            assert!(block.contains(&format!("run-live-cgroup.sh test {label} --")));
         }
     }
     assert_eq!(occurrences(workflow, "group: anytype-headless-live"), 2);
-    assert!(!workflow.contains("group: any-mcp-headless"));
+    assert_eq!(
+        occurrences(workflow, "run-live-cgroup.sh command auth --"),
+        2
+    );
+    assert_eq!(
+        occurrences(workflow, "run-live-cgroup.sh command reset --"),
+        1
+    );
     assert_eq!(occurrences(workflow, "--test live_gate_manifest"), 1);
 
     let action_lines = workflow
@@ -349,7 +366,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
             line.starts_with("- uses:") || line.starts_with("uses:")
         })
         .collect::<Vec<_>>();
-    assert_eq!(action_lines.len(), 11);
+    assert_eq!(action_lines.len(), 14);
     for line in action_lines {
         let reference = line
             .split_once('@')
@@ -365,6 +382,13 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         occurrences(
             workflow,
             "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+        ),
+        3
+    );
+    assert_eq!(
+        occurrences(
+            workflow,
+            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
         ),
         3
     );
@@ -395,6 +419,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
 fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
     let runner = include_str!("../scripts/run-live-gate.py");
     let evidence = include_str!("../scripts/reviewed-evidence.py");
+    let cgroup = include_str!("../scripts/run-live-cgroup.sh");
     let helper_tests = include_str!("../scripts/test_live_gate_security.py");
 
     assert!(runner.contains(&format!(
@@ -416,10 +441,11 @@ fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
         "metadata.st_ino",
         "metadata.st_size < start_bytes",
         "hashlib.sha256(anchor).hexdigest()",
-        "offset = start_bytes",
         "FRESH_ARTIFACT_LIMIT = 64_000",
         "ARTIFACT_LIMIT = 65_536",
-        "reviewed-source=unavailable",
+        "reviewed_log_invalid",
+        "reviewed_log_unavailable",
+        "object_pairs_hook=unique_object",
     ] {
         assert!(
             evidence.contains(required),
@@ -429,4 +455,19 @@ fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
     assert!(helper_tests.contains("stale-allowlisted-event"));
     assert!(helper_tests.contains("assertNotIn"));
     assert!(helper_tests.contains("os.replace"));
+    assert!(helper_tests.contains("source.chmod(0o640)"));
+    assert!(helper_tests.contains("PRIVATE_MALFORMED"));
+    assert!(!evidence.contains("payload = payload + fresh"));
+    for required in [
+        "systemd-run --user --scope",
+        "--property=RuntimeMaxSec=1100s",
+        "trap cleanup EXIT",
+        "systemctl --user stop \"$unit\"",
+        "secrets.token_hex(8)",
+    ] {
+        assert!(
+            cgroup.contains(required),
+            "missing cgroup guard {required:?}"
+        );
+    }
 }

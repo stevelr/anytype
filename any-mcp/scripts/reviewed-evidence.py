@@ -2,7 +2,9 @@
 """Bind live evidence to one opened server-log identity and byte window."""
 
 import hashlib
+import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -12,6 +14,11 @@ from pathlib import Path
 ANCHOR_LIMIT = 4096
 ARTIFACT_LIMIT = 65_536
 FRESH_ARTIFACT_LIMIT = 64_000
+ALLOWED_EVENT_KEYS = {"timestamp", "severity", "component", "category", "fixture_id"}
+CREDENTIAL_LIKE = re.compile(
+    r"(?i)(authorization|bearer|password|secret|token|api[_-]?key)|"
+    r"(?:^|[^0-9a-f])[0-9a-f]{64}(?:$|[^0-9a-f])"
+)
 CONTEXT_KEYS = (
     "run_marker",
     "start_device",
@@ -21,6 +28,10 @@ CONTEXT_KEYS = (
     "anchor_length",
     "anchor_hash",
 )
+
+
+class EvidenceInvalid(Exception):
+    """Fresh evidence exists but violates the closed reviewed format."""
 
 
 def open_regular(path: Path) -> tuple[int, os.stat_result]:
@@ -109,22 +120,86 @@ def reviewed_window(source: Path, context: Path) -> tuple[str, bytes]:
         if hashlib.sha256(anchor).hexdigest() != values["anchor_hash"]:
             raise OSError("anchor changed")
         fresh_size = metadata.st_size - start_bytes
-        offset = start_bytes + max(0, fresh_size - FRESH_ARTIFACT_LIMIT)
-        fresh = os.pread(descriptor, min(fresh_size, FRESH_ARTIFACT_LIMIT), offset)
+        if fresh_size > FRESH_ARTIFACT_LIMIT:
+            raise EvidenceInvalid("fresh window oversized")
+        fresh = os.pread(descriptor, fresh_size, start_bytes)
         return values["run_marker"], fresh
     finally:
         os.close(descriptor)
 
 
+def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for key, value in pairs:
+        if key in values:
+            raise EvidenceInvalid("duplicate event key")
+        values[key] = value
+    return values
+
+
+def reviewed_event_count(fresh: bytes) -> int:
+    try:
+        lines = fresh.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise EvidenceInvalid("invalid UTF-8") from error
+    count = 0
+    for line in lines:
+        if not line:
+            continue
+        try:
+            event = json.loads(line, object_pairs_hook=unique_object)
+        except (json.JSONDecodeError, EvidenceInvalid) as error:
+            raise EvidenceInvalid("invalid event JSON") from error
+        if (
+            not isinstance(event, dict)
+            or len(event) < 2
+            or not set(event).issubset(ALLOWED_EVENT_KEYS)
+            or any(type(value) is not str for value in event.values())
+        ):
+            raise EvidenceInvalid("invalid event shape")
+        values = list(event.values())
+        if (
+            any(not value or len(value) > 256 for value in values)
+            or not isinstance(event.get("severity"), str)
+            or len(event["severity"]) > 32
+            or not any(
+                isinstance(event.get(key), str) and len(event[key]) <= 128
+                for key in ("component", "category")
+            )
+            or any(CREDENTIAL_LIKE.search(value) for value in values)
+        ):
+            raise EvidenceInvalid("unsafe event value")
+        count += 1
+    if count == 0:
+        raise EvidenceInvalid("missing fresh event")
+    return count
+
+
 def capture(source: Path, context: Path, artifact: Path) -> None:
     try:
-        marker, fresh = reviewed_window(source, context)
+        _, fresh = reviewed_window(source, context)
+    except EvidenceInvalid:
         payload = (
-            f"any-mcp reviewed failure evidence\nrun-marker={marker}\n"
-            "reviewed-source=fresh-post-start-window\n"
-        ).encode() + fresh
+            b"any-mcp reviewed failure evidence\nreviewed_log_invalid\nevent_count=0\n"
+        )
     except (OSError, ValueError, UnicodeError):
-        payload = b"any-mcp reviewed failure evidence\nreviewed-source=unavailable\n"
+        payload = (
+            b"any-mcp reviewed failure evidence\n"
+            b"reviewed_log_unavailable\nevent_count=0\n"
+        )
+    else:
+        try:
+            count = reviewed_event_count(fresh)
+        except EvidenceInvalid:
+            payload = (
+                b"any-mcp reviewed failure evidence\n"
+                b"reviewed_log_invalid\nevent_count=0\n"
+            )
+        else:
+            payload = (
+                b"any-mcp reviewed failure evidence\n"
+                b"reviewed_log_valid\n" + f"event_count={count}\n".encode()
+            )
     payload = payload[:ARTIFACT_LIMIT]
     descriptor = os.open(artifact, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as output:

@@ -1755,12 +1755,12 @@ chmod 0700 "$ANY_MCP_LIVE_PRIVATE_DIR"
 python3 any-mcp/scripts/reviewed-evidence.py start "$redacted_log" \
   "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" > "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"
 set -a; source "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"; set +a
-python3 any-mcp/scripts/run-live-gate.py test direct -- \
+bash any-mcp/scripts/run-live-cgroup.sh test direct -- \
   cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
-python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+bash any-mcp/scripts/run-live-cgroup.sh test stdio -- \
   cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- \
   --ignored --test-threads=1
-python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+bash any-mcp/scripts/run-live-cgroup.sh test discussions -- \
   cargo test -p any-mcp --features acceptance-harness \
   --test discussions_stdio_acceptance -- --ignored --test-threads=1
 rm -rf -- "$ANY_MCP_LIVE_PRIVATE_DIR"
@@ -1928,8 +1928,12 @@ absolute, readable runner-produced JSONL event file with credentials and
 content removed. The job records the opened regular file's device, inode,
 length, and bounded trailing anchor before testing. The body audit accepts only
 allow-listed events appended after that offset when the identity and anchor are
-unchanged. On failure, CI retains at most 64 KiB from that fresh reviewed
-window in a mode-0600 artifact for seven days. Protect the `anytype-headless`
+unchanged. On failure, CI validates at most 64 KiB from that fresh reviewed
+window and retains only fixed validity categories and event counters in a
+mode-0600 artifact for seven days; it never uploads raw server-log bytes. Each
+live driver runs in a unique transient user scope with
+an exact-unit cleanup trap and a manager-enforced runtime ceiling, so runners
+must provide an available systemd user manager. Protect the `anytype-headless`
 environment so untrusted code cannot reach the self-hosted runner or
 credentials. Both live jobs run only after the hosted contract matrix on a
 manual dispatch or a push to `main`; pull requests and tag pushes run the

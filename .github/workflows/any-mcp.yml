@@ -48,6 +48,12 @@ jobs:
       - name: Install Rust 1.96.0
         uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
 
+      - name: Install Python 3.14 for Linux helper checks
+        if: runner.os == 'Linux'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
@@ -60,7 +66,10 @@ jobs:
         run: cargo test --locked -p any-mcp --test live_gate_manifest
 
       - name: Verify private live-gate helper failure behavior
-        run: python3 any-mcp/scripts/test_live_gate_security.py
+        if: runner.os == 'Linux'
+        run: |
+          python3 any-mcp/scripts/test_live_gate_security.py
+          bash -n any-mcp/scripts/run-live-cgroup.sh
 
       - name: Run portable production-process and stdio conformance tests
         run: cargo test --locked -p any-mcp --features acceptance-harness --test process_runtime --test stdio_conformance --test headless_stdio_e2e --test discussions_stdio_acceptance
@@ -89,10 +98,24 @@ jobs:
       - name: Install Rust 1.96.0
         uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
 
+      - name: Install Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: any-mcp-headless
+
+      - name: Verify transient user-scope support
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! systemctl --user show-environment >/dev/null 2>&1; then
+            printf '%s\n' 'required live cgroup manager unavailable' >&2
+            exit 1
+          fi
 
       - name: Prepare private live-gate storage
         shell: bash
@@ -130,15 +153,15 @@ jobs:
           export ANY_MCP_HEADLESS_EVIDENCE_CONTEXT="$context"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER
           ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
-          python3 any-mcp/scripts/run-live-gate.py command auth -- \
+          bash any-mcp/scripts/run-live-cgroup.sh command auth -- \
             cargo run --locked -q -p anyr -- auth status --pretty
-          python3 any-mcp/scripts/run-live-gate.py test direct -- \
+          bash any-mcp/scripts/run-live-cgroup.sh test direct -- \
             cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture
-          python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+          bash any-mcp/scripts/run-live-cgroup.sh test stdio -- \
             cargo test --locked -p any-mcp --features acceptance-harness \
             --test headless_stdio_e2e -- --ignored --test-threads=1 --nocapture
-          python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+          bash any-mcp/scripts/run-live-cgroup.sh test discussions -- \
             cargo test --locked -p any-mcp --features acceptance-harness \
             --test discussions_stdio_acceptance -- --ignored --test-threads=1 --nocapture
 
@@ -199,10 +222,24 @@ jobs:
       - name: Install Rust 1.96.0
         uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
 
+      - name: Install Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: any-mcp-headless
+
+      - name: Verify transient user-scope support
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! systemctl --user show-environment >/dev/null 2>&1; then
+            printf '%s\n' 'required live cgroup manager unavailable' >&2
+            exit 1
+          fi
 
       - name: Prepare private live-gate storage
         shell: bash
@@ -222,7 +259,7 @@ jobs:
           test -n "$ANY_MCP_HEADLESS_RESET_SCRIPT"
           test "${ANY_MCP_HEADLESS_RESET_SCRIPT#/}" != "$ANY_MCP_HEADLESS_RESET_SCRIPT"
           test -x "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          python3 any-mcp/scripts/run-live-gate.py command reset -- \
+          bash any-mcp/scripts/run-live-cgroup.sh command reset -- \
             "$ANY_MCP_HEADLESS_RESET_SCRIPT"
 
       - name: Run all serial production-router and stdio-to-headless targets
@@ -252,15 +289,15 @@ jobs:
           export ANY_MCP_HEADLESS_EVIDENCE_CONTEXT="$context"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER
           ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
-          python3 any-mcp/scripts/run-live-gate.py command auth -- \
+          bash any-mcp/scripts/run-live-cgroup.sh command auth -- \
             cargo run --locked -q -p anyr -- auth status --pretty
-          python3 any-mcp/scripts/run-live-gate.py test direct -- \
+          bash any-mcp/scripts/run-live-cgroup.sh test direct -- \
             cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture
-          python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+          bash any-mcp/scripts/run-live-cgroup.sh test stdio -- \
             cargo test --locked -p any-mcp --features acceptance-harness \
             --test headless_stdio_e2e -- --ignored --test-threads=1 --nocapture
-          python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+          bash any-mcp/scripts/run-live-cgroup.sh test discussions -- \
             cargo test --locked -p any-mcp --features acceptance-harness \
             --test discussions_stdio_acceptance -- --ignored --test-threads=1 --nocapture
 

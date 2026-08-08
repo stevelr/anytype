@@ -17,7 +17,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   to `main`, after the hosted contract matrix succeeds. Immutable action pins,
   silent bounded test transcripts, and descriptor-bound post-start server-log
   evidence keep pull-request code and stale or replaced logs outside the
-  protected runner boundary.
+  protected runner boundary. Each driver runs in a uniquely named transient
+  user scope, and failure artifacts contain only fixed validation categories
+  and counters rather than server-log bytes.
 - Add `rich_page_resume` for one retained runtime facade recovery claim over
   the never-attempted suffix of a partial rich-page receipt. Recovery re-proves
   page, type, and authored prefix evidence, and refuses uncertain or attempted

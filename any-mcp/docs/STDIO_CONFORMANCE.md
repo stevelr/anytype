@@ -75,10 +75,10 @@ chmod 0700 "$ANY_MCP_LIVE_PRIVATE_DIR"
 python3 any-mcp/scripts/reviewed-evidence.py start "$redacted_log" \
   "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" > "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"
 set -a; source "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"; set +a
-python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+bash any-mcp/scripts/run-live-cgroup.sh test stdio -- \
   cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- \
   --ignored --test-threads=1
-python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+bash any-mcp/scripts/run-live-cgroup.sh test discussions -- \
   cargo test -p any-mcp --features acceptance-harness \
   --test discussions_stdio_acceptance -- --ignored --test-threads=1
 rm -rf -- "$ANY_MCP_LIVE_PRIVATE_DIR"
