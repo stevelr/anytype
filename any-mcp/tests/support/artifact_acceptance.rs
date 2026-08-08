@@ -609,6 +609,7 @@ fn adversarial_tool_error(kind: ExpectedToolErrorKind) -> ExpectedOutcome {
 pub struct AdversarialExecution {
     executed: BTreeSet<AdversarialCaseId>,
     unsupported: BTreeSet<AdversarialCaseId>,
+    quota_restored: BTreeSet<AdversarialCaseId>,
     forbidden_log_needles: Vec<Zeroizing<Vec<u8>>>,
     uniform_not_found_digest: Option<String>,
 }
@@ -653,6 +654,7 @@ impl AdversarialExecution {
         for id in other.unsupported {
             self.record_unsupported(id)?;
         }
+        self.quota_restored.extend(other.quota_restored);
         self.forbidden_log_needles
             .extend(other.forbidden_log_needles);
         if let Some(digest) = other.uniform_not_found_digest {
@@ -716,6 +718,11 @@ impl AdversarialExecution {
         Ok(())
     }
 
+    fn record_quota_restored(&mut self) {
+        self.quota_restored.extend(self.executed.iter().copied());
+        self.quota_restored.extend(self.unsupported.iter().copied());
+    }
+
     /// Number of cases actually executed on this platform.
     #[must_use]
     pub fn executed_count(&self) -> usize {
@@ -756,7 +763,8 @@ impl AdversarialExecution {
             || self
                 .unsupported
                 .iter()
-                .any(|id| id.status() != AdversarialCaseStatus::PlatformUnsupported)
+                .any(|id| !capability_unsupported(*id))
+            || !observed.is_subset(&self.quota_restored)
         {
             return Err("adversarial ticket execution partition was incomplete".to_owned());
         }
@@ -775,11 +783,17 @@ impl AdversarialExecution {
         if expected.len() != expected_count
             || expected.len() != observed.len()
             || expected != observed
+            || !observed.is_subset(&self.quota_restored)
         {
             return Err("adversarial execution did not match its exact owner inventory".to_owned());
         }
         Ok(())
     }
+}
+
+fn capability_unsupported(id: AdversarialCaseId) -> bool {
+    id.status() == AdversarialCaseStatus::PlatformUnsupported
+        || cfg!(windows) && id == AdversarialCaseId::Alias04
 }
 
 /// Fixture inputs for the path, alias, and hostile-metadata scenarios.
@@ -834,6 +848,46 @@ fn native_wtf16(units: &[u16]) -> Value {
     json!({"encoding": "windows-wtf16le-base64url", "value": URL_SAFE_NO_PAD.encode(bytes)})
 }
 
+#[cfg(windows)]
+fn windows_short_alias(path: &Path) -> Result<Option<String>, String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let source = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: `source` is NUL-terminated and remains live for both calls. The
+    // first call supplies no output buffer and obtains the exact bound.
+    let required = unsafe { GetShortPathNameW(source.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Ok(None);
+    }
+    let capacity = usize::try_from(required)
+        .map_err(|_| "inspect Windows short-name capability".to_owned())?;
+    let mut output = vec![0_u16; capacity];
+    // SAFETY: the buffer has the exact capacity returned above and both
+    // pointers remain live for the duration of the call.
+    let length = unsafe { GetShortPathNameW(source.as_ptr(), output.as_mut_ptr(), required) };
+    let length =
+        usize::try_from(length).map_err(|_| "inspect Windows short-name capability".to_owned())?;
+    if length == 0 || length >= output.len() {
+        return Ok(None);
+    }
+    let short_path = PathBuf::from(OsString::from_wide(&output[..length]));
+    let Some(short_name) = short_path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let Some(long_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    if short_name.eq_ignore_ascii_case(long_name) || !short_name.contains('~') {
+        return Ok(None);
+    }
+    Ok(Some(short_name.to_owned()))
+}
+
 fn file_import_arguments(
     space: &str,
     source: Value,
@@ -850,6 +904,31 @@ fn file_import_arguments(
         arguments["media_type"] = Value::String(media_type.to_owned());
     }
     arguments
+}
+
+async fn adversarial_quota_snapshot(driver: &mut impl McpDriver) -> Result<(u64, u64), String> {
+    let status = driver.call_tool("artifact_status", json!({})).await?;
+    let bytes = status
+        .get("staging_available_bytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "adversarial status omitted available staging bytes".to_owned())?;
+    let entries = status
+        .get("staging_available_entries")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "adversarial status omitted available staging entries".to_owned())?;
+    Ok((bytes, entries))
+}
+
+async fn finish_adversarial_quota(
+    driver: &mut impl McpDriver,
+    before: (u64, u64),
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    if adversarial_quota_snapshot(driver).await? != before {
+        return Err("adversarial staging quota was not restored".to_owned());
+    }
+    execution.record_quota_restored();
+    Ok(())
 }
 
 fn seed_control_import_source(
@@ -1010,6 +1089,7 @@ pub async fn run_artifact_traversal_default(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     let mut execution = AdversarialExecution::default();
     let space = run.ctx.space_id.as_str();
     let escape_sentinel = run.policy.base.join("escape.bin");
@@ -1291,6 +1371,7 @@ pub async fn run_artifact_traversal_default(
     fixture_before.assert_unchanged()?;
     import_before.assert_unchanged()?;
     execution.record_executed(AdversarialCaseId::Trav18)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
 
@@ -1299,6 +1380,7 @@ pub async fn run_artifact_empty_client_roots_case(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     let fixture_before = RootInventory::capture(&run.policy.base)?;
     let import_before = RootInventory::capture(run.policy.import_root())?;
     let export_before = RootInventory::capture(run.policy.export_root())?;
@@ -1328,6 +1410,7 @@ pub async fn run_artifact_empty_client_roots_case(
     let mut execution = AdversarialExecution::default();
     execution.record_uniform_not_found_payload(refusal.normalized_result())?;
     execution.record_executed(AdversarialCaseId::Trav19)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
 
@@ -1337,6 +1420,7 @@ pub async fn run_artifact_missing_roots_case(
     driver: &mut impl McpDriver,
     space_id: &str,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     adversarial_refusal(
         driver,
         "file_import",
@@ -1352,6 +1436,7 @@ pub async fn run_artifact_missing_roots_case(
     .await?;
     let mut execution = AdversarialExecution::default();
     execution.record_executed(AdversarialCaseId::Trav20)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
 
@@ -1366,6 +1451,7 @@ pub async fn run_artifact_alias_cases(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     let mut execution = AdversarialExecution::default();
     let space = run.ctx.space_id.as_str();
     let file_id = adversarial_seed_file(driver, run, "alias-seed.bin").await?;
@@ -1493,10 +1579,11 @@ pub async fn run_artifact_alias_cases(
         execution.record_executed(AdversarialCaseId::Alias03)?;
 
         let long_name = format!("long-artifact-name-{case_suffix}.bin");
-        fs::write(run.policy.export.join(&long_name), original)
+        let long_path = run.policy.export.join(&long_name);
+        fs::write(&long_path, original)
             .map_err(|_| "seed Windows short-name fixture".to_owned())?;
-        secure_files(std::slice::from_ref(&run.policy.export.join(&long_name)))?;
-        if run.policy.export.join("REPORT~1.BIN").exists() {
+        secure_files(std::slice::from_ref(&long_path))?;
+        if let Some(short_name) = windows_short_alias(&long_path)? {
             adversarial_refusal(
                 driver,
                 "file_export",
@@ -1505,7 +1592,7 @@ pub async fn run_artifact_alias_cases(
                     "file_id": file_id,
                     "destination": local_destination(
                         ArtifactPolicyFixture::EXPORT_ROOT,
-                        "REPORT~1.BIN",
+                        &short_name,
                     ),
                     "idempotency_key": format!("alias-short-name-{}", unique_suffix()),
                 }),
@@ -1513,26 +1600,13 @@ pub async fn run_artifact_alias_cases(
                 &[],
             )
             .await?;
+            execution.record_executed(AdversarialCaseId::Alias04)?;
         } else {
-            driver
-                .call_tool(
-                    "file_export",
-                    json!({
-                        "space": space,
-                        "file_id": file_id,
-                        "destination": local_destination(
-                            ArtifactPolicyFixture::EXPORT_ROOT,
-                            "REPORT~1.BIN",
-                        ),
-                        "idempotency_key": format!("alias-short-name-{}", unique_suffix()),
-                    }),
-                )
-                .await?;
+            execution.record_unsupported(AdversarialCaseId::Alias04)?;
         }
         if run.policy.read_export(&long_name)? != original {
             return Err("ALIAS-04 replaced the long-name file".to_owned());
         }
-        execution.record_executed(AdversarialCaseId::Alias04)?;
 
         for name in [
             "CON",
@@ -1654,6 +1728,7 @@ pub async fn run_artifact_alias_cases(
     }
     release_stage_upload(driver, &allocation).await?;
     execution.record_executed(AdversarialCaseId::Alias09)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
 
@@ -1669,6 +1744,7 @@ pub async fn run_artifact_malicious_metadata_default(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     let mut execution = AdversarialExecution::default();
     let space = run.ctx.space_id.as_str();
     let before_names = artifact_object_ids(run.ctx).await?;
@@ -1699,6 +1775,7 @@ pub async fn run_artifact_malicious_metadata_default(
     execution.record_executed(AdversarialCaseId::Mal01)?;
 
     let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
+    execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
     let imported = driver
         .call_tool(
             "file_import",
@@ -2028,6 +2105,7 @@ pub async fn run_artifact_malicious_metadata_default(
         return Err("MAL-14 wrote outside the caller destination".to_owned());
     }
     execution.record_executed(AdversarialCaseId::Mal14)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
 
@@ -2053,6 +2131,7 @@ pub async fn run_artifact_adversarial_stdio_sentinels(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     let mut execution = AdversarialExecution::default();
     let space = run.ctx.space_id.as_str();
     adversarial_refusal(
@@ -2119,6 +2198,7 @@ pub async fn run_artifact_adversarial_stdio_sentinels(
         return Err("MAL-01 created an Anytype object".to_owned());
     }
     execution.record_executed(AdversarialCaseId::Mal01)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     execution.assert_exact(ADVERSARIAL_STDIO_SENTINEL_IDS)?;
     Ok(execution)
 }
@@ -2133,6 +2213,7 @@ pub async fn run_artifact_payload_boundary_cases(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     if run.policy.options().limits != ArtifactLimitProfile::PayloadCeiling {
         return Err("payload adversarial cases require the reviewed limit profile".to_owned());
     }
@@ -2228,6 +2309,7 @@ pub async fn run_artifact_payload_boundary_cases(
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Mal12)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
 
@@ -2237,9 +2319,11 @@ pub async fn run_artifact_hostile_validator_case(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
     let mut execution = AdversarialExecution::default();
     if !VALIDATOR_PLATFORM_ACTIVATES {
         execution.record_unsupported(AdversarialCaseId::Mal13)?;
+        finish_adversarial_quota(driver, quota_before, &mut execution).await?;
         return Ok(execution);
     }
     if run.policy.options().validators != FixtureValidatorPolicy::Optional {
@@ -2283,6 +2367,7 @@ pub async fn run_artifact_hostile_validator_case(
         return Err("MAL-13 exposed unbounded hostile metadata".to_owned());
     }
     execution.record_executed(AdversarialCaseId::Mal13)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
 

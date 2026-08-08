@@ -13,7 +13,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   stable/preview stdio owners enforce exact case partitions, fixed refusal
   payloads, retained-root access and successful-open counters, descriptor-bound
   redacted-log audits, private-root/staging invariants, and platform capability
-  records.
+  records. Artifact status now exposes only aggregate remaining staging bytes
+  and entries so acceptance runs can prove quota restoration without record
+  metadata.
 - Protect every cleanup-owned ignored live test with serial direct-router,
   spawned-stdio, and discussions-process gates. Closed offline manifests and
   executable-count checks reject renamed, missing, skipped, or zero-test

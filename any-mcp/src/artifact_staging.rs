@@ -449,6 +449,28 @@ fn parse_handle(value: &str) -> Result<ParsedHandle, StagingError> {
 }
 
 impl ArtifactStaging {
+    /// Returns content-free remaining record and byte capacity.
+    pub(crate) async fn available_quota(&self) -> (u64, u32) {
+        let records = self.state.records.read().await;
+        let reserved_bytes = records.values().fold(0_u64, |total, record| {
+            total.saturating_add(record.size_bytes)
+        });
+        let available_bytes = self
+            .state
+            .limits
+            .staging_total_bytes
+            .saturating_sub(reserved_bytes);
+        let available_entries = self
+            .state
+            .limits
+            .staging_entries
+            .saturating_sub(records.len());
+        (
+            available_bytes,
+            u32::try_from(available_entries).map_or(u32::MAX, |value| value),
+        )
+    }
+
     /// Activates private root authority and a fresh handle generation.
     pub(crate) async fn activate(
         config: &StagingConfig,
@@ -1881,6 +1903,25 @@ mod tests {
             .get_or_init(|| std::sync::Mutex::new(None))
             .lock()
             .expect("publication pause lock") = None;
+    }
+
+    #[tokio::test]
+    async fn available_quota_tracks_and_releases_private_reservations() {
+        let test = test_staging().await;
+        let before = test.staging.available_quota().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate quota fixture");
+        let during = test.staging.available_quota().await;
+        assert_eq!(during.0, before.0 - 5);
+        assert_eq!(during.1, before.1 - 1);
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release quota fixture");
+        assert_eq!(test.staging.available_quota().await, before);
     }
 
     #[tokio::test]

@@ -175,6 +175,18 @@
             "description": "Whether the supervised staging service is accepting requests.",
             "type": "boolean"
           },
+          "staging_available_bytes": {
+            "description": "Remaining aggregate staging byte capacity, without record metadata.",
+            "maximum": 17179869184,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "staging_available_entries": {
+            "description": "Remaining staging record capacity, without record metadata.",
+            "maximum": 4096,
+            "minimum": 0,
+            "type": "integer"
+          },
           "staging_configured": {
             "description": "Whether the selected startup policy declares remote staging.",
             "type": "boolean"
@@ -198,6 +210,8 @@
           "export_root_count",
           "staging_configured",
           "staging_active",
+          "staging_available_bytes",
+          "staging_available_entries",
           "validator_count",
           "validator_available_count"
         ],

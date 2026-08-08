@@ -529,6 +529,12 @@ struct ArtifactStatusOutput {
     staging_configured: bool,
     /// Whether the supervised staging service is accepting requests.
     staging_active: bool,
+    /// Remaining aggregate staging byte capacity, without record metadata.
+    #[schemars(schema_with = "staging_quota_bytes_schema")]
+    staging_available_bytes: u64,
+    /// Remaining staging record capacity, without record metadata.
+    #[schemars(schema_with = "staging_quota_entries_schema")]
+    staging_available_entries: u32,
     /// Number of configured validator policies, without revealing their IDs.
     #[schemars(schema_with = "root_count_schema")]
     validator_count: u32,
@@ -542,6 +548,22 @@ fn root_count_schema(_: &mut SchemaGenerator) -> Schema {
         "type": "integer",
         "minimum": 0,
         "maximum": 64
+    })
+}
+
+fn staging_quota_bytes_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 17_179_869_184_u64
+    })
+}
+
+fn staging_quota_entries_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4_096
     })
 }
 
@@ -3108,7 +3130,11 @@ async fn stage_release(
     Ok(StageReleaseOutput { released: true })
 }
 
-fn artifact_status(runtime: &RuntimeContext) -> ArtifactStatusOutput {
+async fn artifact_status(runtime: &RuntimeContext) -> ArtifactStatusOutput {
+    let (staging_available_bytes, staging_available_entries) = match runtime.artifact_staging() {
+        Some(staging) => staging.available_quota().await,
+        None => (0, 0),
+    };
     ArtifactStatusOutput {
         local_roots_active: runtime.artifact_roots().is_some(),
         import_root_count: runtime
@@ -3124,6 +3150,8 @@ fn artifact_status(runtime: &RuntimeContext) -> ArtifactStatusOutput {
         staging_active: runtime
             .artifact_staging()
             .is_some_and(ArtifactStaging::is_active),
+        staging_available_bytes,
+        staging_available_entries,
         validator_count: runtime
             .artifact_validators()
             .map_or(0, |runner| bounded_root_count(runner.configured_count())),
@@ -3195,7 +3223,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         .map_err(|_| {
                             ErrorData::internal_error("Artifact contract unavailable.", None)
                         })?
-                        .success(&artifact_status(runtime))
+                        .success(&artifact_status(runtime).await)
                         .map_err(|_| {
                             ErrorData::internal_error("Artifact result unavailable.", None)
                         })

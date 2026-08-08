@@ -325,8 +325,9 @@ on its own, so an incomplete setup refuses work instead of widening access.
    `anyr mcp check --config FILE`.
 4. **Verify at run time.** Call `artifact_status`. It reports
    `local_roots_active`, `import_root_count`, `export_root_count`,
-   `staging_configured`, `staging_active`, and the validator counts, so an
-   operator can confirm the authority a client actually received.
+   `staging_configured`, `staging_active`, remaining staging bytes and entries,
+   and the validator counts, so an operator can confirm the authority a client
+   actually received without exposing record metadata.
 
 #### Local clients (stdio)
 
@@ -1866,9 +1867,10 @@ to this gate
 exercise traversal and native-path grammar, capability-indistinguishable root
 refusals, volume case and normalization aliases, Windows device names,
 staging-record case sensitivity, bounded names and payloads, MIME conflicts,
-invalid document encodings, and hostile upstream metadata. Direct-router
-owners execute every case, while stable and preview stdio repeat the default
-case set and the production startup rejection. Each owner records a fixed case
+invalid document encodings, and hostile upstream metadata. Direct owners
+execute the 42 non-startup cases. Stable and preview stdio each repeat three
+sentinels, while the spawned gate separately owns the production startup
+rejection. Each owner records a fixed case
 ID only after its exact outcome, resource inventory, staging state, and cleanup
 assertions pass. Windows-only aliases and non-activating validator targets are
 explicit capability records rather than silent skips; the remaining 79 cases
