@@ -1863,8 +1863,13 @@ most 128 bytes/32 tokens, and an `artifact_bytes + 1` reservation is refused as
 or diagnostic.
 
 The adversarial family owns a closed 122-case inventory. Its case-status map
-records every row as executed or explicitly unsupported for a required
-platform primitive; the offline partition rejects pending rows.
+keeps unproved rows pending until their executable owner passes, while
+implemented rows are executed or explicitly unsupported for a required
+platform primitive. Pending closure owners include raw-listener assertions for
+partial offsets, short bodies, resumable disconnects, overruns, incomplete
+imports, and replayed chunks, plus a spawned kill-mid-frame assertion that
+accepts only complete JSON-RPC frames followed by one bounded, truncated final
+fragment. Their inventory status advances only after the live owner passes.
 Implemented coverage exercises traversal and native-path grammar,
 capability-indistinguishable root refusals, volume case and normalization
 aliases, Windows device names, staging-record case sensitivity, bounded names
@@ -1894,7 +1899,7 @@ validator and response floods; and cleanup after every refusal class. Each of
 the 50 `HAND`, `PART`, `CRASH`, `FLOOD`, and `CLEAN` rows names one executable
 staging, spawned-lifecycle, validator, direct-teardown, or read-only-catalog
 owner. The case partition checks that these owners cover the exact closed set
-once and that no row can return to a pending state.
+once; a row leaves the pending partition only with its executable assertion.
 
 The hard-link cleanup case retains the staging reservation after a hostile-link
 conflict, including after the outside link is removed. That stable conflict

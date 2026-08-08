@@ -62,10 +62,11 @@ use support::live_scenario::{
     assert_payload_frame_independence, audit_server_log, classify_collision_frames,
     measure_artifact_frame, prepare_artifact_symlink_startup_case,
     record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
-    release_stage_upload, run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
-    run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_policy_scenario,
-    run_artifact_race01, run_artifact_race04, run_artifact_smoke_scenario, server_log_baseline,
-    stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
+    release_stage_upload, require_completed, run_artifact_adversarial_stdio_sentinels,
+    run_artifact_content_scenario, run_artifact_dynamic_filesystem_stdio_sentinels,
+    run_artifact_policy_scenario, run_artifact_race01, run_artifact_race04,
+    run_artifact_smoke_scenario, server_log_baseline, stage_head_status, upload_stage_bytes,
+    validate_tool_frame, wait_for_stage_reaped,
 };
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
@@ -77,6 +78,8 @@ use support::live_scenario::{
     BodyDriverMetrics, OPTIONAL_LIVE_OWNERSHIP, OptionalEvidenceTier, OptionalExecutableWorkflow,
     OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow, OptionalRegistry,
 };
+#[cfg(feature = "acceptance-harness")]
+use support::process::{MAX_STDOUT_BYTES, MidFramePause};
 use support::{
     live_scenario::{
         ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
@@ -512,6 +515,25 @@ impl StdioDriver {
             body_tool_error_frames: Vec::new(),
             _keystore: keystore,
         }
+    }
+
+    #[cfg(feature = "acceptance-harness")]
+    fn spawn_paused_in_second_frame(
+        command: Command,
+        options: DriverOptions,
+    ) -> (Self, MidFramePause) {
+        let (process, pause) =
+            ProtocolProcess::spawn_paused_in_second_frame(command, Duration::from_secs(30));
+        (
+            Self {
+                process,
+                next_id: 1,
+                options,
+                body_tool_error_frames: Vec::new(),
+                _keystore: None,
+            },
+            pause,
+        )
     }
 
     fn initialize(&mut self) {
@@ -1861,6 +1883,79 @@ fn artifact_child_process_evidence(
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn crash06_mid_frame_evidence(output: &ProcessOutput) -> Result<AdversarialExecution, String> {
+    if output.exit_category != "signal"
+        || output.stdout.len() > MAX_STDOUT_BYTES
+        || output.stderr.len() > support::process::MAX_STDERR_BYTES
+    {
+        return Err("CRASH-06 process capture was not bounded termination evidence".to_owned());
+    }
+    if output.consumed_stdout.is_empty()
+        || !output.consumed_stdout.ends_with(b"\n")
+        || !output.stdout.starts_with(&output.consumed_stdout)
+    {
+        return Err("CRASH-06 lost the complete pre-crash frame prefix".to_owned());
+    }
+    let fragment = &output.stdout[output.consumed_stdout.len()..];
+    if fragment.is_empty()
+        || fragment.contains(&b'\n')
+        || fragment.first() != Some(&b'{')
+        || serde_json::from_slice::<Value>(fragment).is_ok()
+    {
+        return Err("CRASH-06 did not capture one truncated final JSON frame".to_owned());
+    }
+    for line in output
+        .consumed_stdout
+        .split_inclusive(|byte| *byte == b'\n')
+    {
+        let frame: Value = serde_json::from_slice(&line[..line.len().saturating_sub(1)])
+            .map_err(|_| "CRASH-06 complete stdout prefix was not JSON".to_owned())?;
+        if frame["jsonrpc"] != "2.0" || frame.get("id").is_none() {
+            return Err("CRASH-06 complete stdout prefix was not JSON-RPC".to_owned());
+        }
+    }
+    for diagnostic in output.stderr.split(|byte| *byte == b'\n') {
+        if !diagnostic.is_empty()
+            && output
+                .stdout
+                .windows(diagnostic.len())
+                .any(|window| window == diagnostic)
+        {
+            return Err("CRASH-06 copied a diagnostic line to stdout".to_owned());
+        }
+    }
+    let mut execution = AdversarialExecution::default();
+    execution.record_executed(AdversarialCaseId::Crash06)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn crash06_evidence_accepts_only_one_truncated_final_frame() {
+    let complete = br#"{"jsonrpc":"2.0","id":1,"result":{}}
+"#;
+    let fragment = br#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"file_"#;
+    let output = ProcessOutput {
+        stdout: [complete.as_slice(), fragment.as_slice()].concat(),
+        consumed_stdout: complete.to_vec(),
+        stderr: b"2026-08-08T00:00:00Z INFO authenticated Anytype runtime ready\n".to_vec(),
+        exit_category: "signal",
+    };
+    let execution = crash06_mid_frame_evidence(&output).expect("bounded truncated frame evidence");
+    execution
+        .assert_exact(&[AdversarialCaseId::Crash06])
+        .expect("CRASH-06 is the only recorded row");
+
+    let mut complete_tail = output;
+    complete_tail.stdout.push(b'\n');
+    assert!(
+        crash06_mid_frame_evidence(&complete_tail).is_err(),
+        "the interrupted frame must remain the sole final fragment"
+    );
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn contains_forbidden_diagnostic_field(value: &Value) -> bool {
     match value {
         Value::Object(fields) => fields.iter().any(|(name, value)| {
@@ -2104,6 +2199,51 @@ fn spawn_disposable_artifact_driver(
     options: DriverOptions,
 ) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
     spawn_disposable_artifact_driver_configured(ctx, cleanup_record, policy, options, None)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn spawn_disposable_mid_frame_crash_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    policy: Arc<ArtifactPolicyFixture>,
+) -> TestResult<(Arc<Mutex<Option<StdioDriver>>>, MidFramePause)> {
+    let child_environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| sentinel_assertion("disposable callback omitted its child environment"))?
+        .clone();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    child_environment.configure(&mut command)?;
+    configure_stdio_command(&mut command, DriverOptions::STANDARD, None);
+    command.env("ANY_MCP_CONFIG", policy.config_path());
+    ctx.spawn_owned_child(move || {
+        let mut retained_policy = Some(policy);
+        let (driver, pause) =
+            StdioDriver::spawn_paused_in_second_frame(command, DriverOptions::STANDARD);
+        let driver = Arc::new(Mutex::new(Some(driver)));
+        let stopped = Arc::clone(&driver);
+        ((driver, pause), move || {
+            *cleanup_record.lock().expect("child cleanup record lock") =
+                ChildCleanupRecord::Attempted;
+            let result = lock_driver(&stopped)
+                .take()
+                .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
+            drop(retained_policy.take());
+            match result {
+                Ok(()) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Stopped;
+                    Ok(())
+                }
+                Err(_) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Failed;
+                    Err(sentinel_assertion(
+                        "registered crash-frame child did not stop cleanly",
+                    ))
+                }
+            }
+        })
+    })
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -6186,6 +6326,69 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
 async fn headless_artifact_spawned_transport_matrix_scenario() {
     require_optional_workflow_executed(run_artifacts_real_workflow().await)
         .expect("spawned artifact acceptance matrix");
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_crash06_mid_frame_scenario() {
+    let cleanup_record = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let callback_cleanup = Arc::clone(&cleanup_record);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-crash06",
+        move |ctx| {
+            Box::pin(async move {
+                let policy = Arc::new(
+                    ArtifactPolicyFixture::create(&ctx.space_id)
+                        .map_err(|_| sentinel_assertion("create CRASH-06 artifact fixture"))?,
+                );
+                let (child, pause) = spawn_disposable_mid_frame_crash_driver(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    policy,
+                )?;
+                {
+                    let mut guard = lock_driver(&child);
+                    let driver = guard.as_mut().ok_or_else(|| {
+                        sentinel_assertion("registered CRASH-06 child disappeared")
+                    })?;
+                    driver.initialize();
+                    let request_id = driver.next_id;
+                    driver.next_id = driver.next_id.saturating_add(1);
+                    driver.process.send(json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "tools/list",
+                        "params": {}
+                    }));
+                }
+                pause
+                    .wait_ready(Duration::from_secs(30))
+                    .map_err(|_| sentinel_assertion("CRASH-06 never reached a stdout frame"))?;
+                let driver = lock_driver(&child)
+                    .take()
+                    .ok_or_else(|| sentinel_assertion("registered CRASH-06 child disappeared"))?;
+                let (_, output) = driver
+                    .terminate()
+                    .map_err(|_| sentinel_assertion("terminate CRASH-06 child"))?;
+                let execution = crash06_mid_frame_evidence(&output)
+                    .map_err(|_| sentinel_assertion("validate CRASH-06 stdout capture"))?;
+                execution
+                    .assert_exact(&[AdversarialCaseId::Crash06])
+                    .map_err(|_| sentinel_assertion("CRASH-06 owner inventory diverged"))?;
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe CRASH-06 acceptance");
+    require_completed(outcome, "CRASH-06 acceptance")
+        .expect("prefix-authorized disposable admission");
+    assert_eq!(
+        *cleanup_record.lock().expect("CRASH-06 cleanup record"),
+        ChildCleanupRecord::Stopped
+    );
 }
 
 #[cfg(feature = "acceptance-harness")]

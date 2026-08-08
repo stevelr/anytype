@@ -117,8 +117,9 @@ use live_scenario::{
     require_completed, run_artifact_alias_cases, run_artifact_dynamic_filesystem_cases,
     run_artifact_empty_client_roots_case, run_artifact_hostile_validator_case,
     run_artifact_malicious_metadata_default, run_artifact_missing_roots_case,
-    run_artifact_payload_boundary_cases, run_artifact_policy_scenario, run_artifact_smoke_scenario,
-    run_artifact_traversal_default, server_log_baseline,
+    run_artifact_partial_write_protocol_cases, run_artifact_payload_boundary_cases,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
+    server_log_baseline,
 };
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
@@ -3180,6 +3181,78 @@ async fn headless_artifact_dynamic_filesystem_direct_scenarios() {
     execution
         .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
         .expect("bounded dynamic filesystem owner evidence");
+}
+
+/// Runs PART-01 through PART-06 against the raw staging listener and direct
+/// artifact handlers.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_partial_write_direct_scenarios() {
+    let owner_evidence = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let callback_evidence = std::sync::Arc::clone(&owner_evidence);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-partial-write",
+        move |ctx| {
+            Box::pin(async move {
+                let log_baseline = required_artifact_log_baseline()?;
+                let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
+                let policy = ArtifactPolicyFixture::create(&ctx.space_id).map_err(|_| {
+                    TestError::Assertion {
+                        message: "create partial-write acceptance policy".to_owned(),
+                    }
+                })?;
+                log_needles.push(policy.forbidden_log_needle());
+                let execution = {
+                    let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                    let run = ArtifactAdversarialRun {
+                        control: ArtifactControlPlane::DirectRouter,
+                        policy: &policy,
+                        ctx: ctx.as_ref(),
+                        root_access_attempts: None,
+                        successful_import_opens: None,
+                        gate_hooks: None,
+                    };
+                    let mut driver = DirectRouterDriver { server: &server };
+                    Box::pin(run_artifact_partial_write_protocol_cases(&mut driver, &run))
+                        .await
+                        .map_err(|_| TestError::Assertion {
+                            message: "direct partial-write acceptance failed".to_owned(),
+                        })?
+                };
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Part01,
+                        AdversarialCaseId::Part02,
+                        AdversarialCaseId::Part03,
+                        AdversarialCaseId::Part04,
+                        AdversarialCaseId::Part05,
+                        AdversarialCaseId::Part06,
+                    ])
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct partial-write partition was incomplete".to_owned(),
+                    })?;
+                *callback_evidence.lock().map_err(|_| TestError::Assertion {
+                    message: "retain partial-write owner evidence".to_owned(),
+                })? = Some((log_baseline, log_needles, execution));
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct partial-write acceptance");
+    require_completed(outcome, "direct partial-write acceptance")
+        .expect("prefix-authorized disposable admission");
+    let (log_baseline, log_needles, execution) = owner_evidence
+        .lock()
+        .expect("partial-write owner evidence lock")
+        .take()
+        .expect("partial-write owner evidence");
+    let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)
+        .expect("post-cleanup partial-write log audit");
+    execution
+        .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
+        .expect("bounded partial-write owner evidence");
 }
 
 /// Runs the default-policy alias and hostile-metadata direct-router cases.
