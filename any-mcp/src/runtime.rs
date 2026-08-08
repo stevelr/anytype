@@ -1369,6 +1369,62 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn settlement_admission_deadline_has_no_invisible_queue() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let held = runtime
+            .admit_import_settlement(runtime.request_deadline())
+            .await
+            .expect("first permit");
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(20))
+            .expect("bounded deadline");
+        assert!(matches!(
+            runtime.admit_import_settlement(deadline).await,
+            Err(ArtifactToolError::Bounded)
+        ));
+        assert_eq!(runtime.settlement_active.load(Ordering::Acquire), 0);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn shutdown_terminalizes_every_admitted_settlement_before_drain() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let key = [3; 32];
+        let fingerprint = [4; 32];
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import(key, fingerprint)
+                .await,
+            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
+        ));
+        let permit = runtime
+            .admit_import_settlement(runtime.request_deadline())
+            .await
+            .expect("settlement permit");
+        let receiver = runtime.supervise_import_settlement(key, permit, async {
+            std::future::pending::<Result<FileImportOutput, ArtifactToolError>>().await
+        });
+        tokio::task::yield_now().await;
+        runtime.begin_shutdown();
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ArtifactToolError::Indeterminate))
+        ));
+        runtime
+            .drain_artifact_settlements(Duration::from_millis(100))
+            .await;
+        assert_eq!(runtime.settlement_active.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import(key, fingerprint)
+                .await,
+            Err(ArtifactToolError::Indeterminate)
+        ));
+    }
+
     #[derive(Clone)]
     struct CancellationToolServer {
         runtime: RuntimeContext,
