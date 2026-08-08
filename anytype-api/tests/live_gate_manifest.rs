@@ -387,6 +387,9 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         assert!(block.contains("runs-on: [ self-hosted, linux, anytype-headless ]"));
         assert!(block.contains("actions/checkout@11d5960a326750d5838078e36cf38b85af677262"));
         assert!(block.contains("python3 anytype-api/scripts/run-live-gate.py"));
+        assert!(block.contains("test -f \"/proc/self/fd/$reviewed_fd\""));
+        assert!(block.contains("stat -Lc '%d|%i|%s' \"/proc/self/fd/$reviewed_fd\""));
+        assert!(!block.contains("stat -Lc '%F"));
         assert!(!block.contains("tee"));
     }
 }

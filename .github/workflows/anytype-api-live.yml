@@ -86,9 +86,9 @@ jobs:
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
           exec {reviewed_fd}<"$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          IFS='|' read -r file_type start_device start_inode start_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+          test -f "/proc/self/fd/$reviewed_fd"
+          IFS='|' read -r start_device start_inode start_bytes < <(stat -Lc '%d|%i|%s' "/proc/self/fd/$reviewed_fd")
           exec {reviewed_fd}<&-
-          test "$file_type" = "regular file"
           case "$start_device:$start_inode:$start_bytes" in *[!0-9:]*|::|*::|:* ) exit 1 ;; esac
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
@@ -122,8 +122,12 @@ jobs:
               printf 'reviewed-source=unavailable\n'
             else
               exec {reviewed_fd}<"$source"
-              IFS='|' read -r file_type current_device current_inode current_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
-              if [[ "$file_type" == "regular file" && "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+              if test -f "/proc/self/fd/$reviewed_fd"; then
+                IFS='|' read -r current_device current_inode current_bytes < <(stat -Lc '%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+              else
+                current_device=unavailable; current_inode=unavailable; current_bytes=unavailable
+              fi
+              if [[ "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
                 printf 'reviewed-source=fresh-window\n'
                 tail -c "+$((start_bytes + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | tail -c 65000 2>/dev/null || true
               else
@@ -199,9 +203,9 @@ jobs:
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
           exec {reviewed_fd}<"$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          IFS='|' read -r file_type start_device start_inode start_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+          test -f "/proc/self/fd/$reviewed_fd"
+          IFS='|' read -r start_device start_inode start_bytes < <(stat -Lc '%d|%i|%s' "/proc/self/fd/$reviewed_fd")
           exec {reviewed_fd}<&-
-          test "$file_type" = "regular file"
           case "$start_device:$start_inode:$start_bytes" in *[!0-9:]*|::|*::|:* ) exit 1 ;; esac
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
@@ -235,8 +239,12 @@ jobs:
               printf 'reviewed-source=unavailable\n'
             else
               exec {reviewed_fd}<"$source"
-              IFS='|' read -r file_type current_device current_inode current_bytes < <(stat -Lc '%F|%d|%i|%s' "/proc/self/fd/$reviewed_fd")
-              if [[ "$file_type" == "regular file" && "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+              if test -f "/proc/self/fd/$reviewed_fd"; then
+                IFS='|' read -r current_device current_inode current_bytes < <(stat -Lc '%d|%i|%s' "/proc/self/fd/$reviewed_fd")
+              else
+                current_device=unavailable; current_inode=unavailable; current_bytes=unavailable
+              fi
+              if [[ "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
                 printf 'reviewed-source=fresh-window\n'
                 tail -c "+$((start_bytes + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | tail -c 65000 2>/dev/null || true
               else
