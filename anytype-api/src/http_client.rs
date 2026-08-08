@@ -2252,10 +2252,10 @@ impl HttpClient {
                                 && retry_for_status(code)
                                 && retryable_method
                             {
-                              log_and_backoff(retry_attempt, "retryable HTTP status").await;
-                              self.metrics.increment_retries();
-                              retry_attempt += 1;
-                              continue;
+                                self.metrics.increment_retries();
+                                log_and_backoff(retry_attempt, "retryable HTTP status").await;
+                                retry_attempt += 1;
+                                continue;
                             }
                             if !retryable_method
                                 && (code.is_server_error() || retry_for_status(code))
@@ -3025,6 +3025,15 @@ mod tests {
         let request_client = client.clone();
         let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
         sent_rx.await.expect("rate-limit response sent");
+        for _ in 0..32 {
+            if client.metrics_snapshot().rate_limit_errors == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(client.metrics_snapshot().rate_limit_errors, 1);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(1)).await;
         let error = request
             .await
             .expect("rate-limit request task")
@@ -3037,8 +3046,65 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(client.metrics_snapshot().rate_limit_errors, 1);
+        tokio::time::resume();
         server.await.expect("rate-limit server");
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_cannot_reset_the_standard_deadline() {
+        let response = fixture_response("504 Gateway Timeout", "retry later", "");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind retry deadline fixture");
+        let address = listener.local_addr().expect("retry fixture address");
+        let (sent_tx, sent_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept retry request");
+            let _request = read_fixture_request(&mut socket).await;
+            socket
+                .write_all(&response)
+                .await
+                .expect("write retry response");
+            let _ = sent_tx.send(());
+        });
+        let client = Arc::new(
+            HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                format!("http://{address}"),
+                ValidationLimits::default(),
+                test_limits(4096, 4096, 4096),
+                5,
+                one_second_standard_policy(),
+                HttpCredentials::new("test-token"),
+            )
+            .expect("retry deadline client"),
+        );
+        let request_client = client.clone();
+        let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
+        sent_rx.await.expect("retry response sent");
+        for _ in 0..32 {
+            if client.metrics_snapshot().retries == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(client.metrics_snapshot().retries, 1);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = request
+            .await
+            .expect("retry request task")
+            .expect_err("shared deadline must expire during retry backoff");
+        assert!(matches!(
+            error,
+            AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::StandardOperation,
+                attempts: 1,
+                ..
+            }
+        ));
+        tokio::time::resume();
+        server.await.expect("retry server");
     }
 
     #[tokio::test(start_paused = true)]
