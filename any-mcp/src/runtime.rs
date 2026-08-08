@@ -25,6 +25,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    artifact_acceptance_gates::ArtifactAcceptanceGates,
     artifact_client_roots::ClientRootsGate,
     artifact_config::ArtifactConfig,
     artifact_roots::RootRegistry,
@@ -68,6 +69,7 @@ pub struct RuntimeContext {
     artifact_staging: Option<ArtifactStaging>,
     artifact_validators: Option<ValidatorRunner>,
     artifact_operations: ArtifactOperationState,
+    artifact_acceptance_gates: ArtifactAcceptanceGates,
     client_roots: Arc<ClientRootsGate>,
 }
 
@@ -323,6 +325,18 @@ impl RuntimeContext {
     #[must_use]
     pub(crate) fn artifact_operations(&self) -> &ArtifactOperationState {
         &self.artifact_operations
+    }
+
+    /// Returns this runtime's private acceptance synchronization facility.
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    pub fn artifact_acceptance_gates(&self) -> &ArtifactAcceptanceGates {
+        &self.artifact_acceptance_gates
+    }
+
+    /// Enables private in-process acceptance synchronization for this runtime.
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    pub fn enable_artifact_acceptance_gates(&mut self) {
+        self.artifact_acceptance_gates = ArtifactAcceptanceGates::enabled();
     }
 
     /// Starts process shutdown, rejects new work, and cancels running or
@@ -693,6 +707,7 @@ impl RuntimeContext {
             artifact_staging: None,
             artifact_validators: None,
             artifact_operations: ArtifactOperationState::default(),
+            artifact_acceptance_gates: ArtifactAcceptanceGates::disabled(),
             client_roots: Arc::new(ClientRootsGate::default()),
         }
     }

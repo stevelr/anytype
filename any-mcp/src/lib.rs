@@ -62,6 +62,7 @@
 //! protocol compatibility, token baselines, and operational guidance.
 
 mod artifact_client_roots;
+mod artifact_acceptance_gates;
 pub mod artifact_config;
 pub mod artifact_roots;
 mod artifact_staging;
@@ -120,6 +121,11 @@ pub use artifact_config::{
     AbsoluteNativePath, ArtifactConfig, ArtifactConfigError, ArtifactLimits, ConfigSelector,
     LogicalRootId, RelativeNativePath, SpaceConfig, SpaceReference, StagingConfig, ValidatorConfig,
     ValidatorDriver,
+};
+#[cfg(any(test, feature = "acceptance-harness"))]
+pub use artifact_acceptance_gates::{
+    ArtifactAcceptanceGateError, ArtifactAcceptanceGateLease, ArtifactAcceptanceGatePoint,
+    ArtifactAcceptanceGates,
 };
 pub use artifact_roots::{
     AnchoredImport, AtomicExport, EffectiveRootRegistry, ROOTS_REQUIRED_GUIDANCE, RootAccessError,

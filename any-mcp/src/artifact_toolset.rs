@@ -32,6 +32,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(any(test, feature = "acceptance-harness"))]
+use crate::artifact_acceptance_gates::ArtifactAcceptanceGatePoint;
+
 use crate::{
     artifact_config::RelativeNativePath,
     artifact_roots::{
@@ -857,7 +860,9 @@ enum DocumentExportIdempotency {
 #[derive(Clone, Debug)]
 enum OperationOutcome {
     ImportInFlight,
+    ImportSettling(EntityId),
     ImportCandidate(EntityId),
+    ImportIndeterminate(EntityId),
     ImportComplete(FileImportOutput),
     ExportInFlight,
     ExportComplete(FileExportOutput),
@@ -870,6 +875,17 @@ enum OperationOutcome {
     DocumentExportInFlight,
     DocumentExportComplete(DocumentExportOutput),
     Indeterminate,
+}
+
+impl OperationOutcome {
+    fn retained_import_candidate(&self) -> Option<&EntityId> {
+        match self {
+            Self::ImportSettling(candidate)
+            | Self::ImportCandidate(candidate)
+            | Self::ImportIndeterminate(candidate) => Some(candidate),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -888,6 +904,18 @@ pub(crate) struct ArtifactOperationState {
 }
 
 impl ArtifactOperationState {
+    async fn settle_import_timeout(&self, key: [u8; 32]) {
+        if let Some(entry) = self.entries.lock().await.get_mut(&key) {
+            entry.outcome = match &entry.outcome {
+                OperationOutcome::ImportSettling(candidate) => {
+                    OperationOutcome::ImportIndeterminate(candidate.clone())
+                }
+                OperationOutcome::ImportInFlight => OperationOutcome::Indeterminate,
+                outcome => outcome.clone(),
+            };
+        }
+    }
+
     async fn reserve_import(
         &self,
         key: [u8; 32],
@@ -907,6 +935,7 @@ impl ArtifactOperationState {
         if entry.fingerprint != fingerprint {
             return Err(ArtifactToolError::Conflict);
         }
+        let _ = entry.outcome.retained_import_candidate();
         match &entry.outcome {
             OperationOutcome::ImportCandidate(candidate) => {
                 Ok(ImportIdempotency::VerifyCandidate(candidate.clone()))
@@ -915,6 +944,8 @@ impl ArtifactOperationState {
                 Ok(ImportIdempotency::Reuse(Box::new(output.clone())))
             }
             OperationOutcome::ImportInFlight
+            | OperationOutcome::ImportSettling(_)
+            | OperationOutcome::ImportIndeterminate(_)
             | OperationOutcome::ExportInFlight
             | OperationOutcome::ExportComplete(_)
             | OperationOutcome::DocumentMutationInFlight
@@ -950,7 +981,9 @@ impl ArtifactOperationState {
                 Ok(ExportIdempotency::Reuse(Box::new(output.clone())))
             }
             OperationOutcome::ImportInFlight
+            | OperationOutcome::ImportSettling(_)
             | OperationOutcome::ImportCandidate(_)
+            | OperationOutcome::ImportIndeterminate(_)
             | OperationOutcome::ImportComplete(_)
             | OperationOutcome::ExportInFlight
             | OperationOutcome::DocumentMutationInFlight
@@ -1323,7 +1356,7 @@ impl PreparedImport {
         match self {
             Self::Local { source, .. } => source
                 .verify_unchanged()
-                .map_err(|_| ArtifactToolError::Indeterminate),
+                .map_err(|error| classify_root_error(&error)),
             Self::Staged(_) => Ok(()),
         }
     }
@@ -1589,51 +1622,6 @@ where
     Ok((output, total, sha256, media_type, etag))
 }
 
-#[cfg(feature = "acceptance-harness")]
-struct AcceptancePauseLease {
-    released: Option<std::path::PathBuf>,
-    cancellation: CancellationToken,
-}
-
-#[cfg(feature = "acceptance-harness")]
-impl Drop for AcceptancePauseLease {
-    fn drop(&mut self) {
-        if let Some(path) = self.released.take() {
-            let marker = if self.cancellation.is_cancelled() {
-                b"cancelled\n".as_slice()
-            } else {
-                b"completed\n".as_slice()
-            };
-            let _ = std::fs::write(path, marker);
-        }
-    }
-}
-
-#[cfg(feature = "acceptance-harness")]
-async fn acceptance_pause_before_file_import_dispatch(
-    cancellation: &CancellationToken,
-) -> Option<AcceptancePauseLease> {
-    static PAUSE_USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if std::env::var("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE")
-        .ok()
-        .as_deref()
-        == Some("file_import_pre_dispatch")
-        && !PAUSE_USED.swap(true, std::sync::atomic::Ordering::AcqRel)
-    {
-        let lease = AcceptancePauseLease {
-            released: std::env::var_os("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_RELEASED")
-                .map(std::path::PathBuf::from),
-            cancellation: cancellation.clone(),
-        };
-        if let Some(ready) = std::env::var_os("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY") {
-            let _ = std::fs::write(ready, b"ready\n");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        return Some(lease);
-    }
-    None
-}
-
 async fn file_import(
     runtime: &RuntimeContext,
     input: FileImportInput,
@@ -1645,7 +1633,7 @@ async fn file_import(
     validate_name(&input.name)?;
     let declared_media_type = normalize_media_type(input.media_type.as_ref().map(String::as_str))?;
     let space_id = resolve_space(runtime.client(), &input.space).await?;
-    let mut source = prepare_import_source(runtime, input.source.resolve()?, &space_id).await?;
+    let source = prepare_import_source(runtime, input.source.resolve()?, &space_id).await?;
     if declared_media_type
         .as_deref()
         .zip(source.stored_media_type())
@@ -1662,8 +1650,6 @@ async fn file_import(
     let staging_record = source.staging_record();
     let validator_findings =
         run_configured_validators(runtime, &source, declared_media_type.as_deref()).await?;
-    #[cfg(feature = "acceptance-harness")]
-    let _acceptance_pause_lease = acceptance_pause_before_file_import_dispatch(cancellation).await;
     let key = idempotency_key(b"import", &input.idempotency_key);
     let fingerprint = import_fingerprint(
         &space_id,
@@ -1711,16 +1697,83 @@ async fn file_import(
         }
         ImportIdempotency::Dispatch => {}
     }
-    let upload_file = source.try_clone_reader()?;
-    let multipart_limit = source_length
-        .checked_add(MULTIPART_ALLOWANCE)
-        .ok_or(ArtifactToolError::Validation)?;
+    let owned_runtime = runtime.clone();
+    let owned_cancellation = CancellationToken::new();
+    let operation_timeout = runtime.artifact_config().limits.operation_timeout;
+    let (settled, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = match tokio::time::timeout(
+            operation_timeout,
+            settle_reserved_import(
+                owned_runtime.clone(),
+                source,
+                space_id,
+                input.name,
+                declared_media_type,
+                content_sha256,
+                source_length,
+                root_id,
+                staging_record,
+                validator_findings,
+                key,
+                owned_cancellation.clone(),
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                owned_cancellation.cancel();
+                owned_runtime
+                    .artifact_operations()
+                    .settle_import_timeout(key)
+                    .await;
+                Err(ArtifactToolError::Indeterminate)
+            }
+        };
+        let _ = settled.send(result);
+    });
+    tokio::select! {
+        () = cancellation.cancelled() => Err(ArtifactToolError::Indeterminate),
+        result = receiver => result.unwrap_or(Err(ArtifactToolError::Indeterminate)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_reserved_import(
+    runtime: RuntimeContext,
+    mut source: PreparedImport,
+    space_id: SpaceId,
+    name: String,
+    declared_media_type: Option<String>,
+    content_sha256: String,
+    source_length: u64,
+    root_id: Option<String>,
+    staging_record: Option<String>,
+    validator_findings: Vec<ValidatorFinding>,
+    key: [u8; 32],
+    cancellation: CancellationToken,
+) -> Result<FileImportOutput, ArtifactToolError> {
+    let upload_file = match source.try_clone_reader() {
+        Ok(file) => file,
+        Err(error) => {
+            runtime.artifact_operations().remove(key).await;
+            return Err(error);
+        }
+    };
+    let multipart_limit = match source_length.checked_add(MULTIPART_ALLOWANCE) {
+        Some(limit) => limit,
+        None => {
+            runtime.artifact_operations().remove(key).await;
+            return Err(ArtifactToolError::Validation);
+        }
+    };
     let mut request = runtime
         .client()
         .files()
         .upload(space_id.as_str())
         .reader(
-            input.name.clone(),
+            name,
             PositionalReader::new(upload_file, source_length),
             source_length,
         )
@@ -1756,24 +1809,71 @@ async fn file_import(
     };
     runtime
         .artifact_operations()
-        .set_outcome(key, OperationOutcome::ImportCandidate(candidate.clone()))
+        .set_outcome(key, OperationOutcome::ImportSettling(candidate.clone()))
         .await;
-    source.verify_unchanged()?;
-    validate_uploaded(&uploaded, &candidate, &space_id, source_length)?;
-    let stored_media_type = verify_import_candidate(
-        runtime,
+    if let Err(source_error) = source.verify_unchanged() {
+        if source_error == ArtifactToolError::Conflict
+            && cleanup_changed_import_candidate(&runtime, &space_id, &candidate).await
+        {
+            runtime.artifact_operations().remove(key).await;
+            return Err(source_error);
+        }
+        runtime
+            .artifact_operations()
+            .set_outcome(
+                key,
+                OperationOutcome::ImportIndeterminate(candidate.clone()),
+            )
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
+    if validate_uploaded(&uploaded, &candidate, &space_id, source_length).is_err() {
+        runtime
+            .artifact_operations()
+            .set_outcome(
+                key,
+                OperationOutcome::ImportIndeterminate(candidate.clone()),
+            )
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
+    let stored_media_type = match verify_import_candidate(
+        &runtime,
         &space_id,
         &candidate,
         source_length,
         &content_sha256,
-        cancellation,
+        &cancellation,
     )
-    .await?;
+    .await
+    {
+        Ok(stored_media_type) => stored_media_type,
+        Err(_) => {
+            runtime
+                .artifact_operations()
+                .set_outcome(key, OperationOutcome::ImportCandidate(candidate.clone()))
+                .await;
+            return Err(ArtifactToolError::Indeterminate);
+        }
+    };
     if let PreparedImport::Staged(staged) = &mut source {
-        staging(runtime)?
-            .consume(staged)
-            .await
-            .map_err(classify_staging_error)?;
+        let consumed = match staging(&runtime) {
+            Ok(staging) => staging
+                .consume(staged)
+                .await
+                .map_err(classify_staging_error),
+            Err(error) => Err(error),
+        };
+        if consumed.is_err() {
+            runtime
+                .artifact_operations()
+                .set_outcome(
+                    key,
+                    OperationOutcome::ImportIndeterminate(candidate.clone()),
+                )
+                .await;
+            return Err(ArtifactToolError::Indeterminate);
+        }
     }
     let output = import_output(
         &space_id,
@@ -1876,6 +1976,36 @@ async fn verify_import_candidate(
         return Err(ArtifactToolError::Indeterminate);
     }
     Ok(stored_media_type)
+}
+
+/// Deletes a candidate only after a definitive local source conflict and
+/// proves its absence through a separate metadata request.  Any ambiguity is
+/// deliberately retained for idempotency reconciliation.
+async fn cleanup_changed_import_candidate(
+    runtime: &RuntimeContext,
+    space_id: &SpaceId,
+    candidate: &EntityId,
+) -> bool {
+    let deletion = runtime
+        .client()
+        .files()
+        .delete_request(space_id.as_str(), candidate.as_str())
+        .permanently()
+        .delete();
+    let _ = tokio::time::timeout(runtime.request_timeout(), deletion).await;
+    let absence = runtime
+        .client()
+        .files()
+        .download_request(space_id.as_str(), candidate.as_str())
+        .response_limit_bytes(1)
+        .error_limit_bytes(ERROR_BYTES)
+        .header_evidence_limit_bytes(HEADER_BYTES)
+        .max_attempts(1)
+        .head();
+    matches!(
+        tokio::time::timeout(runtime.request_timeout(), absence).await,
+        Ok(Err(AnytypeError::NotFound { .. }))
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2084,6 +2214,19 @@ async fn file_export(
     };
     let receipt = match completion {
         ExportCompletion::Local { root_id } => {
+            #[cfg(any(test, feature = "acceptance-harness"))]
+            if !runtime
+                .artifact_acceptance_gates()
+                .reach(ArtifactAcceptanceGatePoint::ExportPrepublication, key)
+                .await
+            {
+                return Err(settle_export_failure(
+                    runtime.artifact_operations(),
+                    key,
+                    ArtifactToolError::Indeterminate,
+                )
+                .await);
+            }
             let committed = match tokio::task::spawn_blocking(move || destination.commit()).await {
                 Ok(committed) => committed,
                 Err(_) => {
@@ -2207,10 +2350,19 @@ impl PreparedDocument {
 }
 
 async fn verify_document_source_before_dispatch(
+    runtime: &RuntimeContext,
     operations: &ArtifactOperationState,
     key: [u8; 32],
     source: &PreparedDocument,
 ) -> Result<(), ArtifactToolError> {
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    let released = runtime
+        .artifact_acceptance_gates()
+        .reach(ArtifactAcceptanceGatePoint::DocumentFinalRevalidation, key)
+        .await;
+    if !released {
+        return Err(ArtifactToolError::Indeterminate);
+    }
     settle_document_source_revalidation(operations, key, source.verify_before_dispatch()).await
 }
 
@@ -2605,7 +2757,8 @@ async fn document_import_create(
     for property in &properties {
         request = property.apply(request);
     }
-    verify_document_source_before_dispatch(runtime.artifact_operations(), key, &source).await?;
+    verify_document_source_before_dispatch(runtime, runtime.artifact_operations(), key, &source)
+        .await?;
     let created = match request.create().await {
         Ok(created) => created,
         Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -2773,7 +2926,13 @@ async fn document_import_update(
         DocumentMutationIdempotency::Dispatch => {}
     }
     if source.dispatched == current_body {
-        verify_document_source_before_dispatch(runtime.artifact_operations(), key, &source).await?;
+        verify_document_source_before_dispatch(
+            runtime,
+            runtime.artifact_operations(),
+            key,
+            &source,
+        )
+        .await?;
         let consumed = source.consume_staged(runtime).await?;
         let output = document_output(
             &space_id,
@@ -2803,7 +2962,8 @@ async fn document_import_update(
     let wire = representation
         .as_ref()
         .map_or(source.dispatched.as_str(), |value| value.wire());
-    verify_document_source_before_dispatch(runtime.artifact_operations(), key, &source).await?;
+    verify_document_source_before_dispatch(runtime, runtime.artifact_operations(), key, &source)
+        .await?;
     let updated = match runtime
         .client()
         .update_object(space_id.as_str(), object_id.as_str())
@@ -2966,6 +3126,19 @@ async fn document_export(
             };
             let maximum = runtime.artifact_config().limits.markdown_bytes;
             let bytes = body.into_bytes();
+            #[cfg(any(test, feature = "acceptance-harness"))]
+            if !runtime
+                .artifact_acceptance_gates()
+                .reach(ArtifactAcceptanceGatePoint::ExportPrepublication, key)
+                .await
+            {
+                return Err(settle_export_failure(
+                    runtime.artifact_operations(),
+                    key,
+                    ArtifactToolError::Indeterminate,
+                )
+                .await);
+            }
             let written = match tokio::task::spawn_blocking(move || {
                 let mut destination = roots
                     .begin_atomic_export(&root_id, &path, maximum)

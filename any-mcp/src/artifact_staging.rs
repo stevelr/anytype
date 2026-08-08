@@ -1313,15 +1313,19 @@ impl ArtifactStaging {
             RecordState::Ready { .. } | RecordState::Available { .. } | RecordState::Consumed => {
                 Some((None, true))
             }
-            RecordState::CleanupPending { .. } => return Err(StagingError::Conflict),
+            // A previous authenticated release may have retained the record
+            // because its private file was externally linked.  Once that
+            // coordinator has finished, the same bearer may ask it to try the
+            // bounded cleanup again.  Keep the retained capability in place;
+            // taking it here would make a failed retry unrecoverable.
+            RecordState::CleanupPending { .. } => None,
         };
-        let Some((destination, published)) = pending else {
-            return Err(StagingError::Conflict);
-        };
-        *state = RecordState::CleanupPending {
-            destination,
-            published,
-        };
+        if let Some((destination, published)) = pending {
+            *state = RecordState::CleanupPending {
+                destination,
+                published,
+            };
+        }
         record.cleanup_blocked.store(true, Ordering::Release);
         drop(records);
         drop(state);
@@ -2224,7 +2228,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn linked_staged_record_retains_quota_until_safe_ttl_cleanup() {
+    async fn linked_staged_record_retries_authenticated_cleanup_after_link_removal() {
         let test = test_staging().await;
         let allocation = test
             .staging
@@ -2268,13 +2272,10 @@ mod tests {
         assert_eq!(test.staging.state.records.read().await.len(), 1);
 
         std::fs::remove_file(&retained_link).expect("remove retained link");
-        let expired = {
-            let mut records = test.staging.state.records.write().await;
-            test.staging
-                .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
-        };
-        assert_eq!(expired.len(), 1);
-        test.staging.cleanup_expired(expired).await;
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("retry authenticated release after link removal");
 
         assert!(!staged_path.exists());
         assert!(test.staging.state.records.read().await.is_empty());
