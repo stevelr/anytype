@@ -486,7 +486,6 @@ const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStat
         | AdversarialCaseId::Race02
         | AdversarialCaseId::Race03
         | AdversarialCaseId::Race04
-        | AdversarialCaseId::Race06
         | AdversarialCaseId::Race07
         | AdversarialCaseId::Race08
         | AdversarialCaseId::Hlink06 => {
@@ -503,21 +502,18 @@ const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStat
                 AdversarialCaseStatus::PlatformUnsupported
             }
         }
-        AdversarialCaseId::Sym13 | AdversarialCaseId::Hlink05 => {
+        AdversarialCaseId::Sym13
+        | AdversarialCaseId::Race05
+        | AdversarialCaseId::Race06
+        | AdversarialCaseId::Hlink03
+        | AdversarialCaseId::Hlink05 => {
             if cfg!(unix) {
                 AdversarialCaseStatus::Executed
             } else {
                 AdversarialCaseStatus::PlatformUnsupported
             }
         }
-        AdversarialCaseId::Race05 => {
-            if cfg!(unix) {
-                AdversarialCaseStatus::Executed
-            } else {
-                AdversarialCaseStatus::PlatformUnsupported
-            }
-        }
-        AdversarialCaseId::Race09 | AdversarialCaseId::Race10 | AdversarialCaseId::Hlink03 => {
+        AdversarialCaseId::Race09 | AdversarialCaseId::Race10 => {
             if cfg!(any(unix, windows)) {
                 AdversarialCaseStatus::Executed
             } else {
@@ -2879,20 +2875,31 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         for id in [
             AdversarialCaseId::Hlink01,
             AdversarialCaseId::Hlink02,
-            AdversarialCaseId::Hlink03,
             AdversarialCaseId::Hlink04,
-            AdversarialCaseId::Hlink05,
             AdversarialCaseId::Hlink06,
         ] {
             execution.record_unsupported_with_reason(id, "link_count_unavailable")?;
+        }
+        #[cfg(unix)]
+        for id in [AdversarialCaseId::Hlink03, AdversarialCaseId::Hlink05] {
+            execution.record_unsupported_with_reason(id, "link_count_unavailable")?;
+        }
+        #[cfg(not(unix))]
+        for id in [AdversarialCaseId::Hlink03, AdversarialCaseId::Hlink05] {
+            execution.record_unsupported(id)?;
         }
     } else {
         execution.record_executed(AdversarialCaseId::Hlink06)?;
         run_hlink01(driver, run).await?;
         execution.record_executed(AdversarialCaseId::Hlink01)?;
 
-        run_hlink03(driver, run).await?;
-        execution.record_executed(AdversarialCaseId::Hlink03)?;
+        #[cfg(unix)]
+        {
+            run_hlink03(driver, run).await?;
+            execution.record_executed(AdversarialCaseId::Hlink03)?;
+        }
+        #[cfg(not(unix))]
+        execution.record_unsupported(AdversarialCaseId::Hlink03)?;
 
         let hlink02_name = format!("hlink02-link-{}", unique_suffix());
         fs::hard_link(
