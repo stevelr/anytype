@@ -30,6 +30,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Validate local file and document export destinations before reserving their
+  idempotency keys, and release reservations after other definite
+  prepublication failures. Traversal, unknown roots, collisions, and staging
+  preflight refusals now reject repeatedly without retaining unbounded
+  in-flight operation entries; uncertain publication remains terminal and
+  retains staging ownership for cleanup.
 - Rewind retained artifact readers before Anytype uploads and hold an exclusive
   staging-record lease through validation and dispatch, preventing shared file
   offsets from producing empty or interleaved imports. Multi-chunk import

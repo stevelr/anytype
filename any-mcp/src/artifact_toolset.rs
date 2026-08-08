@@ -139,6 +139,67 @@ enum ResolvedDestination {
     Remote,
 }
 
+enum ValidatedDestination {
+    Local {
+        root: String,
+        path: RelativeNativePath,
+    },
+    Remote,
+}
+
+impl ResolvedDestination {
+    fn validate(self) -> Result<ValidatedDestination, ArtifactToolError> {
+        match self {
+            Self::Local(location) => Ok(ValidatedDestination::Local {
+                path: location.relative_path()?,
+                root: location.root,
+            }),
+            Self::Remote => Ok(ValidatedDestination::Remote),
+        }
+    }
+}
+
+async fn reserve_file_export_operation(
+    operations: &ArtifactOperationState,
+    key: [u8; 32],
+    fingerprint: [u8; 32],
+    destination: ResolvedDestination,
+) -> Result<(ValidatedDestination, ExportIdempotency), ArtifactToolError> {
+    let destination = destination.validate()?;
+    let reservation = operations.reserve_export(key, fingerprint).await?;
+    Ok((destination, reservation))
+}
+
+async fn reserve_document_export_operation(
+    operations: &ArtifactOperationState,
+    key: [u8; 32],
+    fingerprint: [u8; 32],
+    destination: ResolvedDestination,
+) -> Result<(ValidatedDestination, DocumentExportIdempotency), ArtifactToolError> {
+    let destination = destination.validate()?;
+    let reservation = operations.reserve_document_export(key, fingerprint).await?;
+    Ok((destination, reservation))
+}
+
+async fn settle_export_failure(
+    operations: &ArtifactOperationState,
+    key: [u8; 32],
+    error: ArtifactToolError,
+) -> ArtifactToolError {
+    if error == ArtifactToolError::Indeterminate {
+        operations
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+    } else {
+        operations.remove(key).await;
+    }
+    error
+}
+
+fn should_release_failed_export_stage(error: ArtifactToolError) -> bool {
+    error != ArtifactToolError::Indeterminate
+}
+
 impl ArtifactDestination {
     fn resolve(self) -> Result<ResolvedDestination, ArtifactToolError> {
         match (self.local, self.remote) {
@@ -1848,28 +1909,34 @@ async fn file_export(
         &destination,
         input.expected_strong_etag.as_ref().map(String::as_str),
     );
-    match runtime
-        .artifact_operations()
-        .reserve_export(key, fingerprint)
-        .await?
-    {
+    let (destination, reservation) =
+        reserve_file_export_operation(runtime.artifact_operations(), key, fingerprint, destination)
+            .await?;
+    match reservation {
         ExportIdempotency::Reuse(output) => return Ok(*output),
         ExportIdempotency::Dispatch => {}
     }
     let (destination, completion, stream_etag) = match destination {
-        ResolvedDestination::Local(location) => {
-            let path = location.relative_path()?;
-            let root_id = location.root;
-            let roots = roots(runtime).await?;
+        ValidatedDestination::Local { root, path } => {
+            let root_id = root;
+            let roots = match roots(runtime).await {
+                Ok(roots) => roots,
+                Err(error) => {
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
             let maximum = limits.artifact_bytes;
-            let destination = tokio::task::spawn_blocking(move || {
+            let destination = match tokio::task::spawn_blocking(move || {
                 roots
                     .begin_atomic_export(&root_id, &path, maximum)
                     .map(|destination| (destination, root_id))
             })
             .await
-            .map_err(|_| ArtifactToolError::Upstream)?
-            .map_err(|error| classify_root_error(&error));
+            {
+                Ok(result) => result.map_err(|error| classify_root_error(&error)),
+                Err(_) => Err(ArtifactToolError::Upstream),
+            };
             let (destination, root_id) = match destination {
                 Ok(destination) => destination,
                 Err(error) => {
@@ -1883,8 +1950,8 @@ async fn file_export(
                 input.expected_strong_etag.as_ref().cloned(),
             )
         }
-        ResolvedDestination::Remote => {
-            let preflight = preflight_anytype_file(
+        ValidatedDestination::Remote => {
+            let preflight = match preflight_anytype_file(
                 runtime.client(),
                 &space_id,
                 &file_id,
@@ -1893,16 +1960,37 @@ async fn file_export(
                 input.expected_strong_etag.as_ref().map(String::as_str),
                 None,
             )
-            .await?;
-            let allocation = staging(runtime)?
+            .await
+            {
+                Ok(preflight) => preflight,
+                Err(error) => {
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
+            let staging = match staging(runtime) {
+                Ok(staging) => staging,
+                Err(error) => {
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
+            let allocation = match staging
                 .allocate_export(
                     space_id.clone(),
                     preflight.total,
                     preflight.media_type.clone(),
                 )
                 .await
-                .map_err(classify_staging_error)?;
-            let mut lease = staging(runtime)?
+                .map_err(classify_staging_error)
+            {
+                Ok(allocation) => allocation,
+                Err(error) => {
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
+            let mut lease = match staging
                 .begin_write(
                     &allocation.handle,
                     Some(&allocation.record),
@@ -1910,8 +1998,23 @@ async fn file_export(
                     0,
                 )
                 .await
-                .map_err(classify_staging_error)?;
-            let destination = lease.take_destination().map_err(classify_staging_error)?;
+                .map_err(classify_staging_error)
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    let _ = staging.release(&allocation.handle).await;
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
+            let destination = match lease.take_destination().map_err(classify_staging_error) {
+                Ok(destination) => destination,
+                Err(error) => {
+                    let _ = staging.abort_write(lease, &allocation.handle).await;
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
             (
                 destination,
                 ExportCompletion::Remote { lease, allocation },
@@ -1936,8 +2039,10 @@ async fn file_export(
     let (destination, size, sha256, stored_media_type, _) = match transfer {
         Ok(transfer) => transfer,
         Err(error) => {
-            if let ExportCompletion::Remote { allocation, .. } = &completion {
-                let _ = staging(runtime)?.release(&allocation.handle).await;
+            if let ExportCompletion::Remote { lease, allocation } = completion
+                && let Ok(staging) = staging(runtime)
+            {
+                let _ = staging.abort_write(lease, &allocation.handle).await;
             }
             runtime.artifact_operations().remove(key).await;
             return Err(error);
@@ -1945,9 +2050,17 @@ async fn file_export(
     };
     let receipt = match completion {
         ExportCompletion::Local { root_id } => {
-            let committed = tokio::task::spawn_blocking(move || destination.commit())
-                .await
-                .map_err(|_| ArtifactToolError::Indeterminate)?;
+            let committed = match tokio::task::spawn_blocking(move || destination.commit()).await {
+                Ok(committed) => committed,
+                Err(_) => {
+                    return Err(settle_export_failure(
+                        runtime.artifact_operations(),
+                        key,
+                        ArtifactToolError::Indeterminate,
+                    )
+                    .await);
+                }
+            };
             let committed = match committed {
                 Ok(committed) => committed,
                 Err(error) if error.kind() == RootAccessErrorKind::Indeterminate => {
@@ -1985,10 +2098,24 @@ async fn file_export(
             }
         }
         ExportCompletion::Remote { lease, allocation } => {
-            staging(runtime)?
+            let staging = match staging(runtime) {
+                Ok(staging) => staging,
+                Err(error) => {
+                    return Err(
+                        settle_export_failure(runtime.artifact_operations(), key, error).await,
+                    );
+                }
+            };
+            if let Err(error) = staging
                 .finish_export(lease, destination, size, sha256.clone())
                 .await
-                .map_err(classify_staging_error)?;
+                .map_err(classify_staging_error)
+            {
+                if should_release_failed_export_stage(error) {
+                    let _ = staging.release(&allocation.handle).await;
+                }
+                return Err(settle_export_failure(runtime.artifact_operations(), key, error).await);
+            }
             ArtifactReceipt {
                 direction: ArtifactDirection::Export,
                 state: ArtifactState::Available,
@@ -2751,11 +2878,14 @@ async fn document_export(
         ],
     );
     let key = idempotency_key(b"document-export", &input.idempotency_key);
-    match runtime
-        .artifact_operations()
-        .reserve_document_export(key, fingerprint)
-        .await?
-    {
+    let (destination, reservation) = reserve_document_export_operation(
+        runtime.artifact_operations(),
+        key,
+        fingerprint,
+        destination,
+    )
+    .await?;
+    match reservation {
         DocumentExportIdempotency::Reuse(mut output) => {
             output.reused = true;
             return Ok(*output);
@@ -2764,13 +2894,18 @@ async fn document_export(
     }
 
     let receipt = match destination {
-        ResolvedDestination::Local(location) => {
-            let path = location.relative_path()?;
-            let root_id = location.root;
-            let roots = roots(runtime).await?;
+        ValidatedDestination::Local { root, path } => {
+            let root_id = root;
+            let roots = match roots(runtime).await {
+                Ok(roots) => roots,
+                Err(error) => {
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
             let maximum = runtime.artifact_config().limits.markdown_bytes;
             let bytes = body.into_bytes();
-            let written = tokio::task::spawn_blocking(move || {
+            let written = match tokio::task::spawn_blocking(move || {
                 let mut destination = roots
                     .begin_atomic_export(&root_id, &path, maximum)
                     .map_err(|error| classify_root_error(&error))?;
@@ -2783,7 +2918,22 @@ async fn document_export(
                 Ok::<_, ArtifactToolError>((committed, root_id))
             })
             .await
-            .map_err(|_| ArtifactToolError::Upstream)??;
+            {
+                Ok(Ok(written)) => written,
+                Ok(Err(error)) => {
+                    return Err(
+                        settle_export_failure(runtime.artifact_operations(), key, error).await,
+                    );
+                }
+                Err(_) => {
+                    return Err(settle_export_failure(
+                        runtime.artifact_operations(),
+                        key,
+                        ArtifactToolError::Indeterminate,
+                    )
+                    .await);
+                }
+            };
             if written.0 != size {
                 runtime
                     .artifact_operations()
@@ -2806,12 +2956,26 @@ async fn document_export(
                 validators: Vec::new(),
             }
         }
-        ResolvedDestination::Remote => {
-            let allocation = staging(runtime)?
+        ValidatedDestination::Remote => {
+            let staging = match staging(runtime) {
+                Ok(staging) => staging,
+                Err(error) => {
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
+            let allocation = match staging
                 .allocate_export(space_id.clone(), size, Some("text/markdown".to_owned()))
                 .await
-                .map_err(classify_staging_error)?;
-            let mut lease = staging(runtime)?
+                .map_err(classify_staging_error)
+            {
+                Ok(allocation) => allocation,
+                Err(error) => {
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
+            let mut lease = match staging
                 .begin_write(
                     &allocation.handle,
                     Some(&allocation.record),
@@ -2819,21 +2983,54 @@ async fn document_export(
                     0,
                 )
                 .await
-                .map_err(classify_staging_error)?;
-            let mut destination = lease.take_destination().map_err(classify_staging_error)?;
+                .map_err(classify_staging_error)
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    let _ = staging.release(&allocation.handle).await;
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
+            let mut destination = match lease.take_destination().map_err(classify_staging_error) {
+                Ok(destination) => destination,
+                Err(error) => {
+                    let _ = staging.abort_write(lease, &allocation.handle).await;
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+            };
             let bytes = body.into_bytes();
-            destination = tokio::task::spawn_blocking(move || {
+            destination = match tokio::task::spawn_blocking(move || {
                 destination
                     .write_all(&bytes)
                     .map_err(|_| ArtifactToolError::Upstream)?;
                 Ok::<_, ArtifactToolError>(destination)
             })
             .await
-            .map_err(|_| ArtifactToolError::Upstream)??;
-            staging(runtime)?
+            {
+                Ok(Ok(destination)) => destination,
+                Ok(Err(error)) => {
+                    let _ = staging.abort_write(lease, &allocation.handle).await;
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    let _ = staging.abort_write(lease, &allocation.handle).await;
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(ArtifactToolError::Upstream);
+                }
+            };
+            if let Err(error) = staging
                 .finish_export(lease, destination, size, sha256.clone())
                 .await
-                .map_err(classify_staging_error)?;
+                .map_err(classify_staging_error)
+            {
+                if should_release_failed_export_stage(error) {
+                    let _ = staging.release(&allocation.handle).await;
+                }
+                return Err(settle_export_failure(runtime.artifact_operations(), key, error).await);
+            }
             ArtifactReceipt {
                 direction: ArtifactDirection::Export,
                 state: ArtifactState::Available,
@@ -3350,5 +3547,117 @@ mod tests {
             state.reserve_document_mutation(key, fingerprint).await,
             Err(ArtifactToolError::Indeterminate)
         ));
+    }
+
+    fn traversal_destination() -> ResolvedDestination {
+        ResolvedDestination::Local(LocalLocation {
+            root: "outbox".to_owned(),
+            path: Omittable::Present("../escape.bin".to_owned()),
+            path_native: Omittable::Missing,
+        })
+    }
+
+    #[tokio::test]
+    async fn invalid_export_destinations_never_reserve_idempotency_entries() {
+        let state = ArtifactOperationState::default();
+        for index in 0_u64..64 {
+            let unique = index.to_le_bytes();
+            let key = digest_fields(b"key", &[b"invalid-export", &unique]);
+            let fingerprint = digest_fields(b"fingerprint", &[b"invalid-export", &unique]);
+
+            for _ in 0..2 {
+                assert!(matches!(
+                    reserve_file_export_operation(
+                        &state,
+                        key,
+                        fingerprint,
+                        traversal_destination()
+                    )
+                    .await,
+                    Err(ArtifactToolError::Validation)
+                ));
+                assert!(matches!(
+                    reserve_document_export_operation(
+                        &state,
+                        key,
+                        fingerprint,
+                        traversal_destination()
+                    )
+                    .await,
+                    Err(ArtifactToolError::Validation)
+                ));
+            }
+        }
+
+        assert!(state.entries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn definite_export_preflight_failures_release_reservations() {
+        let state = ArtifactOperationState::default();
+        let file_key = digest_fields(b"key", &[b"file-preflight"]);
+        let file_fingerprint = digest_fields(b"fingerprint", &[b"file-preflight"]);
+        let (_, file_reservation) = reserve_file_export_operation(
+            &state,
+            file_key,
+            file_fingerprint,
+            ResolvedDestination::Remote,
+        )
+        .await
+        .expect("reserve file export");
+        assert!(matches!(file_reservation, ExportIdempotency::Dispatch));
+        assert_eq!(
+            settle_export_failure(&state, file_key, ArtifactToolError::NotFound).await,
+            ArtifactToolError::NotFound
+        );
+
+        let document_key = digest_fields(b"key", &[b"document-preflight"]);
+        let document_fingerprint = digest_fields(b"fingerprint", &[b"document-preflight"]);
+        let (_, document_reservation) = reserve_document_export_operation(
+            &state,
+            document_key,
+            document_fingerprint,
+            ResolvedDestination::Remote,
+        )
+        .await
+        .expect("reserve document export");
+        assert!(matches!(
+            document_reservation,
+            DocumentExportIdempotency::Dispatch
+        ));
+        assert_eq!(
+            settle_export_failure(&state, document_key, ArtifactToolError::Conflict).await,
+            ArtifactToolError::Conflict
+        );
+
+        assert!(state.entries.lock().await.is_empty());
+        assert!(matches!(
+            state.reserve_export(file_key, file_fingerprint).await,
+            Ok(ExportIdempotency::Dispatch)
+        ));
+        assert_eq!(
+            settle_export_failure(&state, file_key, ArtifactToolError::Indeterminate).await,
+            ArtifactToolError::Indeterminate
+        );
+        assert!(matches!(
+            state.reserve_export(file_key, file_fingerprint).await,
+            Err(ArtifactToolError::Indeterminate)
+        ));
+        assert_eq!(state.entries.lock().await.len(), 1);
+    }
+
+    #[test]
+    fn indeterminate_stage_publication_retains_cleanup_ownership() {
+        assert!(!should_release_failed_export_stage(
+            ArtifactToolError::Indeterminate
+        ));
+        for error in [
+            ArtifactToolError::NotFound,
+            ArtifactToolError::Conflict,
+            ArtifactToolError::Bounded,
+            ArtifactToolError::Upstream,
+        ] {
+            assert!(should_release_failed_export_stage(error));
+        }
     }
 }

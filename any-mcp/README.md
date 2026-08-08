@@ -288,7 +288,13 @@ over-limit files, and export collisions. Export bytes remain in an
 owner-private temporary file in the destination directory until commit, which
 atomically publishes a complete create-new destination without replacing an
 existing entry. Failed, cancelled, and dropped exports remove only their
-private temporary file.
+private temporary file. Local destination syntax is validated before an
+idempotency key is reserved, so a rejected path can be corrected and retried
+without retaining process-lifetime operation state. Other definite failures
+before publication, including unavailable roots, collisions, and staging
+preflight refusal, also release the reservation; uncertain commit or
+publication outcomes remain terminal to prevent redispatch and retain staging
+ownership for cleanup.
 
 Container bind mounts, Docker volumes, Nix bind mounts, and locally mounted
 encrypted or object-backed filesystems can be used when they satisfy the same
