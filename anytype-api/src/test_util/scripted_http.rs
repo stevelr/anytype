@@ -320,17 +320,20 @@ impl ScriptedHttpFixture {
     }
 
     /// Waits for every scripted response and returns requests in arrival order.
+    /// Cancelling this future drops the fixture and aborts its listener task.
     ///
     /// # Errors
     ///
     /// Returns a payload-free transport, parsing, limit, timeout, or task error.
     pub async fn finish(mut self) -> Result<Vec<ScriptedHttpRequest>, ScriptedHttpFixtureError> {
-        let Some(server) = self.server.take() else {
+        let Some(server) = self.server.as_mut() else {
             return Err(ScriptedHttpFixtureError::ServerTask);
         };
-        server
+        let result = server
             .await
-            .map_err(|_| ScriptedHttpFixtureError::ServerTask)?
+            .map_err(|_| ScriptedHttpFixtureError::ServerTask)?;
+        self.server.take();
+        result
     }
 }
 
@@ -750,5 +753,39 @@ mod tests {
             ScriptedHttpResponse::new(StatusCode::OK, ScriptedHttpContentType::Text, Vec::new()),
         ]));
         assert!(matches!(result, Err(ScriptedHttpFixtureError::NoRuntime)));
+    }
+
+    #[tokio::test]
+    async fn cancelling_finish_releases_listener_and_accept_authority() {
+        let fixture = ScriptedHttpFixture::start(vec![ScriptedHttpResponse::new(
+            StatusCode::OK,
+            ScriptedHttpContentType::Text,
+            Vec::new(),
+        )])
+        .await
+        .expect("start cancellation fixture");
+        let address = fixture.address();
+        let finish = tokio::spawn(fixture.finish());
+        tokio::task::yield_now().await;
+        finish.abort();
+        assert!(
+            finish
+                .await
+                .expect_err("cancelled finish task must not complete")
+                .is_cancelled()
+        );
+
+        let listener = TcpListener::bind(address)
+            .await
+            .expect("cancelled fixture releases its exact address");
+        let connect = TcpStream::connect(address);
+        let accept = listener.accept();
+        let (client, accepted) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(connect, accept)
+        })
+        .await
+        .expect("replacement listener owns timely accept authority");
+        client.expect("connect replacement listener");
+        accepted.expect("replacement listener accepts connection");
     }
 }
