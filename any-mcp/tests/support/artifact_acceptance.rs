@@ -37,8 +37,10 @@ use std::{
     ffi::OsString,
     fmt,
     fs::{self, File, OpenOptions},
+    future::Future,
     io::{Read, Write},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -1067,6 +1069,38 @@ pub struct ArtifactAdversarialRun<'a> {
     pub root_access_attempts: Option<&'a dyn Fn() -> u64>,
     /// Successful import-open counter used to prove alias targets stay unread.
     pub successful_import_opens: Option<&'a dyn Fn() -> u64>,
+    /// Optional direct-runtime synchronization hooks for deterministic races.
+    pub gate_hooks: Option<&'a dyn ArtifactGateHooks>,
+}
+
+/// Test-harness-owned gate adapter, deliberately independent of the library's
+/// concrete gate type so this support module compiles both in-crate and as an
+/// external integration-test module.
+pub trait ArtifactGateHooks: Send + Sync {
+    /// Arms the exact import operation selected by its raw idempotency key.
+    fn arm_import<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>>;
+    /// Arms the exact export operation selected by its raw idempotency key.
+    fn arm_export<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>>;
+    /// Arms the exact document operation selected by its raw idempotency key.
+    fn arm_document<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>>;
+}
+
+/// One armed, re-armable test synchronization point.
+pub trait ArtifactGateLease: Send {
+    /// Waits for production to enter the armed point.
+    fn wait<'a>(&'a mut self, timeout: Duration)
+    -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+    /// Releases the blocked production operation.
+    fn release(&self);
 }
 
 fn local_source(root: &str, path: &str) -> Value {

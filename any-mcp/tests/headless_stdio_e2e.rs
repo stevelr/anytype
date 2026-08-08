@@ -6059,6 +6059,7 @@ async fn run_spawned_artifact_adversarial_default(
         ctx,
         root_access_attempts: None,
         successful_import_opens: None,
+        gate_hooks: None,
     };
     let observed = {
         let mut driver = OwnedStdioDriver {

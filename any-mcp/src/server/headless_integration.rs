@@ -2929,6 +2929,7 @@ async fn headless_artifact_traversal_direct_scenarios() {
                             ctx: ctx.as_ref(),
                             root_access_attempts: Some(&root_access_attempts),
                             successful_import_opens: Some(&successful_import_opens),
+                            gate_hooks: None,
                         };
                         Box::pin(run_artifact_traversal_default(&mut driver, &run))
                             .await
@@ -2947,6 +2948,7 @@ async fn headless_artifact_traversal_direct_scenarios() {
                         ctx: ctx.as_ref(),
                         root_access_attempts: None,
                         successful_import_opens: None,
+                        gate_hooks: None,
                     };
                     Box::pin(run_artifact_empty_client_roots_case(&mut driver, &run))
                         .await
@@ -3044,6 +3046,7 @@ async fn headless_artifact_dynamic_filesystem_direct_scenarios() {
                             ctx: ctx.as_ref(),
                             root_access_attempts: Some(&root_access_attempts),
                             successful_import_opens: Some(&successful_import_opens),
+                            gate_hooks: None,
                         };
                         let mut driver = DirectRouterDriver { server: &server };
                         Box::pin(run_artifact_dynamic_filesystem_cases(&mut driver, &run))
@@ -3116,6 +3119,7 @@ async fn headless_artifact_alias_metadata_direct_scenarios() {
                     ctx: ctx.as_ref(),
                     root_access_attempts: None,
                     successful_import_opens: Some(&successful_import_opens),
+                    gate_hooks: None,
                 };
                 let mut execution = Box::pin(run_artifact_alias_cases(&mut driver, &run))
                     .await
@@ -3194,6 +3198,7 @@ async fn headless_artifact_bounded_metadata_direct_scenarios() {
                         ctx: ctx.as_ref(),
                         root_access_attempts: None,
                         successful_import_opens: None,
+                        gate_hooks: None,
                     };
                     Box::pin(run_artifact_payload_boundary_cases(&mut driver, &run))
                         .await
@@ -3222,6 +3227,7 @@ async fn headless_artifact_bounded_metadata_direct_scenarios() {
                         ctx: ctx.as_ref(),
                         root_access_attempts: None,
                         successful_import_opens: None,
+                        gate_hooks: None,
                     };
                     Box::pin(run_artifact_hostile_validator_case(&mut driver, &run))
                         .await
