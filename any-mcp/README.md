@@ -1896,8 +1896,8 @@ Direct and spawned owners audit only the descriptor-bound appended window and
 fail on any panic, fatal, or error class outside the already isolated upstream
 set; only counts and fixed category names are reported, never log lines.
 
-Select the live acceptance targets explicitly — two direct-router cases by
-their exact paths, and the four spawned cases by their shared prefix:
+Select the live acceptance targets explicitly — five direct-router cases by
+their exact paths, and the five spawned cases by their shared prefix:
 
 ```sh
 cargo test -p any-mcp --lib headless_artifact_direct_transport_matrix_scenario \
@@ -1906,6 +1906,15 @@ cargo test -p any-mcp --lib headless_artifact_direct_transport_matrix_scenario \
 cargo test -p any-mcp --lib headless_artifact_policy_direct_scenarios \
   -- --ignored --exact \
   server::headless_integration::headless_artifact_policy_direct_scenarios
+cargo test -p any-mcp --lib headless_artifact_traversal_direct_scenarios \
+  -- --ignored --exact \
+  server::headless_integration::headless_artifact_traversal_direct_scenarios
+cargo test -p any-mcp --lib headless_artifact_alias_metadata_direct_scenarios \
+  -- --ignored --exact \
+  server::headless_integration::headless_artifact_alias_metadata_direct_scenarios
+cargo test -p any-mcp --lib headless_artifact_bounded_metadata_direct_scenarios \
+  -- --ignored --exact \
+  server::headless_integration::headless_artifact_bounded_metadata_direct_scenarios
 cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e \
   headless_artifact_ -- --ignored --test-threads=1
 ```
