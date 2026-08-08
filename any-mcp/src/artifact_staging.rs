@@ -236,7 +236,7 @@ enum RecordState {
     CleanupPending {
         destination: Option<AtomicExport>,
         source: Option<AnchoredImport>,
-        published_without_source: bool,
+        pathname_cleanup_unsafe: bool,
     },
     Consumed {
         import: Arc<RetainedImport>,
@@ -1581,7 +1581,7 @@ impl ArtifactStaging {
                 RecordState::CleanupPending {
                     destination,
                     source: None,
-                    published_without_source: false,
+                    pathname_cleanup_unsafe: false,
                 } => destination.take().map_or(
                     PendingCleanupTarget::Absent,
                     PendingCleanupTarget::Temporary,
@@ -1589,19 +1589,25 @@ impl ArtifactStaging {
                 RecordState::CleanupPending {
                     destination: None,
                     source: slot @ Some(_),
-                    published_without_source: false,
-                } => match slot.take() {
-                    Some(source) => PendingCleanupTarget::Published {
-                        name: record.record_name.clone(),
-                        source,
-                    },
-                    None => return false,
-                },
+                    pathname_cleanup_unsafe,
+                } if !*pathname_cleanup_unsafe => {
+                    // Identity validation and unlink are separate pathname
+                    // operations. Closing cleanup authority before releasing
+                    // this lock makes a failed, cancelled, or panicked attempt
+                    // retain its record rather than retry by name.
+                    *pathname_cleanup_unsafe = true;
+                    match slot.take() {
+                        Some(source) => PendingCleanupTarget::Published {
+                            name: record.record_name.clone(),
+                            source,
+                        },
+                        None => return false,
+                    }
+                }
                 RecordState::CleanupPending {
-                    destination: None,
-                    source: None,
-                    published_without_source: true,
-                } => PendingCleanupTarget::IndeterminatePublished(record.record_name.clone()),
+                    pathname_cleanup_unsafe: true,
+                    ..
+                } => return false,
                 _ => return false,
             }
         };
@@ -1622,13 +1628,6 @@ impl ArtifactStaging {
                     PendingCleanupResult::RetainPublished(source)
                 }
             }
-            PendingCleanupTarget::IndeterminatePublished(name) => {
-                if directory.remove_indeterminate_record(&name).is_ok() {
-                    PendingCleanupResult::Removed
-                } else {
-                    PendingCleanupResult::RetainIndeterminatePublished
-                }
-            }
         })
         .await;
         match result {
@@ -1638,7 +1637,7 @@ impl ArtifactStaging {
                 if let RecordState::CleanupPending {
                     destination: slot,
                     source: None,
-                    published_without_source: false,
+                    pathname_cleanup_unsafe: false,
                 } = &mut *state
                 {
                     *slot = Some(destination);
@@ -1652,7 +1651,6 @@ impl ArtifactStaging {
                 }
                 false
             }
-            Ok(PendingCleanupResult::RetainIndeterminatePublished) => false,
             Err(_) => false,
         }
     }
@@ -1719,10 +1717,10 @@ fn transition_to_cleanup_pending(state: &mut RecordState) -> bool {
         RecordState::CleanupPending {
             destination: None,
             source: None,
-            published_without_source: false,
+            pathname_cleanup_unsafe: false,
         },
     );
-    let (destination, source, published_without_source) = match prior {
+    let (destination, source, pathname_cleanup_unsafe) = match prior {
         RecordState::Receiving { destination, .. } => (destination, None, false),
         RecordState::PublicationIndeterminate { completion } if completion.settled() => {
             (None, None, true)
@@ -1761,7 +1759,7 @@ fn transition_to_cleanup_pending(state: &mut RecordState) -> bool {
     *state = RecordState::CleanupPending {
         destination,
         source,
-        published_without_source,
+        pathname_cleanup_unsafe,
     };
     true
 }
@@ -1773,14 +1771,12 @@ enum PendingCleanupTarget {
         name: String,
         source: AnchoredImport,
     },
-    IndeterminatePublished(String),
 }
 
 enum PendingCleanupResult {
     Removed,
     Retain(AtomicExport),
     RetainPublished(AnchoredImport),
-    RetainIndeterminatePublished,
 }
 
 struct IncomingWrite {
@@ -2461,7 +2457,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn linked_staged_record_retries_authenticated_cleanup_after_link_removal() {
+    async fn linked_staged_record_permanently_disables_pathname_cleanup_after_conflict() {
         let test = test_staging().await;
         let before_allocation = test.staging.available_quota().await;
         let allocation = test
@@ -2509,14 +2505,34 @@ mod tests {
         assert_eq!(test.staging.state.records.read().await.len(), 1);
 
         std::fs::remove_file(&retained_link).expect("remove retained link");
-        test.staging
-            .release(&allocation.handle)
-            .await
-            .expect("retry authenticated release after link removal");
-
-        assert!(!staged_path.exists());
-        assert!(test.staging.state.records.read().await.is_empty());
-        assert_eq!(test.staging.available_quota().await, before_allocation);
+        for _ in 0..2 {
+            assert!(matches!(
+                test.staging.release(&allocation.handle).await,
+                Err(StagingError::Conflict)
+            ));
+            assert_eq!(
+                std::fs::read(&staged_path).expect("read staged bytes"),
+                b"hello"
+            );
+            assert_eq!(test.staging.available_quota().await, before_release);
+            assert_eq!(test.staging.state.records.read().await.len(), 1);
+        }
+        for _ in 0..2 {
+            let expired = {
+                let mut records = test.staging.state.records.write().await;
+                test.staging
+                    .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
+            };
+            assert_eq!(expired.len(), 1);
+            test.staging.cleanup_expired(expired).await;
+            assert_eq!(
+                std::fs::read(&staged_path).expect("read staged bytes"),
+                b"hello"
+            );
+            assert_eq!(test.staging.available_quota().await, before_release);
+            assert_eq!(test.staging.state.records.read().await.len(), 1);
+        }
+        assert_ne!(test.staging.available_quota().await, before_allocation);
     }
 
     #[cfg(unix)]
@@ -2771,8 +2787,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expiry_removes_indeterminate_publication_and_its_quota_record() {
+    async fn expiry_retains_indeterminate_publication_and_its_quota_record() {
         let test = test_staging().await;
+        let quota_before = test.staging.available_quota().await;
         let allocation = test
             .staging
             .allocate_export(space_id(), 5, Some("application/octet-stream".to_owned()))
@@ -2798,18 +2815,35 @@ mod tests {
         drop(PublicationOwnerGuard(Arc::clone(&completion)));
         *record.state.lock().await = RecordState::PublicationIndeterminate { completion };
         let published = test.root.join(&record.record_name);
+        let reserved_quota = test.staging.available_quota().await;
         assert!(published.is_file());
+        assert!(matches!(
+            test.staging.release(&allocation.handle).await,
+            Err(StagingError::Conflict)
+        ));
+        assert_eq!(
+            std::fs::read(&published).expect("read publication"),
+            b"hello"
+        );
+        assert_eq!(test.staging.available_quota().await, reserved_quota);
+        assert_eq!(test.staging.state.records.read().await.len(), 1);
 
-        let expired = {
-            let mut records = test.staging.state.records.write().await;
-            test.staging
-                .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
-        };
-        assert_eq!(expired.len(), 1);
-        test.staging.cleanup_expired(expired).await;
-
-        assert!(!published.exists());
-        assert!(test.staging.state.records.read().await.is_empty());
+        for _ in 0..2 {
+            let expired = {
+                let mut records = test.staging.state.records.write().await;
+                test.staging
+                    .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
+            };
+            assert_eq!(expired.len(), 1);
+            test.staging.cleanup_expired(expired).await;
+            assert_eq!(
+                std::fs::read(&published).expect("read publication"),
+                b"hello"
+            );
+            assert_eq!(test.staging.available_quota().await, reserved_quota);
+            assert_eq!(test.staging.state.records.read().await.len(), 1);
+        }
+        assert_ne!(test.staging.available_quota().await, quota_before);
     }
 
     #[tokio::test]
@@ -3172,8 +3206,11 @@ mod tests {
         };
         test.staging.cleanup_expired(expired).await;
 
-        assert!(!published.exists());
-        assert!(test.staging.state.records.read().await.is_empty());
+        assert_eq!(
+            std::fs::read(&published).expect("read publication"),
+            b"hello"
+        );
+        assert_eq!(test.staging.state.records.read().await.len(), 1);
     }
 
     #[tokio::test]

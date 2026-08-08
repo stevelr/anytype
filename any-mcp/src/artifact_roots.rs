@@ -588,22 +588,6 @@ impl StagingDirectory {
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
         sync_parent_directory(&parent).map_err(|_| RootAccessError::new(RootProblem::Containment))
     }
-
-    /// Removes a record whose publication outcome was already indeterminate.
-    ///
-    /// This recovery path has no retained completed handle to compare. It is
-    /// limited to publication-indeterminate state; every retained source uses
-    /// [`Self::remove_exact_record`] instead.
-    pub(crate) fn remove_indeterminate_record(
-        &self,
-        record_name: &str,
-    ) -> Result<(), RootAccessError> {
-        let path = RelativeNativePath::from_utf8(record_name)
-            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-        let (parent, name) = walk_parent(&self.root, &path)?;
-        remove_private_file(&parent, Path::new(&name), 1)?;
-        sync_parent_directory(&parent).map_err(|_| RootAccessError::new(RootProblem::Containment))
-    }
 }
 
 const STAGING_LOCK_NAME: &str = ".any-mcp-staging.lock";
