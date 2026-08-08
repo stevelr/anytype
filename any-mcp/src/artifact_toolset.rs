@@ -855,7 +855,10 @@ pub(crate) enum ArtifactToolError {
 #[derive(Clone, Debug)]
 pub(crate) enum ImportIdempotency {
     Dispatch,
-    VerifyCandidate(EntityId),
+    VerifyCandidate {
+        candidate: EntityId,
+        validator_findings: Vec<ValidatorFinding>,
+    },
     Reuse(Box<FileImportOutput>),
 }
 
@@ -884,9 +887,15 @@ enum DocumentExportIdempotency {
 #[derive(Clone, Debug)]
 enum OperationOutcome {
     ImportInFlight,
-    ImportVerifying(EntityId),
+    ImportVerifying {
+        candidate: EntityId,
+        validator_findings: Vec<ValidatorFinding>,
+    },
     ImportCleaning(EntityId),
-    ImportCandidate(EntityId),
+    ImportCandidate {
+        candidate: EntityId,
+        validator_findings: Vec<ValidatorFinding>,
+    },
     ImportIndeterminate(EntityId),
     ImportComplete(FileImportOutput),
     ExportInFlight,
@@ -905,9 +914,9 @@ enum OperationOutcome {
 impl OperationOutcome {
     fn retained_import_candidate(&self) -> Option<&EntityId> {
         match self {
-            Self::ImportVerifying(candidate)
+            Self::ImportVerifying { candidate, .. }
             | Self::ImportCleaning(candidate)
-            | Self::ImportCandidate(candidate)
+            | Self::ImportCandidate { candidate, .. }
             | Self::ImportIndeterminate(candidate) => Some(candidate),
             _ => None,
         }
@@ -933,9 +942,11 @@ impl ArtifactOperationState {
     pub(crate) async fn settle_import_timeout(&self, key: [u8; 32]) {
         if let Some(entry) = self.entries.lock().await.get_mut(&key) {
             entry.outcome = match &entry.outcome {
-                OperationOutcome::ImportVerifying(candidate) => {
-                    OperationOutcome::ImportCandidate(candidate.clone())
-                }
+                OperationOutcome::ImportVerifying { candidate, validator_findings } =>
+                    OperationOutcome::ImportCandidate {
+                        candidate: candidate.clone(),
+                        validator_findings: validator_findings.clone(),
+                    },
                 OperationOutcome::ImportCleaning(candidate) => {
                     OperationOutcome::ImportIndeterminate(candidate.clone())
                 }
@@ -966,14 +977,16 @@ impl ArtifactOperationState {
         }
         let _ = entry.outcome.retained_import_candidate();
         match &entry.outcome {
-            OperationOutcome::ImportCandidate(candidate) => {
-                Ok(ImportIdempotency::VerifyCandidate(candidate.clone()))
-            }
+            OperationOutcome::ImportCandidate { candidate, validator_findings } =>
+                Ok(ImportIdempotency::VerifyCandidate {
+                    candidate: candidate.clone(),
+                    validator_findings: validator_findings.clone(),
+                }),
             OperationOutcome::ImportComplete(output) => {
                 Ok(ImportIdempotency::Reuse(Box::new(output.clone())))
             }
             OperationOutcome::ImportInFlight
-            | OperationOutcome::ImportVerifying(_)
+            | OperationOutcome::ImportVerifying { .. }
             | OperationOutcome::ImportCleaning(_)
             | OperationOutcome::ImportIndeterminate(_)
             | OperationOutcome::ExportInFlight
@@ -1011,9 +1024,9 @@ impl ArtifactOperationState {
                 Ok(ExportIdempotency::Reuse(Box::new(output.clone())))
             }
             OperationOutcome::ImportInFlight
-            | OperationOutcome::ImportVerifying(_)
+            | OperationOutcome::ImportVerifying { .. }
             | OperationOutcome::ImportCleaning(_)
-            | OperationOutcome::ImportCandidate(_)
+            | OperationOutcome::ImportCandidate { .. }
             | OperationOutcome::ImportIndeterminate(_)
             | OperationOutcome::ImportComplete(_)
             | OperationOutcome::ExportInFlight
@@ -1752,7 +1765,7 @@ async fn file_import(
             drop(settlement_permit);
             return Ok(*output);
         }
-        ImportIdempotency::VerifyCandidate(candidate) => {
+        ImportIdempotency::VerifyCandidate { candidate, validator_findings } => {
             if let Some(handle) = staged_handle.as_deref() {
                 let retained = staging(runtime)?
                     .reconciliation_import(handle, &space_id, key)
@@ -1923,7 +1936,13 @@ async fn settle_reserved_import(
     };
     runtime
         .artifact_operations()
-        .set_outcome(key, OperationOutcome::ImportVerifying(candidate.clone()))
+        .set_outcome(
+            key,
+            OperationOutcome::ImportVerifying {
+                candidate: candidate.clone(),
+                validator_findings: validator_findings.clone(),
+            },
+        )
         .await;
     if let Err(source_error) = source.verify_unchanged() {
         if source_error == ArtifactToolError::Conflict {
@@ -1975,7 +1994,13 @@ async fn settle_reserved_import(
             drop(source);
             runtime
                 .artifact_operations()
-                .set_outcome(key, OperationOutcome::ImportCandidate(candidate.clone()))
+                .set_outcome(
+                    key,
+                    OperationOutcome::ImportCandidate {
+                        candidate: candidate.clone(),
+                        validator_findings,
+                    },
+                )
                 .await;
             return Err(ArtifactToolError::Indeterminate);
         }
@@ -3890,12 +3915,24 @@ mod tests {
         let candidate =
             EntityId::new("bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ".to_owned())
                 .expect("candidate");
+        let findings = vec![ValidatorFinding {
+            id: "retained".to_owned(),
+            status: crate::artifact_validators::ValidatorStatus::Accepted,
+            detected_media_type: Some("text/plain".to_owned()),
+        }];
         state
-            .set_outcome(key, OperationOutcome::ImportCandidate(candidate.clone()))
+            .set_outcome(
+                key,
+                OperationOutcome::ImportCandidate {
+                    candidate: candidate.clone(),
+                    validator_findings: findings.clone(),
+                },
+            )
             .await;
         assert!(matches!(
             state.reserve_import(key, fingerprint).await,
-            Ok(ImportIdempotency::VerifyCandidate(actual)) if actual == candidate
+            Ok(ImportIdempotency::VerifyCandidate { candidate: actual, validator_findings })
+                if actual == candidate && validator_findings.len() == 1 && validator_findings[0].id == "retained"
         ));
         assert!(matches!(
             state
@@ -3919,12 +3956,18 @@ mod tests {
             Ok(ImportIdempotency::Dispatch)
         ));
         state
-            .set_outcome(key, OperationOutcome::ImportVerifying(candidate.clone()))
+            .set_outcome(
+                key,
+                OperationOutcome::ImportVerifying {
+                    candidate: candidate.clone(),
+                    validator_findings: Vec::new(),
+                },
+            )
             .await;
         state.settle_import_timeout(key).await;
         assert!(matches!(
             state.reserve_import(key, fingerprint).await,
-            Ok(ImportIdempotency::VerifyCandidate(actual)) if actual == candidate
+            Ok(ImportIdempotency::VerifyCandidate { candidate: actual, .. }) if actual == candidate
         ));
 
         state
