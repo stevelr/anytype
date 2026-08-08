@@ -571,8 +571,20 @@ impl ArtifactStaging {
         if !config.enabled {
             return Err(StagingError::Disabled);
         }
-        let directory = StagingDirectory::activate(config.root(), local_roots)
+        let (directory, inventory) = StagingDirectory::activate(
+            config.root(),
+            local_roots,
+            limits.staging_entries,
+            limits.artifact_bytes,
+        )
             .map_err(|_| StagingError::Upstream)?;
+        if !inventory.records.is_empty()
+            || !inventory.payloads.is_empty()
+            || !inventory.temporary.is_empty()
+            || !inventory.tombstones.is_empty()
+        {
+            return Err(StagingError::Upstream);
+        }
         let mut generation_key = [0_u8; 32];
         getrandom::fill(&mut generation_key).map_err(|_| StagingError::Upstream)?;
         let public_base_url = config
