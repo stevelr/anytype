@@ -4,7 +4,11 @@ from unittest import mock
 
 from anyr.tests import cli_commands
 from anyr.tests.live_gate_policy import PYTHON_TEST_IDS, python_ok, rust_ok
-from anyr.tests.run_required_python_cli import required_suite
+from anyr.tests.run_required_python_cli import (
+    classify_failure_diagnostics,
+    fixed_failure_message,
+    required_suite,
+)
 
 
 RUST = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s"
@@ -30,6 +34,27 @@ class LiveGatePolicyTests(unittest.TestCase):
             self.assertRaises(AssertionError),
         ):
             cli_commands.TestAnyrCommands.setUpClass()
+
+    def test_failure_category_is_fixed_and_never_echoes_private_details(self):
+        self.assertEqual(
+            classify_failure_diagnostics("space inventory pagination is invalid"),
+            "inventory-invalid",
+        )
+        self.assertEqual(
+            classify_failure_diagnostics(
+                "disposable space create ownership is ambiguous"
+            ),
+            "create-ambiguous",
+        )
+        self.assertEqual(
+            classify_failure_diagnostics("token=secret-untrusted-message"),
+            "required-test-failed",
+        )
+        message = fixed_failure_message("token=secret-untrusted-message")
+        self.assertEqual(
+            message, "required anyr Python gate failed: required-test-failed"
+        )
+        self.assertNotIn("secret", message)
 
     def test_python_test_manifest_matches_loader(self):
         classes = [

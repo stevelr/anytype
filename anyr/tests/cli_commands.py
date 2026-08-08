@@ -19,17 +19,19 @@ CLI_TIMEOUT_SECONDS = 180
 SPACE_PAGE_SIZE = 200
 MAX_SPACE_INVENTORY_PAGES = 16
 MAX_SPACE_INVENTORY_ITEMS = SPACE_PAGE_SIZE * MAX_SPACE_INVENTORY_PAGES
+SPACE_MODELS = frozenset({"space", "chat", "one_to_one", "tech_space"})
 
 
 @dataclasses.dataclass(frozen=True)
 class SpaceIdentity:
-    """A validated regular-space identity from a complete CLI inventory."""
+    """A validated space identity from a complete CLI inventory."""
 
     id: str
     name: str
+    model: str
 
 
-def _space_identity(record: object, context: str) -> SpaceIdentity:
+def _inventory_space_identity(record: object, context: str) -> SpaceIdentity:
     if not isinstance(record, dict):
         raise AssertionError(f"{context} is not a space record")
     space_id = record.get("id")
@@ -39,14 +41,14 @@ def _space_identity(record: object, context: str) -> SpaceIdentity:
         or not space_id
         or not isinstance(space_name, str)
         or not space_name
-        or record.get("object") != "space"
+        or record.get("object") not in SPACE_MODELS
     ):
         raise AssertionError(f"{context} has an invalid space identity")
-    return SpaceIdentity(space_id, space_name)
+    return SpaceIdentity(space_id, space_name, record["object"])
 
 
 def complete_space_inventory() -> dict[str, SpaceIdentity]:
-    """Return every regular space after rejecting partial or malformed pages."""
+    """Return every supported space model after rejecting partial pages."""
     inventory: dict[str, SpaceIdentity] = {}
     offset = 0
     expected_total: int | None = None
@@ -68,7 +70,9 @@ def complete_space_inventory() -> dict[str, SpaceIdentity]:
             not isinstance(has_more, bool)
             or limit != SPACE_PAGE_SIZE
             or page_offset != offset
-            or not isinstance(total, int)
+            or type(limit) is not int
+            or type(page_offset) is not int
+            or type(total) is not int
             or total < 0
             or len(items) > SPACE_PAGE_SIZE
             or (expected_total is not None and total != expected_total)
@@ -76,7 +80,7 @@ def complete_space_inventory() -> dict[str, SpaceIdentity]:
             raise AssertionError("space inventory pagination is invalid")
         expected_total = total
         for item in items:
-            identity = _space_identity(item, "space inventory item")
+            identity = _inventory_space_identity(item, "space inventory item")
             if identity.id in inventory:
                 raise AssertionError("space inventory contains duplicate ids")
             inventory[identity.id] = identity
@@ -95,10 +99,10 @@ def complete_space_inventory() -> dict[str, SpaceIdentity]:
 
 
 def _fresh_owned_space(space_id: str, expected_name: str) -> SpaceIdentity:
-    record = _space_identity(
+    record = _inventory_space_identity(
         run_anyr_json("space", "get", space_id), "space get response"
     )
-    if record.id != space_id or record.name != expected_name:
+    if record.id != space_id or record.name != expected_name or record.model != "space":
         raise AssertionError("disposable space create identity mismatch")
     return record
 
@@ -233,12 +237,32 @@ def create_owned_space(space_name: str) -> str:
 
 def delete_owned_space(space_name: str, space_id: str) -> None:
     """Delete only a twice-revalidated, cleanup-owned regular space."""
-    for _ in range(2):
-        _fresh_owned_space(space_id, space_name)
+    authorize_owned_space_delete(space_name, space_id)
     deleted = run_anyr("space", "delete", space_id, "--skip-archive", "--confirm")
     if deleted.returncode != 0:
         raise AssertionError("disposable space cleanup command failed")
     wait_for_space_absence(space_name, space_id)
+
+
+def authorize_owned_space_delete(space_name: str, space_id: str) -> None:
+    """Require two fresh regular-space identity reads before a delete attempt."""
+    for _ in range(2):
+        _fresh_owned_space(space_id, space_name)
+
+
+def run_owned_space_delete(
+    space_name: str,
+    space_id: str,
+    *options: str,
+    input_text: str | None = None,
+    global_options: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    """Authorize an owned space immediately before one delete command dispatch."""
+    authorize_owned_space_delete(space_name, space_id)
+    args = (*global_options, "space", "delete", space_id, *options)
+    if input_text is None:
+        return run_anyr(*args)
+    return run_anyr_with_input(input_text, *args)
 
 
 class TestDisposableSpaceCleanup(unittest.TestCase):
@@ -513,19 +537,20 @@ class TestAnyrCommands(unittest.TestCase):
     def test_space_delete_prompted_cancellation_and_confirmation(self) -> None:
         self.require_healthy_pings()
         with self.disposable_deletion_space("delete-prompted") as space:
-            canceled = run_anyr_with_input("cancel\n", "space", "delete", space["id"])
+            canceled = run_owned_space_delete(
+                space["name"], space["id"], input_text="cancel\n"
+            )
             self.assertEqual(canceled.returncode, 0, canceled.stderr)
             self.assertIn("Space deletion canceled.", canceled.stderr)
             self.assert_space_exists(
                 space["id"], "archive-choice cancellation deleted the source space"
             )
 
-            wrong_confirmation = run_anyr_with_input(
-                f'delete:{space["name"]}-wrong\n',
-                "space",
-                "delete",
+            wrong_confirmation = run_owned_space_delete(
+                space["name"],
                 space["id"],
                 "--skip-archive",
+                input_text=f'delete:{space["name"]}-wrong\n',
             )
             self.assertEqual(
                 wrong_confirmation.returncode,
@@ -540,13 +565,12 @@ class TestAnyrCommands(unittest.TestCase):
                 space["id"], "wrong typed confirmation deleted the source space"
             )
 
-            confirmation = run_anyr_with_input(
-                f'delete:{space["name"]}\n',
-                "space",
-                "delete",
+            confirmation = run_owned_space_delete(
+                space["name"],
                 space["id"],
                 "--skip-archive",
                 "--json",
+                input_text=f'delete:{space["name"]}\n',
             )
             self.assertEqual(
                 confirmation.returncode,
@@ -567,15 +591,13 @@ class TestAnyrCommands(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
         ):
             destination = os.path.join(directory, "must-not-exist.zip")
-            failed = run_anyr(
-                "--grpc",
-                "http://127.0.0.1:1",
-                "space",
-                "delete",
+            failed = run_owned_space_delete(
+                space["name"],
                 space["id"],
                 "--archive",
                 destination,
                 "--confirm",
+                global_options=("--grpc", "http://127.0.0.1:1"),
             )
             self.assertNotEqual(
                 failed.returncode,
@@ -602,9 +624,8 @@ class TestAnyrCommands(unittest.TestCase):
             with open(decoy, "wb") as handle:
                 handle.write(b"decoy archive candidate")
 
-            deleted = run_anyr(
-                "space",
-                "delete",
+            deleted = run_owned_space_delete(
+                space["name"],
                 space["id"],
                 "--archive",
                 selected,

@@ -20,8 +20,8 @@ def page(items, offset=0, has_more=False, total=None):
     }
 
 
-def space(space_id, name):
-    return {"id": space_id, "name": name, "object": "space"}
+def space(space_id, name, model="space"):
+    return {"id": space_id, "name": name, "object": model}
 
 
 class SpaceOwnershipTests(unittest.TestCase):
@@ -47,6 +47,25 @@ class SpaceOwnershipTests(unittest.TestCase):
         ):
             cli_commands.complete_space_inventory()
 
+    def test_inventory_accepts_supported_non_regular_models_only(self):
+        with mock.patch(
+            "anyr.tests.cli_commands.run_anyr_json",
+            return_value=page(
+                [space("regular", "Regular"), space("chat", "Chat", "chat")]
+            ),
+        ):
+            inventory = cli_commands.complete_space_inventory()
+        self.assertEqual(inventory["chat"].model, "chat")
+
+        with (
+            mock.patch(
+                "anyr.tests.cli_commands.run_anyr_json",
+                return_value=page([space("unknown", "Unknown", "other")]),
+            ),
+            self.assertRaisesRegex(AssertionError, "invalid space identity"),
+        ):
+            cli_commands.complete_space_inventory()
+
     def test_inventory_rejects_malformed_pages_and_page_cap(self):
         with (
             mock.patch(
@@ -56,6 +75,22 @@ class SpaceOwnershipTests(unittest.TestCase):
             self.assertRaisesRegex(AssertionError, "pagination"),
         ):
             cli_commands.complete_space_inventory()
+
+        for key, value in (
+            ("limit", True),
+            ("offset", 0.0),
+            ("total", "0"),
+        ):
+            invalid = page([])
+            invalid["pagination"][key] = value
+            with (
+                self.subTest(key=key, value=value),
+                mock.patch(
+                    "anyr.tests.cli_commands.run_anyr_json", return_value=invalid
+                ),
+                self.assertRaisesRegex(AssertionError, "pagination"),
+            ):
+                cli_commands.complete_space_inventory()
         with (
             mock.patch.object(cli_commands, "MAX_SPACE_INVENTORY_PAGES", 1),
             mock.patch(
@@ -140,6 +175,50 @@ class SpaceOwnershipTests(unittest.TestCase):
         ):
             cli_commands.delete_owned_space("owned", "new")
         delete.assert_not_called()
+
+    def test_second_identity_read_drift_refuses_delete(self):
+        with (
+            mock.patch(
+                "anyr.tests.cli_commands.run_anyr_json",
+                side_effect=[space("new", "owned"), space("new", "drifted")],
+            ),
+            mock.patch("anyr.tests.cli_commands.run_anyr") as delete,
+            self.assertRaisesRegex(AssertionError, "identity mismatch"),
+        ):
+            cli_commands.delete_owned_space("owned", "new")
+        delete.assert_not_called()
+
+    def test_fresh_fixture_proof_rejects_non_regular_space_model(self):
+        with (
+            mock.patch(
+                "anyr.tests.cli_commands.run_anyr_json",
+                return_value=space("new", "owned", "chat"),
+            ),
+            self.assertRaisesRegex(AssertionError, "identity mismatch"),
+        ):
+            cli_commands.authorize_owned_space_delete("owned", "new")
+
+    def test_delete_authorization_precedes_every_dispatch(self):
+        events = []
+
+        def get_space(*_args):
+            events.append("guard")
+            return space("new", "owned")
+
+        def dispatch(*_args):
+            events.append("dispatch")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with (
+            mock.patch("anyr.tests.cli_commands.run_anyr_json", side_effect=get_space),
+            mock.patch(
+                "anyr.tests.cli_commands.run_anyr_with_input", side_effect=dispatch
+            ),
+        ):
+            cli_commands.run_owned_space_delete(
+                "owned", "new", "--skip-archive", input_text="cancel\n"
+            )
+        self.assertEqual(events, ["guard", "guard", "dispatch"])
 
     def test_context_cleans_proven_space_after_caller_setup_failure(self):
         case = cli_commands.TestAnyrCommands()

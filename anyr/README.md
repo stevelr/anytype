@@ -591,14 +591,14 @@ outcome. Transport and server failures fail cleanup instead of being treated as
 proof of deletion, and diagnostic lines from `RUST_LOG` may precede the
 not-found message.
 
-The protected `anyr-anyback-live` workflow separately installs `anyr` as users
-do and runs the required backup create/restore smoke test. That gate never skips:
-it requires authenticated HTTP and gRPC pings, explicit disposable-process
-admission, a unique safe space prefix, and a reviewed redacted server log. It
-creates and removes its own source and destination spaces, runs as one exact
-test with `--test-threads=1`, and must not overlap other live mutation suites.
-The ordinary offline workspace test does not run this ignored server-backed
-target.
+The protected `anyr-anyback-live` workflow installs `anyr` and serializes three
+required subgates: the exact ignored type-property test, the manifest-pinned
+Python CLI suite, and one exact backup create/restore smoke test. Each subgate
+rejects skips and zero-test collection. The workflow requires authenticated HTTP
+and gRPC pings, disposable-process admission, a unique safe space prefix, and a
+reviewed redacted server log. Its smoke test creates and removes its own source
+and destination spaces. Ordinary offline workspace tests do not run these
+server-backed targets.
 
 ## License
 
