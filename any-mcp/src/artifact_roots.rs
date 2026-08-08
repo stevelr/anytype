@@ -31,6 +31,7 @@ use cap_fs_ext::OpenOptionsExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::fs::{Dir, OpenOptions};
 use fs2::FileExt;
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, ReadBuf};
 
 #[cfg(any(test, feature = "acceptance-harness"))]
@@ -323,6 +324,25 @@ impl RootRegistry {
         }
     }
 
+    /// Returns domain-separated, path-free evidence for the activated logical
+    /// root policy and its stable native identities.
+    pub(crate) fn staging_policy_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"any-mcp/artifact-root-policy/v1\0");
+        for (id, capability) in self.roots.iter() {
+            let id = id.as_str().as_bytes();
+            hasher.update((id.len() as u64).to_be_bytes());
+            hasher.update(id);
+            hasher.update([match capability.kind {
+                RootCapabilityKind::Import => 0,
+                RootCapabilityKind::Export => 1,
+            }]);
+            hasher.update(capability.directory.identity.volume.to_be_bytes());
+            hasher.update(capability.directory.identity.file.to_be_bytes());
+        }
+        hasher.finalize().into()
+    }
+
     /// Intersects static roots with one terminal MCP client-root snapshot.
     ///
     /// An empty snapshot denies every local root. Each client root is opened
@@ -498,11 +518,14 @@ impl EffectiveRootRegistry {
 /// Private capability used by the supervised artifact staging service.
 #[derive(Clone)]
 pub(crate) struct StagingDirectory {
+    root: RootCapability,
     records: RootCapability,
     payloads: RootCapability,
     temporary: RootCapability,
     tombstones: RootCapability,
-    _instance_lock: Arc<File>,
+    root_lock: Arc<File>,
+    instance_lock: Arc<File>,
+    instance_lock_identity: FileIdentity,
 }
 
 /// One preflighted private file discovered during staging reconciliation.
@@ -532,6 +555,13 @@ pub(crate) struct StagingPayload {
     identity: FileIdentity,
     maximum_bytes: u64,
     written: u64,
+}
+
+/// A failed payload conversion which retains the exact opened file authority.
+#[derive(Debug)]
+pub(crate) struct StagingPayloadError {
+    pub(crate) payload: StagingPayload,
+    _error: RootAccessError,
 }
 
 impl fmt::Debug for StagingPayload {
@@ -577,17 +607,29 @@ impl StagingPayload {
         Ok(reader)
     }
 
-    pub(crate) fn into_anchored(self) -> Result<AnchoredImport, RootAccessError> {
-        self.sync_all()?;
-        let metadata = self
-            .file
-            .metadata()
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
-        let snapshot = FileSnapshot::from_file(&self.file, &metadata)
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
-        if snapshot.identity != self.identity || snapshot.length != self.written {
-            return Err(RootAccessError::new(RootProblem::Changed));
-        }
+    pub(crate) fn into_anchored(self) -> Result<AnchoredImport, StagingPayloadError> {
+        let validation = (|| {
+            self.sync_all()?;
+            let metadata = self
+                .file
+                .metadata()
+                .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            let snapshot = FileSnapshot::from_file(&self.file, &metadata)
+                .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            if snapshot.identity != self.identity || snapshot.length != self.written {
+                return Err(RootAccessError::new(RootProblem::Changed));
+            }
+            Ok(snapshot)
+        })();
+        let snapshot = match validation {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Err(StagingPayloadError {
+                    payload: self,
+                    _error: error,
+                });
+            }
+        };
         Ok(AnchoredImport {
             file: self.file,
             length: self.written,
@@ -636,6 +678,13 @@ impl StagingDirectory {
     ) -> Result<(Self, StagingInventory), RootAccessError> {
         let directory =
             open_root(path).map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        let root_metadata = directory
+            .file
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        if !safe_private_directory_metadata(&directory.file, &root_metadata) {
+            return Err(RootAccessError::new(RootProblem::Activation));
+        }
         for capability in local_roots.roots.values() {
             let overlaps = is_ancestor_identity(&directory, &capability.directory)
                 .and_then(|left| {
@@ -651,8 +700,9 @@ impl StagingDirectory {
             kind: RootCapabilityKind::Export,
             directory,
         };
+        let root_lock = acquire_staging_root_lock(&root)?;
         validate_staging_root(&root, maximum_entries)?;
-        let instance_lock = acquire_staging_lock(&root)?;
+        let (instance_lock, instance_lock_identity) = acquire_staging_lock(&root)?;
         let records = staging_child(&root, STAGING_RECORDS_DIRECTORY)?;
         let payloads = staging_child(&root, STAGING_PAYLOADS_DIRECTORY)?;
         let temporary = staging_child(&root, STAGING_TEMPORARY_DIRECTORY)?;
@@ -660,14 +710,74 @@ impl StagingDirectory {
         sync_retained_directory(&root)?;
         validate_staging_root(&root, maximum_entries)?;
         let staging = Self {
+            root,
             records,
             payloads,
             temporary,
             tombstones,
-            _instance_lock: Arc::new(instance_lock),
+            root_lock: Arc::new(root_lock),
+            instance_lock: Arc::new(instance_lock),
+            instance_lock_identity,
         };
         let inventory = staging.inventory(maximum_entries, maximum_payload_bytes)?;
         Ok((staging, inventory))
+    }
+
+    /// Revalidates that the retained locks still name this exact generation.
+    ///
+    /// A retained file lock alone is insufficient on systems where an owner
+    /// can unlink the locked pathname. The root-directory lock prevents a
+    /// second activation while this generation is alive; this check also
+    /// detects namespace replacement so the running server can fail closed.
+    pub(crate) fn authority_intact(&self) -> Result<(), RootAccessError> {
+        let directory = retained_directory(&self.records.directory)?;
+        drop(directory);
+        let root_directory = self
+            .root_lock
+            .try_clone()
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        let root_metadata = root_directory
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        if !root_metadata.is_dir() {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+
+        let root = retained_directory(&self.root.directory)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).follow(FollowSymlinks::No);
+        let reopened = root
+            .open_with(Path::new(STAGING_LOCK_NAME), &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        let metadata = reopened
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        let identity = file_identity(&reopened, &metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        if identity != self.instance_lock_identity
+            || !safe_created_export_metadata(&reopened, &metadata)
+            || !safe_windows_security(&reopened)
+            || !safe_private_windows_security(&reopened)
+        {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        let retained_metadata = self
+            .instance_lock
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        let retained_identity = file_identity(&self.instance_lock, &retained_metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        (retained_identity == identity)
+            .then_some(())
+            .ok_or_else(|| RootAccessError::new(RootProblem::Changed))
+    }
+
+    pub(crate) fn policy_identity(&self) -> StagingFileIdentity {
+        StagingFileIdentity {
+            volume: self.root.directory.identity.volume,
+            file: self.root.directory.identity.file,
+        }
     }
 
     pub(crate) fn inventory(
@@ -720,7 +830,10 @@ impl StagingDirectory {
         let metadata = file
             .metadata()
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-        if !safe_created_export_metadata(&file, &metadata) || !safe_windows_security(&file) {
+        if !safe_created_export_metadata(&file, &metadata)
+            || !safe_windows_security(&file)
+            || !safe_private_windows_security(&file)
+        {
             return Err(RootAccessError::new(RootProblem::Changed));
         }
         let identity = file_identity(&file, &metadata)
@@ -780,6 +893,7 @@ impl StagingDirectory {
             if metadata.len() != bytes.len() as u64
                 || !safe_created_export_metadata(&file, &metadata)
                 || !safe_windows_security(&file)
+                || !safe_private_windows_security(&file)
             {
                 return Err(RootAccessError::new(RootProblem::Changed));
             }
@@ -963,7 +1077,18 @@ const STAGING_TEMPORARY_DIRECTORY: &str = "tmp";
 const STAGING_TOMBSTONES_DIRECTORY: &str = "tombstones";
 pub(crate) const STAGING_STATE_BYTES: u64 = 16 * 1024;
 
-fn acquire_staging_lock(root: &RootCapability) -> Result<File, RootAccessError> {
+fn acquire_staging_root_lock(root: &RootCapability) -> Result<File, RootAccessError> {
+    let file = root
+        .directory
+        .file
+        .try_clone()
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    file.try_lock_exclusive()
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    Ok(file)
+}
+
+fn acquire_staging_lock(root: &RootCapability) -> Result<(File, FileIdentity), RootAccessError> {
     let directory = retained_directory(&root.directory)?;
     let mut options = OpenOptions::new();
     options
@@ -980,12 +1105,17 @@ fn acquire_staging_lock(root: &RootCapability) -> Result<File, RootAccessError> 
     let metadata = file
         .metadata()
         .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
-    if !safe_created_export_metadata(&file, &metadata) || !safe_windows_security(&file) {
+    if !safe_created_export_metadata(&file, &metadata)
+        || !safe_windows_security(&file)
+        || !safe_private_windows_security(&file)
+    {
         return Err(RootAccessError::new(RootProblem::Activation));
     }
     file.try_lock_exclusive()
         .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
-    Ok(file)
+    let identity = file_identity(&file, &metadata)
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    Ok((file, identity))
 }
 
 fn validate_staging_root(
@@ -1033,6 +1163,9 @@ fn validate_staging_root(
             return Err(RootAccessError::new(RootProblem::Activation));
         }
     }
+    if !names.is_empty() && names.len() != 5 {
+        return Err(RootAccessError::new(RootProblem::Activation));
+    }
     Ok(())
 }
 
@@ -1065,6 +1198,7 @@ fn staging_child(
         .metadata()
         .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
     if !safe_directory_metadata(&file, &metadata, root.directory.identity.volume)
+        || !safe_private_directory_metadata(&file, &metadata)
         || !safe_windows_security(&file)
     {
         return Err(RootAccessError::new(RootProblem::Activation));
@@ -1113,6 +1247,9 @@ fn inventory_directory(
             .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
         let source = open_import_at(capability, &path, maximum_bytes)
             .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        if !source.owner_private() {
+            return Err(RootAccessError::new(RootProblem::Activation));
+        }
         inventory.push(StagingInventoryFile { name, source });
     }
     Ok(inventory)
@@ -1417,6 +1554,12 @@ impl fmt::Debug for AnchoredImport {
 }
 
 impl AnchoredImport {
+    fn owner_private(&self) -> bool {
+        self.file.metadata().ok().is_some_and(|metadata| {
+            private_file_with_links(&self.file, &metadata, 1)
+                && safe_private_windows_security(&self.file)
+        })
+    }
     pub(crate) fn staging_identity(&self) -> StagingFileIdentity {
         StagingFileIdentity {
             volume: self.snapshot.identity.volume,
@@ -2055,14 +2198,17 @@ fn owner_private_create_options() -> OpenOptions {
     options
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn sync_parent_directory(parent: &Dir) -> io::Result<()> {
     parent.try_clone()?.into_std_file().sync_all()
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn sync_parent_directory(_: &Dir) -> io::Result<()> {
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "directory durability is unavailable on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -2091,6 +2237,25 @@ fn safe_directory_metadata(file: &File, metadata: &std::fs::Metadata, root_volum
 
 #[cfg(not(any(unix, windows)))]
 fn safe_directory_metadata(_: &File, _: &std::fs::Metadata, _: u64) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn safe_private_directory_metadata(_: &File, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    // SAFETY: `geteuid` has no memory or ownership preconditions.
+    let effective_user = unsafe { libc::geteuid() };
+    metadata.is_dir() && metadata.uid() == effective_user && metadata.mode() & 0o077 == 0
+}
+
+#[cfg(windows)]
+fn safe_private_directory_metadata(file: &File, metadata: &std::fs::Metadata) -> bool {
+    metadata.is_dir() && windows_security::owner_and_dacl_are_private(file).unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn safe_private_directory_metadata(_: &File, _: &std::fs::Metadata) -> bool {
     false
 }
 
@@ -2177,6 +2342,16 @@ const fn safe_windows_security(_: &File) -> bool {
     true
 }
 
+#[cfg(not(windows))]
+const fn safe_private_windows_security(_: &File) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn safe_private_windows_security(file: &File) -> bool {
+    windows_security::owner_and_dacl_are_private(file).unwrap_or(false)
+}
+
 #[cfg(windows)]
 fn safe_windows_security(file: &File) -> bool {
     windows_security::owner_and_dacl_are_safe(file).unwrap_or(false)
@@ -2213,8 +2388,9 @@ pub(crate) mod windows_security {
         },
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, DELETE, FILE_APPEND_DATA, FILE_BASIC_INFO,
-            FILE_DELETE_CHILD, FILE_WRITE_DATA, FileBasicInfo, GetFileInformationByHandle,
-            GetFileInformationByHandleEx, WRITE_DAC, WRITE_OWNER,
+            FILE_DELETE_CHILD, FILE_LIST_DIRECTORY, FILE_TRAVERSE, FILE_WRITE_DATA, FileBasicInfo,
+            GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL, WRITE_DAC,
+            WRITE_OWNER,
         },
         System::{
             SystemServices::ACCESS_ALLOWED_ACE_TYPE,
@@ -2238,6 +2414,11 @@ pub(crate) mod windows_security {
         | WRITE_OWNER
         | GENERIC_WRITE
         | GENERIC_ALL;
+    const PRIVATE_ACCESS: u32 = DANGEROUS_ACCESS
+        | FILE_LIST_DIRECTORY
+        | FILE_TRAVERSE
+        | READ_CONTROL
+        | windows_sys::Win32::Foundation::GENERIC_READ;
 
     pub(crate) struct HandleMetadata {
         pub(crate) volume: u64,
@@ -2348,7 +2529,41 @@ pub(crate) mod windows_security {
         if unsafe { EqualSid(owner, token_user) } == 0 {
             return Ok(false);
         }
-        dacl_has_no_untrusted_writers(dacl, token_user)
+        dacl_has_no_untrusted_access(dacl, token_user, DANGEROUS_ACCESS)
+    }
+
+    pub(crate) fn owner_and_dacl_are_private(file: &std::fs::File) -> io::Result<bool> {
+        let token = current_process_token()?;
+        let token_user_buffer = token_user_buffer(token.0)?;
+        let token_user = token_user_buffer.sid();
+        let mut owner = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: the live file handle and output pointers satisfy `GetSecurityInfo`.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != 0 || descriptor.is_null() {
+            return Err(io::Error::other("Windows security query failed"));
+        }
+        let _descriptor = LocalSecurityDescriptor(descriptor);
+        if owner.is_null() || dacl.is_null() {
+            return Ok(false);
+        }
+        // SAFETY: both SIDs are owned by live token/descriptor buffers.
+        if unsafe { EqualSid(owner, token_user) } == 0 {
+            return Ok(false);
+        }
+        dacl_has_no_untrusted_access(dacl, token_user, PRIVATE_ACCESS)
     }
 
     fn current_process_token() -> io::Result<OwnedHandle> {
@@ -2395,7 +2610,11 @@ pub(crate) mod windows_security {
         Ok(TokenUserBuffer { words: buffer })
     }
 
-    fn dacl_has_no_untrusted_writers(dacl: *mut ACL, token_user: PSID) -> io::Result<bool> {
+    fn dacl_has_no_untrusted_access(
+        dacl: *mut ACL,
+        token_user: PSID,
+        forbidden_access: u32,
+    ) -> io::Result<bool> {
         let mut information = ACL_SIZE_INFORMATION::default();
         // SAFETY: `dacl` is retained by the live security descriptor and the
         // output structure has the exact declared size.
@@ -2449,7 +2668,7 @@ pub(crate) mod windows_security {
                     || IsWellKnownSid(sid, WinLocalSystemSid) != 0
                     || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
             };
-            if !trusted && allowed.Mask & DANGEROUS_ACCESS != 0 {
+            if !trusted && allowed.Mask & forbidden_access != 0 {
                 return Ok(false);
             }
         }
@@ -2850,6 +3069,12 @@ mod tests {
         let (base, import, export) = temporary_tree();
         let staging = base.join("staging");
         fs::create_dir(&staging).expect("staging directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("owner-private staging directory");
+        }
         let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
         let path = AbsoluteNativePath::from_utf8(
             staging.to_str().expect("temporary staging path is UTF-8"),
@@ -2881,10 +3106,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staging_lock_namespace_replacement_closes_authority() {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let (base, import, export) = temporary_tree();
+        let staging = base.join("staging");
+        fs::create_dir(&staging).expect("staging directory");
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+            .expect("owner-private staging directory");
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
+        let path = AbsoluteNativePath::from_utf8(
+            staging.to_str().expect("temporary staging path is UTF-8"),
+        )
+        .expect("staging path");
+        let (first, _) =
+            StagingDirectory::activate(&path, &registry, 4, 1024).expect("first generation");
+
+        fs::remove_file(staging.join(STAGING_LOCK_NAME)).expect("unlink retained lock pathname");
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(staging.join(STAGING_LOCK_NAME))
+            .expect("create replacement lock pathname");
+
+        assert!(first.authority_intact().is_err());
+        assert!(StagingDirectory::activate(&path, &registry, 4, 1024).is_err());
+
+        drop(first);
+        let (next, _) =
+            StagingDirectory::activate(&path, &registry, 4, 1024).expect("next generation");
+        assert!(next.authority_intact().is_ok());
+        drop(next);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn staging_activation_refuses_unknown_entry_without_deleting_it() {
         let (base, import, export) = temporary_tree();
         let staging = base.join("staging");
         fs::create_dir(&staging).expect("staging directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("owner-private staging directory");
+        }
         let unknown = staging.join("operator-file");
         fs::write(&unknown, b"ambiguous").expect("unknown staging entry");
         let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");

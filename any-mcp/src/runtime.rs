@@ -193,6 +193,30 @@ impl RuntimeContext {
     /// Returns a concise [`StartupError`] without embedding credential values
     /// or upstream response bodies.
     pub async fn start(config: &RuntimeConfig) -> Result<Self, StartupError> {
+        // Validate and retain all filesystem authority before credential or
+        // network activity. Staging is activated only after these validators
+        // and the canonical space policy have succeeded, so no listener or
+        // cleanup task can outlive a later startup failure.
+        let artifact_roots = if config.optional_toolsets.contains("artifacts") && !config.read_only
+        {
+            Some(
+                RootRegistry::activate(&config.artifact)
+                    .map_err(|_| StartupError::ArtifactRoots)?,
+            )
+        } else {
+            None
+        };
+        let artifact_validators = if artifact_roots.is_some()
+            && !config.artifact.validators().is_empty()
+        {
+            Some(
+                ValidatorRunner::activate(config.artifact.validators(), &config.artifact.limits)
+                    .await
+                    .map_err(|_| StartupError::ArtifactValidators)?,
+            )
+        } else {
+            None
+        };
         let client = AnytypeClient::with_config(config.client_config())
             .map_err(|_| StartupError::ClientInitialization)?;
         let auth = client
@@ -213,15 +237,6 @@ impl RuntimeContext {
         let authority = SpaceAuthority::initialize(&client, &config.artifact.spaces)
             .await
             .map_err(|_| StartupError::SpacePolicy)?;
-        let artifact_roots = if config.optional_toolsets.contains("artifacts") && !config.read_only
-        {
-            Some(
-                RootRegistry::activate(&config.artifact)
-                    .map_err(|_| StartupError::ArtifactRoots)?,
-            )
-        } else {
-            None
-        };
         let mut runtime = Self::from_parts_with_authority(
             client,
             RuntimeParts {
@@ -249,17 +264,6 @@ impl RuntimeContext {
                 .map_err(classify_staging_startup_error)?,
             ),
             _ => None,
-        };
-        let artifact_validators = if artifact_roots.is_some()
-            && !config.artifact.validators().is_empty()
-        {
-            Some(
-                ValidatorRunner::activate(config.artifact.validators(), &config.artifact.limits)
-                    .await
-                    .map_err(|_| StartupError::ArtifactValidators)?,
-            )
-        } else {
-            None
         };
         runtime.artifact_config = Arc::new(config.artifact.clone());
         runtime.artifact_roots = artifact_roots;

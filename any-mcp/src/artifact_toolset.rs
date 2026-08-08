@@ -1473,6 +1473,21 @@ impl PreparedImport {
         }
     }
 
+    async fn retain_import_candidate(
+        &self,
+        runtime: &RuntimeContext,
+        candidate: &EntityId,
+    ) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Staged(source) => staging(runtime)?
+                .retain_import_candidate(source, candidate)
+                .await
+                .map_err(classify_staging_error),
+            Self::Local { .. } => Ok(()),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
+        }
+    }
+
     fn root_id(&self) -> Option<String> {
         match self {
             Self::Local { root_id, .. } => Some(root_id.clone()),
@@ -1992,18 +2007,6 @@ async fn settle_reserved_import(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
-    #[cfg(any(test, feature = "acceptance-harness"))]
-    if !runtime
-        .artifact_acceptance_gates()
-        .reach(ArtifactAcceptanceGatePoint::ImportPostDispatch, key)
-        .await
-    {
-        runtime
-            .artifact_operations()
-            .set_outcome(key, OperationOutcome::Indeterminate)
-            .await;
-        return Err(ArtifactToolError::Indeterminate);
-    }
     let candidate = match validated_uploaded_candidate(&uploaded, &space_id, source_length) {
         Ok(candidate) => candidate,
         Err(_) => {
@@ -2014,6 +2017,29 @@ async fn settle_reserved_import(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
+    if source
+        .retain_import_candidate(&runtime, &candidate)
+        .await
+        .is_err()
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::ImportIndeterminate(candidate))
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(ArtifactAcceptanceGatePoint::ImportPostDispatch, key)
+        .await
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::ImportIndeterminate(candidate))
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     runtime
         .artifact_operations()
         .set_outcome(
