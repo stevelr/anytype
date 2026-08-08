@@ -1549,7 +1549,7 @@ mod tests {
     #[test]
     #[ignore = "requires configured disposable real Anytype server"]
     #[serial_test::serial(disposable_anytype_api)]
-    fn live_disposable_absent_attached_repeat_and_protocol_parity() {
+    fn headless_disposable_absent_attached_repeat_and_protocol_parity() {
         use anytype::{
             chats::MessageContent,
             test_util::{DisposableRun, unique_suffix, with_disposable_space_context},

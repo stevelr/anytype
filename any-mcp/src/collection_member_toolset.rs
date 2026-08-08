@@ -3487,7 +3487,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-    fn live_direct_membership_ignores_saved_view_presentation() {
+    fn headless_direct_membership_ignores_saved_view_presentation() {
         run_large_future(|| async {
             let outcome = Box::pin(with_disposable_space_context(
                 "any-mcp-collection-list",
@@ -3953,7 +3953,7 @@ mod tests {
             match outcome {
                 DisposableRun::Completed(()) => {}
                 DisposableRun::Skipped(reason) => {
-                    eprintln!("disposable collection-list suite skipped: {reason:?}");
+                    panic!("required disposable collection-list suite was skipped: {reason:?}");
                 }
             }
         });

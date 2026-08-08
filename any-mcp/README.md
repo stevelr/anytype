@@ -1654,6 +1654,10 @@ runtime and advertises their static capability alongside the tool catalog.
 - `tests/headless_stdio_e2e.rs` — ignored production stdio-to-real-Anytype
   workflow with independent `anytype-api` readback, disposable lifecycle and
   panic sentinels, and cleanup.
+- `tests/discussions_stdio_acceptance.rs`: ignored stable and preview process
+  acceptance for cleanup-owned attached discussions.
+- `tests/live_gate_manifest.rs`: offline closed-inventory and workflow-filter
+  checks for every ignored live target.
 - `tests/schema/mcp-2026-07-28.json` — official draft schema used only as a
   test oracle for actual preview requests and results.
 - `docs/STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client
@@ -1737,26 +1741,31 @@ initialization, while focused spawned profile sentinels retain their
 cleanup-owned test context. Every created object, type, and property is
 registered immediately for cleanup. The suite requires a running headless
 server, env-only disposable credentials from `.test-env`, and `anyr auth
-status` reporting both HTTP and gRPC pings as OK. Run the direct-router and
-spawned-stdio targets explicitly from the repository root:
+status` reporting both HTTP and gRPC pings as OK. Run the direct-router,
+spawned-stdio, and discussion-process targets explicitly from the repository
+root:
 
 ```sh
 source .test-env
-# Prepare redacted_log and run_marker with the private derivative recipe in
-# TESTING.md.
+# Set redacted_log to a mode-0600 copy of the reviewed server log. Set
+# run_marker to fresh 64-hex text and append any-mcp-run-marker=$run_marker.
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
 export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
 export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
 test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
 cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
 cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- --ignored --test-threads=1
+cargo test -p any-mcp --features acceptance-harness --test discussions_stdio_acceptance -- --ignored --test-threads=1
 ```
 
 The protected workflow validates
 `ANYTYPE_TEST_SPACE_PREFIX` as 1 through 485 ASCII letters, digits, hyphens, or
 underscores after sourcing its environment, exports the dedicated-process
-gate, and rejects any captured test output reporting a skipped admission.
-Protected CI therefore cannot pass without running the disposable callbacks.
+gate, and rejects captured test output that reports a skipped admission or an
+unexpected executable count. The hosted test lane compares every ignored
+library test with a closed manifest and verifies the two whole-binary count
+pins without contacting a server. Protected CI therefore cannot pass without
+running the disposable callbacks.
 
 The selectable `headless_direct_standard_*` and
 `headless_stdio_standard_*` cases cover discovery, document/resource access,
@@ -1918,7 +1927,7 @@ MCP/API pull request and main/tag update; branch protection and release
 automation should require its latest green result. Fork pull requests are
 excluded before the protected runner is selected. A separate unconditional
 scheduled job invokes an operator-owned absolute reset script, provisions a
-clean isolated server, and then runs the same two explicit targets; this keeps
+clean isolated server, and then runs the same three explicit targets; this keeps
 path filters from hiding backend drift.
 
 `space_list` continuation uses two disposable spaces created and immediately

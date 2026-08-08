@@ -58,8 +58,11 @@ jobs:
       - name: Run schema, catalog, token-budget, and unit tests
         run: cargo test --locked -p any-mcp --lib
 
+      - name: Verify the ignored live-test inventory and workflow pins
+        run: cargo test --locked -p any-mcp --test live_gate_manifest
+
       - name: Run portable production-process and stdio conformance tests
-        run: cargo test --locked -p any-mcp --features acceptance-harness --test process_runtime --test stdio_conformance --test headless_stdio_e2e
+        run: cargo test --locked -p any-mcp --features acceptance-harness --test process_runtime --test stdio_conformance --test headless_stdio_e2e --test discussions_stdio_acceptance
 
   headless-e2e:
     name: stdio to headless Anytype
@@ -130,7 +133,8 @@ jobs:
           printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
           run_required_live_gate() {
             local label="$1"
-            shift
+            local expected_passed="$2"
+            shift 2
             local gate_output="$reviewed_dir/$label.log"
             set +e
             "$@" 2>&1 | tee "$gate_output"
@@ -145,13 +149,24 @@ jobs:
               printf '%s\n' "required live gate reported skipped admission" >&2
               return 1
             fi
+            local summary_count
+            summary_count="$(grep -Ec '^test result:' "$gate_output" || true)"
+            if [[ "$summary_count" -ne 1 ]] ||
+              ! grep -Eq "^test result: ok\\. ${expected_passed} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\\.[0-9]+)?s$" "$gate_output"; then
+              rm -f -- "$gate_output"
+              printf '%s\n' "required live gate executed an unexpected test count" >&2
+              return 1
+            fi
             rm -f -- "$gate_output"
           }
           cargo run --locked -q -p anyr -- auth status --pretty
-          run_required_live_gate direct cargo test --locked -p any-mcp --lib headless_ -- \
+          run_required_live_gate direct 32 cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture
-          run_required_live_gate stdio cargo test --locked -p any-mcp \
+          run_required_live_gate stdio 25 cargo test --locked -p any-mcp \
             --features acceptance-harness --test headless_stdio_e2e -- \
+            --ignored --test-threads=1 --nocapture
+          run_required_live_gate discussions 1 cargo test --locked -p any-mcp \
+            --features acceptance-harness --test discussions_stdio_acceptance -- \
             --ignored --test-threads=1 --nocapture
 
       - name: Retain redacted headless server evidence on failure
@@ -240,7 +255,8 @@ jobs:
           printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
           run_required_live_gate() {
             local label="$1"
-            shift
+            local expected_passed="$2"
+            shift 2
             local gate_output="$reviewed_dir/$label.log"
             set +e
             "$@" 2>&1 | tee "$gate_output"
@@ -255,13 +271,24 @@ jobs:
               printf '%s\n' "required live gate reported skipped admission" >&2
               return 1
             fi
+            local summary_count
+            summary_count="$(grep -Ec '^test result:' "$gate_output" || true)"
+            if [[ "$summary_count" -ne 1 ]] ||
+              ! grep -Eq "^test result: ok\\. ${expected_passed} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\\.[0-9]+)?s$" "$gate_output"; then
+              rm -f -- "$gate_output"
+              printf '%s\n' "required live gate executed an unexpected test count" >&2
+              return 1
+            fi
             rm -f -- "$gate_output"
           }
           cargo run --locked -q -p anyr -- auth status --pretty
-          run_required_live_gate direct cargo test --locked -p any-mcp --lib headless_ -- \
+          run_required_live_gate direct 32 cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture
-          run_required_live_gate stdio cargo test --locked -p any-mcp \
+          run_required_live_gate stdio 25 cargo test --locked -p any-mcp \
             --features acceptance-harness --test headless_stdio_e2e -- \
+            --ignored --test-threads=1 --nocapture
+          run_required_live_gate discussions 1 cargo test --locked -p any-mcp \
+            --features acceptance-harness --test discussions_stdio_acceptance -- \
             --ignored --test-threads=1 --nocapture
 
       - name: Retain redacted clean-server evidence on failure
