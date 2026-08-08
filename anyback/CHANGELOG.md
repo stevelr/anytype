@@ -5,7 +5,8 @@
 ### Added
 
 - Add protected cleanup-owned restore fidelity tests for file bytes, metadata,
-  attachments, chat ordering and replies, and custom schema semantics.
+  attachments, chat ordering and replies, custom schema semantics, and typed
+  object values including relations and select options.
 - Added a protected serial live gate that installs `anyr`, creates and restores a
   backup across cleanup-owned disposable spaces, verifies semantic content, and
   requires proof that cleanup completed.

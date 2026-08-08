@@ -207,8 +207,10 @@ Coverage classes:
   cleanup-owned cross-space cases: `.4.1`
   `e2e_restore_preserves_file_payload_metadata_and_host_attachment`, `.4.2`
   `e2e_restore_preserves_chat_order_reply_and_attachment`, and `.4.3`
-  `e2e_restore_preserves_custom_schema_keys_formats_and_featured_membership`.
-  Typed-object values, relation targets, and selection values remain in `.4.4`.
+  `e2e_restore_preserves_custom_schema_keys_formats_and_featured_membership`,
+  and `.4.4` `e2e_restore_preserves_typed_object_value_fidelity`. The latter
+  compares typed scalar values, a destination-resolved relation target, and
+  destination-resolved select and multi-select option IDs and keys.
 
 ### Spaces and archives
 

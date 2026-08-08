@@ -1005,6 +1005,473 @@ async fn exercise_schema_restore_fidelity(
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires protected disposable Anytype server admission"]
+async fn e2e_restore_preserves_typed_object_value_fidelity() -> Result<()> {
+    verify_authenticated_pings_cli()?;
+    let mut source = DisposableSpace::create("typed-value-fidelity-src")?;
+    let mut destination = match DisposableSpace::create("typed-value-fidelity-dst") {
+        Ok(space) => space,
+        Err(error) => return finish_disposable_spaces(Err(error), &mut [&mut source]),
+    };
+
+    let result = exercise_typed_object_value_restore_fidelity(&mut source, &mut destination).await;
+    finish_disposable_spaces(result, &mut [&mut destination, &mut source])
+}
+
+async fn exercise_typed_object_value_restore_fidelity(
+    source: &mut DisposableSpace,
+    destination: &mut DisposableSpace,
+) -> Result<()> {
+    const TEXT_VALUE: &str = "typed restore semantic text";
+    const NUMBER_VALUE: i64 = 42;
+    const URL_VALUE: &str = "https://example.invalid/anyback-typed-fidelity";
+
+    let unique = anytype::test_util::unique_suffix();
+    let key_suffix = unique_alpha_key_suffix();
+    let type_key = format!("anybacktypedvalue{key_suffix}");
+    let type_name = format!("Anyback Typed Value Fidelity {unique}");
+    let text_key = format!("anyback_typed_text_{key_suffix}");
+    let number_key = format!("anyback_typed_number_{key_suffix}");
+    let checkbox_key = format!("anyback_typed_checkbox_{key_suffix}");
+    let url_key = format!("anyback_typed_url_{key_suffix}");
+    let objects_key = format!("anyback_typed_objects_{key_suffix}");
+    let select_key = format!("anyback_typed_select_{key_suffix}");
+    let multi_select_key = format!("anyback_typed_multi_select_{key_suffix}");
+    let select_option_key = format!("anyback_typed_select_option_{key_suffix}");
+    let multi_option_one_key = format!("anyback_typed_multi_one_{key_suffix}");
+    let multi_option_two_key = format!("anyback_typed_multi_two_{key_suffix}");
+    let target_name = format!("anyback-typed-target-{unique}");
+    let host_name = format!("anyback-typed-host-{unique}");
+
+    let client = anytype::test_util::test_client_named("anyback_typed_value_restore_fidelity")
+        .map_err(|error| anyhow!("failed to build typed value fidelity client: {error}"))?;
+    let source_type = client
+        .new_type(&source.id, &type_name)
+        .key(&type_key)
+        .property("Typed Text", &text_key, PropertyFormat::Text)
+        .property("Typed Number", &number_key, PropertyFormat::Number)
+        .property("Typed Checkbox", &checkbox_key, PropertyFormat::Checkbox)
+        .property("Typed URL", &url_key, PropertyFormat::Url)
+        .property("Typed Relation", &objects_key, PropertyFormat::Objects)
+        .property("Typed Select", &select_key, PropertyFormat::Select)
+        .property(
+            "Typed Multi Select",
+            &multi_select_key,
+            PropertyFormat::MultiSelect,
+        )
+        .create()
+        .await?;
+    source.register("type", source_type.id.clone());
+    for property in &source_type.properties {
+        source.register("property", property.id.clone());
+    }
+
+    let source_select_property = find_property_by_key(&source_type.properties, &select_key)?;
+    let source_multi_select_property =
+        find_property_by_key(&source_type.properties, &multi_select_key)?;
+    let source_select_option = client
+        .new_tag(&source.id, &source_select_property.id)
+        .name(format!("Typed Select Option {unique}"))
+        .key(&select_option_key)
+        .create()
+        .await?;
+    source.register("tag", source_select_option.id.clone());
+    let source_multi_option_one = client
+        .new_tag(&source.id, &source_multi_select_property.id)
+        .name(format!("Typed Multi Option One {unique}"))
+        .key(&multi_option_one_key)
+        .create()
+        .await?;
+    source.register("tag", source_multi_option_one.id.clone());
+    let source_multi_option_two = client
+        .new_tag(&source.id, &source_multi_select_property.id)
+        .name(format!("Typed Multi Option Two {unique}"))
+        .key(&multi_option_two_key)
+        .create()
+        .await?;
+    source.register("tag", source_multi_option_two.id.clone());
+
+    let source_target = client
+        .new_object(&source.id, "page")
+        .name(&target_name)
+        .body("typed relation target")
+        .create()
+        .await?;
+    source.register("object", source_target.id.clone());
+    let source_host = client
+        .new_object(&source.id, &type_key)
+        .name(&host_name)
+        .body("typed value host")
+        .set_text(&text_key, TEXT_VALUE)
+        .set_number(&number_key, NUMBER_VALUE)
+        .set_checkbox(&checkbox_key, true)
+        .set_url(&url_key, URL_VALUE)
+        .set_objects(&objects_key, [source_target.id.clone()])
+        .set_select(&select_key, source_select_option.id.clone())
+        .set_multi_select(
+            &multi_select_key,
+            [
+                source_multi_option_one.id.clone(),
+                source_multi_option_two.id.clone(),
+            ],
+        )
+        .create()
+        .await?;
+    source.register("object", source_host.id.clone());
+    let source_expectation = TypedValueExpectation {
+        text_value: TEXT_VALUE,
+        number_value: NUMBER_VALUE,
+        url_value: URL_VALUE,
+        text_key: &text_key,
+        number_key: &number_key,
+        checkbox_key: &checkbox_key,
+        url_key: &url_key,
+        objects_key: &objects_key,
+        select_key: &select_key,
+        multi_select_key: &multi_select_key,
+        relation_target_id: &source_target.id,
+        select_option_id: &source_select_option.id,
+        select_option_key: &select_option_key,
+        multi_select_option_ids: [&source_multi_option_one.id, &source_multi_option_two.id],
+        multi_select_option_keys: [&multi_option_one_key, &multi_option_two_key],
+    };
+    wait_for_typed_value_semantics(&client, &source.id, &source_host.id, &source_expectation)
+        .await?;
+
+    let archive_dir = tempfile::tempdir().context("failed to create archive directory")?;
+    let archive = create_full_backup(&source.id, archive_dir.path(), false)?;
+    restore_archive(&destination.id, &archive)?;
+
+    let destination_type = wait_resolve_type(&client, &destination.id, &type_key).await?;
+    destination.register("type", destination_type.id.clone());
+    let expected_property_keys = [
+        text_key.as_str(),
+        number_key.as_str(),
+        checkbox_key.as_str(),
+        url_key.as_str(),
+        objects_key.as_str(),
+        select_key.as_str(),
+        multi_select_key.as_str(),
+    ];
+    let destination_properties =
+        wait_resolve_properties_by_exact_keys(&client, &destination.id, &expected_property_keys)
+            .await?;
+    for property in destination_properties.values() {
+        destination.register("property", property.id.clone());
+    }
+    let destination_select_property = destination_properties
+        .get(&select_key)
+        .ok_or_else(|| anyhow!("destination select property was not resolved"))?
+        .clone();
+    let destination_multi_select_property = destination_properties
+        .get(&multi_select_key)
+        .ok_or_else(|| anyhow!("destination multi-select property was not resolved"))?
+        .clone();
+    let destination_select_option = wait_resolve_property_tag_by_key(
+        &client,
+        &destination.id,
+        &destination_select_property.id,
+        &select_option_key,
+    )
+    .await?;
+    destination.register("tag", destination_select_option.id.clone());
+    let destination_multi_option_one = wait_resolve_property_tag_by_key(
+        &client,
+        &destination.id,
+        &destination_multi_select_property.id,
+        &multi_option_one_key,
+    )
+    .await?;
+    destination.register("tag", destination_multi_option_one.id.clone());
+    let destination_multi_option_two = wait_resolve_property_tag_by_key(
+        &client,
+        &destination.id,
+        &destination_multi_select_property.id,
+        &multi_option_two_key,
+    )
+    .await?;
+    destination.register("tag", destination_multi_option_two.id.clone());
+
+    let destination_target_id =
+        wait_find_object_id_by_exact_name(&destination.id, &target_name).await?;
+    destination.register("object", destination_target_id.clone());
+    let destination_host_id =
+        wait_find_object_id_by_exact_name(&destination.id, &host_name).await?;
+    destination.register("object", destination_host_id.clone());
+    let destination_expectation = TypedValueExpectation {
+        text_value: TEXT_VALUE,
+        number_value: NUMBER_VALUE,
+        url_value: URL_VALUE,
+        text_key: &text_key,
+        number_key: &number_key,
+        checkbox_key: &checkbox_key,
+        url_key: &url_key,
+        objects_key: &objects_key,
+        select_key: &select_key,
+        multi_select_key: &multi_select_key,
+        relation_target_id: &destination_target_id,
+        select_option_id: &destination_select_option.id,
+        select_option_key: &select_option_key,
+        multi_select_option_ids: [
+            &destination_multi_option_one.id,
+            &destination_multi_option_two.id,
+        ],
+        multi_select_option_keys: [&multi_option_one_key, &multi_option_two_key],
+    };
+    wait_for_typed_value_semantics(
+        &client,
+        &destination.id,
+        &destination_host_id,
+        &destination_expectation,
+    )
+    .await?;
+    Ok(())
+}
+
+fn find_property_by_key<'a>(
+    properties: &'a [anytype::properties::Property],
+    key: &str,
+) -> Result<&'a anytype::properties::Property> {
+    properties
+        .iter()
+        .find(|property| property.key == key)
+        .ok_or_else(|| anyhow!("type creation did not return property with key {key}"))
+}
+
+struct TypedValueExpectation<'a> {
+    text_value: &'a str,
+    number_value: i64,
+    url_value: &'a str,
+    text_key: &'a str,
+    number_key: &'a str,
+    checkbox_key: &'a str,
+    url_key: &'a str,
+    objects_key: &'a str,
+    select_key: &'a str,
+    multi_select_key: &'a str,
+    relation_target_id: &'a str,
+    select_option_id: &'a str,
+    select_option_key: &'a str,
+    multi_select_option_ids: [&'a str; 2],
+    multi_select_option_keys: [&'a str; 2],
+}
+
+fn assert_typed_value_semantics(
+    properties: &[anytype::properties::PropertyWithValue],
+    expected: &TypedValueExpectation<'_>,
+) -> Result<()> {
+    ensure_property_value(
+        properties,
+        expected.text_key,
+        |value| matches!(value, anytype::properties::PropertyValue::Text { text } if text == expected.text_value),
+        "text",
+    )?;
+    ensure_property_value(
+        properties,
+        expected.number_key,
+        |value| matches!(value, anytype::properties::PropertyValue::Number { number } if number.as_i64() == Some(expected.number_value)),
+        "number",
+    )?;
+    ensure_property_value(
+        properties,
+        expected.checkbox_key,
+        |value| {
+            matches!(
+                value,
+                anytype::properties::PropertyValue::Checkbox { checkbox: true }
+            )
+        },
+        "checkbox",
+    )?;
+    ensure_property_value(
+        properties,
+        expected.url_key,
+        |value| matches!(value, anytype::properties::PropertyValue::Url { url } if url == expected.url_value),
+        "URL",
+    )?;
+    ensure_property_value(
+        properties,
+        expected.objects_key,
+        |value| matches!(value, anytype::properties::PropertyValue::Objects { objects } if objects.as_slice() == [expected.relation_target_id]),
+        "relation target",
+    )?;
+    ensure_property_value(
+        properties,
+        expected.select_key,
+        |value| matches!(value, anytype::properties::PropertyValue::Select { select } if select.key == expected.select_option_key && select.id == expected.select_option_id),
+        "select option",
+    )?;
+    let [first_multi_select_id, second_multi_select_id] = expected.multi_select_option_ids;
+    let [first_multi_select_key, second_multi_select_key] = expected.multi_select_option_keys;
+    let expected_multi_select_ids = BTreeSet::from([first_multi_select_id, second_multi_select_id]);
+    let expected_multi_select_keys =
+        BTreeSet::from([first_multi_select_key, second_multi_select_key]);
+    ensure_property_value(
+        properties,
+        expected.multi_select_key,
+        |value| match value {
+            anytype::properties::PropertyValue::MultiSelect { multi_select } => {
+                multi_select.len() == expected_multi_select_ids.len()
+                    && multi_select
+                        .iter()
+                        .map(|tag| tag.id.as_str())
+                        .collect::<BTreeSet<_>>()
+                        == expected_multi_select_ids
+                    && multi_select
+                        .iter()
+                        .map(|tag| tag.key.as_str())
+                        .collect::<BTreeSet<_>>()
+                        == expected_multi_select_keys
+            }
+            _ => false,
+        },
+        "multi-select options",
+    )?;
+    Ok(())
+}
+
+fn ensure_property_value(
+    properties: &[anytype::properties::PropertyWithValue],
+    key: &str,
+    predicate: impl FnOnce(&anytype::properties::PropertyValue) -> bool,
+    label: &str,
+) -> Result<()> {
+    let property = properties
+        .iter()
+        .find(|property| property.key == key)
+        .ok_or_else(|| anyhow!("typed host is missing {label} property {key}"))?;
+    ensure!(
+        predicate(&property.value),
+        "typed host {label} property {key} differs from the expected semantic value"
+    );
+    Ok(())
+}
+
+async fn wait_for_typed_value_semantics(
+    client: &AnytypeClient,
+    space_id: &str,
+    object_id: &str,
+    expected: &TypedValueExpectation<'_>,
+) -> Result<()> {
+    let mut last_evidence = String::from("no typed host read completed");
+    for _ in 0..40 {
+        match client.object(space_id, object_id).get().await {
+            Ok(host) => match assert_typed_value_semantics(&host.properties, expected) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let observed_keys = host
+                        .properties
+                        .iter()
+                        .map(|property| property.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    last_evidence = format!(
+                        "semantic mismatch: {error:#}; observed property keys: {observed_keys}; observed properties: {:#?}",
+                        host.properties
+                    );
+                }
+            },
+            Err(error) => last_evidence = format!("typed host read failed: {error}"),
+        }
+        sleep(Duration::from_millis(750)).await;
+    }
+    bail!(
+        "typed host {object_id} did not expose all expected value semantics after 40 attempts: {last_evidence}"
+    )
+}
+
+async fn wait_resolve_properties_by_exact_keys(
+    client: &AnytypeClient,
+    space_id: &str,
+    expected_keys: &[&str],
+) -> Result<BTreeMap<String, anytype::properties::Property>> {
+    let expected = expected_keys.iter().copied().collect::<BTreeSet<_>>();
+    let mut last_evidence = String::from("no property list completed");
+    for _ in 0..40 {
+        let listed = client.properties(space_id).limit(1000).list().await;
+        let listed = match listed {
+            Ok(result) => result.collect_all().await,
+            Err(error) => Err(error),
+        };
+        match listed {
+            Ok(properties) => {
+                let resolved = properties
+                    .iter()
+                    .filter(|property| expected.contains(property.key.as_str()))
+                    .map(|property| (property.key.clone(), property.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                if resolved.len() == expected.len()
+                    && expected.iter().all(|key| resolved.contains_key(*key))
+                {
+                    return Ok(resolved);
+                }
+                let present = resolved.keys().cloned().collect::<Vec<_>>().join(",");
+                last_evidence = format!(
+                    "expected keys: {}; visible expected keys: {present}",
+                    expected.iter().copied().collect::<Vec<_>>().join(",")
+                );
+            }
+            Err(error) => last_evidence = format!("direct property list failed: {error}"),
+        }
+        sleep(Duration::from_millis(750)).await;
+    }
+    bail!(
+        "destination properties did not expose every expected key after 40 attempts: {last_evidence}"
+    )
+}
+
+async fn wait_resolve_property_tag_by_key(
+    client: &AnytypeClient,
+    space_id: &str,
+    property_id: &str,
+    tag_key: &str,
+) -> Result<anytype::tags::Tag> {
+    let mut last_error = String::from("no tag lookup completed");
+    for _ in 0..40 {
+        match client
+            .lookup_property_tag(space_id, property_id, tag_key)
+            .await
+        {
+            Ok(tag) => return Ok(tag),
+            Err(error) => last_error = error.to_string(),
+        }
+        sleep(Duration::from_millis(750)).await;
+    }
+    bail!(
+        "destination tag {tag_key} for property {property_id} was not resolved after 40 attempts: {last_error}"
+    )
+}
+
+async fn wait_find_object_id_by_exact_name(space_name: &str, name: &str) -> Result<String> {
+    let mut last_count = 0_usize;
+    for _ in 0..40 {
+        let output = run_anyr(["object", "list", space_name, "--all"])?;
+        let value: Value = serde_json::from_str(&output)?;
+        let items = if let Some(items) = value.as_array() {
+            items
+        } else {
+            value
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("object list output missing items array"))?
+        };
+        last_count = items.len();
+        if let Some(id) = items.iter().find_map(|item| {
+            (item.get("name").and_then(Value::as_str) == Some(name))
+                .then(|| item.get("id").and_then(Value::as_str))
+                .flatten()
+                .map(ToString::to_string)
+        }) {
+            return Ok(id);
+        }
+        sleep(Duration::from_millis(750)).await;
+    }
+    bail!(
+        "object with exact name '{name}' was not found in space {space_name} after 40 attempts (last candidate count: {last_count})"
+    )
+}
+
 #[cfg(feature = "snapshot-import")]
 #[tokio::test]
 #[ignore = "backup-restore"]

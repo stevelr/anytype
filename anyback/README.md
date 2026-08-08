@@ -102,7 +102,7 @@ live test stays ignored.
 
 ### Restore Content-Fidelity Live Matrix
 
-Three ignored tests extend the protected disposable-space pattern beyond the
+Four ignored tests extend the protected disposable-space pattern beyond the
 smoke gate:
 
 - `e2e_restore_preserves_file_payload_metadata_and_host_attachment` compares
@@ -114,6 +114,9 @@ smoke gate:
 - `e2e_restore_preserves_custom_schema_keys_formats_and_featured_membership`
   verifies a custom type key, text/number/checkbox/URL property keys and formats,
   and destination-resolved featured-property membership.
+- `e2e_restore_preserves_typed_object_value_fidelity` creates a custom type and
+  verifies text, number, checkbox, URL, relation, select, and multi-select host
+  values against independently resolved destination resources.
 
 Each test creates and removes unique prefix-owned source and destination spaces,
 requires healthy authenticated HTTP and gRPC pings plus a reviewed redacted
