@@ -289,6 +289,13 @@ fn retry_for_status(code: StatusCode) -> bool {
     }
 }
 
+fn mutation_status_is_indeterminate(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+    ) || status.is_server_error()
+}
+
 fn log_http_status(
     request: &HttpRequest,
     status: StatusCode,
@@ -366,7 +373,21 @@ impl EstablishedSseState {
         let lifetime_deadline = self
             .lifetime
             .and_then(|lifetime| self.started.checked_add(lifetime));
+        let now = tokio::time::Instant::now();
+        if lifetime_deadline.is_some_and(|deadline| now >= deadline) {
+            return Some(self.terminate_with_timeout(HttpTimeoutClass::SseLifetime));
+        }
+        if idle_deadline.is_some_and(|deadline| now >= deadline) {
+            return Some(self.terminate_with_timeout(HttpTimeoutClass::SseIdle));
+        }
         tokio::select! {
+            biased;
+            () = wait_until(lifetime_deadline) => {
+                Some(self.terminate_with_timeout(HttpTimeoutClass::SseLifetime))
+            },
+            () = wait_until(idle_deadline) => {
+                Some(self.terminate_with_timeout(HttpTimeoutClass::SseIdle))
+            },
             chunk = self.chunks.next() => match chunk {
                 Some(Ok(chunk)) => {
                     if !chunk.is_empty() {
@@ -396,21 +417,23 @@ impl EstablishedSseState {
                             path: diagnostic_path(&self.path),
                         }
                     };
+                    self.terminate();
                     Some((Err(error), self))
                 }
                 None => None,
             },
-            () = wait_until(idle_deadline) => {
-                self.terminated = true;
-                let error = self.logical_timeout(HttpTimeoutClass::SseIdle);
-                Some((Err(error), self))
-            },
-            () = wait_until(lifetime_deadline) => {
-                self.terminated = true;
-                let error = self.logical_timeout(HttpTimeoutClass::SseLifetime);
-                Some((Err(error), self))
-            },
         }
+    }
+
+    fn terminate_with_timeout(mut self, class: HttpTimeoutClass) -> (Result<Bytes>, Self) {
+        let error = self.logical_timeout(class);
+        self.terminate();
+        (Err(error), self)
+    }
+
+    fn terminate(&mut self) {
+        self.terminated = true;
+        self.chunks = futures::stream::empty().boxed();
     }
 
     fn logical_timeout(&self, class: HttpTimeoutClass) -> AnytypeError {
@@ -453,8 +476,10 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 pub(crate) enum PreservedStatusResponse<T> {
     /// The server returned a successful status and a valid response body.
     Success(T),
-    /// The server completed the response with this exact non-success status.
+    /// The server definitively rejected the mutation with this exact status.
     Rejected { status: u16 },
+    /// The server returned a status that cannot prove whether the mutation ran.
+    Indeterminate { status: u16 },
 }
 
 impl fmt::Debug for HttpRequest {
@@ -782,6 +807,7 @@ impl HttpClient {
             Ok(Err(AnytypeError::Http { source, .. })) => {
                 Err(self.classify_transport_error(source, method, path, timing))
             }
+            Ok(Err(error @ AnytypeError::HttpTimeout { .. })) => Err(error),
             Ok(_result) if tokio::time::Instant::now() >= deadline => {
                 Err(self.logical_timeout_error(class, outcome, method, path, timing))
             }
@@ -1391,10 +1417,7 @@ impl HttpClient {
             let status = response.status();
             let code = status.as_u16();
             let message = self.read_error_body(response, "post", path).await?;
-            if status == StatusCode::TOO_MANY_REQUESTS
-                || status == StatusCode::REQUEST_TIMEOUT
-                || status.is_server_error()
-            {
+            if mutation_status_is_indeterminate(status) {
                 return Err(Self::mutation_indeterminate(
                     &Method::POST,
                     path,
@@ -1475,10 +1498,7 @@ impl HttpClient {
             let status = response.status();
             let code = status.as_u16();
             let message = self.read_error_body(response, "delete", path).await?;
-            if status == StatusCode::TOO_MANY_REQUESTS
-                || status == StatusCode::REQUEST_TIMEOUT
-                || status.is_server_error()
-            {
+            if mutation_status_is_indeterminate(status) {
                 return Err(Self::mutation_indeterminate(
                     &Method::DELETE,
                     path,
@@ -1724,11 +1744,7 @@ impl HttpClient {
             }
 
             if !(status.is_success() || allowed_control_status) {
-                if !replay_safe
-                    && (status == StatusCode::TOO_MANY_REQUESTS
-                        || status == StatusCode::REQUEST_TIMEOUT
-                        || status.is_server_error())
-                {
+                if !replay_safe && mutation_status_is_indeterminate(status) {
                     return Err(Self::mutation_indeterminate(
                         &method, path, attempts, status,
                     ));
@@ -1868,10 +1884,7 @@ impl HttpClient {
                     .await?,
             )
             .into_owned();
-            if status == StatusCode::TOO_MANY_REQUESTS
-                || status == StatusCode::REQUEST_TIMEOUT
-                || status.is_server_error()
-            {
+            if mutation_status_is_indeterminate(status) {
                 return Err(Self::mutation_indeterminate(
                     &Method::POST,
                     path,
@@ -1991,8 +2004,12 @@ impl HttpClient {
                 self.metrics.increment_errors();
             }
             log_http_status(&req, status, "preserved_status", physical_attempt);
-            return Ok(PreservedStatusResponse::Rejected {
-                status: status.as_u16(),
+            let indeterminate = mutation_status_is_indeterminate(status);
+            let status = status.as_u16();
+            return Ok(if indeterminate {
+                PreservedStatusResponse::Indeterminate { status }
+            } else {
+                PreservedStatusResponse::Rejected { status }
             });
         }
         let body = match self
@@ -2837,7 +2854,12 @@ mod tests {
                     .await
                     .expect("finish SSE body");
             } else {
-                std::future::pending::<()>().await;
+                let mut peer_data = [0_u8; 1];
+                let read = socket
+                    .read(&mut peer_data)
+                    .await
+                    .expect("observe SSE peer close");
+                assert_eq!(read, 0, "SSE peer sent unexpected data");
             }
         });
         let client = HttpClient::new(
@@ -3191,6 +3213,17 @@ mod tests {
             }
         ));
         assert_eq!(client.metrics_snapshot().physical_attempts, 1);
+        let metrics = client.metrics_snapshot();
+        assert_eq!(
+            metrics
+                .timeout(crate::http_timeout::HttpTimeoutClass::StandardOperation)
+                .count,
+            1
+        );
+        assert_eq!(
+            metrics.timeout_outcome_count(crate::http_timeout::TimeoutOutcome::ReadAborted),
+            1
+        );
         tokio::time::resume();
         server.await.expect("retry server");
     }
@@ -3380,11 +3413,14 @@ mod tests {
                 ..
             }))
         ));
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("timed-out SSE response closes promptly")
+            .expect("SSE server");
         assert!(
             chunks.next().await.is_none(),
             "stream emits one terminal error"
         );
-        server.abort();
 
         let lifetime_policy = HttpTimeoutPolicy {
             sse_idle: Some(Duration::from_secs(10)),
@@ -3419,6 +3455,56 @@ mod tests {
             }))
         ));
         server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_sse_chunks_cannot_cross_exact_deadline_boundaries() {
+        let started = tokio::time::Instant::now();
+        let idle_state = super::EstablishedSseState {
+            chunks: futures::stream::iter([Ok(Bytes::from_static(b"data: queued\n\n"))]).boxed(),
+            metrics: Arc::new(HttpMetrics::new()),
+            path: "/events".to_owned(),
+            started,
+            last_progress: started,
+            idle: Some(Duration::from_secs(1)),
+            lifetime: Some(Duration::from_secs(10)),
+            terminated: false,
+        };
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (result, idle_state) = idle_state.next().await.expect("idle terminal error");
+        assert!(matches!(
+            result,
+            Err(AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::SseIdle,
+                ..
+            })
+        ));
+        assert!(idle_state.next().await.is_none());
+
+        let started = tokio::time::Instant::now();
+        let lifetime_state = super::EstablishedSseState {
+            chunks: futures::stream::iter([Ok(Bytes::from_static(b"data: queued\n\n"))]).boxed(),
+            metrics: Arc::new(HttpMetrics::new()),
+            path: "/events".to_owned(),
+            started,
+            last_progress: started,
+            idle: Some(Duration::from_secs(1)),
+            lifetime: Some(Duration::from_secs(1)),
+            terminated: false,
+        };
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (result, lifetime_state) = lifetime_state
+            .next()
+            .await
+            .expect("lifetime terminal error");
+        assert!(matches!(
+            result,
+            Err(AnytypeError::HttpTimeout {
+                class: crate::http_timeout::HttpTimeoutClass::SseLifetime,
+                ..
+            })
+        ));
+        assert!(lifetime_state.next().await.is_none());
     }
 
     async fn read_fixture_request(socket: &mut TcpStream) -> String {
@@ -4708,6 +4794,53 @@ mod tests {
         assert!(super::retry_for_status(StatusCode::REQUEST_TIMEOUT));
         assert!(super::retry_for_status(StatusCode::GATEWAY_TIMEOUT));
         assert!(!super::retry_for_status(StatusCode::INTERNAL_SERVER_ERROR));
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(super::mutation_status_is_indeterminate(status));
+        }
+        for status in [StatusCode::BAD_REQUEST, StatusCode::CONFLICT] {
+            assert!(!super::mutation_status_is_indeterminate(status));
+        }
+    }
+
+    #[tokio::test]
+    async fn preserved_mutation_status_distinguishes_ambiguous_failures() {
+        for (wire_status, expected_status, indeterminate) in [
+            ("400 Bad Request", 400, false),
+            ("409 Conflict", 409, false),
+            ("408 Request Timeout", 408, true),
+            ("429 Too Many Requests", 429, true),
+            ("500 Internal Server Error", 500, true),
+            ("504 Gateway Timeout", 504, true),
+        ] {
+            let (client, server) = serve_once(fixture_response(wire_status, "", "")).await;
+            let response = client
+                .post_request_preserve_status::<String, _>(
+                    "/test",
+                    &(),
+                    QueryWithFilters::default(),
+                )
+                .await
+                .expect("preserved mutation status");
+            if indeterminate {
+                assert!(matches!(
+                    response,
+                    super::PreservedStatusResponse::Indeterminate { status }
+                        if status == expected_status
+                ));
+            } else {
+                assert!(matches!(
+                    response,
+                    super::PreservedStatusResponse::Rejected { status }
+                        if status == expected_status
+                ));
+            }
+            server.await.expect("preserved-status server");
+        }
     }
 
     #[test]

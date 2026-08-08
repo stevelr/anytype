@@ -21,7 +21,7 @@ pub const DEFAULT_SSE_ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// A finite value must be between one and 3,600 seconds inclusive. `None`
 /// disables that boundary. Supplying this policy through
-/// [`ClientConfig::http_timeouts`](crate::ClientConfig::http_timeouts) ignores
+/// [`ClientConfig::http_timeouts`](crate::client::ClientConfig::http_timeouts) ignores
 /// [`ANYTYPE_HTTP_TIMEOUT_SECS`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HttpTimeoutPolicy {
@@ -89,7 +89,10 @@ impl HttpTimeoutPolicy {
         let value = value.into_string().map_err(|_| AnytypeError::Validation {
             message: format!("{ANYTYPE_HTTP_TIMEOUT_SECS} must be Unicode ASCII decimal"),
         })?;
-        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        if value.is_empty()
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+            || (value.len() > 1 && value.starts_with('0'))
+        {
             return Err(AnytypeError::Validation {
                 message: format!(
                     "{ANYTYPE_HTTP_TIMEOUT_SECS} must be an ASCII decimal from 0 through 3600"
@@ -244,7 +247,19 @@ mod tests {
 
     #[test]
     fn inherited_environment_rejects_non_decimal_and_out_of_range_values() {
-        for value in ["", " 1", "+1", "-1", "1.0", "3601", "18446744073709551616"] {
+        for value in [
+            "",
+            "00",
+            "000",
+            "01",
+            "001",
+            " 1",
+            "+1",
+            "-1",
+            "1.0",
+            "3601",
+            "18446744073709551616",
+        ] {
             assert!(HttpTimeoutPolicy::from_environment(Some(OsString::from(value))).is_err());
         }
     }

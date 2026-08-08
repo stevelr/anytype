@@ -870,6 +870,9 @@ match client
 {
     CollectionMemberAddOutcome::Acknowledged => {}
     CollectionMemberAddOutcome::Rejected { status } => eprintln!("HTTP {status}"),
+    CollectionMemberAddOutcome::Indeterminate { status } => {
+        eprintln!("HTTP {status}; observe membership before retrying")
+    }
 }
 # Ok(())
 # }
@@ -877,10 +880,11 @@ match client
 
 The method sends one POST attempt, never follows a redirect, and returns the
 exact completed non-success status without reading or exposing its response
-body. A transport failure, incomplete or oversized success response, or
-malformed success body remains an error because it cannot prove whether the
-server applied the mutation. `view_add_objects` remains the general
-multi-object API and does not provide this status-preserving contract.
+body. HTTP 408, 429, 504, and all server failures are indeterminate and require
+a fresh membership observation before retry. A transport failure, incomplete
+or oversized success response, or malformed success body remains an error for
+the same reason. `view_add_objects` remains the general multi-object API and
+does not provide this status-preserving contract.
 
 Use `collection_membership_page` to enumerate the same canonical direct
 membership scope without consulting a selected or saved view:

@@ -147,7 +147,8 @@ pub enum CollectionMembershipState {
 /// Completed HTTP outcome from dispatching one collection-member addition.
 ///
 /// Transport, response-read, and response-decoding failures are returned as
-/// errors instead because they cannot prove whether the server applied the
+/// errors. Completed timeout, rate-limit, and server-failure responses are
+/// indeterminate because they cannot prove whether the server applied the
 /// mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionMemberAddOutcome {
@@ -155,6 +156,8 @@ pub enum CollectionMemberAddOutcome {
     Acknowledged,
     /// The server completed the request with this exact non-success status.
     Rejected { status: u16 },
+    /// The mutation may have run despite this timeout, rate-limit, or server status.
+    Indeterminate { status: u16 },
 }
 
 /// Identity-bound result of a direct collection-membership observation.
@@ -727,10 +730,10 @@ impl AnytypeClient {
 
     /// Adds exactly one object to a collection in one non-replayed POST.
     ///
-    /// Completed non-success responses retain their exact HTTP status in
-    /// [`CollectionMemberAddOutcome::Rejected`]. The request is never retried
-    /// or redirected, so callers can distinguish definitive application-level
-    /// rejections from outcomes that still require state verification.
+    /// Completed non-success responses retain their exact HTTP status. The
+    /// request is never retried or redirected. Timeout, rate-limit, and server
+    /// statuses return [`CollectionMemberAddOutcome::Indeterminate`] and require
+    /// a fresh observation before an application retry.
     ///
     /// # Errors
     ///
@@ -800,6 +803,9 @@ fn collection_member_add_outcome(
         PreservedStatusResponse::Success(_) => CollectionMemberAddOutcome::Acknowledged,
         PreservedStatusResponse::Rejected { status } => {
             CollectionMemberAddOutcome::Rejected { status }
+        }
+        PreservedStatusResponse::Indeterminate { status } => {
+            CollectionMemberAddOutcome::Indeterminate { status }
         }
     }
 }
@@ -1409,10 +1415,16 @@ mod tests {
             collection_member_add_outcome(PreservedStatusResponse::Success("ok".to_owned())),
             CollectionMemberAddOutcome::Acknowledged
         );
-        for status in [300, 400, 401, 403, 404, 408, 409, 410, 422, 425, 429, 500] {
+        for status in [300, 400, 401, 403, 404, 409, 410, 422, 425] {
             assert_eq!(
                 collection_member_add_outcome(PreservedStatusResponse::Rejected { status }),
                 CollectionMemberAddOutcome::Rejected { status }
+            );
+        }
+        for status in [408, 429, 500, 503, 504, 599] {
+            assert_eq!(
+                collection_member_add_outcome(PreservedStatusResponse::Indeterminate { status }),
+                CollectionMemberAddOutcome::Indeterminate { status }
             );
         }
     }
