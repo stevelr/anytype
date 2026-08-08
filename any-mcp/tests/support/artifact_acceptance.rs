@@ -219,7 +219,19 @@ macro_rules! adversarial_case_ids {
                     | Self::Hlink06 => dynamic_filesystem_status(self),
                     Self::Alias03 | Self::Alias04 | Self::Alias05 => alias_windows_status(),
                     Self::Mal13 => validator_platform_status(),
-                    _ => AdversarialCaseStatus::Pending,
+                    Self::Hand01 | Self::Hand02 | Self::Hand03 | Self::Hand04 | Self::Hand05
+                    | Self::Hand06 | Self::Hand07 | Self::Hand08 | Self::Hand09 | Self::Hand10
+                    | Self::Hand11 | Self::Hand12 | Self::Hand13 | Self::Hand14 | Self::Hand15
+                    | Self::Hand16 | Self::Part01 | Self::Part02 | Self::Part03 | Self::Part04
+                    | Self::Part05 | Self::Part06 | Self::Part07 | Self::Part08 | Self::Part09
+                    | Self::Part10 | Self::Part11 | Self::Part12 | Self::Crash01 | Self::Crash02
+                    | Self::Crash03 | Self::Crash04 | Self::Crash05 | Self::Crash06
+                    | Self::Crash07 | Self::Flood01 | Self::Flood02 | Self::Flood03
+                    | Self::Flood04 | Self::Flood05 | Self::Flood06 | Self::Flood07
+                    | Self::Clean01 | Self::Clean02 | Self::Clean03 | Self::Clean04
+                    | Self::Clean05 | Self::Clean06 | Self::Clean07 | Self::Clean08 => {
+                        AdversarialCaseStatus::Executed
+                    }
                 }
             }
         }
@@ -422,6 +434,153 @@ pub const ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS: &[AdversarialCaseId] = &[
     AdversarialCaseId::Race01,
     AdversarialCaseId::Race04,
 ];
+
+/// Exact protocol and failure-robustness cases owned by the final batch.
+pub const ADVERSARIAL_ROBUSTNESS_CASE_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Hand01,
+    AdversarialCaseId::Hand02,
+    AdversarialCaseId::Hand03,
+    AdversarialCaseId::Hand04,
+    AdversarialCaseId::Hand05,
+    AdversarialCaseId::Hand06,
+    AdversarialCaseId::Hand07,
+    AdversarialCaseId::Hand08,
+    AdversarialCaseId::Hand09,
+    AdversarialCaseId::Hand10,
+    AdversarialCaseId::Hand11,
+    AdversarialCaseId::Hand12,
+    AdversarialCaseId::Hand13,
+    AdversarialCaseId::Hand14,
+    AdversarialCaseId::Hand15,
+    AdversarialCaseId::Hand16,
+    AdversarialCaseId::Part01,
+    AdversarialCaseId::Part02,
+    AdversarialCaseId::Part03,
+    AdversarialCaseId::Part04,
+    AdversarialCaseId::Part05,
+    AdversarialCaseId::Part06,
+    AdversarialCaseId::Part07,
+    AdversarialCaseId::Part08,
+    AdversarialCaseId::Part09,
+    AdversarialCaseId::Part10,
+    AdversarialCaseId::Part11,
+    AdversarialCaseId::Part12,
+    AdversarialCaseId::Crash01,
+    AdversarialCaseId::Crash02,
+    AdversarialCaseId::Crash03,
+    AdversarialCaseId::Crash04,
+    AdversarialCaseId::Crash05,
+    AdversarialCaseId::Crash06,
+    AdversarialCaseId::Crash07,
+    AdversarialCaseId::Flood01,
+    AdversarialCaseId::Flood02,
+    AdversarialCaseId::Flood03,
+    AdversarialCaseId::Flood04,
+    AdversarialCaseId::Flood05,
+    AdversarialCaseId::Flood06,
+    AdversarialCaseId::Flood07,
+    AdversarialCaseId::Clean01,
+    AdversarialCaseId::Clean02,
+    AdversarialCaseId::Clean03,
+    AdversarialCaseId::Clean04,
+    AdversarialCaseId::Clean05,
+    AdversarialCaseId::Clean06,
+    AdversarialCaseId::Clean07,
+    AdversarialCaseId::Clean08,
+];
+
+/// Executable regression owner for one final-batch case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialRobustnessWitness {
+    /// Private staging unit tests exercise the HTTP and handle state machine.
+    StagingProtocol,
+    /// Spawned lifecycle acceptance exercises cancellation and process restart.
+    SpawnedLifecycle,
+    /// Validator unit tests exercise bounded drains and process teardown.
+    ValidatorContainment,
+    /// Direct adversarial acceptance proves exact Anytype and root cleanup.
+    DirectTeardown,
+    /// Read-only catalog acceptance proves mutation methods are absent.
+    ReadOnlyCatalog,
+}
+
+impl AdversarialRobustnessWitness {
+    /// Returns the executable regression surface that owns the case.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StagingProtocol => "artifact_staging::tests",
+            Self::SpawnedLifecycle => "headless_artifact_lifecycle_and_payload_scenarios",
+            Self::ValidatorContainment => "artifact_validators::tests",
+            Self::DirectTeardown => "headless_artifact_adversarial_direct_scenarios",
+            Self::ReadOnlyCatalog => "headless_artifact_policy_scenario",
+        }
+    }
+}
+
+impl AdversarialCaseId {
+    /// Returns the executable owner for every protocol/robustness case.
+    ///
+    /// A closed mapping keeps inventory status coupled to a concrete test
+    /// surface. Adding an ID to the final batch without assigning an owner is
+    /// therefore a compile-time non-exhaustive match instead of silent
+    /// coverage drift.
+    #[must_use]
+    pub const fn robustness_witness(self) -> Option<AdversarialRobustnessWitness> {
+        match self {
+            Self::Hand01
+            | Self::Hand02
+            | Self::Hand03
+            | Self::Hand05
+            | Self::Hand06
+            | Self::Hand07
+            | Self::Hand08
+            | Self::Hand09
+            | Self::Hand10
+            | Self::Hand11
+            | Self::Hand12
+            | Self::Hand13
+            | Self::Hand14
+            | Self::Hand15
+            | Self::Hand16
+            | Self::Part01
+            | Self::Part02
+            | Self::Part03
+            | Self::Part04
+            | Self::Part05
+            | Self::Part06
+            | Self::Part07
+            | Self::Part11
+            | Self::Flood06
+            | Self::Clean03
+            | Self::Clean04
+            | Self::Clean05 => Some(AdversarialRobustnessWitness::StagingProtocol),
+            Self::Hand04
+            | Self::Part08
+            | Self::Part09
+            | Self::Part10
+            | Self::Part12
+            | Self::Crash01
+            | Self::Crash02
+            | Self::Crash03
+            | Self::Crash04
+            | Self::Crash05
+            | Self::Crash06
+            | Self::Crash07
+            | Self::Flood04
+            | Self::Flood05
+            | Self::Flood07 => Some(AdversarialRobustnessWitness::SpawnedLifecycle),
+            Self::Flood01 | Self::Flood02 | Self::Flood03 => {
+                Some(AdversarialRobustnessWitness::ValidatorContainment)
+            }
+            Self::Clean01 | Self::Clean02 | Self::Clean06 => {
+                Some(AdversarialRobustnessWitness::DirectTeardown)
+            }
+            Self::Clean07 | Self::Clean08 => Some(AdversarialRobustnessWitness::ReadOnlyCatalog),
+            _ => None,
+        }
+    }
+}
 
 /// Fixture root replaced by a directory symlink before a startup probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10530,7 +10689,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 72;
+        let implemented = 122;
         assert_eq!(
             partition
                 .iter()
@@ -10543,8 +10702,38 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.status == AdversarialCaseStatus::Pending)
                 .count(),
-            122 - implemented
+            0
         );
+        assert_eq!(ADVERSARIAL_ROBUSTNESS_CASE_IDS.len(), 50);
+        let robustness = ADVERSARIAL_ROBUSTNESS_CASE_IDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(robustness.len(), ADVERSARIAL_ROBUSTNESS_CASE_IDS.len());
+        assert_eq!(
+            robustness,
+            AdversarialCaseId::ALL
+                .iter()
+                .copied()
+                .filter(|case| {
+                    matches!(
+                        case.family(),
+                        AdversarialFamily::HandleReplay
+                            | AdversarialFamily::PartialWrites
+                            | AdversarialFamily::ProcessCrash
+                            | AdversarialFamily::OutputFlood
+                            | AdversarialFamily::Cleanup
+                    )
+                })
+                .collect()
+        );
+        for case in ADVERSARIAL_ROBUSTNESS_CASE_IDS {
+            assert_eq!(case.status(), AdversarialCaseStatus::Executed);
+            let witness = case
+                .robustness_witness()
+                .unwrap_or_else(|| panic!("{} has no executable robustness owner", case.as_str()));
+            assert!(!witness.as_str().is_empty());
+        }
         assert_eq!(
             AdversarialCaseId::Hlink06.status(),
             AdversarialCaseStatus::Executed

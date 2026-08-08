@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Complete the closed artifact adversarial inventory with the 50 handle,
+  partial-write, process-crash, output-flood, and failure-cleanup cases.
+  Production staging regressions exercise uniform bearer refusal, route,
+  direction, and space binding, strict request grammar, rate recovery, and
+  request-permit shedding. Spawned lifecycle and validator owners cover
+  restart reconciliation, cancellation settlement, bounded process output,
+  and exact private-state teardown; the offline partition now rejects every
+  pending row.
 - Add closed real-server adversarial artifact coverage for 43 traversal,
   filesystem-alias, filename, MIME, and metadata cases. Direct-router and
   stable/preview stdio owners enforce exact case partitions, fixed refusal
