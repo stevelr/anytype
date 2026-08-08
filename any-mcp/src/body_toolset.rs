@@ -43,8 +43,8 @@ use crate::{
     create_idempotency::{
         Attempt, BeginAttempt, CreateDisposition, CreateExecution, DEFAULT_IDEMPOTENCY_CAPACITY,
         IdempotencyKey, IdempotencyStore, PendingCandidate, PendingCandidateLookup, ReplayWitness,
-        RichReceiptMetadata, finish_supervised_execution, wait_for_attempt_until,
-        wait_for_leader_attempt_until,
+        ResumeEligibilitySnapshot, ResumeFinish, RichBeginAttempt, RichReceiptMetadata,
+        finish_supervised_execution, wait_for_attempt_until, wait_for_leader_attempt_until,
     },
     cursor::{CursorStore, CursorToken, EvidenceCursorState, QueryFingerprint},
     discovery::DiscoveryReference,
@@ -81,20 +81,23 @@ pub const BODY_BLOCK_DELETE: &str = "body_block_delete";
 pub const BODY_BLOCK_MOVE: &str = "body_block_move";
 /// Exact rich-page creation tool name.
 pub const RICH_PAGE_CREATE: &str = "rich_page_create";
+/// Exact rich-page recovery tool name.
+pub const RICH_PAGE_RESUME: &str = "rich_page_resume";
 #[cfg(feature = "acceptance-harness")]
-const BODY_TOOL_NAMES: [&str; 6] = [
+const BODY_TOOL_NAMES: [&str; 7] = [
     BODY_BLOCK_CREATE,
     BODY_BLOCK_DELETE,
     BODY_BLOCK_LIST,
     BODY_BLOCK_MOVE,
     BODY_BLOCK_UPDATE,
     RICH_PAGE_CREATE,
+    RICH_PAGE_RESUME,
 ];
 
 /// Reviewed incremental read-write catalog ceiling.
-pub const BODY_BLOCKS_CATALOG_TOKEN_CEILING: usize = 25_108;
+pub const BODY_BLOCKS_CATALOG_TOKEN_CEILING: usize = 31_708;
 /// Reviewed selected read-write contribution ceiling including status.
-pub const BODY_BLOCKS_SELECTED_TOKEN_CEILING: usize = 25_608;
+pub const BODY_BLOCKS_SELECTED_TOKEN_CEILING: usize = 32_208;
 /// Reviewed incremental read-only catalog ceiling.
 pub const BODY_BLOCKS_READ_ONLY_CATALOG_TOKEN_CEILING: usize = 4_000;
 /// Reviewed selected read-only contribution ceiling including status.
@@ -3179,6 +3182,14 @@ fn rich_create_tool() -> Result<WorkflowTool<RichPageCreateOutput>, SchemaContra
     )
 }
 
+fn rich_resume_tool() -> Result<WorkflowTool<RichPageCreateOutput>, SchemaContractError> {
+    workflow_tool::<RichPageCreateInput, RichPageCreateOutput>(
+        RICH_PAGE_RESUME,
+        "Resume only the never-attempted suffix of a retained rich_page_create receipt in this runtime facade. Restart, facade replacement or eviction, missing or capacity-rejected evidence, attempted or indeterminate boundaries, and consumed claims refuse recovery. Reread with body_block_list before deliberate primitive mutations.",
+        ToolProfile::Create,
+    )
+}
+
 fn body_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
         OptionalRegistryTool::read(list_tool()?),
@@ -3187,6 +3198,7 @@ fn body_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
         OptionalRegistryTool::mutation(delete_tool()?),
         OptionalRegistryTool::mutation(move_tool()?),
         OptionalRegistryTool::mutation(rich_create_tool()?),
+        OptionalRegistryTool::mutation(rich_resume_tool()?),
     ])
 }
 
@@ -3197,6 +3209,7 @@ struct BodyHandlers {
     delete: WorkflowTool<BodyBlockDeleteOutput>,
     move_block: WorkflowTool<BodyBlockMutationOutput>,
     rich_create: WorkflowTool<RichPageCreateOutput>,
+    rich_resume: WorkflowTool<RichPageCreateOutput>,
     block_creates: Arc<IdempotencyStore>,
     rich_creates: Arc<IdempotencyStore>,
     rpc_metrics: BodyRpcMetrics,
@@ -3322,6 +3335,7 @@ impl BodyHandlers {
             delete: delete_tool()?,
             move_block: move_tool()?,
             rich_create: rich_create_tool()?,
+            rich_resume: rich_resume_tool()?,
             block_creates: Arc::new(IdempotencyStore::new(DEFAULT_IDEMPOTENCY_CAPACITY)),
             rich_creates: Arc::new(IdempotencyStore::new(DEFAULT_IDEMPOTENCY_CAPACITY)),
             rpc_metrics: BodyRpcMetrics::default(),
@@ -3424,6 +3438,19 @@ impl BodyHandlers {
                     let input = decode_arguments::<RichPageCreateInput>(request.arguments)?;
                     (
                         self.rich_create(runtime, input, cancellation).await,
+                        RICH_FRAME_BOUNDS,
+                    )
+                }
+                RICH_PAGE_RESUME => {
+                    if let Err(error) = require_mutation_access(access) {
+                        return Ok(tool_error(error.tool_error()));
+                    }
+                    if let Err(error) = ensure_body_request_bounds(&request, RICH_FRAME_BOUNDS) {
+                        return Ok(tool_error(error.tool_error()));
+                    }
+                    let input = decode_arguments::<RichPageCreateInput>(request.arguments)?;
+                    (
+                        self.rich_resume(runtime, input, cancellation).await,
                         RICH_FRAME_BOUNDS,
                     )
                 }
@@ -6232,6 +6259,180 @@ fn verified_rich_prefix_len(
     applied.len()
 }
 
+fn rich_page_object_matches(
+    object: &anytype::objects::Object,
+    space_id: &str,
+    object_id: &str,
+    name: &str,
+    page_type_id: &str,
+) -> bool {
+    object.id == object_id
+        && object.space_id == space_id
+        && object.name.as_deref() == Some(name)
+        && !object.archived
+        && object
+            .r#type
+            .as_ref()
+            .is_some_and(|typ| typ.id == page_type_id && typ.key == "page" && !typ.archived)
+}
+
+fn rich_page_type_matches(typ: &anytype::types::Type, page_type_id: &str) -> bool {
+    typ.id == page_type_id && typ.key == "page" && !typ.archived
+}
+
+#[derive(Clone)]
+struct ResumableRichReceipt {
+    space_id: EntityId,
+    object_id: EntityId,
+    failed_index: usize,
+    applied: Vec<RichApplied>,
+}
+
+fn resumable_rich_receipt(
+    result: &CallToolResult,
+    input: &RichPageCreateInput,
+) -> Result<ResumableRichReceipt, ()> {
+    if result.is_error == Some(true) {
+        return Err(());
+    }
+    let value = result.structured_content.as_ref().ok_or(())?;
+    if value.get("status").and_then(serde_json::Value::as_str) != Some("partial") {
+        return Err(());
+    }
+    let space_id = value
+        .get("space_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| EntityId::new(value.to_owned()).ok())
+        .ok_or(())?;
+    let object_id = value
+        .get("object_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| EntityId::new(value.to_owned()).ok())
+        .ok_or(())?;
+    let applied =
+        serde_json::from_value::<Vec<RichApplied>>(value.get("applied").cloned().ok_or(())?)
+            .map_err(|_| ())?;
+    let failed_index_u64 = value
+        .get("failed")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|failed| failed.get("index"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(())?;
+    let failed_index = usize::try_from(failed_index_u64).map_err(|_| ())?;
+    if failed_index >= input.blocks.len() || applied.len() != failed_index {
+        return Err(());
+    }
+    for (index, receipt) in applied.iter().enumerate() {
+        if usize::from(receipt.index) != index
+            || input
+                .blocks
+                .get(index)
+                .is_none_or(|entry| entry.local_key != receipt.local_key)
+        {
+            return Err(());
+        }
+    }
+    let suffix = value
+        .get("not_attempted")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(())?;
+    if suffix.len() != input.blocks.len().saturating_sub(failed_index) {
+        return Err(());
+    }
+    for (offset, encoded) in suffix.iter().enumerate() {
+        let expected = failed_index.checked_add(offset).ok_or(())?;
+        if encoded.as_u64() != u64::try_from(expected).ok() {
+            return Err(());
+        }
+    }
+    Ok(ResumableRichReceipt {
+        space_id,
+        object_id,
+        failed_index,
+        applied,
+    })
+}
+
+fn verified_rich_relative_prefix_len(
+    input: &RichPageCreateInput,
+    applied: &[RichApplied],
+    projected: &ProjectedSnapshot,
+) -> usize {
+    let mut actual_ids = HashMap::<&str, &str>::new();
+    let mut last_sibling = HashMap::<&str, u64>::new();
+    let mut seen_ids = HashSet::<&str>::new();
+    for (position, receipt) in applied.iter().enumerate() {
+        if usize::from(receipt.index) != position || position >= input.blocks.len() {
+            return position;
+        }
+        let entry = &input.blocks[position];
+        if receipt.local_key != entry.local_key {
+            return position;
+        }
+        let block_id = receipt.block_id.as_str();
+        if !seen_ids.insert(block_id) {
+            return position;
+        }
+        let Some(block) = projected
+            .items
+            .iter()
+            .find(|candidate| candidate.id.as_str() == block_id)
+        else {
+            return position;
+        };
+        let expected_parent = match entry.parent_key.as_ref() {
+            Some(parent) => match actual_ids.get(parent.as_str()).copied() {
+                Some(parent) => parent,
+                None => return position,
+            },
+            None => projected.root_id.as_str(),
+        };
+        if block.parent_id.as_ref().map(EntityId::as_str) != Some(expected_parent)
+            || last_sibling
+                .insert(expected_parent, block.sibling_index)
+                .is_some_and(|prior| prior >= block.sibling_index)
+        {
+            return position;
+        }
+        let Ok(expected) =
+            intended_create_output(&projected.space_id, &projected.object_id, &entry.block)
+        else {
+            return position;
+        };
+        if block.content != expected.block.content
+            || block.align != expected.block.align
+            || block.vertical_align != expected.block.vertical_align
+            || block.background_color != expected.block.background_color
+        {
+            return position;
+        }
+        if let NewBlockInput::Table {
+            rows,
+            columns,
+            header_row,
+        } = &entry.block
+        {
+            let Some(materialized_count) =
+                table_materialized_count(usize::from(*rows), usize::from(*columns), *header_row)
+            else {
+                return position;
+            };
+            if !projected_table_subtree_matches(
+                projected,
+                block,
+                *rows,
+                *columns,
+                *header_row,
+                materialized_count,
+            ) {
+                return position;
+            }
+        }
+        actual_ids.insert(entry.local_key.as_str(), block_id);
+    }
+    applied.len()
+}
+
 impl BodyHandlers {
     async fn rich_create(
         &self,
@@ -6259,27 +6460,14 @@ impl BodyHandlers {
         let key = input.idempotency_key.clone();
         match self
             .rich_creates
-            .begin_until(deadline, key.clone(), fingerprint)
+            .begin_rich_until(deadline, key.clone(), fingerprint)
             .await
         {
-            BeginAttempt::Cached(_) => match self
-                .rich_creates
-                .cached_rich_receipt(&key, fingerprint)
-                .await
-            {
-                Some(cached) => {
-                    self.replay_rich_create(
-                        runtime,
-                        &input,
-                        &resolved,
-                        cached.result,
-                        cached.metadata,
-                    )
+            RichBeginAttempt::Cached(cached) => {
+                self.replay_rich_create(runtime, &input, &resolved, cached.result, cached.metadata)
                     .await
-                }
-                None => tool_error(&ToolError::conflict()),
-            },
-            BeginAttempt::Indeterminate => {
+            }
+            RichBeginAttempt::Indeterminate => {
                 match self.rich_creates.pending_candidate(&key, fingerprint).await {
                     PendingCandidateLookup::Available(candidate) => {
                         self.recover_pending_rich_create(
@@ -6301,13 +6489,13 @@ impl BodyHandlers {
                     }
                 }
             }
-            BeginAttempt::Conflict => tool_error(&ToolError::conflict()),
-            BeginAttempt::Full => tool_error(&ToolError::bounded_result()),
-            BeginAttempt::Expired => tool_error(&ToolError::upstream()),
-            BeginAttempt::Wait(attempt) => {
+            RichBeginAttempt::Conflict => tool_error(&ToolError::conflict()),
+            RichBeginAttempt::Full => tool_error(&ToolError::bounded_result()),
+            RichBeginAttempt::Expired => tool_error(&ToolError::upstream()),
+            RichBeginAttempt::Wait(attempt) => {
                 wait_for_attempt_until(attempt, cancellation, deadline).await
             }
-            BeginAttempt::Lead(attempt) => {
+            RichBeginAttempt::Lead(attempt) => {
                 let runtime = runtime.clone();
                 let contract = self.rich_create.clone();
                 let store = self.rich_creates.clone();
@@ -6344,6 +6532,113 @@ impl BodyHandlers {
         }
     }
 
+    async fn rich_resume(
+        &self,
+        runtime: &RuntimeContext,
+        input: RichPageCreateInput,
+        cancellation: &CancellationToken,
+    ) -> CallToolResult {
+        if rich_input_bytes(&input).is_err() || validate_rich_plan(&input).is_err() {
+            return tool_error(&ToolError::validation());
+        }
+        let key = input.idempotency_key.clone();
+        let eligibility = self
+            .rich_creates
+            .resume_eligibility(&key, |result| {
+                resumable_rich_receipt(result, &input).is_ok()
+            })
+            .await;
+        let ResumeEligibilitySnapshot::Eligible {
+            fingerprint: retained_fingerprint,
+            metadata: retained_metadata,
+        } = eligibility
+        else {
+            return tool_error(&ToolError::conflict());
+        };
+        let deadline = runtime.request_deadline();
+        let resolved = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return tool_error(&ToolError::upstream()),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                return tool_error(&ToolError::upstream());
+            },
+            result = runtime.client().resolve_space_id(input.space.as_str()) => match result {
+                Ok(value) => value,
+                Err(error) => return api_error_result(&error),
+            }
+        };
+        if EntityId::new(resolved.clone()).is_err()
+            || rich_fingerprint(&input, &resolved) != retained_fingerprint
+        {
+            return tool_error(&ToolError::conflict());
+        }
+        let claim = match self
+            .rich_creates
+            .claim_resume(&key, retained_fingerprint, &retained_metadata, |result| {
+                resumable_rich_receipt(result, &input).is_ok()
+            })
+            .await
+        {
+            Ok(claim) => claim,
+            Err(()) => return tool_error(&ToolError::conflict()),
+        };
+        let attempt = claim.attempt.clone();
+        let token = claim.token.clone();
+        let prior_result = claim.result;
+        let page_type_id = claim.metadata.page_type_id;
+        let runtime = runtime.clone();
+        let contract = self.rich_resume.clone();
+        let store = self.rich_creates.clone();
+        let rpc_metrics = self.rpc_metrics.clone();
+        let task_attempt = attempt.clone();
+        tokio::spawn(async move {
+            let progress = task_attempt.progress();
+            let task_progress = progress.clone();
+            let leader_cancellation = task_attempt.leader_cancellation();
+            let execution_page_type_id = page_type_id.clone();
+            let task = tokio::spawn(async move {
+                execute_rich_resume(
+                    input,
+                    prior_result,
+                    RichResumeContext {
+                        runtime: &runtime,
+                        contract: &contract,
+                        resolved_space: &resolved,
+                        page_type_id: &execution_page_type_id,
+                        progress: &task_progress,
+                        cancellation: &leader_cancellation,
+                        deadline,
+                        rpc_metrics,
+                    },
+                )
+                .await
+            });
+            let finish = match task.await {
+                Ok(ResumeExecution::BeforeWritePoll(result)) => {
+                    ResumeFinish::BeforeWritePoll(result)
+                }
+                Ok(ResumeExecution::Indeterminate(result)) => ResumeFinish::Indeterminate(result),
+                Ok(ResumeExecution::Superseded(result)) => ResumeFinish::Superseded {
+                    result,
+                    metadata: RichReceiptMetadata {
+                        page_type_id,
+                        replay_witness: ReplayWitness::ResumedRelative,
+                    },
+                },
+                Err(_)
+                    if progress.stage() == crate::handler_support::MutationStage::PreDispatch =>
+                {
+                    ResumeFinish::BeforeWritePoll(tool_error(&ToolError::upstream()))
+                }
+                Err(_) => {
+                    ResumeFinish::Indeterminate(tool_error(&ToolError::mutation_indeterminate()))
+                }
+            };
+            let _ = store.finish_resume(&key, &token, finish).await;
+        });
+        wait_for_leader_attempt_until(attempt, cancellation, deadline).await
+    }
+
     async fn recover_pending_rich_create(
         &self,
         runtime: &RuntimeContext,
@@ -6373,16 +6668,35 @@ impl BodyHandlers {
                 Some(Err(_)) | None => return tool_error(&ToolError::conflict()),
             }
         };
-        if verified.id != recovery.candidate.object_id()
-            || verified.space_id != recovery.candidate.space_id()
-            || verified.name.as_deref() != Some(input.name.as_str())
-            || verified.r#type.as_ref().map(|value| value.key.as_str()) != Some("page")
-        {
-            return tool_error(&ToolError::conflict());
-        }
-        let Some(page_type_id) = verified.r#type.as_ref().map(|typ| typ.id.clone()) else {
+        let Some(retained_page_type_id) = recovery.candidate.rich_page_type_id() else {
             return tool_error(&ToolError::conflict());
         };
+        if !rich_page_object_matches(
+            &verified,
+            recovery.candidate.space_id(),
+            recovery.candidate.object_id(),
+            input.name.as_str(),
+            retained_page_type_id,
+        ) {
+            return tool_error(&ToolError::conflict());
+        }
+        let direct_type = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return tool_error(&ToolError::conflict()),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(recovery.deadline)) => {
+                return tool_error(&ToolError::conflict());
+            },
+            result = runtime.client().get_type(
+                recovery.candidate.space_id(),
+                retained_page_type_id,
+            ).get_direct() => match result {
+                Ok(typ) => typ,
+                Err(_) => return tool_error(&ToolError::conflict()),
+            }
+        };
+        if !rich_page_type_matches(&direct_type, retained_page_type_id) {
+            return tool_error(&ToolError::conflict());
+        }
         let rpc = self.rpc_config(recovery.deadline);
         let body = tokio::select! {
             biased;
@@ -6412,7 +6726,7 @@ impl BodyHandlers {
             &self.rich_create,
             &recovery,
             input.blocks.len(),
-            page_type_id,
+            retained_page_type_id.to_owned(),
             body,
         )
         .await
@@ -6441,11 +6755,28 @@ impl BodyHandlers {
             Ok(object) => object,
             Err(_) => return tool_error(&ToolError::conflict()),
         };
-        if object.id != object_id
-            || object.space_id != resolved_space
-            || object.name.as_deref() != Some(input.name.as_str())
-            || object.r#type.as_ref().map(|value| value.key.as_str()) != Some("page")
+        let Some(metadata) = metadata.as_ref() else {
+            return tool_error(&ToolError::conflict());
+        };
+        if !rich_page_object_matches(
+            &object,
+            resolved_space,
+            object_id,
+            input.name.as_str(),
+            &metadata.page_type_id,
+        ) {
+            return tool_error(&ToolError::conflict());
+        }
+        let page_type = match runtime
+            .client()
+            .get_type(resolved_space, &metadata.page_type_id)
+            .get_direct()
+            .await
         {
+            Ok(typ) => typ,
+            Err(_) => return tool_error(&ToolError::conflict()),
+        };
+        if !rich_page_type_matches(&page_type, &metadata.page_type_id) {
             return tool_error(&ToolError::conflict());
         }
         let snapshot = match fetch_body(
@@ -6463,13 +6794,12 @@ impl BodyHandlers {
             Ok(projected) => projected,
             Err(_) => return tool_error(&ToolError::conflict()),
         };
-        let replay_witness = metadata.as_ref().map(|metadata| metadata.replay_witness);
+        let replay_witness = Some(metadata.replay_witness);
         let root_append_index = match replay_witness {
-            Some(ReplayWitness::RichRootAppendIndex(value)) => Some(value),
-            Some(ReplayWitness::RichRecoveredCandidate | ReplayWitness::RichResumedRelative)
-            | None => None,
+            Some(ReplayWitness::RootAppendIndex(value)) => Some(value),
+            Some(ReplayWitness::RecoveredCandidate | ReplayWitness::ResumedRelative) | None => None,
         };
-        let relative = matches!(replay_witness, Some(ReplayWitness::RichResumedRelative));
+        let relative = matches!(replay_witness, Some(ReplayWitness::ResumedRelative));
         if (!relative
             && value
                 .get("final_snapshot_hash")
@@ -6517,21 +6847,407 @@ async fn complete_pending_rich_recovery(
     let output = rich_recovered_failure(&space_id, &object_id, total, final_hash, category);
     let result = finish_rich_result(contract, output, CreateDisposition::Terminal).result;
     if store
-        .complete_pending_candidate_with_metadata(
+        .complete_pending_rich_candidate(
             &recovery.key,
             recovery.fingerprint,
             &recovery.candidate,
             result.clone(),
-            Some(RichReceiptMetadata {
-                page_type_id,
-                replay_witness: ReplayWitness::RichRecoveredCandidate,
-            }),
+            &page_type_id,
         )
         .await
     {
         result
     } else {
         tool_error(&ToolError::conflict())
+    }
+}
+
+enum ResumeExecution {
+    BeforeWritePoll(CallToolResult),
+    Indeterminate(CallToolResult),
+    Superseded(CallToolResult),
+}
+
+struct RichResumeContext<'a> {
+    runtime: &'a RuntimeContext,
+    contract: &'a WorkflowTool<RichPageCreateOutput>,
+    resolved_space: &'a str,
+    page_type_id: &'a str,
+    progress: &'a MutationProgress,
+    cancellation: &'a CancellationToken,
+    deadline: std::time::Instant,
+    rpc_metrics: BodyRpcMetrics,
+}
+
+async fn execute_rich_resume(
+    input: RichPageCreateInput,
+    prior_result: CallToolResult,
+    context: RichResumeContext<'_>,
+) -> ResumeExecution {
+    let RichResumeContext {
+        runtime,
+        contract,
+        resolved_space,
+        page_type_id,
+        progress,
+        cancellation,
+        deadline,
+        rpc_metrics,
+    } = context;
+    let receipt = match resumable_rich_receipt(&prior_result, &input) {
+        Ok(receipt) => receipt,
+        Err(()) => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+        }
+    };
+    if receipt.space_id.as_str() != resolved_space || page_type_id.is_empty() {
+        return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+    }
+    let client = runtime.client().clone();
+    let object = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::upstream()));
+        },
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::upstream()));
+        },
+        result = client.object(receipt.space_id.as_str(), receipt.object_id.as_str()).get() => {
+            match result {
+                Ok(object) => object,
+                Err(_) => {
+                    return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+                }
+            }
+        }
+    };
+    if !rich_page_object_matches(
+        &object,
+        receipt.space_id.as_str(),
+        receipt.object_id.as_str(),
+        input.name.as_str(),
+        page_type_id,
+    ) {
+        return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+    }
+    let page_type = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::upstream()));
+        },
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::upstream()));
+        },
+        result = client.get_type(receipt.space_id.as_str(), page_type_id).get_direct() => {
+            match result {
+                Ok(typ) => typ,
+                Err(_) => {
+                    return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+                }
+            }
+        }
+    };
+    if !rich_page_type_matches(&page_type, page_type_id) {
+        return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+    }
+    let rpc =
+        BodyRpcConfig::new(tokio::time::Instant::from_std(deadline)).with_metrics(rpc_metrics);
+    let snapshot = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::upstream()));
+        },
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::upstream()));
+        },
+        result = fetch_body(
+            &client,
+            receipt.space_id.as_str(),
+            receipt.object_id.as_str(),
+            rpc.clone(),
+        ) => match result {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+            }
+        }
+    };
+    let projected = match project_snapshot(&snapshot) {
+        Ok(projected)
+            if projected.space_id == receipt.space_id
+                && projected.object_id == receipt.object_id =>
+        {
+            projected
+        }
+        Ok(_) | Err(_) => {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+        }
+    };
+    if verified_rich_relative_prefix_len(&input, &receipt.applied, &projected)
+        != receipt.applied.len()
+    {
+        return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+    }
+    let scheduler = match RichScheduler::with_prefix(input.blocks.len(), receipt.applied) {
+        Some(scheduler) if scheduler.next_write_index() == Some(receipt.failed_index) => scheduler,
+        _ => return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict())),
+    };
+    let mut actual_ids = HashMap::<String, BlockId>::new();
+    for applied in scheduler.applied() {
+        let block_id = match BlockId::try_from(applied.block_id.as_str().to_owned()) {
+            Ok(block_id) => block_id,
+            Err(_) => {
+                return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+            }
+        };
+        if actual_ids
+            .insert(applied.local_key.as_str().to_owned(), block_id)
+            .is_some()
+        {
+            return ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()));
+        }
+    }
+    execute_rich_resume_suffix(
+        &input,
+        contract,
+        &client,
+        receipt.space_id,
+        receipt.object_id,
+        snapshot,
+        scheduler,
+        actual_ids,
+        progress,
+        cancellation,
+        deadline,
+        rpc,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_rich_resume_suffix(
+    input: &RichPageCreateInput,
+    contract: &WorkflowTool<RichPageCreateOutput>,
+    client: &AnytypeClient,
+    space_id: EntityId,
+    object_id: EntityId,
+    mut current: BodySnapshot,
+    mut scheduler: RichScheduler,
+    mut actual_ids: HashMap<String, BlockId>,
+    progress: &MutationProgress,
+    cancellation: &CancellationToken,
+    deadline: std::time::Instant,
+    rpc: BodyRpcConfig,
+) -> ResumeExecution {
+    while let Some(index) = scheduler.next_write_index() {
+        let Some(entry) = input.blocks.get(index) else {
+            return resume_internal_failure(progress);
+        };
+        if cancellation.is_cancelled() || std::time::Instant::now() >= deadline {
+            let Some(output) =
+                scheduler.stop(&space_id, &object_id, false, RichWriteStop::Cancelled, None)
+            else {
+                return resume_internal_failure(progress);
+            };
+            return finish_resume_output(contract, output, progress);
+        }
+        let target = match entry.parent_key.as_ref() {
+            Some(parent) => match actual_ids.get(parent.as_str()) {
+                Some(id) => id.clone(),
+                None => return resume_internal_failure(progress),
+            },
+            None => current.root_id.clone(),
+        };
+        let new = match new_block(&entry.block) {
+            Ok(value) => value,
+            Err(_) => return resume_internal_failure(progress),
+        };
+        let before_polls = rpc.metrics().snapshot().write_polls;
+        let editor = body_editor(&current, client, rpc.clone());
+        let observed_write = observe_body_dispatch(
+            editor.create(new, &target, InsertPosition::LastChild),
+            rpc.metrics(),
+            progress.clone(),
+        );
+        let write_result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => None,
+            result = observed_write => Some(result),
+        };
+        match write_result {
+            Some(Ok(write)) => {
+                let Some(affected) = write.affected.first() else {
+                    let final_hash =
+                        fresh_rich_hash(client, &space_id, &object_id, rpc.clone()).await;
+                    let Some(output) = scheduler.stop(
+                        &space_id,
+                        &object_id,
+                        true,
+                        RichWriteStop::Rejected {
+                            category: RichFailureCategory::Indeterminate,
+                            definitive: false,
+                        },
+                        final_hash,
+                    ) else {
+                        return resume_internal_failure(progress);
+                    };
+                    return finish_resume_output(contract, output, progress);
+                };
+                let projected = match project_snapshot(&write.snapshot) {
+                    Ok(projected) => projected,
+                    Err(_) => {
+                        let final_hash =
+                            fresh_rich_hash(client, &space_id, &object_id, rpc.clone()).await;
+                        let Some(output) = scheduler.stop(
+                            &space_id,
+                            &object_id,
+                            true,
+                            RichWriteStop::Rejected {
+                                category: RichFailureCategory::Indeterminate,
+                                definitive: false,
+                            },
+                            final_hash,
+                        ) else {
+                            return resume_internal_failure(progress);
+                        };
+                        return finish_resume_output(contract, output, progress);
+                    }
+                };
+                let block_id = match EntityId::new(affected.block_id.as_str()) {
+                    Ok(block_id) => block_id,
+                    Err(_) => {
+                        let final_hash =
+                            fresh_rich_hash(client, &space_id, &object_id, rpc.clone()).await;
+                        let Some(output) = scheduler.stop(
+                            &space_id,
+                            &object_id,
+                            true,
+                            RichWriteStop::Rejected {
+                                category: RichFailureCategory::Indeterminate,
+                                definitive: false,
+                            },
+                            final_hash,
+                        ) else {
+                            return resume_internal_failure(progress);
+                        };
+                        return finish_resume_output(contract, output, progress);
+                    }
+                };
+                actual_ids.insert(
+                    entry.local_key.as_str().to_owned(),
+                    affected.block_id.clone(),
+                );
+                if !scheduler.record_verified(RichApplied {
+                    index: rich_index(index),
+                    local_key: entry.local_key.clone(),
+                    block_id,
+                    snapshot_hash: projected.hash,
+                }) {
+                    return resume_internal_failure(progress);
+                }
+                current = write.snapshot;
+            }
+            Some(Err(error)) => {
+                let polled = rpc.metrics().snapshot().write_polls > before_polls;
+                let definitive = polled && mutation_rejection_is_definitive(&error);
+                let final_hash = fresh_rich_hash(client, &space_id, &object_id, rpc.clone()).await;
+                let Some(output) = scheduler.stop(
+                    &space_id,
+                    &object_id,
+                    polled,
+                    RichWriteStop::Rejected {
+                        category: rich_category(&error),
+                        definitive,
+                    },
+                    final_hash,
+                ) else {
+                    return resume_internal_failure(progress);
+                };
+                return finish_resume_output(contract, output, progress);
+            }
+            None => {
+                let polled = rpc.metrics().snapshot().write_polls > before_polls;
+                let Some(output) = scheduler.stop(
+                    &space_id,
+                    &object_id,
+                    polled,
+                    RichWriteStop::Cancelled,
+                    None,
+                ) else {
+                    return resume_internal_failure(progress);
+                };
+                return finish_resume_output(contract, output, progress);
+            }
+        }
+    }
+    let Some(applied) = scheduler.into_applied() else {
+        return resume_internal_failure(progress);
+    };
+    let final_projected = match project_snapshot(&current) {
+        Ok(projected) => projected,
+        Err(_) => {
+            let final_hash = fresh_rich_hash(client, &space_id, &object_id, rpc.clone()).await;
+            let output = rich_postwrite_failure(
+                &space_id,
+                &object_id,
+                input.blocks.len().saturating_sub(1),
+                input.blocks.len(),
+                applied,
+                final_hash,
+            );
+            return finish_resume_output(contract, output, progress);
+        }
+    };
+    let verified = verified_rich_relative_prefix_len(input, &applied, &final_projected);
+    if verified != applied.len() {
+        let output = rich_final_drift_failure(
+            &space_id,
+            &object_id,
+            verified,
+            applied,
+            final_projected.hash,
+        );
+        return finish_resume_output(contract, output, progress);
+    }
+    let output = RichPageCreateOutput {
+        status: RichStatus::Complete,
+        space_id,
+        object_id,
+        applied,
+        failed: None,
+        not_attempted: Vec::new(),
+        final_snapshot_hash: Some(final_projected.hash),
+        idempotency: IdempotencyProjection {
+            key_reused: false,
+            scope: "process",
+        },
+    };
+    let result = finish_rich_result(contract, output, CreateDisposition::Verified).result;
+    ResumeExecution::Superseded(result)
+}
+
+fn finish_resume_output(
+    contract: &WorkflowTool<RichPageCreateOutput>,
+    output: RichPageCreateOutput,
+    progress: &MutationProgress,
+) -> ResumeExecution {
+    let indeterminate = output.status == RichStatus::Indeterminate;
+    let result = finish_rich_result(contract, output, CreateDisposition::Terminal).result;
+    if indeterminate {
+        ResumeExecution::Indeterminate(result)
+    } else if progress.stage() == crate::handler_support::MutationStage::Dispatched {
+        ResumeExecution::Superseded(result)
+    } else {
+        ResumeExecution::BeforeWritePoll(result)
+    }
+}
+
+fn resume_internal_failure(progress: &MutationProgress) -> ResumeExecution {
+    if progress.stage() == crate::handler_support::MutationStage::PreDispatch {
+        ResumeExecution::BeforeWritePoll(tool_error(&ToolError::conflict()))
+    } else {
+        ResumeExecution::Indeterminate(tool_error(&ToolError::mutation_indeterminate()))
     }
 }
 
@@ -6585,7 +7301,7 @@ async fn execute_rich_create(
         },
         result = client.resolve_type(space_id.as_str(), "page") => result,
     } {
-        Ok(typ) if typ.key == "page" => typ,
+        Ok(typ) if typ.key == "page" && !typ.archived => typ,
         Ok(_) => {
             return CreateExecution::new(
                 tool_error(&ToolError::upstream()),
@@ -6681,11 +7397,13 @@ async fn execute_rich_create(
             );
         }
     };
-    if verified.id != object_id.as_str()
-        || verified.space_id != space_id.as_str()
-        || verified.name.as_deref() != Some(input.name.as_str())
-        || verified.r#type.as_ref().map(|value| value.key.as_str()) != Some("page")
-    {
+    if !rich_page_object_matches(
+        &verified,
+        space_id.as_str(),
+        object_id.as_str(),
+        input.name.as_str(),
+        &typ.id,
+    ) {
         return CreateExecution::new(
             tool_error(&ToolError::conflict()),
             CreateDisposition::Indeterminate,
@@ -6734,7 +7452,7 @@ async fn execute_rich_create(
         }
     };
     attempt
-        .record_replay_witness(ReplayWitness::RichRootAppendIndex(root_append_baseline))
+        .record_replay_witness(ReplayWitness::RootAppendIndex(root_append_baseline))
         .await;
     let mut current = initial;
     let mut scheduler = RichScheduler::new(plan.entries.len());
@@ -7223,6 +7941,27 @@ impl RichScheduler {
         (!self.terminal && self.next_index < self.total).then_some(self.next_index)
     }
 
+    fn with_prefix(total: usize, applied: Vec<RichApplied>) -> Option<Self> {
+        if applied.len() >= total
+            || applied
+                .iter()
+                .enumerate()
+                .any(|(index, receipt)| usize::from(receipt.index) != index)
+        {
+            return None;
+        }
+        Some(Self {
+            total,
+            next_index: applied.len(),
+            applied,
+            terminal: false,
+        })
+    }
+
+    fn applied(&self) -> &[RichApplied] {
+        &self.applied
+    }
+
     fn record_verified(&mut self, receipt: RichApplied) -> bool {
         if self.next_write_index() != Some(usize::from(receipt.index)) {
             return false;
@@ -7403,20 +8142,22 @@ mod tests {
         server::AnyMcpServer,
     };
 
-    const BODY_NAMES: [&str; 6] = [
+    const BODY_NAMES: [&str; 7] = [
         BODY_BLOCK_CREATE,
         BODY_BLOCK_DELETE,
         BODY_BLOCK_LIST,
         BODY_BLOCK_MOVE,
         BODY_BLOCK_UPDATE,
         RICH_PAGE_CREATE,
+        RICH_PAGE_RESUME,
     ];
-    const MUTATION_NAMES: [&str; 5] = [
+    const MUTATION_NAMES: [&str; 6] = [
         BODY_BLOCK_CREATE,
         BODY_BLOCK_UPDATE,
         BODY_BLOCK_DELETE,
         BODY_BLOCK_MOVE,
         RICH_PAGE_CREATE,
+        RICH_PAGE_RESUME,
     ];
     const TOKEN_BUDGET_SNAPSHOT: &str =
         include_str!("../tests/snapshots/body-blocks-token-budget.json");
@@ -7773,6 +8514,276 @@ mod tests {
             &deleted,
             Some(2)
         ));
+    }
+
+    fn rich_result(output: RichPageCreateOutput) -> CallToolResult {
+        CallToolResult::structured(serde_json::to_value(output).expect("rich output JSON"))
+    }
+
+    #[test]
+    fn resume_receipt_shape_admits_only_exact_never_attempted_suffix() {
+        let input = parse_rich(vec![
+            entry("a", None, text_block("A")),
+            entry("b", None, text_block("B")),
+            entry("c", None, text_block("C")),
+        ]);
+        let space = EntityId::new("space").expect("space");
+        let object = EntityId::new("object").expect("object");
+        let untouched = rich_result(rich_local_failure(
+            &space,
+            &object,
+            1,
+            input.blocks.len(),
+            vec![rich_applied(0, "a", "a_id")],
+            RichFailureCategory::Upstream,
+            None,
+        ));
+        let decoded = resumable_rich_receipt(&untouched, &input).expect("resumable suffix");
+        assert_eq!(decoded.failed_index, 1);
+        assert_eq!(decoded.applied.len(), 1);
+
+        let recovered_entry_zero = rich_result(rich_recovered_failure(
+            &space,
+            &object,
+            input.blocks.len(),
+            Some(SnapshotHash::new("a".repeat(64)).expect("hash")),
+            RichFailureCategory::Conflict,
+        ));
+        assert_eq!(
+            resumable_rich_receipt(&recovered_entry_zero, &input)
+                .expect("recovered candidate")
+                .failed_index,
+            0
+        );
+
+        let attempted = rich_result(rich_attempted_rejection(
+            &space,
+            &object,
+            1,
+            input.blocks.len(),
+            vec![rich_applied(0, "a", "a_id")],
+            RichFailureCategory::Validation,
+            None,
+        ));
+        assert!(resumable_rich_receipt(&attempted, &input).is_err());
+        let indeterminate = rich_result(rich_postwrite_failure(
+            &space,
+            &object,
+            1,
+            input.blocks.len(),
+            vec![rich_applied(0, "a", "a_id")],
+            None,
+        ));
+        assert!(resumable_rich_receipt(&indeterminate, &input).is_err());
+
+        let mut malformed = untouched.clone();
+        malformed.structured_content.as_mut().expect("content")["not_attempted"] = json!([2, 1]);
+        assert!(resumable_rich_receipt(&malformed, &input).is_err());
+        let mut wrong_key = untouched;
+        wrong_key.structured_content.as_mut().expect("content")["applied"][0]["local_key"] =
+            json!("wrong");
+        assert!(resumable_rich_receipt(&wrong_key, &input).is_err());
+    }
+
+    #[test]
+    fn resumed_relative_prefix_accepts_foreign_siblings_but_not_authored_drift() {
+        let input = parse_rich(vec![
+            entry("a", None, text_block("A")),
+            entry("b", None, text_block("B")),
+            entry("child", Some("a"), text_block("Child")),
+        ]);
+        let applied = vec![
+            rich_applied(0, "a", "a_id"),
+            rich_applied(1, "b", "b_id"),
+            rich_applied(2, "child", "child_id"),
+        ];
+        let interleaved = projected(vec![
+            summary("root", None, 0, 0, 4, projected_text("root")),
+            summary(
+                "foreign_before",
+                Some("root"),
+                0,
+                1,
+                0,
+                projected_text("foreign"),
+            ),
+            summary("a_id", Some("root"), 1, 1, 2, projected_text("A")),
+            summary(
+                "foreign_child",
+                Some("a_id"),
+                0,
+                2,
+                0,
+                projected_text("foreign"),
+            ),
+            summary("child_id", Some("a_id"), 1, 2, 0, projected_text("Child")),
+            summary(
+                "foreign_between",
+                Some("root"),
+                2,
+                1,
+                0,
+                projected_text("foreign"),
+            ),
+            summary("b_id", Some("root"), 3, 1, 0, projected_text("B")),
+        ]);
+        assert_eq!(
+            verified_rich_relative_prefix_len(&input, &applied, &interleaved),
+            applied.len()
+        );
+        assert!(verified_rich_prefix_len(&input, &applied, &interleaved, Some(0)) < applied.len());
+
+        let mut edited = interleaved.clone();
+        edited
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "a_id")
+            .expect("authored block")
+            .content = projected_text("edited");
+        assert_eq!(
+            verified_rich_relative_prefix_len(&input, &applied, &edited),
+            0
+        );
+        let mut moved = interleaved.clone();
+        moved
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "child_id")
+            .expect("authored child")
+            .parent_id = Some(EntityId::new("root").expect("root"));
+        assert_eq!(
+            verified_rich_relative_prefix_len(&input, &applied, &moved),
+            2
+        );
+        let mut reversed = interleaved;
+        reversed
+            .items
+            .iter_mut()
+            .find(|block| block.id.as_str() == "a_id")
+            .expect("a")
+            .sibling_index = 4;
+        assert_eq!(
+            verified_rich_relative_prefix_len(&input, &applied, &reversed),
+            1
+        );
+    }
+
+    #[test]
+    fn resume_scheduler_seeds_exact_prefix_and_preserves_budget() {
+        let prefix = (0..7)
+            .map(|index| {
+                rich_applied(
+                    rich_index(index),
+                    &format!("local_{index}"),
+                    &format!("block_{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut interrupted =
+            RichScheduler::with_prefix(MAX_RICH_OPS, prefix.clone()).expect("seeded");
+        for index in 7..9 {
+            assert!(interrupted.record_verified(rich_applied(
+                rich_index(index),
+                &format!("local_{index}"),
+                &format!("block_{index}"),
+            )));
+        }
+        let interrupted = interrupted
+            .stop(
+                &EntityId::new("space").expect("space"),
+                &EntityId::new("object").expect("object"),
+                true,
+                RichWriteStop::Cancelled,
+                None,
+            )
+            .expect("stopped suffix");
+        assert_eq!(interrupted.status, RichStatus::Indeterminate);
+        assert_eq!(interrupted.applied.len(), 9);
+        assert_eq!(
+            interrupted.not_attempted,
+            (10..MAX_RICH_OPS).map(rich_index).collect::<Vec<_>>()
+        );
+
+        let mut scheduler = RichScheduler::with_prefix(MAX_RICH_OPS, prefix).expect("seeded");
+        assert_eq!(scheduler.next_write_index(), Some(7));
+        for index in 7..MAX_RICH_OPS {
+            assert!(scheduler.record_verified(rich_applied(
+                rich_index(index),
+                &format!("local_{index}"),
+                &format!("block_{index}"),
+            )));
+        }
+        assert_eq!(scheduler.into_applied().map(|value| value.len()), Some(16));
+        assert!(RichScheduler::with_prefix(2, vec![rich_applied(1, "wrong", "block")],).is_none());
+    }
+
+    #[test]
+    fn rich_recovery_identity_binds_active_page_and_original_type_id() {
+        let valid: anytype::objects::Object = serde_json::from_value(json!({
+            "archived":false,
+            "id":"object",
+            "name":"Page",
+            "space_id":"space",
+            "type":{
+                "archived":false,
+                "id":"page-type-one",
+                "key":"page"
+            }
+        }))
+        .expect("page object");
+        assert!(rich_page_object_matches(
+            &valid,
+            "space",
+            "object",
+            "Page",
+            "page-type-one"
+        ));
+
+        let mut archived_page = valid.clone();
+        archived_page.archived = true;
+        assert!(!rich_page_object_matches(
+            &archived_page,
+            "space",
+            "object",
+            "Page",
+            "page-type-one"
+        ));
+        let mut archived_type_on_page = valid.clone();
+        archived_type_on_page
+            .r#type
+            .as_mut()
+            .expect("type")
+            .archived = true;
+        assert!(!rich_page_object_matches(
+            &archived_type_on_page,
+            "space",
+            "object",
+            "Page",
+            "page-type-one"
+        ));
+        let mut replacement_type_on_page = valid;
+        replacement_type_on_page.r#type.as_mut().expect("type").id = "page-type-two".to_owned();
+        assert!(!rich_page_object_matches(
+            &replacement_type_on_page,
+            "space",
+            "object",
+            "Page",
+            "page-type-one"
+        ));
+
+        let active_type: anytype::types::Type = serde_json::from_value(json!({
+            "archived":false,
+            "id":"page-type-one",
+            "key":"page"
+        }))
+        .expect("page type");
+        assert!(rich_page_type_matches(&active_type, "page-type-one"));
+        let mut archived_type = active_type.clone();
+        archived_type.archived = true;
+        assert!(!rich_page_type_matches(&archived_type, "page-type-one"));
+        let mut replacement_type = active_type;
+        replacement_type.id = "page-type-two".to_owned();
+        assert!(!rich_page_type_matches(&replacement_type, "page-type-one"));
     }
 
     fn canonical(value: Value) -> String {
@@ -11274,6 +12285,7 @@ mod tests {
         delete_tool().expect("delete schema");
         move_tool().expect("move schema");
         rich_create_tool().expect("rich create schema");
+        rich_resume_tool().expect("rich resume schema");
         assert_eq!(
             BODY_BLOCKS_REGISTRY.metadata(),
             OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME, true)
@@ -11342,6 +12354,82 @@ mod tests {
                     Some("validation")
                 );
             }
+        });
+    }
+
+    #[test]
+    fn resume_missing_and_ineligible_receipts_refuse_without_io() {
+        run_large_future(|| async {
+            let runtime = runtime(
+                Some(BODY_BLOCKS_TOOLSET_NAME),
+                ApplicationProfile::Compact,
+                false,
+            );
+            let handlers = BodyHandlers::new().expect("body handlers");
+            let input = parse_rich(vec![entry("a", None, text_block("A"))]);
+            let before_http = runtime.client().http_metrics();
+            let before_rpc = handlers.rpc_metrics.snapshot();
+            let missing = handlers
+                .rich_resume(&runtime, input.clone(), &CancellationToken::new())
+                .await;
+            assert_eq!(
+                missing
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("code"))
+                    .and_then(Value::as_str),
+                Some("conflict")
+            );
+            assert_eq!(runtime.client().http_metrics(), before_http);
+            assert_eq!(handlers.rpc_metrics.snapshot(), before_rpc);
+
+            let fingerprint = rich_fingerprint(&input, "space");
+            let key = input.idempotency_key.clone();
+            let BeginAttempt::Lead(attempt) =
+                handlers.rich_creates.begin(key.clone(), fingerprint).await
+            else {
+                panic!("seed rich receipt");
+            };
+            attempt
+                .record_replay_witness(ReplayWitness::RootAppendIndex(0))
+                .await;
+            attempt
+                .record_rich_page_type_id("page-type".to_owned())
+                .await;
+            let complete = RichPageCreateOutput {
+                status: RichStatus::Complete,
+                space_id: EntityId::new("space").expect("space"),
+                object_id: EntityId::new("object").expect("object"),
+                applied: vec![rich_applied(0, "a", "a_id")],
+                failed: None,
+                not_attempted: Vec::new(),
+                final_snapshot_hash: Some(SnapshotHash::new("a".repeat(64)).expect("hash")),
+                idempotency: IdempotencyProjection {
+                    key_reused: false,
+                    scope: "process",
+                },
+            };
+            handlers
+                .rich_creates
+                .finish(
+                    &key,
+                    &attempt,
+                    CreateExecution::new(rich_result(complete), CreateDisposition::Verified),
+                )
+                .await;
+            let ineligible = handlers
+                .rich_resume(&runtime, input, &CancellationToken::new())
+                .await;
+            assert_eq!(
+                ineligible
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("code"))
+                    .and_then(Value::as_str),
+                Some("conflict")
+            );
+            assert_eq!(runtime.client().http_metrics(), before_http);
+            assert_eq!(handlers.rpc_metrics.snapshot(), before_rpc);
         });
     }
 
@@ -11911,6 +12999,9 @@ mod tests {
                     BeginAttempt::Lead(attempt) => attempt,
                     _ => panic!("recovery original must lead"),
                 };
+                attempt
+                    .record_rich_page_type_id("page-type".to_owned())
+                    .await;
                 let candidate = attempt
                     .record_pending_candidate("space".to_owned(), format!("object-{ordinal}"))
                     .await;
@@ -11983,6 +13074,9 @@ mod tests {
                 BeginAttempt::Lead(attempt) => attempt,
                 _ => panic!("hash recovery original must lead"),
             };
+            attempt
+                .record_rich_page_type_id("page-type".to_owned())
+                .await;
             let candidate = attempt
                 .record_pending_candidate("space".to_owned(), "object-hash".to_owned())
                 .await;

@@ -138,9 +138,9 @@ pub(crate) struct Attempt {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReplayWitness {
-    RichRootAppendIndex(u64),
-    RichRecoveredCandidate,
-    RichResumedRelative,
+    RootAppendIndex(u64),
+    RecoveredCandidate,
+    ResumedRelative,
 }
 
 /// Private replay metadata retained with one rich-page receipt.
@@ -200,7 +200,7 @@ pub(crate) struct CachedRichReceipt {
 /// A token-matched terminal reduction for one recovery attempt.
 pub(crate) enum ResumeFinish {
     /// Closes eligibility and restores the prior receipt because no write polled.
-    BeforeWritePoll,
+    BeforeWritePoll(CallToolResult),
     /// Records that a suffix write may have applied.
     Indeterminate(CallToolResult),
     /// Replaces the prior receipt with a receipt proved under relative replay.
@@ -224,7 +224,8 @@ impl Attempt {
         space_id: String,
         object_id: String,
     ) -> PendingCandidate {
-        let candidate = PendingCandidate::new(space_id, object_id);
+        let rich_page_type_id = self.rich_page_type_id.lock().await.clone();
+        let candidate = PendingCandidate::new(space_id, object_id, rich_page_type_id);
         *self.pending_candidate.lock().await = Some(candidate.clone());
         candidate
     }
@@ -255,14 +256,16 @@ pub(crate) enum PendingCandidateLookup {
 struct PendingCandidateInner {
     space_id: String,
     object_id: String,
+    rich_page_type_id: Option<String>,
     attempts: AtomicU8,
 }
 
 impl PendingCandidate {
-    fn new(space_id: String, object_id: String) -> Self {
+    fn new(space_id: String, object_id: String, rich_page_type_id: Option<String>) -> Self {
         Self(Arc::new(PendingCandidateInner {
             space_id,
             object_id,
+            rich_page_type_id,
             attempts: AtomicU8::new(0),
         }))
     }
@@ -273,6 +276,10 @@ impl PendingCandidate {
 
     pub(crate) fn object_id(&self) -> &str {
         &self.0.object_id
+    }
+
+    pub(crate) fn rich_page_type_id(&self) -> Option<&str> {
+        self.0.rich_page_type_id.as_deref()
     }
 
     pub(crate) fn claim_get_attempt(&self) -> bool {
@@ -303,6 +310,18 @@ pub(crate) enum BeginAttempt {
     Expired,
 }
 
+/// Rich-create admission that snapshots a cached receipt and its metadata
+/// while holding the cohort lock.
+pub(crate) enum RichBeginAttempt {
+    Lead(Arc<Attempt>),
+    Wait(Arc<Attempt>),
+    Cached(CachedRichReceipt),
+    Indeterminate,
+    Conflict,
+    Full,
+    Expired,
+}
+
 impl IdempotencyStore {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
@@ -322,6 +341,67 @@ impl IdempotencyStore {
         fingerprint: [u8; 32],
     ) -> BeginAttempt {
         self.begin_inner(Some(deadline), key, fingerprint).await
+    }
+
+    /// Admits a rich create and snapshots any cached result with matching
+    /// replay metadata in the same critical section.
+    pub(crate) async fn begin_rich_until(
+        &self,
+        deadline: Instant,
+        key: IdempotencyKey,
+        fingerprint: [u8; 32],
+    ) -> RichBeginAttempt {
+        if Instant::now() >= deadline {
+            return RichBeginAttempt::Expired;
+        }
+        let mut entries = self.entries.lock().await;
+        if Instant::now() >= deadline {
+            return RichBeginAttempt::Expired;
+        }
+        if let Some(entry) = entries.get(&key) {
+            return match entry {
+                StoredAttempt::Running {
+                    fingerprint: saved,
+                    attempt,
+                } if saved == &fingerprint => RichBeginAttempt::Wait(attempt.clone()),
+                StoredAttempt::Complete(complete) if complete.fingerprint == fingerprint => {
+                    RichBeginAttempt::Cached(CachedRichReceipt {
+                        result: complete.result.clone(),
+                        metadata: complete.replay_metadata.clone(),
+                    })
+                }
+                StoredAttempt::ResumeRunning { prior, .. } if prior.fingerprint == fingerprint => {
+                    RichBeginAttempt::Cached(CachedRichReceipt {
+                        result: prior.result.clone(),
+                        metadata: prior.replay_metadata.clone(),
+                    })
+                }
+                StoredAttempt::Indeterminate { fingerprint: saved } if saved == &fingerprint => {
+                    RichBeginAttempt::Indeterminate
+                }
+                StoredAttempt::PendingCandidate {
+                    fingerprint: saved, ..
+                } if saved == &fingerprint => RichBeginAttempt::Indeterminate,
+                _ => RichBeginAttempt::Conflict,
+            };
+        }
+        if self.capacity == 0 || entries.len() >= self.capacity {
+            return RichBeginAttempt::Full;
+        }
+        let attempt = Arc::new(new_attempt(Some(deadline)));
+        entries.insert(
+            key.clone(),
+            StoredAttempt::Running {
+                fingerprint,
+                attempt: attempt.clone(),
+            },
+        );
+        if Instant::now() >= deadline {
+            entries.remove(&key);
+            RichBeginAttempt::Expired
+        } else {
+            RichBeginAttempt::Lead(attempt)
+        }
     }
 
     async fn begin_inner(
@@ -365,16 +445,7 @@ impl IdempotencyStore {
         if self.capacity == 0 || entries.len() >= self.capacity {
             return BeginAttempt::Full;
         }
-        let attempt = Arc::new(Attempt {
-            result: Mutex::new(None),
-            notify: Notify::new(),
-            progress: MutationProgress::new(),
-            deadline,
-            pending_candidate: Mutex::new(None),
-            replay_witness: Mutex::new(None),
-            rich_page_type_id: Mutex::new(None),
-            leader_cancellation: CancellationToken::new(),
-        });
+        let attempt = Arc::new(new_attempt(deadline));
         entries.insert(
             key.clone(),
             StoredAttempt::Running {
@@ -442,25 +513,13 @@ impl IdempotencyStore {
         attempt.notify.notify_waiters();
     }
 
+    #[cfg(test)]
     pub(crate) async fn complete_pending_candidate(
         &self,
         key: &IdempotencyKey,
         fingerprint: [u8; 32],
         candidate: &PendingCandidate,
         result: CallToolResult,
-    ) -> bool {
-        self.complete_pending_candidate_with_metadata(key, fingerprint, candidate, result, None)
-            .await
-    }
-
-    /// Replaces a proven pending page candidate with a rich receipt.
-    pub(crate) async fn complete_pending_candidate_with_metadata(
-        &self,
-        key: &IdempotencyKey,
-        fingerprint: [u8; 32],
-        candidate: &PendingCandidate,
-        result: CallToolResult,
-        metadata: Option<RichReceiptMetadata>,
     ) -> bool {
         let mut entries = self.entries.lock().await;
         let matches = entries.get(key).is_some_and(|entry| {
@@ -469,7 +528,9 @@ impl IdempotencyStore {
                 StoredAttempt::PendingCandidate {
                     fingerprint: saved,
                     candidate: saved_candidate,
-                } if saved == &fingerprint && saved_candidate.same(candidate)
+                } if saved == &fingerprint
+                    && saved_candidate.same(candidate)
+                    && saved_candidate.rich_page_type_id().is_none()
             )
         });
         if matches {
@@ -478,12 +539,55 @@ impl IdempotencyStore {
                 StoredAttempt::Complete(CompleteAttempt {
                     fingerprint,
                     result,
-                    replay_metadata: metadata,
+                    replay_metadata: None,
                     resume_consumed: false,
                 }),
             );
         }
         matches
+    }
+
+    /// Replaces a proven pending page candidate using its originally retained
+    /// type identity rather than caller-supplied replay metadata.
+    pub(crate) async fn complete_pending_rich_candidate(
+        &self,
+        key: &IdempotencyKey,
+        fingerprint: [u8; 32],
+        candidate: &PendingCandidate,
+        result: CallToolResult,
+        observed_page_type_id: &str,
+    ) -> bool {
+        if observed_page_type_id.is_empty() {
+            return false;
+        }
+        let mut entries = self.entries.lock().await;
+        let retained_type_id = entries.get(key).and_then(|entry| match entry {
+            StoredAttempt::PendingCandidate {
+                fingerprint: saved,
+                candidate: saved_candidate,
+            } if saved == &fingerprint && saved_candidate.same(candidate) => saved_candidate
+                .rich_page_type_id()
+                .filter(|retained| *retained == observed_page_type_id)
+                .map(str::to_owned),
+            _ => None,
+        });
+        if let Some(page_type_id) = retained_type_id {
+            entries.insert(
+                key.clone(),
+                StoredAttempt::Complete(CompleteAttempt {
+                    fingerprint,
+                    result,
+                    replay_metadata: Some(RichReceiptMetadata {
+                        page_type_id,
+                        replay_witness: ReplayWitness::RecoveredCandidate,
+                    }),
+                    resume_consumed: false,
+                }),
+            );
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) async fn pending_candidate(
@@ -509,6 +613,7 @@ impl IdempotencyStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn replay_witness(
         &self,
         key: &IdempotencyKey,
@@ -534,39 +639,20 @@ impl IdempotencyStore {
         }
     }
 
-    /// Reads a cached rich result and its proof metadata under one lock.
-    pub(crate) async fn cached_rich_receipt(
-        &self,
-        key: &IdempotencyKey,
-        fingerprint: [u8; 32],
-    ) -> Option<CachedRichReceipt> {
-        let entries = self.entries.lock().await;
-        let complete = match entries.get(key) {
-            Some(StoredAttempt::Complete(complete)) if complete.fingerprint == fingerprint => {
-                complete
-            }
-            Some(StoredAttempt::ResumeRunning { prior, .. })
-                if prior.fingerprint == fingerprint =>
-            {
-                prior
-            }
-            _ => return None,
-        };
-        Some(CachedRichReceipt {
-            result: complete.result.clone(),
-            metadata: complete.replay_metadata.clone(),
-        })
-    }
-
     /// Reports whether a retained rich receipt can be claimed without I/O.
-    pub(crate) async fn resume_eligibility(
+    pub(crate) async fn resume_eligibility<F>(
         &self,
         key: &IdempotencyKey,
-    ) -> ResumeEligibilitySnapshot {
+        receipt_shape: F,
+    ) -> ResumeEligibilitySnapshot
+    where
+        F: FnOnce(&CallToolResult) -> bool,
+    {
         let entries = self.entries.lock().await;
         match entries.get(key) {
             Some(StoredAttempt::Complete(complete))
                 if !complete.resume_consumed
+                    && receipt_shape(&complete.result)
                     && complete
                         .replay_metadata
                         .as_ref()
@@ -589,6 +675,7 @@ impl IdempotencyStore {
         &self,
         key: &IdempotencyKey,
         fingerprint: [u8; 32],
+        expected_metadata: &RichReceiptMetadata,
         receipt_shape: F,
     ) -> Result<ResumeClaim, ()>
     where
@@ -600,6 +687,7 @@ impl IdempotencyStore {
         };
         if complete.fingerprint != fingerprint
             || complete.resume_consumed
+            || complete.replay_metadata.as_ref() != Some(expected_metadata)
             || !receipt_shape(&complete.result)
         {
             return Err(());
@@ -607,19 +695,13 @@ impl IdempotencyStore {
         let Some(metadata) = complete.replay_metadata.clone() else {
             return Err(());
         };
+        if metadata.page_type_id.is_empty() {
+            return Err(());
+        }
         let mut prior = complete.clone();
         prior.resume_consumed = true;
         let token = ResumeToken::new();
-        let attempt = Arc::new(Attempt {
-            result: Mutex::new(None),
-            notify: Notify::new(),
-            progress: MutationProgress::new(),
-            deadline: None,
-            pending_candidate: Mutex::new(None),
-            replay_witness: Mutex::new(None),
-            rich_page_type_id: Mutex::new(None),
-            leader_cancellation: CancellationToken::new(),
-        });
+        let attempt = Arc::new(new_attempt(None));
         let claim = ResumeClaim {
             token: token.clone(),
             attempt: attempt.clone(),
@@ -659,7 +741,7 @@ impl IdempotencyStore {
         let mut restored = prior.clone();
         let attempt = attempt.clone();
         let result = match &finish {
-            ResumeFinish::BeforeWritePoll => restored.result.clone(),
+            ResumeFinish::BeforeWritePoll(result) => result.clone(),
             ResumeFinish::Indeterminate(result) => result.clone(),
             ResumeFinish::Superseded { result, metadata } => {
                 restored.result = result.clone();
@@ -676,7 +758,7 @@ impl IdempotencyStore {
                     },
                 );
             }
-            ResumeFinish::BeforeWritePoll | ResumeFinish::Superseded { .. } => {
+            ResumeFinish::BeforeWritePoll(_) | ResumeFinish::Superseded { .. } => {
                 entries.insert(key.clone(), StoredAttempt::Complete(restored));
             }
         }
@@ -692,11 +774,26 @@ fn rich_metadata(
     page_type_id: Option<String>,
 ) -> Option<RichReceiptMetadata> {
     match (replay_witness, page_type_id) {
-        (Some(replay_witness), page_type_id) => Some(RichReceiptMetadata {
-            page_type_id: page_type_id.unwrap_or_default(),
-            replay_witness,
-        }),
+        (Some(replay_witness), Some(page_type_id)) if !page_type_id.is_empty() => {
+            Some(RichReceiptMetadata {
+                page_type_id,
+                replay_witness,
+            })
+        }
         _ => None,
+    }
+}
+
+fn new_attempt(deadline: Option<Instant>) -> Attempt {
+    Attempt {
+        result: Mutex::new(None),
+        notify: Notify::new(),
+        progress: MutationProgress::new(),
+        deadline,
+        pending_candidate: Mutex::new(None),
+        replay_witness: Mutex::new(None),
+        rich_page_type_id: Mutex::new(None),
+        leader_cancellation: CancellationToken::new(),
     }
 }
 
@@ -934,7 +1031,10 @@ mod tests {
             panic!("first call leads");
         };
         attempt
-            .record_replay_witness(ReplayWitness::RichRootAppendIndex(7))
+            .record_replay_witness(ReplayWitness::RootAppendIndex(7))
+            .await;
+        attempt
+            .record_rich_page_type_id("page-type".to_owned())
             .await;
         store
             .finish(
@@ -953,7 +1053,7 @@ mod tests {
         ));
         assert_eq!(
             store.replay_witness(&key, fingerprint).await,
-            Some(ReplayWitness::RichRootAppendIndex(7))
+            Some(ReplayWitness::RootAppendIndex(7))
         );
         assert_eq!(store.replay_witness(&key, [6; 32]).await, None);
     }
@@ -963,7 +1063,7 @@ mod tests {
             panic!("first call leads");
         };
         attempt
-            .record_replay_witness(ReplayWitness::RichRootAppendIndex(0))
+            .record_replay_witness(ReplayWitness::RootAppendIndex(0))
             .await;
         attempt
             .record_rich_page_type_id("page-type".to_owned())
@@ -980,6 +1080,13 @@ mod tests {
             .await;
     }
 
+    fn test_metadata() -> RichReceiptMetadata {
+        RichReceiptMetadata {
+            page_type_id: "page-type".to_owned(),
+            replay_witness: ReplayWitness::RootAppendIndex(0),
+        }
+    }
+
     #[tokio::test]
     async fn resume_claim_is_single_slot_and_create_observes_prior_receipt() {
         let store = IdempotencyStore::new(1);
@@ -988,12 +1095,12 @@ mod tests {
         complete_rich(&store, &key, fingerprint).await;
 
         let claim = store
-            .claim_resume(&key, fingerprint, |_| true)
+            .claim_resume(&key, fingerprint, &test_metadata(), |_| true)
             .await
             .expect("first claim");
         assert!(
             store
-                .claim_resume(&key, fingerprint, |_| true)
+                .claim_resume(&key, fingerprint, &test_metadata(), |_| true)
                 .await
                 .is_err()
         );
@@ -1002,12 +1109,16 @@ mod tests {
             BeginAttempt::Cached(_)
         ));
         assert!(matches!(
-            store.resume_eligibility(&key).await,
+            store.resume_eligibility(&key, |_| true).await,
             ResumeEligibilitySnapshot::Refused
         ));
         assert!(
             store
-                .finish_resume(&key, &claim.token, ResumeFinish::BeforeWritePoll)
+                .finish_resume(
+                    &key,
+                    &claim.token,
+                    ResumeFinish::BeforeWritePoll(tool_error(&ToolError::conflict())),
+                )
                 .await
         );
         assert!(matches!(
@@ -1023,13 +1134,17 @@ mod tests {
         let fingerprint = [10; 32];
         complete_rich(&store, &key, fingerprint).await;
         let claim = store
-            .claim_resume(&key, fingerprint, |_| true)
+            .claim_resume(&key, fingerprint, &test_metadata(), |_| true)
             .await
             .expect("claim");
         let stale = ResumeToken::new();
         assert!(
             !store
-                .finish_resume(&key, &stale, ResumeFinish::BeforeWritePoll)
+                .finish_resume(
+                    &key,
+                    &stale,
+                    ResumeFinish::BeforeWritePoll(tool_error(&ToolError::conflict())),
+                )
                 .await
         );
         assert!(
@@ -1053,18 +1168,225 @@ mod tests {
         let key = key();
         let fingerprint = [11; 32];
         complete_rich(&store, &key, fingerprint).await;
-        assert!(store.claim_resume(&key, [12; 32], |_| true).await.is_err());
         assert!(
             store
-                .claim_resume(&key, fingerprint, |_| false)
+                .claim_resume(&key, [12; 32], &test_metadata(), |_| true)
                 .await
                 .is_err()
         );
         assert!(
             store
-                .claim_resume(&key, fingerprint, |_| true)
+                .claim_resume(&key, fingerprint, &test_metadata(), |_| false)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .claim_resume(&key, fingerprint, &test_metadata(), |_| true)
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn rich_cached_admission_keeps_prior_across_superseding_finish() {
+        let store = IdempotencyStore::new(1);
+        let key = key();
+        let fingerprint = [13; 32];
+        complete_rich(&store, &key, fingerprint).await;
+        let claim = store
+            .claim_resume(&key, fingerprint, &test_metadata(), |_| true)
+            .await
+            .expect("resume claim");
+        let RichBeginAttempt::Cached(observed) = store
+            .begin_rich_until(
+                Instant::now() + std::time::Duration::from_secs(1),
+                key.clone(),
+                fingerprint,
+            )
+            .await
+        else {
+            panic!("cached rich admission");
+        };
+        let superseding = CallToolResult::structured(
+            serde_json::json!({"status":"complete","marker":"superseding"}),
+        );
+        assert!(
+            store
+                .finish_resume(
+                    &key,
+                    &claim.token,
+                    ResumeFinish::Superseded {
+                        result: superseding,
+                        metadata: RichReceiptMetadata {
+                            page_type_id: "page-type".to_owned(),
+                            replay_witness: ReplayWitness::ResumedRelative,
+                        },
+                    },
+                )
+                .await
+        );
+        assert_eq!(
+            observed
+                .result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("partial")
+        );
+        let RichBeginAttempt::Cached(current) = store
+            .begin_rich_until(
+                Instant::now() + std::time::Duration::from_secs(1),
+                key,
+                fingerprint,
+            )
+            .await
+        else {
+            panic!("superseding rich admission");
+        };
+        assert_eq!(
+            current
+                .result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("marker"))
+                .and_then(serde_json::Value::as_str),
+            Some("superseding")
+        );
+    }
+
+    #[tokio::test]
+    async fn rich_cached_admission_keeps_prior_across_indeterminate_finish() {
+        let store = IdempotencyStore::new(1);
+        let key = key();
+        let fingerprint = [14; 32];
+        complete_rich(&store, &key, fingerprint).await;
+        let claim = store
+            .claim_resume(&key, fingerprint, &test_metadata(), |_| true)
+            .await
+            .expect("resume claim");
+        let RichBeginAttempt::Cached(observed) = store
+            .begin_rich_until(
+                Instant::now() + std::time::Duration::from_secs(1),
+                key.clone(),
+                fingerprint,
+            )
+            .await
+        else {
+            panic!("cached rich admission");
+        };
+        assert!(
+            store
+                .finish_resume(
+                    &key,
+                    &claim.token,
+                    ResumeFinish::Indeterminate(tool_error(&ToolError::mutation_indeterminate(),)),
+                )
+                .await
+        );
+        assert_eq!(
+            observed
+                .result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("partial")
+        );
+        assert!(matches!(
+            store
+                .begin_rich_until(
+                    Instant::now() + std::time::Duration::from_secs(1),
+                    key,
+                    fingerprint,
+                )
+                .await,
+            RichBeginAttempt::Indeterminate
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_rich_candidate_cannot_rebind_page_type() {
+        let store = IdempotencyStore::new(1);
+        let key = key();
+        let fingerprint = [15; 32];
+        let BeginAttempt::Lead(attempt) = store.begin(key.clone(), fingerprint).await else {
+            panic!("first call leads");
+        };
+        attempt
+            .record_rich_page_type_id("page-type-one".to_owned())
+            .await;
+        let candidate = attempt
+            .record_pending_candidate("space".to_owned(), "object".to_owned())
+            .await;
+        store
+            .finish(
+                &key,
+                &attempt,
+                CreateExecution::new(
+                    tool_error(&ToolError::conflict()),
+                    CreateDisposition::Indeterminate,
+                ),
+            )
+            .await;
+        let receipt = CallToolResult::structured(serde_json::json!({"status":"partial"}));
+        assert!(
+            !store
+                .complete_pending_rich_candidate(
+                    &key,
+                    fingerprint,
+                    &candidate,
+                    receipt.clone(),
+                    "page-type-two",
+                )
+                .await
+        );
+        assert!(
+            !store
+                .complete_pending_candidate(&key, fingerprint, &candidate, receipt.clone())
+                .await
+        );
+        assert!(
+            store
+                .complete_pending_rich_candidate(
+                    &key,
+                    fingerprint,
+                    &candidate,
+                    receipt,
+                    "page-type-one",
+                )
+                .await
+        );
+        let RichBeginAttempt::Cached(cached) = store
+            .begin_rich_until(
+                Instant::now() + std::time::Duration::from_secs(1),
+                key,
+                fingerprint,
+            )
+            .await
+        else {
+            panic!("recovered candidate cached");
+        };
+        assert_eq!(
+            cached.metadata.map(|metadata| metadata.page_type_id),
+            Some("page-type-one".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_resume_eligibility_applies_receipt_shape_before_admission() {
+        let store = IdempotencyStore::new(1);
+        let key = key();
+        let fingerprint = [16; 32];
+        complete_rich(&store, &key, fingerprint).await;
+        assert!(matches!(
+            store.resume_eligibility(&key, |_| false).await,
+            ResumeEligibilitySnapshot::Refused
+        ));
+        assert!(matches!(
+            store.resume_eligibility(&key, |_| true).await,
+            ResumeEligibilitySnapshot::Eligible { .. }
+        ));
     }
 }
