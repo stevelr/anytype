@@ -1,9 +1,23 @@
 """Run exactly the manifest-pinned Python CLI cases for the protected gate."""
 
+import argparse
+import os
 import sys
 import unittest
+from pathlib import Path
 
 from anyr.tests.live_gate_policy import PYTHON_TEST_IDS
+
+
+FAILURE_CATEGORIES = frozenset(
+    {
+        "inventory-invalid",
+        "create-ambiguous",
+        "identity-mismatch",
+        "cleanup-failed",
+        "required-test-failed",
+    }
+)
 
 
 def classify_failure_diagnostics(diagnostics: str) -> str:
@@ -32,6 +46,26 @@ def fixed_failure_message(diagnostics: str) -> str:
     )
 
 
+def write_failure_category(category_file: Path, category: str) -> None:
+    """Atomically write one allowlisted failure category with private permissions."""
+    if category not in FAILURE_CATEGORIES or not category_file.is_absolute():
+        raise RuntimeError("required anyr Python category destination is invalid")
+    temporary = category_file.with_name(f".{category_file.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(f"{category}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, category_file)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _flatten(suite: unittest.TestSuite):
     for item in suite:
         if isinstance(item, unittest.TestSuite):
@@ -54,19 +88,32 @@ def required_suite() -> unittest.TestSuite:
     return suite
 
 
+def parse_arguments() -> argparse.Namespace:
+    """Parse the protected workflow's private category destination."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--category-file", required=True, type=Path)
+    return parser.parse_args()
+
+
+def fail(category_file: Path, diagnostics: str) -> None:
+    """Persist a safe category while leaving all unittest details private."""
+    category = classify_failure_diagnostics(diagnostics)
+    write_failure_category(category_file, category)
+    print(fixed_failure_message(diagnostics), file=sys.stderr)
+    raise SystemExit(1)
+
+
 def main() -> None:
+    arguments = parse_arguments()
     try:
         suite = required_suite()
     except RuntimeError:
-        print("required anyr Python test manifest is invalid", file=sys.stderr)
-        raise SystemExit(1) from None
+        fail(arguments.category_file, "")
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if result.testsRun != len(PYTHON_TEST_IDS) or result.skipped:
-        print(fixed_failure_message(""), file=sys.stderr)
-        raise SystemExit(1)
+        fail(arguments.category_file, "")
     if not result.wasSuccessful():
-        print(fixed_failure_message(failure_diagnostics(result)), file=sys.stderr)
-        raise SystemExit(1)
+        fail(arguments.category_file, failure_diagnostics(result))
 
 
 if __name__ == "__main__":

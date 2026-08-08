@@ -98,19 +98,31 @@ jobs:
           [[ "${ANYR_BIN#/}" != "$ANYR_BIN" ]] || fail_preflight "installed anyr path must be absolute"
           [[ -x "$ANYR_BIN" ]] || fail_preflight "installed anyr binary is missing"
 
-          run_required_live_gate() {
-            local output="$gate_dir/gate-$1.log"
-            shift
+          run_required_python_gate() {
+            local output="$gate_dir/gate-python-cli.log"
+            local category_file="$gate_dir/gate-python-cli.category"
             set +e
-            "$@" >"$output" 2>&1
+            env ANYR_PY_REQUIRE_LIVE=1 python3 anyr/tests/run_required_python_cli.py \
+              --category-file "$category_file" >"$output" 2>&1
             local status=$?
             set -e
             if [[ "$status" -ne 0 ]] || ! python3 anyr/tests/live_gate_policy.py python "$output"; then
-              rm -f -- "$output"
-              printf '%s\n' "required anyr live gate failed" >&2
+              local category="required-test-failed"
+              if [[ -f "$category_file" && ! -L "$category_file" ]] && \
+                [[ "$(stat -c '%u' -- "$category_file")" == "$(id -u)" ]] && \
+                [[ "$(stat -c '%a' -- "$category_file")" == "600" ]] && \
+                [[ "$(stat -c '%s' -- "$category_file")" -le 64 ]]; then
+                category="$(<"$category_file")"
+                case "$category" in
+                  inventory-invalid|create-ambiguous|identity-mismatch|cleanup-failed|required-test-failed) ;;
+                  *) category="required-test-failed" ;;
+                esac
+              fi
+              rm -f -- "$output" "$category_file"
+              printf 'required anyr live gate failed: %s\n' "$category" >&2
               return 1
             fi
-            rm -f -- "$output"
+            rm -f -- "$output" "$category_file"
           }
           run_required_type_property_gate() {
             local output="$gate_dir/gate-type-property.log"
@@ -127,8 +139,7 @@ jobs:
             rm -f -- "$output"
           }
           run_required_type_property_gate
-          run_required_live_gate python-cli env ANYR_PY_REQUIRE_LIVE=1 \
-            python3 anyr/tests/run_required_python_cli.py
+          run_required_python_gate
 
           marker="$gate_dir/callback.marker"
           expected_marker="$gate_dir/callback.expected"

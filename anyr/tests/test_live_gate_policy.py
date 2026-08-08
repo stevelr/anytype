@@ -1,13 +1,18 @@
 import os
+import stat
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from anyr.tests import cli_commands
 from anyr.tests.live_gate_policy import PYTHON_TEST_IDS, python_ok, rust_ok
 from anyr.tests.run_required_python_cli import (
+    FAILURE_CATEGORIES,
     classify_failure_diagnostics,
     fixed_failure_message,
     required_suite,
+    write_failure_category,
 )
 
 
@@ -55,6 +60,18 @@ class LiveGatePolicyTests(unittest.TestCase):
             message, "required anyr Python gate failed: required-test-failed"
         )
         self.assertNotIn("secret", message)
+
+    def test_category_files_surface_only_allowlisted_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for category in FAILURE_CATEGORIES:
+                category_file = Path(directory, f"{category}.category")
+                write_failure_category(category_file, category)
+                self.assertEqual(
+                    category_file.read_text(encoding="ascii"), f"{category}\n"
+                )
+                self.assertEqual(stat.S_IMODE(category_file.stat().st_mode), 0o600)
+        with self.assertRaisesRegex(RuntimeError, "destination"):
+            write_failure_category(Path("relative.category"), "token=secret")
 
     def test_python_test_manifest_matches_loader(self):
         classes = [
