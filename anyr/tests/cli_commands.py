@@ -112,6 +112,32 @@ def wait_for_space_absence(
         time.sleep(1)
 
 
+def create_owned_space(space_name: str) -> str:
+    """Create a new exact-name space and prove that its returned ID is owned."""
+    before = run_anyr_json("space", "list", "--limit", "200").get("items", [])
+    before_ids = {item.get("id") for item in before if isinstance(item, dict)}
+    try:
+        candidate = run_anyr_json("space", "create", space_name).get("id")
+    except AssertionError:
+        after = run_anyr_json("space", "list", "--limit", "200").get("items", [])
+        candidates = [
+            item
+            for item in after
+            if isinstance(item, dict)
+            and item.get("name") == space_name
+            and item.get("id") not in before_ids
+        ]
+        if len(candidates) != 1:
+            raise AssertionError("disposable space create ownership is ambiguous")
+        candidate = candidates[0].get("id")
+    if not isinstance(candidate, str) or not candidate or candidate in before_ids:
+        raise AssertionError("disposable space create did not return a new id")
+    fresh = run_anyr_json("space", "get", candidate)
+    if fresh.get("id") != candidate or fresh.get("name") != space_name:
+        raise AssertionError("disposable space create identity mismatch")
+    return candidate
+
+
 class TestDisposableSpaceCleanup(unittest.TestCase):
     @staticmethod
     def get_result(stderr: str, returncode: int = 1) -> subprocess.CompletedProcess:
@@ -158,6 +184,49 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
             self.assertRaisesRegex(AssertionError, "Anytype API error 500"),
         ):
             wait_for_space_absence("owned-space", "space-id", timeout_seconds=0)
+
+    def test_create_owned_space_rejects_ambient_id_and_accepts_exact_identity(
+        self,
+    ) -> None:
+        with mock.patch(
+            __name__ + ".run_anyr_json",
+            side_effect=[
+                {"items": [{"id": "ambient", "name": "old"}]},
+                {"id": "new"},
+                {"id": "new", "name": "owned"},
+            ],
+        ):
+            self.assertEqual(create_owned_space("owned"), "new")
+        with (
+            mock.patch(
+                __name__ + ".run_anyr_json",
+                side_effect=[
+                    {"items": [{"id": "ambient", "name": "owned"}]},
+                    {"id": "ambient"},
+                ],
+            ),
+            self.assertRaisesRegex(AssertionError, "new id"),
+        ):
+            create_owned_space("owned")
+
+    def test_create_owned_space_reconciliation_refuses_ambiguity(self) -> None:
+        with (
+            mock.patch(
+                __name__ + ".run_anyr_json",
+                side_effect=[
+                    {"items": []},
+                    AssertionError("indeterminate"),
+                    {
+                        "items": [
+                            {"id": "one", "name": "owned"},
+                            {"id": "two", "name": "owned"},
+                        ]
+                    },
+                ],
+            ),
+            self.assertRaisesRegex(AssertionError, "ambiguous"),
+        ):
+            create_owned_space("owned")
 
 
 class TestAnyrCommands(unittest.TestCase):
@@ -274,9 +343,7 @@ class TestAnyrCommands(unittest.TestCase):
     @contextlib.contextmanager
     def disposable_deletion_space(self, label: str):
         space_name = f"{self.space_prefix}-{label}-{os.getpid()}-{time.time_ns()}"
-        created = run_anyr_json("space", "create", space_name)
-        space_id = created.get("id")
-        self.assertIsInstance(space_id, str, "space create missing id")
+        space_id = create_owned_space(space_name)
         state = {"name": space_name, "id": space_id, "deleted": False}
         try:
             yield state
@@ -459,9 +526,7 @@ class TestAnyrCommands(unittest.TestCase):
         removed with it and no ambient space is mutated.
         """
         space_name = f"{self.space_prefix}-{label}-{int(time.time() * 1000)}"
-        created = run_anyr_json("space", "create", space_name)
-        space_id = created.get("id")
-        self.assertIsInstance(space_id, str, "space create missing id")
+        space_id = create_owned_space(space_name)
         try:
             yield space_id
         finally:
@@ -710,9 +775,7 @@ class TestAnyrCommands(unittest.TestCase):
         space_name = (
             f"{self.space_prefix}-real-operations-{os.getpid()}-{time.time_ns()}"
         )
-        space = run_anyr_json("space", "create", space_name)
-        space_id = space.get("id")
-        self.assertIsInstance(space_id, str, "real-operations space create missing id")
+        space_id = create_owned_space(space_name)
         suffix = str(int(time.time() * 1000))
         type_key = f"cli_test_type_{suffix}"
         type_name = f"CLI Test Type {suffix}"
