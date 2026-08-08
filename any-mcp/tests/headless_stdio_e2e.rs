@@ -6258,26 +6258,30 @@ async fn run_spawned_artifact_adversarial_default(
         sentinel_assertion("spawned adversarial artifact scenarios failed")
     })?;
     if control == ArtifactControlPlane::SpawnedStableStdio {
-        execution.merge(
-            run_spawned_artifact_gated_race(
-                ctx,
-                Arc::new(Mutex::new(ChildCleanupRecord::NotStarted)),
-                audit_needles,
-                "import-first-upload-chunk",
-                AdversarialCaseId::Race01,
+        execution
+            .merge(
+                run_spawned_artifact_gated_race(
+                    ctx,
+                    Arc::new(Mutex::new(ChildCleanupRecord::NotRun)),
+                    audit_needles,
+                    "import-first-upload-chunk",
+                    AdversarialCaseId::Race01,
+                )
+                .await?,
             )
-            .await?,
-        )?;
-        execution.merge(
-            run_spawned_artifact_gated_race(
-                ctx,
-                Arc::new(Mutex::new(ChildCleanupRecord::NotStarted)),
-                audit_needles,
-                "export-prepublication",
-                AdversarialCaseId::Race04,
+            .map_err(|_| sentinel_assertion("merge stable RACE-01 evidence"))?;
+        execution
+            .merge(
+                run_spawned_artifact_gated_race(
+                    ctx,
+                    Arc::new(Mutex::new(ChildCleanupRecord::NotRun)),
+                    audit_needles,
+                    "export-prepublication",
+                    AdversarialCaseId::Race04,
+                )
+                .await?,
             )
-            .await?,
-        )?;
+            .map_err(|_| sentinel_assertion("merge stable RACE-04 evidence"))?;
     }
     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
     if control == ArtifactControlPlane::SpawnedStableStdio {

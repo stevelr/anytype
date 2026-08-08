@@ -4387,9 +4387,9 @@ pub use artifact_acceptance::{
     run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_empty_client_roots_case,
     run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
     run_artifact_missing_roots_case, run_artifact_payload_boundary_cases,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
-    server_log_baseline, stage_head_status, upload_stage_bytes, validate_tool_frame,
-    wait_for_stage_reaped,
+    run_artifact_policy_scenario, run_artifact_race01, run_artifact_race04,
+    run_artifact_smoke_scenario, run_artifact_traversal_default, server_log_baseline,
+    stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
 
 /// Evidence tier required for every optional production operation.

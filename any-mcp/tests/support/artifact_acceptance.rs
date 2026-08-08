@@ -32,6 +32,8 @@
 //! keeps it outside `PATH`.
 #![allow(dead_code)] // Shared support: each consuming target executes a subset.
 
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
@@ -768,6 +770,7 @@ pub struct AdversarialExecution {
     unsupported: BTreeSet<AdversarialCaseId>,
     unsupported_reasons: BTreeMap<AdversarialCaseId, &'static str>,
     quota_restored: BTreeSet<AdversarialCaseId>,
+    quota_retained: BTreeSet<AdversarialCaseId>,
     forbidden_log_needles: Vec<Zeroizing<Vec<u8>>>,
     uniform_not_found_digest: Option<String>,
 }
@@ -833,6 +836,7 @@ impl AdversarialExecution {
             self.record_unsupported_with_reason(id, reason)?;
         }
         self.quota_restored.extend(other.quota_restored);
+        self.quota_retained.extend(other.quota_retained);
         self.forbidden_log_needles
             .extend(other.forbidden_log_needles);
         if let Some(digest) = other.uniform_not_found_digest {
@@ -892,7 +896,7 @@ impl AdversarialExecution {
             .union(&self.unsupported)
             .copied()
             .collect::<BTreeSet<_>>();
-        if !observed.is_subset(&self.quota_restored) || !audit.is_clean() {
+        if !observed.is_subset(&self.quota_accounted_for()) || !audit.is_clean() {
             return Err("adversarial owner evidence was incomplete".to_owned());
         }
         let case_ids = observed.iter().map(|id| id.as_str()).collect::<Vec<_>>();
@@ -921,7 +925,8 @@ impl AdversarialExecution {
             "teardown": {
                 "space_deleted": true,
                 "prefix_inventory": 0,
-                "quota_restored": true,
+                "quota_restored": self.quota_retained.is_empty(),
+                "quota_retained_cases": self.quota_retained.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
             },
         });
         let encoded = serde_json::to_string(&evidence)
@@ -948,6 +953,19 @@ impl AdversarialExecution {
     fn record_quota_restored(&mut self) {
         self.quota_restored.extend(self.executed.iter().copied());
         self.quota_restored.extend(self.unsupported.iter().copied());
+    }
+
+    /// Records a case whose intentionally immutable cleanup keeps its staging
+    /// reservation charged until the owning runtime shuts down.
+    pub fn record_quota_retained(&mut self, id: AdversarialCaseId) {
+        self.quota_retained.insert(id);
+    }
+
+    fn quota_accounted_for(&self) -> BTreeSet<AdversarialCaseId> {
+        self.quota_restored
+            .union(&self.quota_retained)
+            .copied()
+            .collect()
     }
 
     /// Records that a startup-rejection case cannot activate staging quota.
@@ -996,7 +1014,7 @@ impl AdversarialExecution {
                 .unsupported
                 .iter()
                 .any(|id| !self.unsupported_reasons.contains_key(id))
-            || !observed.is_subset(&self.quota_restored)
+            || !observed.is_subset(&self.quota_accounted_for())
         {
             return Err("adversarial ticket execution partition was incomplete".to_owned());
         }
@@ -1015,7 +1033,7 @@ impl AdversarialExecution {
         if expected.len() != expected_count
             || expected.len() != observed.len()
             || expected != observed
-            || !observed.is_subset(&self.quota_restored)
+            || !observed.is_subset(&self.quota_accounted_for())
         {
             return Err("adversarial execution did not match its exact owner inventory".to_owned());
         }
@@ -1089,7 +1107,8 @@ fn approved_unsupported_reason(id: AdversarialCaseId, reason: &'static str) -> b
                     | AdversarialCaseId::Hlink05
                     | AdversarialCaseId::Hlink06,
                 "link_count_unavailable"
-            )
+            ) | (AdversarialCaseId::Sym07, "junction_unavailable")
+                | (AdversarialCaseId::Sym08, "reparse_unavailable")
         )
 }
 
@@ -1593,6 +1612,116 @@ async fn run_sym10(
         return Err("SYM-10 reached the retained-root boundary".to_owned());
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_reparse_tag(path: &Path) -> Result<Option<u32>, String> {
+    let output = Command::new("fsutil")
+        .args(["reparsepoint", "query"])
+        .arg(path)
+        .output()
+        .map_err(|_| "run Windows reparse tag probe".to_owned())?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "decode Windows reparse tag probe".to_owned())?;
+    let marker = "Reparse Tag Value : 0x";
+    let Some(value) = text
+        .split(marker)
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+    else {
+        return Ok(None);
+    };
+    u32::from_str_radix(value, 16)
+        .map(Some)
+        .map_err(|_| "decode Windows reparse tag probe".to_owned())
+}
+
+/// Creates a real mount-point junction and proves its mount-point reparse tag
+/// before exercising the import containment refusal.
+#[cfg(windows)]
+async fn run_sym07(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<bool, String> {
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xa000_0003;
+    let target = run
+        .policy
+        .base
+        .join(format!("sym07-target-{}", unique_suffix()));
+    let name = format!("sym07-junction-{}", unique_suffix());
+    let junction = run.policy.import_root().join(&name);
+    fs::create_dir(&target).map_err(|_| "create SYM-07 target".to_owned())?;
+    secure_directories(&[&target])?;
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .status()
+        .map_err(|_| "create SYM-07 junction".to_owned())?;
+    if !status.success() || windows_reparse_tag(&junction)? != Some(IO_REPARSE_TAG_MOUNT_POINT) {
+        let _ = fs::remove_dir(&junction);
+        return Ok(false);
+    }
+    let source = format!("{name}/source.bin");
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source),
+            "sym07.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&source],
+    )
+    .await?;
+    Ok(true)
+}
+
+/// Creates a non-junction directory reparse point and independently proves
+/// that its tag differs from a junction before testing containment.
+#[cfg(windows)]
+async fn run_sym08(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<bool, String> {
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xa000_0003;
+    let target = run
+        .policy
+        .base
+        .join(format!("sym08-target-{}", unique_suffix()));
+    let name = format!("sym08-reparse-{}", unique_suffix());
+    let link = run.policy.import_root().join(&name);
+    fs::create_dir(&target).map_err(|_| "create SYM-08 target".to_owned())?;
+    secure_directories(&[&target])?;
+    if std::os::windows::fs::symlink_dir(&target, &link).is_err() {
+        return Ok(false);
+    }
+    let Some(tag) = windows_reparse_tag(&link)? else {
+        return Ok(false);
+    };
+    if tag == IO_REPARSE_TAG_MOUNT_POINT {
+        return Err("SYM-08 created a junction instead of a non-junction reparse point".to_owned());
+    }
+    let source = format!("{name}/source.bin");
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source),
+            "sym08.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&source],
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Proves that this fixture volume reports a stable hard-link identity and a
@@ -2359,13 +2488,22 @@ async fn run_hlink05(
         return Err("HLINK-05 failed cleanup did not retain its ownership state".to_owned());
     }
     fs::remove_file(&outside).map_err(|_| "remove HLINK-05 outside link".to_owned())?;
-    release_stage_upload(driver, &allocation).await?;
-    if run.policy.staging_snapshot()?.is_reaped() == false
-        || adversarial_quota_snapshot(driver).await? != quota_before
+    adversarial_refusal(
+        driver,
+        "artifact_release",
+        json!({"handle": allocation.handle()}),
+        ExpectedToolErrorKind::Conflict,
+        &[],
+    )
+    .await?;
+    if fs::read(&record).ok().as_deref() != Some(payload)
+        || run.policy.staging_snapshot()?.is_reaped()
+        || adversarial_quota_snapshot(driver).await? != quota_reserved
     {
-        return Err("HLINK-05 retry did not reap record and restore quota".to_owned());
+        return Err("HLINK-05 retry changed immutable cleanup ownership".to_owned());
     }
     execution.record_executed(AdversarialCaseId::Hlink05)?;
+    execution.record_quota_retained(AdversarialCaseId::Hlink05);
     Ok(())
 }
 
@@ -2522,6 +2660,21 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     {
         execution.record_unsupported(AdversarialCaseId::Sym07)?;
         execution.record_unsupported(AdversarialCaseId::Sym08)?;
+    }
+    #[cfg(windows)]
+    {
+        if run_sym07(driver, run).await? {
+            execution.record_executed(AdversarialCaseId::Sym07)?;
+        } else {
+            execution
+                .record_unsupported_with_reason(AdversarialCaseId::Sym07, "junction_unavailable")?;
+        }
+        if run_sym08(driver, run).await? {
+            execution.record_executed(AdversarialCaseId::Sym08)?;
+        } else {
+            execution
+                .record_unsupported_with_reason(AdversarialCaseId::Sym08, "reparse_unavailable")?;
+        }
     }
 
     let sym09_path = "file.bin:evil";
@@ -2699,7 +2852,15 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     {
         return Err("dynamic filesystem refusals changed the object inventory".to_owned());
     }
-    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    let quota_after = adversarial_quota_snapshot(driver).await?;
+    if quota_after != quota_before
+        && !execution
+            .quota_retained
+            .contains(&AdversarialCaseId::Hlink05)
+    {
+        return Err("adversarial staging quota was not restored".to_owned());
+    }
+    execution.record_quota_restored();
     Ok(execution)
 }
 

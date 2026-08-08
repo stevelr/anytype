@@ -1868,9 +1868,10 @@ Implemented coverage exercises traversal and native-path grammar,
 capability-indistinguishable root refusals, volume case and normalization
 aliases, Windows device names, staging-record case sensitivity, bounded names
 and payloads, MIME conflicts, invalid document encodings, and hostile upstream
-metadata. The implemented dynamic subset is `SYM-01` through `SYM-06`,
-`SYM-09`, startup `SYM-11` and `SYM-12`, and `HLINK-01`, `HLINK-02`, and
-`HLINK-04`. Remaining rename-race and dynamic filesystem rows stay pending.
+metadata. The implemented dynamic set covers `SYM-01` through `SYM-13`,
+`RACE-01` through `RACE-10`, and `HLINK-01` through `HLINK-06`. Windows
+junction and non-junction reparse probes verify their native tags before they
+run. A host without the required primitive records its fixed capability outcome.
 Direct owners and spawned stdio owners enforce their exact partitions, and the
 spawned gate separately owns production startup rejections. Each owner
 records a fixed case ID only after its exact outcome, resource inventory,
@@ -1880,6 +1881,10 @@ silent skips. Direct traversal and alias checks also snapshot test-only
 retained-root access and successful-open counters, while every live owner binds
 its log audit to one opened owner-private descriptor and rejects bounded-window
 matches for fixture paths, transient handles, or credentials.
+
+The hard-link cleanup case retains the staging reservation after a hostile-link
+conflict, including after the outside link is removed. That stable conflict
+prevents a later pathname-based deletion from changing the staged record.
 
 The validator scenarios declare one real host `file(1)`-compatible executable
 pinned by absolute path and SHA-256; nothing is shipped or synthesized, and the
