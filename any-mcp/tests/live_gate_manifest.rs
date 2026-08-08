@@ -190,6 +190,26 @@ fn occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
 
+fn workflow_job<'a>(workflow: &'a str, job: &str, next_job: Option<&str>) -> &'a str {
+    let start_marker = format!("  {job}:\n");
+    let start = workflow
+        .find(&start_marker)
+        .unwrap_or_else(|| panic!("workflow job {job} is missing"));
+    let end = next_job
+        .map(|next| {
+            workflow[start + start_marker.len()..]
+                .find(&format!("  {next}:\n"))
+                .map(|offset| start + start_marker.len() + offset)
+                .unwrap_or(workflow.len())
+        })
+        .unwrap_or(workflow.len());
+    &workflow[start..end]
+}
+
+fn compact_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
 fn ignored_library_manifest_is_closed_and_filter_safe() {
     assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 32);
@@ -289,21 +309,124 @@ fn inventory_comparison_rejects_a_same_count_replacement() {
 }
 
 #[test]
-fn workflow_runs_each_pinned_live_target_in_both_protected_jobs() {
+fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     let workflow = include_str!("../../.github/workflows/any-mcp.yml");
-    for (label, expected) in [
-        ("direct", ADMITTED_IGNORED_LIB_TESTS.len()),
-        ("stdio", HEADLESS_STDIO_IGNORED_TESTS.len()),
-        ("discussions", DISCUSSIONS_STDIO_IGNORED_TESTS.len()),
-    ] {
-        let needle = format!("run_required_live_gate {label} {expected} cargo test");
-        assert_eq!(
-            occurrences(workflow, &needle),
-            2,
-            "workflow must run {needle:?} in both protected jobs"
-        );
+    let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
+    let live = workflow_job(workflow, "headless-e2e", Some("headless-clean-server-soak"));
+    let clean = workflow_job(workflow, "headless-clean-server-soak", None);
+    let predicate = "if: >- github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')";
+
+    assert!(workflow.contains("  pull_request:\n"));
+    assert!(!workflow.contains("  schedule:\n"));
+    assert!(!portable.contains("self-hosted"));
+    for block in [live, clean] {
+        assert!(compact_whitespace(block).contains(predicate));
+        assert!(block.contains("needs: portable-contracts"));
+        assert!(block.contains("      - self-hosted"));
+        assert!(block.contains("      - linux"));
+        assert!(block.contains("      - anytype-headless"));
+        assert!(block.contains("group: anytype-headless-live"));
+        assert!(!block.contains("pull_request"));
+        assert!(!block.contains("schedule"));
+        assert!(!block.contains("tee"));
+        assert!(block.contains("reviewed-evidence.py start"));
+        assert!(block.contains("reviewed-evidence.py capture"));
+        assert!(block.contains("ANY_MCP_HEADLESS_EVIDENCE_CONTEXT"));
+        assert!(block.contains("retention-days: 7"));
+        assert!(block.contains("\"$RUNNER_TEMP\"/any-mcp-live-??????"));
+        for label in ["direct", "stdio", "discussions"] {
+            assert!(block.contains(&format!("run-live-gate.py test {label} --")));
+        }
     }
     assert_eq!(occurrences(workflow, "group: anytype-headless-live"), 2);
     assert!(!workflow.contains("group: any-mcp-headless"));
     assert_eq!(occurrences(workflow, "--test live_gate_manifest"), 1);
+
+    let action_lines = workflow
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line.starts_with("- uses:") || line.starts_with("uses:")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(action_lines.len(), 11);
+    for line in action_lines {
+        let reference = line
+            .split_once('@')
+            .map(|(_, reference)| reference.split_whitespace().next().unwrap_or(""))
+            .unwrap_or("");
+        assert_eq!(reference.len(), 40, "action is not pinned: {line}");
+        assert!(
+            reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "action is not pinned: {line}"
+        );
+    }
+    assert_eq!(
+        occurrences(
+            workflow,
+            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+        ),
+        3
+    );
+    assert_eq!(
+        occurrences(
+            workflow,
+            "dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e"
+        ),
+        3
+    );
+    assert_eq!(
+        occurrences(
+            workflow,
+            "Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c"
+        ),
+        3
+    );
+    assert_eq!(
+        occurrences(
+            workflow,
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+        ),
+        2
+    );
+}
+
+#[test]
+fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
+    let runner = include_str!("../scripts/run-live-gate.py");
+    let evidence = include_str!("../scripts/reviewed-evidence.py");
+    let helper_tests = include_str!("../scripts/test_live_gate_security.py");
+
+    assert!(runner.contains(&format!(
+        "EXPECTED = {{\"direct\": {}, \"stdio\": {}, \"discussions\": {}}}",
+        ADMITTED_IGNORED_LIB_TESTS.len(),
+        HEADLESS_STDIO_IGNORED_TESTS.len(),
+        DISCUSSIONS_STDIO_IGNORED_TESTS.len()
+    )));
+    assert!(runner.contains("OUTPUT_LIMIT = 1024 * 1024"));
+    assert!(runner.contains("TemporaryFile(dir=private_dir)"));
+    assert!(runner.contains("os.chmod(transcript.fileno(), 0o600)"));
+    assert!(!runner.contains("tee"));
+    assert!(!runner.contains("print(output"));
+
+    for required in [
+        "O_NOFOLLOW",
+        "os.fstat(descriptor)",
+        "metadata.st_dev",
+        "metadata.st_ino",
+        "metadata.st_size < start_bytes",
+        "hashlib.sha256(anchor).hexdigest()",
+        "offset = start_bytes",
+        "FRESH_ARTIFACT_LIMIT = 64_000",
+        "ARTIFACT_LIMIT = 65_536",
+        "reviewed-source=unavailable",
+    ] {
+        assert!(
+            evidence.contains(required),
+            "missing evidence guard {required:?}"
+        );
+    }
+    assert!(helper_tests.contains("stale-allowlisted-event"));
+    assert!(helper_tests.contains("assertNotIn"));
+    assert!(helper_tests.contains("os.replace"));
 }

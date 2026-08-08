@@ -4,8 +4,6 @@ name: any-mcp
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 3 * * *"
   pull_request:
     paths:
       - ".github/workflows/any-mcp.yml"
@@ -43,15 +41,15 @@ jobs:
           - windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
 
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: any-mcp-${{ matrix.os }}
 
@@ -61,15 +59,18 @@ jobs:
       - name: Verify the ignored live-test inventory and workflow pins
         run: cargo test --locked -p any-mcp --test live_gate_manifest
 
+      - name: Verify private live-gate helper failure behavior
+        run: python3 any-mcp/scripts/test_live_gate_security.py
+
       - name: Run portable production-process and stdio conformance tests
         run: cargo test --locked -p any-mcp --features acceptance-harness --test process_runtime --test stdio_conformance --test headless_stdio_e2e --test discussions_stdio_acceptance
 
   headless-e2e:
     name: stdio to headless Anytype
     if: >-
-      github.event_name != 'schedule' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: portable-contracts
     environment: anytype-headless
     runs-on:
       - self-hosted
@@ -81,17 +82,26 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
 
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: any-mcp-headless
+
+      - name: Prepare private live-gate storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          private_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-live-XXXXXX")"
+          chmod 0700 "$private_dir"
+          printf 'ANY_MCP_LIVE_PRIVATE_DIR=%s\n' "$private_dir" >> "$GITHUB_ENV"
 
       - name: Run serial production-router and stdio-to-headless gates
         shell: bash
@@ -100,8 +110,7 @@ jobs:
           ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
-          test -n "$ANY_MCP_HEADLESS_ENV_FILE"
-          test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
@@ -110,77 +119,68 @@ jobs:
           set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
           test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
-          test -n "$test_prefix"
-          test "${#test_prefix}" -le 485
+          test -n "$test_prefix" && test "${#test_prefix}" -le 485
           case "$test_prefix" in
-            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
-              printf '%s\n' "ANYTYPE_TEST_SPACE_PREFIX must use 1..485 ASCII letters, digits, hyphens, or underscores" >&2
-              exit 1
-              ;;
+            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) exit 1 ;;
           esac
           unset test_prefix
-          reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          umask 077
-          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-reviewed-XXXXXX")"
-          reviewed_log="$reviewed_dir/server-events.jsonl"
-          cp -- "$reviewed_source" "$reviewed_log"
-          chmod 0600 "$reviewed_log"
-          run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-          test "${#run_marker}" -eq 64
-          printf '\nany-mcp-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
-          export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
-          export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-          printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
-          run_required_live_gate() {
-            local label="$1"
-            local expected_passed="$2"
-            shift 2
-            local gate_output="$reviewed_dir/$label.log"
-            set +e
-            "$@" 2>&1 | tee "$gate_output"
-            local gate_status="${PIPESTATUS[0]}"
-            set -e
-            if [[ "$gate_status" -ne 0 ]]; then
-              rm -f -- "$gate_output"
-              return "$gate_status"
-            fi
-            if grep -Fqi "skipped" "$gate_output"; then
-              rm -f -- "$gate_output"
-              printf '%s\n' "required live gate reported skipped admission" >&2
-              return 1
-            fi
-            local summary_count
-            summary_count="$(grep -Ec '^test result:' "$gate_output" || true)"
-            if [[ "$summary_count" -ne 1 ]] ||
-              ! grep -Eq "^test result: ok\\. ${expected_passed} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\\.[0-9]+)?s$" "$gate_output"; then
-              rm -f -- "$gate_output"
-              printf '%s\n' "required live gate executed an unexpected test count" >&2
-              return 1
-            fi
-            rm -f -- "$gate_output"
-          }
-          cargo run --locked -q -p anyr -- auth status --pretty
-          run_required_live_gate direct 32 cargo test --locked -p any-mcp --lib headless_ -- \
+          context="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context"
+          python3 any-mcp/scripts/reviewed-evidence.py start \
+            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" "$context" >> "$GITHUB_ENV"
+          export ANY_MCP_HEADLESS_EVIDENCE_CONTEXT="$context"
+          export ANY_MCP_HEADLESS_LOG_RUN_MARKER
+          ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
+          python3 any-mcp/scripts/run-live-gate.py command auth -- \
+            cargo run --locked -q -p anyr -- auth status --pretty
+          python3 any-mcp/scripts/run-live-gate.py test direct -- \
+            cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture
-          run_required_live_gate stdio 25 cargo test --locked -p any-mcp \
-            --features acceptance-harness --test headless_stdio_e2e -- \
-            --ignored --test-threads=1 --nocapture
-          run_required_live_gate discussions 1 cargo test --locked -p any-mcp \
-            --features acceptance-harness --test discussions_stdio_acceptance -- \
-            --ignored --test-threads=1 --nocapture
+          python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+            cargo test --locked -p any-mcp --features acceptance-harness \
+            --test headless_stdio_e2e -- --ignored --test-threads=1 --nocapture
+          python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+            cargo test --locked -p any-mcp --features acceptance-harness \
+            --test discussions_stdio_acceptance -- --ignored --test-threads=1 --nocapture
 
-      - name: Retain redacted headless server evidence on failure
+      - name: Capture bounded reviewed server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        shell: bash
+        env:
+          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+        run: |
+          set -euo pipefail
+          artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
+          python3 any-mcp/scripts/reviewed-evidence.py capture \
+            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
+            "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
+          printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
+
+      - name: Retain bounded reviewed server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: any-mcp-headless-server-log
-          path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          name: any-mcp-headless-reviewed-server-evidence
+          path: ${{ env.ANY_MCP_LIVE_FAILURE_EVIDENCE }}
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Remove private live-gate storage
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${ANY_MCP_LIVE_PRIVATE_DIR:-}" in
+            "$RUNNER_TEMP"/any-mcp-live-??????) ;;
+            *) exit 1 ;;
+          esac
+          rm -rf -- "$ANY_MCP_LIVE_PRIVATE_DIR"
+
   headless-clean-server-soak:
-    name: scheduled clean-server soak
-    if: github.event_name == 'schedule'
+    name: clean-server live gate
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: portable-contracts
     environment: anytype-headless
     runs-on:
       - self-hosted
@@ -192,17 +192,26 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
 
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: any-mcp-headless
+
+      - name: Prepare private live-gate storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          private_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-live-XXXXXX")"
+          chmod 0700 "$private_dir"
+          printf 'ANY_MCP_LIVE_PRIVATE_DIR=%s\n' "$private_dir" >> "$GITHUB_ENV"
 
       - name: Provision a clean isolated headless server
         shell: bash
@@ -213,7 +222,8 @@ jobs:
           test -n "$ANY_MCP_HEADLESS_RESET_SCRIPT"
           test "${ANY_MCP_HEADLESS_RESET_SCRIPT#/}" != "$ANY_MCP_HEADLESS_RESET_SCRIPT"
           test -x "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          "$ANY_MCP_HEADLESS_RESET_SCRIPT"
+          python3 any-mcp/scripts/run-live-gate.py command reset -- \
+            "$ANY_MCP_HEADLESS_RESET_SCRIPT"
 
       - name: Run all serial production-router and stdio-to-headless targets
         shell: bash
@@ -222,8 +232,7 @@ jobs:
           ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
-          test -n "$ANY_MCP_HEADLESS_ENV_FILE"
-          test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
@@ -232,70 +241,58 @@ jobs:
           set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
           test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
-          test -n "$test_prefix"
-          test "${#test_prefix}" -le 485
+          test -n "$test_prefix" && test "${#test_prefix}" -le 485
           case "$test_prefix" in
-            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
-              printf '%s\n' "ANYTYPE_TEST_SPACE_PREFIX must use 1..485 ASCII letters, digits, hyphens, or underscores" >&2
-              exit 1
-              ;;
+            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) exit 1 ;;
           esac
           unset test_prefix
-          reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          umask 077
-          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-reviewed-XXXXXX")"
-          reviewed_log="$reviewed_dir/server-events.jsonl"
-          cp -- "$reviewed_source" "$reviewed_log"
-          chmod 0600 "$reviewed_log"
-          run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-          test "${#run_marker}" -eq 64
-          printf '\nany-mcp-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
-          export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
-          export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-          printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
-          run_required_live_gate() {
-            local label="$1"
-            local expected_passed="$2"
-            shift 2
-            local gate_output="$reviewed_dir/$label.log"
-            set +e
-            "$@" 2>&1 | tee "$gate_output"
-            local gate_status="${PIPESTATUS[0]}"
-            set -e
-            if [[ "$gate_status" -ne 0 ]]; then
-              rm -f -- "$gate_output"
-              return "$gate_status"
-            fi
-            if grep -Fqi "skipped" "$gate_output"; then
-              rm -f -- "$gate_output"
-              printf '%s\n' "required live gate reported skipped admission" >&2
-              return 1
-            fi
-            local summary_count
-            summary_count="$(grep -Ec '^test result:' "$gate_output" || true)"
-            if [[ "$summary_count" -ne 1 ]] ||
-              ! grep -Eq "^test result: ok\\. ${expected_passed} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\\.[0-9]+)?s$" "$gate_output"; then
-              rm -f -- "$gate_output"
-              printf '%s\n' "required live gate executed an unexpected test count" >&2
-              return 1
-            fi
-            rm -f -- "$gate_output"
-          }
-          cargo run --locked -q -p anyr -- auth status --pretty
-          run_required_live_gate direct 32 cargo test --locked -p any-mcp --lib headless_ -- \
+          context="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context"
+          python3 any-mcp/scripts/reviewed-evidence.py start \
+            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" "$context" >> "$GITHUB_ENV"
+          export ANY_MCP_HEADLESS_EVIDENCE_CONTEXT="$context"
+          export ANY_MCP_HEADLESS_LOG_RUN_MARKER
+          ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
+          python3 any-mcp/scripts/run-live-gate.py command auth -- \
+            cargo run --locked -q -p anyr -- auth status --pretty
+          python3 any-mcp/scripts/run-live-gate.py test direct -- \
+            cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture
-          run_required_live_gate stdio 25 cargo test --locked -p any-mcp \
-            --features acceptance-harness --test headless_stdio_e2e -- \
-            --ignored --test-threads=1 --nocapture
-          run_required_live_gate discussions 1 cargo test --locked -p any-mcp \
-            --features acceptance-harness --test discussions_stdio_acceptance -- \
-            --ignored --test-threads=1 --nocapture
+          python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+            cargo test --locked -p any-mcp --features acceptance-harness \
+            --test headless_stdio_e2e -- --ignored --test-threads=1 --nocapture
+          python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+            cargo test --locked -p any-mcp --features acceptance-harness \
+            --test discussions_stdio_acceptance -- --ignored --test-threads=1 --nocapture
 
-      - name: Retain redacted clean-server evidence on failure
+      - name: Capture bounded reviewed server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        shell: bash
+        env:
+          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+        run: |
+          set -euo pipefail
+          artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
+          python3 any-mcp/scripts/reviewed-evidence.py capture \
+            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
+            "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
+          printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
+
+      - name: Retain bounded reviewed server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: any-mcp-clean-server-log
-          path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          name: any-mcp-clean-server-reviewed-evidence
+          path: ${{ env.ANY_MCP_LIVE_FAILURE_EVIDENCE }}
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Remove private live-gate storage
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${ANY_MCP_LIVE_PRIVATE_DIR:-}" in
+            "$RUNNER_TEMP"/any-mcp-live-??????) ;;
+            *) exit 1 ;;
+          esac
+          rm -rf -- "$ANY_MCP_LIVE_PRIVATE_DIR"

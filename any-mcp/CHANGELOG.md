@@ -13,6 +13,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   executable-count checks reject renamed, missing, skipped, or zero-test
   cases; object-edit coverage uses a disposable space, and the redundant
   direct-body orphan is retired in favor of the shared body scenario.
+- Restrict both self-hosted live jobs to manual dispatches and trusted pushes
+  to `main`, after the hosted contract matrix succeeds. Immutable action pins,
+  silent bounded test transcripts, and descriptor-bound post-start server-log
+  evidence keep pull-request code and stale or replaced logs outside the
+  protected runner boundary.
 - Add `rich_page_resume` for one retained runtime facade recovery claim over
   the never-attempted suffix of a partial rich-page receipt. Recovery re-proves
   page, type, and authored prefix evidence, and refuses uncertain or attempted

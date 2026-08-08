@@ -68,15 +68,20 @@ through production stdio, then independently verify stored state through
 
 ```sh
 source .test-env
-# Set redacted_log to a mode-0600 copy of the reviewed server log. Set
-# run_marker to fresh 64-hex text and append any-mcp-run-marker=$run_marker.
+# Set redacted_log to the absolute mode-0600 reviewed server event file.
 export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
-export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e \
-  -- --ignored --test-threads=1
-cargo test -p any-mcp --features acceptance-harness \
+export ANY_MCP_LIVE_PRIVATE_DIR="$(mktemp -d)"
+chmod 0700 "$ANY_MCP_LIVE_PRIVATE_DIR"
+python3 any-mcp/scripts/reviewed-evidence.py start "$redacted_log" \
+  "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" > "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"
+set -a; source "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"; set +a
+python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+  cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- \
+  --ignored --test-threads=1
+python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+  cargo test -p any-mcp --features acceptance-harness \
   --test discussions_stdio_acceptance -- --ignored --test-threads=1
+rm -rf -- "$ANY_MCP_LIVE_PRIVATE_DIR"
 ```
 
 The same complete scenario set also runs through the production direct router.

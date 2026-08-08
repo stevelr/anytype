@@ -1747,15 +1747,23 @@ root:
 
 ```sh
 source .test-env
-# Set redacted_log to a mode-0600 copy of the reviewed server log. Set
-# run_marker to fresh 64-hex text and append any-mcp-run-marker=$run_marker.
+# Set redacted_log to the absolute mode-0600 reviewed server event file.
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
 export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
-export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
-cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- --ignored --test-threads=1
-cargo test -p any-mcp --features acceptance-harness --test discussions_stdio_acceptance -- --ignored --test-threads=1
+export ANY_MCP_LIVE_PRIVATE_DIR="$(mktemp -d)"
+chmod 0700 "$ANY_MCP_LIVE_PRIVATE_DIR"
+python3 any-mcp/scripts/reviewed-evidence.py start "$redacted_log" \
+  "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" > "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"
+set -a; source "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"; set +a
+python3 any-mcp/scripts/run-live-gate.py test direct -- \
+  cargo test -p any-mcp --lib headless_ -- --ignored --test-threads=1
+python3 any-mcp/scripts/run-live-gate.py test stdio -- \
+  cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- \
+  --ignored --test-threads=1
+python3 any-mcp/scripts/run-live-gate.py test discussions -- \
+  cargo test -p any-mcp --features acceptance-harness \
+  --test discussions_stdio_acceptance -- --ignored --test-threads=1
+rm -rf -- "$ANY_MCP_LIVE_PRIVATE_DIR"
 ```
 
 The protected workflow validates
@@ -1917,18 +1925,17 @@ repository variable `ANY_MCP_HEADLESS_ENV_FILE` to a readable, protected
 environment file with the same endpoint, keystore, and test-space settings as
 `.test-env`. It must also set `ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to an
 absolute, readable runner-produced JSONL event file with credentials and
-content removed. The job copies it into a parent-created `0600` derivative,
-appends one fresh run marker, and the test verifies exact provenance,
-allow-listed fields, and absence of credentials loaded from the configured
-keystore; the job keeps that protected derivative for seven days on failure. Protect the
-`anytype-headless` environment so untrusted pull-request code cannot reach the
-self-hosted runner or credentials. The job runs serially on every matching
-MCP/API pull request and main/tag update; branch protection and release
-automation should require its latest green result. Fork pull requests are
-excluded before the protected runner is selected. A separate unconditional
-scheduled job invokes an operator-owned absolute reset script, provisions a
-clean isolated server, and then runs the same three explicit targets; this keeps
-path filters from hiding backend drift.
+content removed. The job records the opened regular file's device, inode,
+length, and bounded trailing anchor before testing. The body audit accepts only
+allow-listed events appended after that offset when the identity and anchor are
+unchanged. On failure, CI retains at most 64 KiB from that fresh reviewed
+window in a mode-0600 artifact for seven days. Protect the `anytype-headless`
+environment so untrusted code cannot reach the self-hosted runner or
+credentials. Both live jobs run only after the hosted contract matrix on a
+manual dispatch or a push to `main`; pull requests and tag pushes run the
+hosted offline inventory only. The clean-server job first invokes an
+operator-owned absolute reset script, then runs the same three explicit
+targets.
 
 `space_list` continuation uses two disposable spaces created and immediately
 registered through the test-only `anytype-api` fixture lifecycle. Their complete
