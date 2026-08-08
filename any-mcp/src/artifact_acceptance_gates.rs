@@ -7,6 +7,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, watch};
 
 /// An exact artifact operation point exposed only to the acceptance harness.
@@ -59,6 +60,29 @@ pub enum ArtifactAcceptanceGateError {
 }
 
 impl ArtifactAcceptanceGates {
+    /// Arms the exact import operation selected by its caller idempotency key.
+    pub async fn arm_file_import(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::ImportFirstUploadChunk,
+            operation_key(b"import", idempotency_key),
+        )
+        .await
+    }
+
+    /// Arms the exact file-export operation selected by its caller key.
+    pub async fn arm_file_export(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::ExportPrepublication,
+            operation_key(b"export", idempotency_key),
+        )
+        .await
+    }
     /// Creates a gate-free runtime facility.
     #[must_use]
     pub fn disabled() -> Self {
@@ -128,6 +152,16 @@ impl ArtifactAcceptanceGates {
             .await
             .is_ok_and(|result| result.is_ok() && *released.borrow())
     }
+}
+
+fn operation_key(direction: &[u8], key: &str) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"any-mcp/artifact/idempotency/v1");
+    for field in [direction, key.as_bytes()] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    digest.finalize().into()
 }
 
 impl ArtifactAcceptanceGateLease {
