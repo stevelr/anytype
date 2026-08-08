@@ -5,9 +5,17 @@
 
 //! Private, runtime-owned synchronization points for artifact acceptance tests.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Mutex, watch};
 
 /// An exact artifact operation point exposed only to the acceptance harness.
@@ -83,6 +91,18 @@ impl ArtifactAcceptanceGates {
         )
         .await
     }
+
+    /// Arms the exact final document-source revalidation selected by its key.
+    pub async fn arm_document_import(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::DocumentFinalRevalidation,
+            operation_key(b"document", idempotency_key),
+        )
+        .await
+    }
     /// Creates a gate-free runtime facility.
     #[must_use]
     pub fn disabled() -> Self {
@@ -154,7 +174,80 @@ impl ArtifactAcceptanceGates {
     }
 }
 
-fn operation_key(direction: &[u8], key: &str) -> [u8; 32] {
+/// An upload reader that pauses only after it has yielded its first nonempty
+/// chunk. The pause is intentionally between chunks, so the upstream multipart
+/// body has consumed concrete source bytes before an adversarial test can act.
+pub(crate) struct FirstChunkGateReader<R> {
+    inner: R,
+    gates: ArtifactAcceptanceGates,
+    operation: [u8; 32],
+    pause_before_next_read: bool,
+    pause: Option<Pin<Box<dyn Future<Output = bool> + Send>>>,
+}
+
+use std::future::Future;
+
+impl<R> FirstChunkGateReader<R> {
+    /// Wraps one upload reader with the exact import gate.
+    pub(crate) fn new(inner: R, gates: ArtifactAcceptanceGates, operation: [u8; 32]) -> Self {
+        Self {
+            inner,
+            gates,
+            operation,
+            pause_before_next_read: false,
+            pause: None,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for FirstChunkGateReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.pause_before_next_read {
+            if self.pause.is_none() {
+                let gates = self.gates.clone();
+                let operation = self.operation;
+                self.pause = Some(Box::pin(async move {
+                    gates
+                        .reach(
+                            ArtifactAcceptanceGatePoint::ImportFirstUploadChunk,
+                            operation,
+                        )
+                        .await
+                }));
+            }
+            let Some(pause) = self.pause.as_mut() else {
+                return Poll::Ready(Err(io::Error::other("artifact gate state missing")));
+            };
+            match pause.as_mut().poll(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(true) => {
+                    self.pause_before_next_read = false;
+                    self.pause = None;
+                }
+                Poll::Ready(false) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "artifact acceptance gate was not released",
+                    )));
+                }
+            }
+        }
+        let before = buffer.filled().len();
+        match Pin::new(&mut self.inner).poll_read(context, buffer) {
+            Poll::Ready(Ok(())) if buffer.filled().len() > before => {
+                self.pause_before_next_read = true;
+                Poll::Ready(Ok(()))
+            }
+            outcome => outcome,
+        }
+    }
+}
+
+pub(crate) fn operation_key(direction: &[u8], key: &str) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"any-mcp/artifact/idempotency/v1");
     for field in [direction, key.as_bytes()] {

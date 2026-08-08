@@ -33,6 +33,8 @@ use cap_std::fs::{Dir, OpenOptions};
 use fs2::FileExt;
 use tokio::io::{AsyncRead, ReadBuf};
 
+#[cfg(any(test, feature = "acceptance-harness"))]
+use crate::artifact_acceptance_gates::{ArtifactAcceptanceGatePoint, ArtifactAcceptanceGates};
 use crate::artifact_config::{
     AbsoluteNativePath, ArtifactConfig, LogicalRootId, RelativeNativePath, RootDefinition,
 };
@@ -642,33 +644,6 @@ fn lowercase_hex(byte: u8) -> bool {
     byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
 }
 
-#[cfg(test)]
-#[derive(Clone)]
-struct ExportPublicationTestPause {
-    temporary_name: OsString,
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
-}
-
-#[cfg(test)]
-static EXPORT_PUBLICATION_TEST_PAUSE: OnceLock<
-    std::sync::Mutex<Option<ExportPublicationTestPause>>,
-> = OnceLock::new();
-
-#[cfg(test)]
-fn pause_export_publication_for_test(temporary_name: &OsString) {
-    let pause = EXPORT_PUBLICATION_TEST_PAUSE
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|pause| pause.as_ref().cloned())
-        .filter(|pause| &pause.temporary_name == temporary_name);
-    if let Some(pause) = pause {
-        pause.entered.wait();
-        pause.release.wait();
-    }
-}
-
 /// One bounded same-directory export which is invisible until commit.
 pub struct AtomicExport {
     parent: Dir,
@@ -681,6 +656,8 @@ pub struct AtomicExport {
     maximum_bytes: u64,
     written: u64,
     published: bool,
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    acceptance_gate: Option<(ArtifactAcceptanceGates, [u8; 32])>,
 }
 
 impl fmt::Debug for AtomicExport {
@@ -695,6 +672,16 @@ impl fmt::Debug for AtomicExport {
 }
 
 impl AtomicExport {
+    /// Installs the acceptance-only prepublication point for this one export.
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    pub(crate) fn with_acceptance_gate(
+        mut self,
+        gates: ArtifactAcceptanceGates,
+        operation: [u8; 32],
+    ) -> Self {
+        self.acceptance_gate = Some((gates, operation));
+        self
+    }
     /// Removes an unpublished private destination without discarding its
     /// retained capability when the file is no longer safe to unlink.
     pub(crate) fn discard_in_place(&mut self) -> Result<(), RootAccessError> {
@@ -759,9 +746,16 @@ impl AtomicExport {
         let source_identity = file_identity(&file, &metadata)
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
         self.verify_export_namespace()?;
-        #[cfg(test)]
-        pause_export_publication_for_test(&self.temporary_name);
-
+        #[cfg(any(test, feature = "acceptance-harness"))]
+        if let Some((gates, operation)) = self.acceptance_gate.take() {
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+            if !handle
+                .block_on(gates.reach(ArtifactAcceptanceGatePoint::ExportPrepublication, operation))
+            {
+                return Err(RootAccessError::new(RootProblem::Indeterminate));
+            }
+        }
         match self.parent.hard_link(
             Path::new(&self.temporary_name),
             &self.parent,
@@ -1487,6 +1481,8 @@ fn begin_atomic_export_at(
                     maximum_bytes,
                     written: 0,
                     published: false,
+                    #[cfg(any(test, feature = "acceptance-harness"))]
+                    acceptance_gate: None,
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -2273,66 +2269,6 @@ mod tests {
         assert!(pending.commit().is_err());
         assert!(!moved_parent.join("result.bin").exists());
         assert!(!original_parent.join("result.bin").exists());
-        drop(effective);
-        fs::remove_dir_all(base).expect("cleanup");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_export_rechecks_parent_after_prepublication_pause() {
-        let (base, import, export) = temporary_tree();
-        let original_parent = export.join("safe");
-        fs::create_dir(&original_parent).expect("create export parent");
-        let effective = RootRegistry::activate(&config(&import, &export))
-            .expect("activate")
-            .static_policy();
-        let path = RelativeNativePath::from_utf8("safe/result.bin").expect("export path");
-        let mut pending = effective
-            .begin_atomic_export("outbox", &path, 64)
-            .expect("begin export");
-        pending.write_all(b"private bytes").expect("write export");
-        let temporary_name = pending.temporary_name.clone();
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        *EXPORT_PUBLICATION_TEST_PAUSE
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .expect("publication pause lock") = Some(ExportPublicationTestPause {
-            temporary_name,
-            entered: Arc::clone(&entered),
-            release: Arc::clone(&release),
-        });
-
-        let commit = std::thread::spawn(move || pending.commit());
-        entered.wait();
-        let moved_parent = base.join("moved-parent");
-        let moved = fs::rename(&original_parent, &moved_parent);
-        let replaced = fs::create_dir(&original_parent);
-        release.wait();
-        let result = commit.join().expect("commit thread");
-        *EXPORT_PUBLICATION_TEST_PAUSE
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .expect("publication pause lock") = None;
-        moved.expect("move export parent");
-        replaced.expect("replace export parent");
-
-        assert!(matches!(
-            result,
-            Err(error) if error.kind() == RootAccessErrorKind::Changed
-        ));
-        assert!(
-            fs::read_dir(&moved_parent)
-                .expect("inspect moved parent")
-                .next()
-                .is_none()
-        );
-        assert!(
-            fs::read_dir(&original_parent)
-                .expect("inspect replacement parent")
-                .next()
-                .is_none()
-        );
         drop(effective);
         fs::remove_dir_all(base).expect("cleanup");
     }

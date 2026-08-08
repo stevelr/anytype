@@ -33,7 +33,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(any(test, feature = "acceptance-harness"))]
-use crate::artifact_acceptance_gates::ArtifactAcceptanceGatePoint;
+use crate::artifact_acceptance_gates::{ArtifactAcceptanceGatePoint, FirstChunkGateReader};
 
 use crate::{
     artifact_config::RelativeNativePath,
@@ -84,6 +84,30 @@ const MULTIPART_ALLOWANCE: u64 = 1024 * 1024;
 const RESPONSE_BYTES: u64 = 256 * 1024;
 const ERROR_BYTES: u64 = 64 * 1024;
 const HEADER_BYTES: u64 = 64 * 1024;
+
+#[cfg(any(test, feature = "acceptance-harness"))]
+fn artifact_upload_reader(
+    runtime: &RuntimeContext,
+    file: File,
+    length: u64,
+    key: [u8; 32],
+) -> FirstChunkGateReader<PositionalReader> {
+    FirstChunkGateReader::new(
+        PositionalReader::new(file, length),
+        runtime.artifact_acceptance_gates().clone(),
+        key,
+    )
+}
+
+#[cfg(not(any(test, feature = "acceptance-harness")))]
+fn artifact_upload_reader(
+    _: &RuntimeContext,
+    file: File,
+    length: u64,
+    _: [u8; 32],
+) -> PositionalReader {
+    PositionalReader::new(file, length)
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1774,7 +1798,7 @@ async fn settle_reserved_import(
         .upload(space_id.as_str())
         .reader(
             name,
-            PositionalReader::new(upload_file, source_length),
+            artifact_upload_reader(&runtime, upload_file, source_length, key),
             source_length,
         )
         .multipart_limit_bytes(multipart_limit)
@@ -2215,18 +2239,8 @@ async fn file_export(
     let receipt = match completion {
         ExportCompletion::Local { root_id } => {
             #[cfg(any(test, feature = "acceptance-harness"))]
-            if !runtime
-                .artifact_acceptance_gates()
-                .reach(ArtifactAcceptanceGatePoint::ExportPrepublication, key)
-                .await
-            {
-                return Err(settle_export_failure(
-                    runtime.artifact_operations(),
-                    key,
-                    ArtifactToolError::Indeterminate,
-                )
-                .await);
-            }
+            let destination =
+                destination.with_acceptance_gate(runtime.artifact_acceptance_gates().clone(), key);
             let committed = match tokio::task::spawn_blocking(move || destination.commit()).await {
                 Ok(committed) => committed,
                 Err(_) => {
@@ -2350,7 +2364,8 @@ impl PreparedDocument {
 }
 
 async fn verify_document_source_before_dispatch(
-    runtime: &RuntimeContext,
+    #[cfg(any(test, feature = "acceptance-harness"))] runtime: &RuntimeContext,
+    #[cfg(not(any(test, feature = "acceptance-harness")))] _runtime: &RuntimeContext,
     operations: &ArtifactOperationState,
     key: [u8; 32],
     source: &PreparedDocument,
@@ -2360,6 +2375,7 @@ async fn verify_document_source_before_dispatch(
         .artifact_acceptance_gates()
         .reach(ArtifactAcceptanceGatePoint::DocumentFinalRevalidation, key)
         .await;
+    #[cfg(any(test, feature = "acceptance-harness"))]
     if !released {
         return Err(ArtifactToolError::Indeterminate);
     }
@@ -3127,18 +3143,7 @@ async fn document_export(
             let maximum = runtime.artifact_config().limits.markdown_bytes;
             let bytes = body.into_bytes();
             #[cfg(any(test, feature = "acceptance-harness"))]
-            if !runtime
-                .artifact_acceptance_gates()
-                .reach(ArtifactAcceptanceGatePoint::ExportPrepublication, key)
-                .await
-            {
-                return Err(settle_export_failure(
-                    runtime.artifact_operations(),
-                    key,
-                    ArtifactToolError::Indeterminate,
-                )
-                .await);
-            }
+            let gates = runtime.artifact_acceptance_gates().clone();
             let written = match tokio::task::spawn_blocking(move || {
                 let mut destination = roots
                     .begin_atomic_export(&root_id, &path, maximum)
@@ -3146,6 +3151,8 @@ async fn document_export(
                 destination
                     .write_all(&bytes)
                     .map_err(|_| ArtifactToolError::NotFound)?;
+                #[cfg(any(test, feature = "acceptance-harness"))]
+                let destination = destination.with_acceptance_gate(gates, key);
                 let committed = destination
                     .commit()
                     .map_err(|error| classify_root_error(&error))?;

@@ -61,8 +61,9 @@
 //! The crate README contains current host registration, complete tool semantics,
 //! protocol compatibility, token baselines, and operational guidance.
 
-mod artifact_client_roots;
+#[allow(dead_code)]
 mod artifact_acceptance_gates;
+mod artifact_client_roots;
 pub mod artifact_config;
 pub mod artifact_roots;
 mod artifact_staging;
@@ -117,15 +118,15 @@ pub mod view_handlers;
 #[cfg(test)]
 mod skill_examples;
 
-pub use artifact_config::{
-    AbsoluteNativePath, ArtifactConfig, ArtifactConfigError, ArtifactLimits, ConfigSelector,
-    LogicalRootId, RelativeNativePath, SpaceConfig, SpaceReference, StagingConfig, ValidatorConfig,
-    ValidatorDriver,
-};
 #[cfg(any(test, feature = "acceptance-harness"))]
 pub use artifact_acceptance_gates::{
     ArtifactAcceptanceGateError, ArtifactAcceptanceGateLease, ArtifactAcceptanceGatePoint,
     ArtifactAcceptanceGates,
+};
+pub use artifact_config::{
+    AbsoluteNativePath, ArtifactConfig, ArtifactConfigError, ArtifactLimits, ConfigSelector,
+    LogicalRootId, RelativeNativePath, SpaceConfig, SpaceReference, StagingConfig, ValidatorConfig,
+    ValidatorDriver,
 };
 pub use artifact_roots::{
     AnchoredImport, AtomicExport, EffectiveRootRegistry, ROOTS_REQUIRED_GUIDANCE, RootAccessError,
@@ -156,7 +157,20 @@ pub fn run_process<I>(arguments: I) -> std::process::ExitCode
 where
     I: IntoIterator<Item = std::ffi::OsString>,
 {
-    run_process_with_keystore_override(arguments, None)
+    run_process_inner(arguments, None, false)
+}
+
+/// Runs the private acceptance child with synchronization gates enabled.
+///
+/// This entrypoint is deliberately separate from [`run_process`]. It is used
+/// only by the test-only process wrapper, so feature unification cannot make
+/// the ordinary server or `anyr` observe acceptance configuration.
+#[cfg(feature = "acceptance-harness")]
+pub fn run_acceptance_process<I>(arguments: I) -> std::process::ExitCode
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    run_process_inner(arguments, None, true)
 }
 
 /// Run the any-mcp process while overriding the selected Anytype keystore.
@@ -167,6 +181,17 @@ where
 pub fn run_process_with_keystore_override<I>(
     arguments: I,
     keystore: Option<String>,
+) -> std::process::ExitCode
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    run_process_inner(arguments, keystore, false)
+}
+
+fn run_process_inner<I>(
+    arguments: I,
+    keystore: Option<String>,
+    acceptance_process: bool,
 ) -> std::process::ExitCode
 where
     I: IntoIterator<Item = std::ffi::OsString>,
@@ -204,13 +229,14 @@ where
                 std::process::ExitCode::FAILURE
             }
         },
-        ProcessCommand::Serve(arguments) => start_server(arguments, keystore),
+        ProcessCommand::Serve(arguments) => start_server(arguments, keystore, acceptance_process),
     }
 }
 
 fn start_server(
     arguments: Vec<std::ffi::OsString>,
     keystore: Option<String>,
+    acceptance_process: bool,
 ) -> std::process::ExitCode {
     if let Err(error) = logging::init() {
         eprintln!("any-mcp: diagnostic setup failed: {error}");
@@ -223,7 +249,7 @@ fn start_server(
             return std::process::ExitCode::FAILURE;
         }
     };
-    if let Err(error) = runtime.block_on(run_server(arguments, keystore)) {
+    if let Err(error) = runtime.block_on(run_server(arguments, keystore, acceptance_process)) {
         tracing::error!(reason = %error, "any-mcp startup or service failure");
         return std::process::ExitCode::FAILURE;
     }
@@ -240,6 +266,7 @@ fn production_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 async fn run_server(
     arguments: Vec<std::ffi::OsString>,
     keystore: Option<String>,
+    acceptance_process: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Transport and HTTP configuration are validated before any Anytype
     // credential access, probe, or listener bind.
@@ -248,7 +275,11 @@ async fn run_server(
     let protocol_mode = config.protocol_mode;
     match transport {
         http::TransportSelection::Stdio => {
-            let runtime = RuntimeContext::start(&config).await?;
+            let mut runtime = RuntimeContext::start(&config).await?;
+            #[cfg(feature = "acceptance-harness")]
+            if acceptance_process {
+                runtime.enable_artifact_acceptance_gates();
+            }
             tracing::info!(
                 http_available = runtime.startup_status().http_available,
                 grpc_available = runtime.startup_status().grpc_available,
@@ -258,7 +289,11 @@ async fn run_server(
         }
         http::TransportSelection::StreamableHttp(http_config) => {
             let auth = http::prepare_http_auth(&http_config, config.startup_timeout).await?;
-            let runtime = RuntimeContext::start(&config).await?;
+            let mut runtime = RuntimeContext::start(&config).await?;
+            #[cfg(feature = "acceptance-harness")]
+            if acceptance_process {
+                runtime.enable_artifact_acceptance_gates();
+            }
             tracing::info!(
                 http_available = runtime.startup_status().http_available,
                 grpc_available = runtime.startup_status().grpc_available,
