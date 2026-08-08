@@ -2724,7 +2724,8 @@ async fn live_artifact_server_with(
     let artifact = ArtifactConfig::from_toml(&contents).map_err(|_| TestError::Assertion {
         message: "parse artifact acceptance policy".to_owned(),
     })?;
-    let runtime = live_artifact_runtime(ctx, &artifact, read_only).await?;
+    let mut runtime = live_artifact_runtime(ctx, &artifact, read_only).await?;
+    runtime.enable_artifact_acceptance_gates();
     Ok(AnyMcpServer::new(runtime).expect("production artifacts MCP catalog"))
 }
 
