@@ -7610,6 +7610,7 @@ async fn run_artifact_ttl_acceptance(
         return Err("CLEAN-04 did not invalidate the expired handle and restore quota".to_owned());
     }
     catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    execution.record_executed(AdversarialCaseId::Hand03)?;
     execution.record_executed(AdversarialCaseId::Clean04)?;
     execution.record_quota_not_applicable();
     Ok(execution)
@@ -7927,11 +7928,44 @@ async fn run_artifact_payload_acceptance(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
-) -> Result<(), String> {
+) -> Result<AdversarialExecution, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let large_markdown = (0..65)
+        .map(|index| format!("## FLOOD-05-{index}\n\n{}\n\n", "x".repeat(16 * 1024)))
+        .collect::<String>();
+    let large_document = ctx
+        .client
+        .new_object(&ctx.space_id, "page")
+        .name(format!("FLOOD-05-{}", unique_suffix()))
+        .body(&large_markdown)
+        .create()
+        .await
+        .map_err(|_| "create FLOOD-05 large document".to_owned())?;
+    ctx.register_object(&large_document.id);
+    let export_before = policy.export_snapshot()?;
+    let flood = driver
+        .call_tool_error(
+            "document_export",
+            json!({
+                "space": ctx.space_id,
+                "object_id": large_document.id,
+                "destination": {"local": {"root": ArtifactPolicyFixture::EXPORT_ROOT, "path": "flood05.md"}},
+                "idempotency_key": format!("FLOOD-05-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if flood.code() != "bounded_result"
+        || serde_json::to_vec(flood.normalized_result())
+            .map_err(|_| "serialize FLOOD-05 refusal".to_owned())?
+            .len()
+            > ARTIFACT_FRAME_CEILING_BYTES as usize
+        || policy.export_snapshot()? != export_before
+    {
+        return Err("FLOOD-05 did not return a bounded refusal without publication".to_owned());
+    }
     let (small, small_stage) =
         measured_payload_import(ctx, child, b"payload-small", "small", audit_needles).await?;
     let large_payload = (0..1024 * 1024)
@@ -7958,7 +7992,11 @@ async fn run_artifact_payload_acceptance(
     if !policy.staging_snapshot()?.is_reaped() {
         return Err("payload scenario left private staging state".to_owned());
     }
-    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    let mut execution = AdversarialExecution::default();
+    execution.record_executed(AdversarialCaseId::Flood05)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
 }
 
 /// Runs quota, TTL, collision, cancellation, restart, stale-generation, and
@@ -8044,7 +8082,10 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                             )
                             .await
                             .and_then(|execution| {
-                                execution.assert_exact(&[AdversarialCaseId::Clean04])
+                                execution.assert_exact(&[
+                                    AdversarialCaseId::Hand03,
+                                    AdversarialCaseId::Clean04,
+                                ])
                             })
                         }
                         ArtifactLifecycleScenario::Collision => {
@@ -8097,6 +8138,9 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 &callback_audit_needles,
                             )
                             .await
+                            .and_then(|execution| {
+                                execution.assert_exact(&[AdversarialCaseId::Flood05])
+                            })
                         }
                     };
                     result.map_err(|_| {

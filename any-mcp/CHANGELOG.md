@@ -12,13 +12,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   regressions for uniform bearer refusal, route, direction, and space binding,
   strict request grammar, rate recovery, and request-permit shedding. The
   partial-write owner now drives malformed raw HTTP, disconnect/resume, offset,
-  hash, inventory, quota-allocation, and download-range assertions; the
+  hash, consumed-handle replay, inventory, quota-allocation, and download-range
+  assertions; the
   process-crash owner captures a deterministic kill during a JSON-RPC frame.
   Cleanup owners cover failed import/export rollback, release and TTL
   invalidation, required-validator refusal, and read-only catalog isolation.
   Flood owners measure maximum-occupancy aggregate status, oversized validator
-  output, validator deadline enforcement, descendant cleanup, and bounded
-  spawned diagnostics.
+  output, validator deadline enforcement, descendant cleanup, oversized
+  document-export refusal, and bounded spawned diagnostics.
   These and the remaining handle, process-crash, output-flood, and
   failure-cleanup rows stay pending until their live case-specific owners pass.
 - Add closed real-server adversarial artifact coverage for 43 traversal,

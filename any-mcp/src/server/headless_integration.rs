@@ -3290,6 +3290,7 @@ async fn headless_artifact_partial_write_direct_scenarios() {
                 };
                 execution
                     .assert_exact(&[
+                        AdversarialCaseId::Hand05,
                         AdversarialCaseId::Part01,
                         AdversarialCaseId::Part02,
                         AdversarialCaseId::Part03,

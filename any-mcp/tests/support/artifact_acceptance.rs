@@ -3329,8 +3329,24 @@ pub async fn run_artifact_partial_write_protocol_cases(
     if imported.pointer("/receipt/sha256").and_then(Value::as_str) != Some(expected.as_str()) {
         return Err("PART-03 resumed bytes failed final hash verification".to_owned());
     }
+    let consumed = driver
+        .call_tool_error(
+            "file_import",
+            json!({
+                "space": run.ctx.space_id,
+                "source": {"staged_handle": allocation.handle()},
+                "name": "hand05.bin",
+                "media_type": "text/plain",
+                "idempotency_key": format!("hand05-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if consumed.code() != "not_found" {
+        return Err("HAND-05 did not uniformly refuse the consumed handle".to_owned());
+    }
     release_stage_upload(driver, &allocation).await?;
     execution.record_executed(AdversarialCaseId::Part03)?;
+    execution.record_executed(AdversarialCaseId::Hand05)?;
     let objects_after_resume = artifact_object_ids(run.ctx).await?;
     if objects_after_resume.len() != objects_before.len().saturating_add(1) {
         return Err("PART-03 did not create exactly one verified file".to_owned());
