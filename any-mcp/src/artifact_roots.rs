@@ -23,6 +23,9 @@ use std::{
     task::{Context, Poll},
 };
 
+#[cfg(any(test, feature = "acceptance-harness"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 #[cfg(unix)]
 use cap_fs_ext::OpenOptionsExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
@@ -264,6 +267,10 @@ pub struct RootRegistry {
     roots: Arc<BTreeMap<LogicalRootId, RootCapability>>,
     import_count: usize,
     export_count: usize,
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    access_attempts: Arc<AtomicU64>,
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    successful_import_opens: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for RootRegistry {
@@ -298,6 +305,10 @@ impl RootRegistry {
             roots: Arc::new(roots),
             import_count: config.import_root_count(),
             export_count: config.export_root_count(),
+            #[cfg(any(test, feature = "acceptance-harness"))]
+            access_attempts: Arc::new(AtomicU64::new(0)),
+            #[cfg(any(test, feature = "acceptance-harness"))]
+            successful_import_opens: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -358,6 +369,26 @@ impl RootRegistry {
     pub const fn export_root_count(&self) -> usize {
         self.export_count
     }
+
+    /// Returns the retained-root operation count for acceptance assertions.
+    ///
+    /// This test-only counter advances before authorization or filesystem I/O,
+    /// allowing adversarial grammar tests to prove malformed paths never
+    /// reached the retained-root boundary.
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn acceptance_access_attempts(&self) -> u64 {
+        self.access_attempts.load(Ordering::Acquire)
+    }
+
+    /// Returns successful retained import opens for acceptance assertions.
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn acceptance_successful_import_opens(&self) -> u64 {
+        self.successful_import_opens.load(Ordering::Acquire)
+    }
 }
 
 /// Effective root authority after optional MCP client-root narrowing.
@@ -395,8 +426,17 @@ impl EffectiveRootRegistry {
         path: &RelativeNativePath,
         maximum_bytes: u64,
     ) -> Result<AnchoredImport, RootAccessError> {
+        #[cfg(any(test, feature = "acceptance-harness"))]
+        self.registry.access_attempts.fetch_add(1, Ordering::AcqRel);
         let capability = self.authorize(root, RootCapabilityKind::Import)?;
-        open_import_at(capability, path, maximum_bytes)
+        let opened = open_import_at(capability, path, maximum_bytes);
+        #[cfg(any(test, feature = "acceptance-harness"))]
+        if opened.is_ok() {
+            self.registry
+                .successful_import_opens
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        opened
     }
 
     /// Starts one bounded, create-new atomic export.
@@ -415,6 +455,8 @@ impl EffectiveRootRegistry {
         path: &RelativeNativePath,
         maximum_bytes: u64,
     ) -> Result<AtomicExport, RootAccessError> {
+        #[cfg(any(test, feature = "acceptance-harness"))]
+        self.registry.access_attempts.fetch_add(1, Ordering::AcqRel);
         if maximum_bytes == 0 {
             return Err(RootAccessError::new(RootProblem::TooLarge));
         }
@@ -1475,6 +1517,16 @@ fn safe_windows_security(file: &File) -> bool {
     windows_security::owner_and_dacl_are_safe(file).unwrap_or(false)
 }
 
+/// Validates an owner-private, non-reparse regular file for Windows acceptance evidence.
+#[cfg(all(windows, any(test, feature = "acceptance-harness")))]
+#[doc(hidden)]
+#[must_use]
+pub fn acceptance_owner_private_file(file: &File) -> bool {
+    file.metadata().ok().is_some_and(|metadata| {
+        safe_import_metadata(file, &metadata) && safe_windows_security(file)
+    })
+}
+
 #[cfg(windows)]
 pub(crate) mod windows_security {
     use std::{
@@ -1880,6 +1932,17 @@ mod tests {
 
         assert_eq!(registry.import_root_count(), 1);
         assert_eq!(registry.export_root_count(), 1);
+        assert_eq!(registry.acceptance_access_attempts(), 0);
+        assert_eq!(registry.acceptance_successful_import_opens(), 0);
+        let missing = RelativeNativePath::from_utf8("missing.bin").expect("relative path");
+        assert!(
+            registry
+                .static_policy()
+                .open_import("inbox", &missing, 64)
+                .is_err()
+        );
+        assert_eq!(registry.acceptance_access_attempts(), 1);
+        assert_eq!(registry.acceptance_successful_import_opens(), 0);
         assert!(!format!("{registry:?}").contains(base.to_string_lossy().as_ref()));
         fs::remove_dir_all(base).expect("cleanup");
     }

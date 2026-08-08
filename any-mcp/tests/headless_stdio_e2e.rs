@@ -48,16 +48,18 @@ mod support;
 
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
-    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD,
-    ARTIFACT_TOOL_NAMES, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
+    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE,
+    ARTIFACT_FILE_PAYLOAD, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
+    ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
     ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactLifecycleScenario,
     ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
-    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactTransport, allocate_stage_upload,
-    artifact_catalog_snapshot, artifact_sha256, assert_artifact_content_parity,
-    assert_artifact_parity, assert_artifact_policy_parity, assert_payload_frame_independence,
-    audit_server_log, classify_collision_frames, measure_artifact_frame,
-    reject_oversized_stage_chunk, release_stage_upload, run_artifact_content_scenario,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_offset,
+    ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactTransport,
+    ExpectedOutcome, ObservedOutcome, allocate_stage_upload, artifact_catalog_snapshot,
+    artifact_sha256, assert_artifact_content_parity, assert_artifact_parity,
+    assert_artifact_policy_parity, assert_payload_frame_independence, audit_server_log,
+    classify_collision_frames, measure_artifact_frame, reject_oversized_stage_chunk,
+    release_stage_upload, run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_baseline,
     stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
 #[cfg(feature = "acceptance-harness")]
@@ -1801,6 +1803,7 @@ struct ArtifactChildProcessEvidence {
     reconciled_records: u64,
     cancelled_operations: u64,
     stdout_bytes: u64,
+    stderr_bytes: u64,
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -1843,6 +1846,8 @@ fn artifact_child_process_evidence(
     let mut evidence = ArtifactChildProcessEvidence {
         stdout_bytes: u64::try_from(output.stdout.len())
             .map_err(|_| "artifact child stdout exceeds the addressable range".to_owned())?,
+        stderr_bytes: u64::try_from(output.stderr.len())
+            .map_err(|_| "artifact child stderr exceeds the addressable range".to_owned())?,
         ..ArtifactChildProcessEvidence::default()
     };
     for line in stderr.lines() {
@@ -5780,9 +5785,24 @@ const SPAWNED_ARTIFACT_CONTROLS: [ArtifactControlPlane; 3] = [
     ArtifactControlPlane::SpawnedPreviewStdio,
 ];
 
-/// Optional captured Anytype server log inspected for new failure classes.
+/// Production stdio controls that own the adversarial artifact matrix.
 #[cfg(feature = "acceptance-harness")]
-const ARTIFACT_SERVER_LOG_ENV: &str = "ANY_MCP_ARTIFACT_SERVER_LOG";
+const ADVERSARIAL_STDIO_CONTROLS: [ArtifactControlPlane; 2] = [
+    ArtifactControlPlane::SpawnedStableStdio,
+    ArtifactControlPlane::SpawnedPreviewStdio,
+];
+
+/// Aggregate diagnostic limits for one complete adversarial production child.
+#[cfg(feature = "acceptance-harness")]
+const ADVERSARIAL_CHILD_OUTPUT_BYTES: u64 = 1_048_576;
+
+/// Maximum retained sensitive value passed only to the bounded log audit.
+#[cfg(feature = "acceptance-harness")]
+const ARTIFACT_LOG_NEEDLE_BYTES: usize = 4 * 1024;
+
+/// Required reviewed Anytype server log inspected for new failure classes.
+#[cfg(feature = "acceptance-harness")]
+const ARTIFACT_SERVER_LOG_ENV: &str = "ANY_MCP_HEADLESS_REDACTED_LOG_FILE";
 
 #[cfg(feature = "acceptance-harness")]
 fn artifact_driver_options(control: ArtifactControlPlane) -> DriverOptions {
@@ -5795,13 +5815,103 @@ fn artifact_driver_options(control: ArtifactControlPlane) -> DriverOptions {
     }
 }
 
-/// Records the captured server log window before the acceptance matrix runs.
+/// Records the captured server-log descriptor before the acceptance matrix runs.
 #[cfg(feature = "acceptance-harness")]
-fn artifact_server_log_window() -> Option<(PathBuf, u64)> {
-    let path = PathBuf::from(std::env::var_os(ARTIFACT_SERVER_LOG_ENV)?);
-    let offset = server_log_offset(&path)
-        .unwrap_or_else(|error| panic!("captured artifact server log baseline: {error}"));
-    Some((path, offset))
+fn artifact_server_log_baseline() -> ArtifactServerLogBaseline {
+    let path = PathBuf::from(
+        std::env::var_os(ARTIFACT_SERVER_LOG_ENV)
+            .unwrap_or_else(|| panic!("reviewed artifact server-log evidence was not configured")),
+    );
+    server_log_baseline(&path)
+        .unwrap_or_else(|error| panic!("captured artifact server log baseline: {error}"))
+}
+
+/// Retains sensitive values solely for the descriptor-bounded server-log audit.
+#[cfg(feature = "acceptance-harness")]
+fn record_artifact_log_needle(needles: &Arc<Mutex<Vec<Vec<u8>>>>, value: &[u8]) -> TestResult<()> {
+    if value.is_empty() || value.len() > ARTIFACT_LOG_NEEDLE_BYTES {
+        return Err(sentinel_assertion(
+            "artifact log audit received an invalid forbidden value",
+        ));
+    }
+    needles
+        .lock()
+        .map_err(|_| sentinel_assertion("artifact log-audit needles lock poisoned"))?
+        .push(value.to_vec());
+    Ok(())
+}
+
+/// Retains a staging bearer for the descriptor-bounded audit without reporting it.
+#[cfg(feature = "acceptance-harness")]
+fn record_artifact_stage_log_needle(
+    needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    bearer: &[u8],
+) -> Result<(), String> {
+    if bearer.is_empty() || bearer.len() > ARTIFACT_LOG_NEEDLE_BYTES {
+        return Err("artifact log audit received an invalid staging bearer".to_owned());
+    }
+    needles
+        .lock()
+        .map_err(|_| "artifact log-audit needles lock poisoned".to_owned())?
+        .push(bearer.to_vec());
+    Ok(())
+}
+
+/// Adds the private fixture base path to the server-log redaction audit.
+#[cfg(feature = "acceptance-harness")]
+fn artifact_fixture_log_needle(policy: &ArtifactPolicyFixture) -> TestResult<Vec<u8>> {
+    let needle = policy.forbidden_log_needle();
+    if needle.is_empty() || needle.len() > ARTIFACT_LOG_NEEDLE_BYTES {
+        return Err(sentinel_assertion(
+            "artifact fixture produced an invalid log-audit value",
+        ));
+    }
+    Ok(needle.to_vec())
+}
+
+/// Adds the private fixture base path to the server-log redaction audit.
+#[cfg(feature = "acceptance-harness")]
+fn record_artifact_fixture_log_needle(
+    policy: &ArtifactPolicyFixture,
+    needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<()> {
+    let needle = artifact_fixture_log_needle(policy)?;
+    record_artifact_log_needle(needles, &needle)
+}
+
+/// Adds disposable child credentials to the server-log redaction audit.
+#[cfg(feature = "acceptance-harness")]
+fn record_artifact_credential_log_needles(
+    ctx: &TestContext,
+    needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<()> {
+    for credential in disposable_child_credential_needles(ctx)? {
+        record_artifact_log_needle(needles, &credential)?;
+    }
+    Ok(())
+}
+
+/// Audits the retained descriptor without exposing paths, credentials, or log bytes.
+#[cfg(feature = "acceptance-harness")]
+fn assert_artifact_server_log_clean(
+    baseline: &ArtifactServerLogBaseline,
+    needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    workflow: &'static str,
+) {
+    let needles = needles.lock().expect("artifact log-audit needles lock");
+    let borrowed = needles.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let audit = audit_server_log(baseline, &borrowed).expect("audit captured artifact server log");
+    eprintln!(
+        "artifact {workflow} server log inspected={} panic_or_fatal={} unclassified={} forbidden={}",
+        audit.inspected_lines,
+        audit.panic_or_fatal_lines,
+        audit.unclassified_error_lines,
+        audit.forbidden_needle_matches,
+    );
+    assert!(
+        audit.is_clean() && audit.forbidden_needle_matches == 0,
+        "captured server log violated the fixed-category or redaction contract"
+    );
 }
 
 /// Runs the complete spawned artifact acceptance matrix in one disposable space.
@@ -5814,11 +5924,14 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
     let cleanup: [Arc<Mutex<ChildCleanupRecord>>; SPAWNED_ARTIFACT_CONTROLS.len()] =
         std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
     let callback_cleanup = cleanup.clone();
-    let log_window = artifact_server_log_window();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-artifact",
         move |ctx| {
             Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
                 let mut evidence = Vec::with_capacity(ArtifactTransport::SPAWNED_MATRIX.len());
                 for (index, control) in SPAWNED_ARTIFACT_CONTROLS.into_iter().enumerate() {
                     let options = artifact_driver_options(control);
@@ -5826,6 +5939,7 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                         Arc::new(ArtifactPolicyFixture::create(&ctx.space_id).map_err(|_| {
                             sentinel_assertion("create artifact acceptance policy")
                         })?);
+                    record_artifact_fixture_log_needle(&policy, &callback_audit_needles)?;
                     let record = callback_cleanup
                         .get(index)
                         .ok_or_else(|| sentinel_assertion("artifact cleanup record missing"))?;
@@ -5859,9 +5973,9 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                             };
                             Box::pin(run_artifact_smoke_scenario(&mut driver, &fixture)).await
                         };
-                        evidence.push(observed.map_err(|error| {
+                        evidence.push(observed.map_err(|_| {
                             eprintln!(
-                                "artifact acceptance transport={} failure={error}",
+                                "artifact acceptance transport={} outcome=failed",
                                 transport.id()
                             );
                             sentinel_assertion("artifact acceptance transport failed")
@@ -5870,8 +5984,8 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                 }
 
                 assert_artifact_parity(&evidence, &ArtifactTransport::SPAWNED_MATRIX).map_err(
-                    |error| {
-                        eprintln!("artifact acceptance parity failure={error}");
+                    |_| {
+                        eprintln!("artifact acceptance parity outcome=diverged");
                         sentinel_assertion("spawned artifact transports diverged")
                     },
                 )?;
@@ -5890,25 +6004,11 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                     ChildCleanupRecord::Stopped
                 );
             }
-            if let Some((path, offset)) = log_window {
-                let audit =
-                    audit_server_log(&path, offset).expect("audit captured artifact server log");
-                eprintln!(
-                    "artifact acceptance server log inspected={} panic_or_fatal={} unclassified={} known={:?}",
-                    audit.inspected_lines,
-                    audit.panic_or_fatal_lines,
-                    audit.unclassified_error_lines,
-                    audit.known_classes
-                );
-                assert!(
-                    audit.is_clean(),
-                    "captured server log reported a panic, fatal, or unclassified error class"
-                );
-            }
+            assert_artifact_server_log_clean(&log_baseline, &audit_needles, "acceptance");
             OptionalRealWorkflowRun::Executed
         }
-        DisposableRun::Skipped(reason) => {
-            eprintln!("artifact acceptance skipped before callback: {reason:?}");
+        DisposableRun::Skipped(_) => {
+            eprintln!("artifact acceptance outcome=admission_skipped");
             OptionalRealWorkflowRun::Skipped
         }
     }
@@ -5921,6 +6021,236 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
 async fn headless_artifact_spawned_transport_matrix_scenario() {
     require_optional_workflow_executed(run_artifacts_real_workflow().await)
         .expect("spawned artifact acceptance matrix");
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_spawned_artifact_adversarial_default(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    control: ArtifactControlPlane,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<()> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| sentinel_assertion("create adversarial artifact fixture"))?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)?;
+    let child = spawn_disposable_artifact_driver(
+        ctx,
+        cleanup_record,
+        Arc::clone(&policy),
+        artifact_driver_options(control),
+    )?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("registered adversarial artifact child disappeared"))?
+        .initialize();
+
+    let run = ArtifactAdversarialRun {
+        control,
+        policy: policy.as_ref(),
+        ctx,
+        root_access_attempts: None,
+        successful_import_opens: None,
+    };
+    let observed = {
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&child),
+        };
+        Box::pin(run_artifact_adversarial_stdio_sentinels(&mut driver, &run)).await
+    };
+    let process = finish_registered_artifact_child(&child, None).map_err(|_| {
+        eprintln!(
+            "artifact adversarial control={} child_outcome=failed",
+            control.as_str()
+        );
+        sentinel_assertion("spawned adversarial artifact child did not stop cleanly")
+    })?;
+    if process.stdout_bytes > ADVERSARIAL_CHILD_OUTPUT_BYTES
+        || process.stderr_bytes > ADVERSARIAL_CHILD_OUTPUT_BYTES
+    {
+        return Err(sentinel_assertion(
+            "spawned adversarial artifact child exceeded its output bound",
+        ));
+    }
+    let execution = observed.map_err(|_| {
+        eprintln!(
+            "artifact adversarial control={} outcome=failed",
+            control.as_str()
+        );
+        sentinel_assertion("spawned adversarial artifact scenarios failed")
+    })?;
+    execution
+        .assert_exact(ADVERSARIAL_STDIO_SENTINEL_IDS)
+        .map_err(|_| sentinel_assertion("spawned adversarial case inventory diverged"))?;
+    for needle in execution.forbidden_log_needles() {
+        record_artifact_log_needle(audit_needles, needle)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn alias07_policy_contents(policy: &ArtifactPolicyFixture) -> TestResult<String> {
+    let configured = policy
+        .policy_contents()
+        .map_err(|_| sentinel_assertion("read adversarial startup policy"))?;
+    let export = format!(
+        "[[roots.export]]\nid = \"{}\"",
+        ArtifactPolicyFixture::EXPORT_ROOT
+    );
+    let replacement = "[[roots.export]]\nid = \"INBOX\"";
+    if !configured.contains(&export) {
+        return Err(sentinel_assertion(
+            "adversarial startup policy omitted its export root",
+        ));
+    }
+    Ok(configured.replacen(&export, replacement, 1))
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn run_alias07_startup_rejection(
+    ctx: &TestContext,
+    control: ArtifactControlPlane,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<AdversarialExecution> {
+    let policy = ArtifactPolicyFixture::create(&ctx.space_id)
+        .map_err(|_| sentinel_assertion("create adversarial startup fixture"))?;
+    let fixture_needle = artifact_fixture_log_needle(&policy)?;
+    record_artifact_log_needle(audit_needles, &fixture_needle)?;
+    std::fs::write(policy.config_path(), alias07_policy_contents(&policy)?)
+        .map_err(|_| sentinel_assertion("write adversarial startup policy"))?;
+
+    let credential_needles = disposable_child_credential_needles(ctx)?;
+    let environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| sentinel_assertion("adversarial startup omitted child environment"))?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    environment.configure(&mut command)?;
+    configure_stdio_command(
+        &mut command,
+        artifact_driver_options(control),
+        Some("artifacts"),
+    );
+    command.env("ANY_MCP_CONFIG", policy.config_path());
+
+    let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(5));
+    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+        .expect_err("ALIAS-07 startup rejection closes stdout without a frame");
+    let panic_text = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic");
+    if panic_text != "bounded protocol process failed: child_eof" {
+        return Err(sentinel_assertion(
+            "ALIAS-07 startup rejection did not produce the bounded EOF category",
+        ));
+    }
+    let failure = process
+        .take_failure()
+        .ok_or_else(|| sentinel_assertion("ALIAS-07 omitted bounded process evidence"))?;
+    if failure.category != "child_eof"
+        || failure.output.exit_category != "exit_code"
+        || !failure.output.stdout.is_empty()
+        || failure.output.stderr.len() > support::process::MAX_STDERR_BYTES
+    {
+        return Err(sentinel_assertion(
+            "ALIAS-07 startup rejection violated the production output contract",
+        ));
+    }
+    let stderr = std::str::from_utf8(&failure.output.stderr)
+        .map_err(|_| sentinel_assertion("ALIAS-07 stderr was not UTF-8"))?;
+    let lines = stderr
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let category = match lines.as_slice() {
+        [line]
+            if line
+                .strip_suffix(
+                    "any-mcp startup or service failure reason=invalid any-mcp artifact root",
+                )
+                .is_some_and(|prefix| {
+                    prefix
+                        .split_ascii_whitespace()
+                        .any(|field| field == "ERROR")
+                }) =>
+        {
+            "invalid any-mcp artifact root"
+        }
+        _ => "unexpected startup category",
+    };
+    ExpectedOutcome::StartupRejected {
+        category: "invalid any-mcp artifact root",
+    }
+    .assert_matches(ObservedOutcome::StartupRejected { category })
+    .map_err(|_| sentinel_assertion("ALIAS-07 startup category diverged"))?;
+    if contains_bytes(&failure.output.stderr, &fixture_needle)
+        || credential_needles
+            .iter()
+            .any(|needle| contains_bytes(&failure.output.stderr, needle))
+    {
+        return Err(sentinel_assertion(
+            "ALIAS-07 startup diagnostics exposed disposable credentials",
+        ));
+    }
+    let mut execution = AdversarialExecution::default();
+    execution
+        .record_executed(AdversarialCaseId::Alias07)
+        .map_err(|_| sentinel_assertion("record ALIAS-07 startup rejection"))?;
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
+    let cleanup: [Arc<Mutex<ChildCleanupRecord>>; ADVERSARIAL_STDIO_CONTROLS.len()] =
+        std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
+    let callback_cleanup = cleanup.clone();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-adversarial",
+        move |ctx| {
+            Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                for (index, control) in ADVERSARIAL_STDIO_CONTROLS.into_iter().enumerate() {
+                    let record = callback_cleanup
+                        .get(index)
+                        .ok_or_else(|| sentinel_assertion("adversarial cleanup record missing"))?;
+                    run_spawned_artifact_adversarial_default(
+                        ctx.as_ref(),
+                        Arc::clone(record),
+                        control,
+                        &callback_audit_needles,
+                    )
+                    .await?;
+                    run_alias07_startup_rejection(ctx.as_ref(), control, &callback_audit_needles)?;
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned artifact adversarial scenarios");
+
+    match outcome {
+        DisposableRun::Completed(()) => {
+            for record in &cleanup {
+                assert_eq!(
+                    *record.lock().expect("adversarial artifact cleanup record"),
+                    ChildCleanupRecord::Stopped
+                );
+            }
+            assert_artifact_server_log_clean(&log_baseline, &audit_needles, "adversarial");
+        }
+        DisposableRun::Skipped(_) => {
+            panic!("artifact adversarial scenarios require disposable admission");
+        }
+    }
 }
 
 /// Selects the spawned child profile for one policy scenario.
@@ -5952,11 +6282,13 @@ async fn run_spawned_artifact_policy_scenario(
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
     scenario: ArtifactPolicyScenario,
     control: ArtifactControlPlane,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> TestResult<ArtifactPolicyEvidence> {
     let policy = Arc::new(
         ArtifactPolicyFixture::create_with(&ctx.space_id, scenario.policy_options())
             .map_err(|_| sentinel_assertion("create artifact policy fixture"))?,
     );
+    record_artifact_fixture_log_needle(&policy, audit_needles)?;
     let options = artifact_policy_driver_options(control, scenario.is_read_only());
     let child =
         spawn_disposable_artifact_driver(ctx, cleanup_record, Arc::clone(&policy), options)?;
@@ -5988,9 +6320,9 @@ async fn run_spawned_artifact_policy_scenario(
     let stopped = lock_driver(&child)
         .take()
         .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
-    let evidence = observed.map_err(|error| {
+    let evidence = observed.map_err(|_| {
         eprintln!(
-            "artifact policy scenario={} control={} failure={error}",
+            "artifact policy scenario={} control={} outcome=failed",
             scenario.as_str(),
             control.as_str()
         );
@@ -6015,11 +6347,14 @@ async fn headless_artifact_policy_spawned_scenarios() {
         .map(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)))
         .collect();
     let callback_cleanup = cleanup.clone();
-    let log_window = artifact_server_log_window();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-artifact-policy",
         move |ctx| {
             Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
                 for (scenario_index, scenario) in
                     ArtifactPolicyScenario::ALL.into_iter().enumerate()
                 {
@@ -6039,14 +6374,15 @@ async fn headless_artifact_policy_spawned_scenarios() {
                                 Arc::clone(record),
                                 scenario,
                                 control,
+                                &callback_audit_needles,
                             ))
                             .await?,
                         );
                     }
                     assert_artifact_policy_parity(&evidence, &SPAWNED_ARTIFACT_CONTROLS).map_err(
-                        |error| {
+                        |_| {
                             eprintln!(
-                                "artifact policy scenario={} parity failure={error}",
+                                "artifact policy scenario={} parity_outcome=diverged",
                                 scenario.as_str()
                             );
                             sentinel_assertion("spawned artifact policy planes diverged")
@@ -6068,24 +6404,10 @@ async fn headless_artifact_policy_spawned_scenarios() {
                     ChildCleanupRecord::Stopped
                 );
             }
-            if let Some((path, offset)) = log_window {
-                let audit = audit_server_log(&path, offset)
-                    .expect("audit captured artifact policy server log");
-                eprintln!(
-                    "artifact policy server log inspected={} panic_or_fatal={} unclassified={} known={:?}",
-                    audit.inspected_lines,
-                    audit.panic_or_fatal_lines,
-                    audit.unclassified_error_lines,
-                    audit.known_classes
-                );
-                assert!(
-                    audit.is_clean(),
-                    "captured server log reported a panic, fatal, or unclassified error class"
-                );
-            }
+            assert_artifact_server_log_clean(&log_baseline, &audit_needles, "policy");
         }
-        DisposableRun::Skipped(reason) => {
-            panic!("artifact policy scenarios require disposable admission: {reason:?}");
+        DisposableRun::Skipped(_) => {
+            panic!("artifact policy scenarios require disposable admission");
         }
     }
 }
@@ -6101,18 +6423,20 @@ async fn run_spawned_artifact_content_scenario(
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
     scenario: ArtifactContentScenario,
     control: ArtifactControlPlane,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> TestResult<ArtifactContentEvidence> {
     let policy = Arc::new(
         ArtifactPolicyFixture::create_with(&ctx.space_id, scenario.policy_options()).map_err(
-            |error| {
+            |_| {
                 eprintln!(
-                    "artifact content scenario={} fixture failure={error}",
+                    "artifact content scenario={} fixture_outcome=failed",
                     scenario.as_str()
                 );
                 sentinel_assertion("create artifact content fixture")
             },
         )?,
     );
+    record_artifact_fixture_log_needle(&policy, audit_needles)?;
     let child = spawn_disposable_artifact_driver(
         ctx,
         cleanup_record,
@@ -6145,9 +6469,9 @@ async fn run_spawned_artifact_content_scenario(
     let stopped = lock_driver(&child)
         .take()
         .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
-    let evidence = observed.map_err(|error| {
+    let evidence = observed.map_err(|_| {
         eprintln!(
-            "artifact content scenario={} control={} failure={error}",
+            "artifact content scenario={} control={} outcome=failed",
             scenario.as_str(),
             control.as_str()
         );
@@ -6176,11 +6500,14 @@ async fn headless_artifact_content_spawned_scenarios() {
         .map(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)))
         .collect();
     let callback_cleanup = cleanup.clone();
-    let log_window = artifact_server_log_window();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-artifact-content",
         move |ctx| {
             Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
                 for (scenario_index, scenario) in
                     ArtifactContentScenario::ALL.into_iter().enumerate()
                 {
@@ -6200,14 +6527,15 @@ async fn headless_artifact_content_spawned_scenarios() {
                                 Arc::clone(record),
                                 scenario,
                                 control,
+                                &callback_audit_needles,
                             ))
                             .await?,
                         );
                     }
                     assert_artifact_content_parity(&evidence, &SPAWNED_ARTIFACT_CONTROLS).map_err(
-                        |error| {
+                        |_| {
                             eprintln!(
-                                "artifact content scenario={} parity failure={error}",
+                                "artifact content scenario={} parity_outcome=diverged",
                                 scenario.as_str()
                             );
                             sentinel_assertion("spawned artifact content planes diverged")
@@ -6229,24 +6557,10 @@ async fn headless_artifact_content_spawned_scenarios() {
                     ChildCleanupRecord::Stopped
                 );
             }
-            if let Some((path, offset)) = log_window {
-                let audit = audit_server_log(&path, offset)
-                    .expect("audit captured artifact content server log");
-                eprintln!(
-                    "artifact content server log inspected={} panic_or_fatal={} unclassified={} known={:?}",
-                    audit.inspected_lines,
-                    audit.panic_or_fatal_lines,
-                    audit.unclassified_error_lines,
-                    audit.known_classes
-                );
-                assert!(
-                    audit.is_clean(),
-                    "captured server log reported a panic, fatal, or unclassified error class"
-                );
-            }
+            assert_artifact_server_log_clean(&log_baseline, &audit_needles, "content");
         }
-        DisposableRun::Skipped(reason) => {
-            panic!("artifact content scenarios require disposable admission: {reason:?}");
+        DisposableRun::Skipped(_) => {
+            panic!("artifact content scenarios require disposable admission");
         }
     }
 }
@@ -6256,6 +6570,7 @@ async fn run_artifact_quota_acceptance(
     ctx: &TestContext,
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> Result<(), String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
@@ -6269,6 +6584,7 @@ async fn run_artifact_quota_acceptance(
         None,
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, first.handle().as_bytes())?;
     let second = allocate_stage_upload(
         &mut driver,
         &ctx.space_id,
@@ -6277,6 +6593,7 @@ async fn run_artifact_quota_acceptance(
         None,
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, second.handle().as_bytes())?;
     let reserved = policy.staging_snapshot()?;
     if reserved.temporary_files != 2 || reserved.unexpected_entries != 0 {
         return Err("quota reservations did not produce the exact staging snapshot".to_owned());
@@ -6304,6 +6621,7 @@ async fn run_artifact_quota_acceptance(
         None,
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, third.handle().as_bytes())?;
     release_stage_upload(&mut driver, &third).await?;
     let byte_refusal = driver
         .call_tool_error(
@@ -6330,6 +6648,7 @@ async fn run_artifact_ttl_acceptance(
     ctx: &TestContext,
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> Result<(), String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
@@ -6343,6 +6662,7 @@ async fn run_artifact_ttl_acceptance(
         None,
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, allocation.handle().as_bytes())?;
     let allocated = policy.staging_snapshot()?;
     if allocated.temporary_files != 1 || allocated.unexpected_entries != 0 {
         return Err("TTL allocation did not produce the exact staging snapshot".to_owned());
@@ -6447,6 +6767,7 @@ async fn run_artifact_cancellation_acceptance(
     ctx: &TestContext,
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> Result<u64, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
@@ -6462,6 +6783,7 @@ async fn run_artifact_cancellation_acceptance(
         Some(&expected),
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, allocation.handle().as_bytes())?;
     upload_stage_bytes(&allocation, &payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
     let suffix = unique_suffix();
     let arguments = json!({
@@ -6504,6 +6826,7 @@ async fn run_artifact_restart_acceptance(
     first_cleanup: &Arc<Mutex<ChildCleanupRecord>>,
     second_cleanup: Arc<Mutex<ChildCleanupRecord>>,
     policy: Arc<ArtifactPolicyFixture>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> Result<ArtifactChildProcessEvidence, String> {
     let mut first_driver = OwnedStdioDriver {
         driver: Arc::clone(first_child),
@@ -6519,6 +6842,7 @@ async fn run_artifact_restart_acceptance(
         Some(&expected),
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, stale.handle().as_bytes())?;
     upload_stage_bytes(&stale, &payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
     if policy.staging_snapshot()?.record_files != 1 {
         return Err("restart fixture did not retain one complete staged record".to_owned());
@@ -6567,6 +6891,7 @@ async fn run_artifact_restart_acceptance(
         None,
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, fresh.handle().as_bytes())?;
     release_stage_upload(&mut second_driver, &fresh).await?;
     let evidence = finish_registered_artifact_child(&second_child, None)?;
     if evidence.reconciliation_events == 0 || evidence.reconciled_records == 0 {
@@ -6581,6 +6906,7 @@ async fn measured_payload_import(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     payload: &[u8],
     label: &str,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> Result<(ArtifactFrameMeasurement, ArtifactStageAllocation), String> {
     let expected = artifact_sha256(payload);
     let mut driver = OwnedStdioDriver {
@@ -6594,6 +6920,7 @@ async fn measured_payload_import(
         Some(&expected),
     )
     .await?;
+    record_artifact_stage_log_needle(audit_needles, allocation.handle().as_bytes())?;
     if payload.len() > ACCEPTANCE_TRANSFER_CHUNK_BYTES {
         reject_oversized_stage_chunk(&allocation, payload, ARTIFACT_FILE_MEDIA_TYPE).await?;
     }
@@ -6640,18 +6967,19 @@ async fn run_artifact_payload_acceptance(
     ctx: &TestContext,
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> Result<(), String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
     let (small, small_stage) =
-        measured_payload_import(ctx, child, b"payload-small", "small").await?;
+        measured_payload_import(ctx, child, b"payload-small", "small", audit_needles).await?;
     let large_payload = (0..1024 * 1024)
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     let (large, large_stage) =
-        measured_payload_import(ctx, child, &large_payload, "ceiling").await?;
+        measured_payload_import(ctx, child, &large_payload, "ceiling", audit_needles).await?;
     assert_payload_frame_independence(&small, &large)?;
     let over_limit = driver
         .call_tool_error(
@@ -6685,11 +7013,14 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
         .map(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)))
         .collect::<Vec<_>>();
     let callback_cleanup = cleanup.clone();
-    let log_window = artifact_server_log_window();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
     let outcome = Box::pin(with_disposable_space_context(
         "any-mcp-artifact-lifecycle",
         move |ctx| {
             Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
                 let mut cleanup_index = 0_usize;
                 for scenario in ArtifactLifecycleScenario::ALL {
                     eprintln!("artifact lifecycle scenario={}", scenario.as_str());
@@ -6700,6 +7031,7 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                         )
                         .map_err(|_| sentinel_assertion("create artifact lifecycle fixture"))?,
                     );
+                    record_artifact_fixture_log_needle(&policy, &callback_audit_needles)?;
                     let record = callback_cleanup
                         .get(cleanup_index)
                         .ok_or_else(|| sentinel_assertion("artifact lifecycle cleanup record missing"))?;
@@ -6726,10 +7058,22 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
 
                     let result = match scenario {
                         ArtifactLifecycleScenario::Quota => {
-                            run_artifact_quota_acceptance(ctx.as_ref(), &child, &policy).await
+                            run_artifact_quota_acceptance(
+                                ctx.as_ref(),
+                                &child,
+                                &policy,
+                                &callback_audit_needles,
+                            )
+                            .await
                         }
                         ArtifactLifecycleScenario::TtlCleanup => {
-                            run_artifact_ttl_acceptance(ctx.as_ref(), &child, &policy).await
+                            run_artifact_ttl_acceptance(
+                                ctx.as_ref(),
+                                &child,
+                                &policy,
+                                &callback_audit_needles,
+                            )
+                            .await
                         }
                         ArtifactLifecycleScenario::Collision => {
                             run_artifact_collision_acceptance(ctx.as_ref(), &child, &policy).await
@@ -6739,6 +7083,7 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 ctx.as_ref(),
                                 &child,
                                 &policy,
+                                &callback_audit_needles,
                             )
                             .await
                             {
@@ -6766,17 +7111,24 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 record,
                                 Arc::clone(second),
                                 Arc::clone(&policy),
+                                &callback_audit_needles,
                             )
                             .await
                             .map(|_| ())
                         }
                         ArtifactLifecycleScenario::PayloadCeiling => {
-                            run_artifact_payload_acceptance(ctx.as_ref(), &child, &policy).await
+                            run_artifact_payload_acceptance(
+                                ctx.as_ref(),
+                                &child,
+                                &policy,
+                                &callback_audit_needles,
+                            )
+                            .await
                         }
                     };
-                    result.map_err(|error| {
+                    result.map_err(|_| {
                         eprintln!(
-                            "artifact lifecycle scenario={} failure={error}",
+                            "artifact lifecycle scenario={} outcome=failed",
                             scenario.as_str()
                         );
                         sentinel_assertion("artifact lifecycle scenario failed")
@@ -6817,24 +7169,10 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                     ChildCleanupRecord::Stopped
                 );
             }
-            if let Some((path, offset)) = log_window {
-                let audit = audit_server_log(&path, offset)
-                    .expect("audit captured artifact lifecycle server log");
-                eprintln!(
-                    "artifact lifecycle server log inspected={} panic_or_fatal={} unclassified={} known={:?}",
-                    audit.inspected_lines,
-                    audit.panic_or_fatal_lines,
-                    audit.unclassified_error_lines,
-                    audit.known_classes
-                );
-                assert!(
-                    audit.is_clean(),
-                    "captured server log reported a panic, fatal, or unclassified error class"
-                );
-            }
+            assert_artifact_server_log_clean(&log_baseline, &audit_needles, "lifecycle");
         }
-        DisposableRun::Skipped(reason) => {
-            panic!("artifact lifecycle scenarios require disposable admission: {reason:?}");
+        DisposableRun::Skipped(_) => {
+            panic!("artifact lifecycle scenarios require disposable admission");
         }
     }
 }

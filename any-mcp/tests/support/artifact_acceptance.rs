@@ -33,8 +33,11 @@
 #![allow(dead_code)] // Shared support: each consuming target executes a subset.
 
 use std::{
-    collections::BTreeMap,
-    fmt, fs,
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    fmt,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -43,11 +46,20 @@ use anytype::{
     objects::ANYTYPE_PLAIN_MARKDOWN_SUFFIX,
     test_util::{DisposableRun, TestContext, unique_suffix},
 };
-use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, RANGE};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(any(unix, windows))]
+use cap_fs_ext::OpenOptionsFollowExt;
+use futures_util::StreamExt;
+use reqwest::{
+    Method,
+    header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderName, HeaderValue, RANGE},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(windows)]
+use super::acceptance_owner_private_file;
 use super::{McpDriver, ToolErrorEvidence};
 
 /// Exact sorted production artifact tool inventory.
@@ -68,6 +80,2660 @@ pub const ARTIFACT_FILE_PAYLOAD: &[u8] = b"artifact-file-payload";
 pub const ARTIFACT_CREATE_MARKDOWN: &str = "# Artifact create\n";
 /// Exact Markdown source used to update the smoke document.
 pub const ARTIFACT_UPDATE_MARKDOWN: &str = "# Artifact update\n";
+
+/// Stable families in the closed artifact adversarial inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AdversarialFamily {
+    /// Portable and native relative-path traversal attempts.
+    PathTraversal,
+    /// Symlink, junction, and reparse-point containment attempts.
+    SymlinkReparse,
+    /// Rename and time-of-check/time-of-use races.
+    RenameRace,
+    /// Case, normalization, reserved-name, and alias behavior.
+    PathAliases,
+    /// Hard-link identity and containment behavior.
+    HardLinks,
+    /// Malformed filenames, MIME declarations, and document bytes.
+    MaliciousMetadata,
+    /// Staging-handle guessing, replay, and cross-space use.
+    HandleReplay,
+    /// Partial and malformed staging writes.
+    PartialWrites,
+    /// Child-process crash and restart behavior.
+    ProcessCrash,
+    /// Bounded response and staging-concurrency behavior.
+    OutputFlood,
+    /// Cleanup after deliberately failed operations.
+    Cleanup,
+}
+
+impl AdversarialFamily {
+    /// Every stable inventory family, in matrix order.
+    pub const ALL: &[Self] = &[
+        Self::PathTraversal,
+        Self::SymlinkReparse,
+        Self::RenameRace,
+        Self::PathAliases,
+        Self::HardLinks,
+        Self::MaliciousMetadata,
+        Self::HandleReplay,
+        Self::PartialWrites,
+        Self::ProcessCrash,
+        Self::OutputFlood,
+        Self::Cleanup,
+    ];
+
+    /// Returns the stable lowercase inventory name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PathTraversal => "path_traversal",
+            Self::SymlinkReparse => "symlink_reparse",
+            Self::RenameRace => "rename_race",
+            Self::PathAliases => "path_aliases",
+            Self::HardLinks => "hard_links",
+            Self::MaliciousMetadata => "malicious_metadata",
+            Self::HandleReplay => "handle_replay",
+            Self::PartialWrites => "partial_writes",
+            Self::ProcessCrash => "process_crash",
+            Self::OutputFlood => "output_flood",
+            Self::Cleanup => "cleanup",
+        }
+    }
+
+    /// Parses a stable lowercase inventory name.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|family| family.as_str() == value)
+    }
+}
+
+macro_rules! adversarial_case_ids {
+    ($( $variant:ident => ($id:literal, $family:ident) ),+ $(,)?) => {
+        /// One stable case identifier from the closed adversarial inventory.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum AdversarialCaseId {
+            $( $variant, )+
+        }
+
+        impl AdversarialCaseId {
+            /// Every stable case identifier, in matrix order.
+            pub const ALL: &[Self] = &[
+                $( Self::$variant, )+
+            ];
+
+            /// Returns the exact `FAMILY-NN` matrix identifier.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $id, )+
+                }
+            }
+
+            /// Returns the family owning this case.
+            #[must_use]
+            pub const fn family(self) -> AdversarialFamily {
+                match self {
+                    $( Self::$variant => AdversarialFamily::$family, )+
+                }
+            }
+
+            /// Parses an exact stable matrix identifier.
+            #[must_use]
+            pub fn parse(value: &str) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|case| case.as_str() == value)
+            }
+
+            /// Returns the current implementation partition for this case.
+            #[must_use]
+            pub const fn status(self) -> AdversarialCaseStatus {
+                match self {
+                    Self::Trav01 | Self::Trav02 | Self::Trav03 | Self::Trav04 | Self::Trav05
+                    | Self::Trav06 | Self::Trav07 | Self::Trav08 | Self::Trav09 | Self::Trav10
+                    | Self::Trav11 | Self::Trav12 | Self::Trav13 | Self::Trav14 | Self::Trav15
+                    | Self::Trav16 | Self::Trav17 | Self::Trav18 | Self::Trav19 | Self::Trav20
+                    | Self::Alias01 | Self::Alias02 | Self::Alias06 | Self::Alias07
+                    | Self::Alias08 | Self::Alias09 | Self::Mal01 | Self::Mal02 | Self::Mal03
+                    | Self::Mal04 | Self::Mal05 | Self::Mal06 | Self::Mal07 | Self::Mal08
+                    | Self::Mal09 | Self::Mal10 | Self::Mal11 | Self::Mal12 | Self::Mal14 => {
+                        AdversarialCaseStatus::Executed
+                    }
+                    Self::Alias03 | Self::Alias04 | Self::Alias05 => alias_windows_status(),
+                    Self::Mal13 => validator_platform_status(),
+                    _ => AdversarialCaseStatus::Pending,
+                }
+            }
+        }
+    };
+}
+
+adversarial_case_ids! {
+    Trav01 => ("TRAV-01", PathTraversal), Trav02 => ("TRAV-02", PathTraversal),
+    Trav03 => ("TRAV-03", PathTraversal), Trav04 => ("TRAV-04", PathTraversal),
+    Trav05 => ("TRAV-05", PathTraversal), Trav06 => ("TRAV-06", PathTraversal),
+    Trav07 => ("TRAV-07", PathTraversal), Trav08 => ("TRAV-08", PathTraversal),
+    Trav09 => ("TRAV-09", PathTraversal), Trav10 => ("TRAV-10", PathTraversal),
+    Trav11 => ("TRAV-11", PathTraversal), Trav12 => ("TRAV-12", PathTraversal),
+    Trav13 => ("TRAV-13", PathTraversal), Trav14 => ("TRAV-14", PathTraversal),
+    Trav15 => ("TRAV-15", PathTraversal), Trav16 => ("TRAV-16", PathTraversal),
+    Trav17 => ("TRAV-17", PathTraversal), Trav18 => ("TRAV-18", PathTraversal),
+    Trav19 => ("TRAV-19", PathTraversal), Trav20 => ("TRAV-20", PathTraversal),
+    Sym01 => ("SYM-01", SymlinkReparse), Sym02 => ("SYM-02", SymlinkReparse),
+    Sym03 => ("SYM-03", SymlinkReparse), Sym04 => ("SYM-04", SymlinkReparse),
+    Sym05 => ("SYM-05", SymlinkReparse), Sym06 => ("SYM-06", SymlinkReparse),
+    Sym07 => ("SYM-07", SymlinkReparse), Sym08 => ("SYM-08", SymlinkReparse),
+    Sym09 => ("SYM-09", SymlinkReparse), Sym10 => ("SYM-10", SymlinkReparse),
+    Sym11 => ("SYM-11", SymlinkReparse), Sym12 => ("SYM-12", SymlinkReparse),
+    Sym13 => ("SYM-13", SymlinkReparse),
+    Race01 => ("RACE-01", RenameRace), Race02 => ("RACE-02", RenameRace),
+    Race03 => ("RACE-03", RenameRace), Race04 => ("RACE-04", RenameRace),
+    Race05 => ("RACE-05", RenameRace), Race06 => ("RACE-06", RenameRace),
+    Race07 => ("RACE-07", RenameRace), Race08 => ("RACE-08", RenameRace),
+    Race09 => ("RACE-09", RenameRace), Race10 => ("RACE-10", RenameRace),
+    Alias01 => ("ALIAS-01", PathAliases), Alias02 => ("ALIAS-02", PathAliases),
+    Alias03 => ("ALIAS-03", PathAliases), Alias04 => ("ALIAS-04", PathAliases),
+    Alias05 => ("ALIAS-05", PathAliases), Alias06 => ("ALIAS-06", PathAliases),
+    Alias07 => ("ALIAS-07", PathAliases), Alias08 => ("ALIAS-08", PathAliases),
+    Alias09 => ("ALIAS-09", PathAliases),
+    Hlink01 => ("HLINK-01", HardLinks), Hlink02 => ("HLINK-02", HardLinks),
+    Hlink03 => ("HLINK-03", HardLinks), Hlink04 => ("HLINK-04", HardLinks),
+    Hlink05 => ("HLINK-05", HardLinks), Hlink06 => ("HLINK-06", HardLinks),
+    Mal01 => ("MAL-01", MaliciousMetadata), Mal02 => ("MAL-02", MaliciousMetadata),
+    Mal03 => ("MAL-03", MaliciousMetadata), Mal04 => ("MAL-04", MaliciousMetadata),
+    Mal05 => ("MAL-05", MaliciousMetadata), Mal06 => ("MAL-06", MaliciousMetadata),
+    Mal07 => ("MAL-07", MaliciousMetadata), Mal08 => ("MAL-08", MaliciousMetadata),
+    Mal09 => ("MAL-09", MaliciousMetadata), Mal10 => ("MAL-10", MaliciousMetadata),
+    Mal11 => ("MAL-11", MaliciousMetadata), Mal12 => ("MAL-12", MaliciousMetadata),
+    Mal13 => ("MAL-13", MaliciousMetadata), Mal14 => ("MAL-14", MaliciousMetadata),
+    Hand01 => ("HAND-01", HandleReplay), Hand02 => ("HAND-02", HandleReplay),
+    Hand03 => ("HAND-03", HandleReplay), Hand04 => ("HAND-04", HandleReplay),
+    Hand05 => ("HAND-05", HandleReplay), Hand06 => ("HAND-06", HandleReplay),
+    Hand07 => ("HAND-07", HandleReplay), Hand08 => ("HAND-08", HandleReplay),
+    Hand09 => ("HAND-09", HandleReplay), Hand10 => ("HAND-10", HandleReplay),
+    Hand11 => ("HAND-11", HandleReplay), Hand12 => ("HAND-12", HandleReplay),
+    Hand13 => ("HAND-13", HandleReplay), Hand14 => ("HAND-14", HandleReplay),
+    Hand15 => ("HAND-15", HandleReplay), Hand16 => ("HAND-16", HandleReplay),
+    Part01 => ("PART-01", PartialWrites), Part02 => ("PART-02", PartialWrites),
+    Part03 => ("PART-03", PartialWrites), Part04 => ("PART-04", PartialWrites),
+    Part05 => ("PART-05", PartialWrites), Part06 => ("PART-06", PartialWrites),
+    Part07 => ("PART-07", PartialWrites), Part08 => ("PART-08", PartialWrites),
+    Part09 => ("PART-09", PartialWrites), Part10 => ("PART-10", PartialWrites),
+    Part11 => ("PART-11", PartialWrites), Part12 => ("PART-12", PartialWrites),
+    Crash01 => ("CRASH-01", ProcessCrash), Crash02 => ("CRASH-02", ProcessCrash),
+    Crash03 => ("CRASH-03", ProcessCrash), Crash04 => ("CRASH-04", ProcessCrash),
+    Crash05 => ("CRASH-05", ProcessCrash), Crash06 => ("CRASH-06", ProcessCrash),
+    Crash07 => ("CRASH-07", ProcessCrash),
+    Flood01 => ("FLOOD-01", OutputFlood), Flood02 => ("FLOOD-02", OutputFlood),
+    Flood03 => ("FLOOD-03", OutputFlood), Flood04 => ("FLOOD-04", OutputFlood),
+    Flood05 => ("FLOOD-05", OutputFlood), Flood06 => ("FLOOD-06", OutputFlood),
+    Flood07 => ("FLOOD-07", OutputFlood),
+    Clean01 => ("CLEAN-01", Cleanup), Clean02 => ("CLEAN-02", Cleanup),
+    Clean03 => ("CLEAN-03", Cleanup), Clean04 => ("CLEAN-04", Cleanup),
+    Clean05 => ("CLEAN-05", Cleanup), Clean06 => ("CLEAN-06", Cleanup),
+    Clean07 => ("CLEAN-07", Cleanup), Clean08 => ("CLEAN-08", Cleanup),
+}
+
+/// Exact case ownership of the default-policy runner.
+pub const ADVERSARIAL_DEFAULT_CASE_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Trav01,
+    AdversarialCaseId::Trav02,
+    AdversarialCaseId::Trav03,
+    AdversarialCaseId::Trav04,
+    AdversarialCaseId::Trav05,
+    AdversarialCaseId::Trav06,
+    AdversarialCaseId::Trav07,
+    AdversarialCaseId::Trav08,
+    AdversarialCaseId::Trav09,
+    AdversarialCaseId::Trav10,
+    AdversarialCaseId::Trav11,
+    AdversarialCaseId::Trav12,
+    AdversarialCaseId::Trav13,
+    AdversarialCaseId::Trav14,
+    AdversarialCaseId::Trav15,
+    AdversarialCaseId::Trav16,
+    AdversarialCaseId::Trav17,
+    AdversarialCaseId::Trav18,
+    AdversarialCaseId::Alias01,
+    AdversarialCaseId::Alias02,
+    AdversarialCaseId::Alias03,
+    AdversarialCaseId::Alias04,
+    AdversarialCaseId::Alias05,
+    AdversarialCaseId::Alias06,
+    AdversarialCaseId::Alias08,
+    AdversarialCaseId::Alias09,
+    AdversarialCaseId::Mal01,
+    AdversarialCaseId::Mal02,
+    AdversarialCaseId::Mal03,
+    AdversarialCaseId::Mal04,
+    AdversarialCaseId::Mal05,
+    AdversarialCaseId::Mal06,
+    AdversarialCaseId::Mal07,
+    AdversarialCaseId::Mal08,
+    AdversarialCaseId::Mal09,
+    AdversarialCaseId::Mal11,
+    AdversarialCaseId::Mal14,
+];
+
+/// Exact cases requiring distinct runtime policy or startup ownership.
+pub const ADVERSARIAL_SPECIAL_CASE_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Trav19,
+    AdversarialCaseId::Trav20,
+    AdversarialCaseId::Alias07,
+    AdversarialCaseId::Mal10,
+    AdversarialCaseId::Mal12,
+    AdversarialCaseId::Mal13,
+];
+
+/// Canonical default cases repeated on stable and preview stdio.
+pub const ADVERSARIAL_STDIO_SENTINEL_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Trav01,
+    AdversarialCaseId::Alias06,
+    AdversarialCaseId::Mal01,
+];
+
+/// Whether a case is executed now, explicitly unsupported, or still pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialCaseStatus {
+    /// The case has a concrete regression test in this ticket.
+    Executed,
+    /// The platform lacks a required primitive and records that fact.
+    PlatformUnsupported,
+    /// The case remains in the closed inventory for a later ticket.
+    Pending,
+}
+
+const fn alias_windows_status() -> AdversarialCaseStatus {
+    if cfg!(windows) {
+        AdversarialCaseStatus::Executed
+    } else {
+        AdversarialCaseStatus::PlatformUnsupported
+    }
+}
+
+const fn validator_platform_status() -> AdversarialCaseStatus {
+    if VALIDATOR_PLATFORM_ACTIVATES {
+        AdversarialCaseStatus::Executed
+    } else {
+        AdversarialCaseStatus::PlatformUnsupported
+    }
+}
+
+/// One row of the current closed case partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdversarialCasePartition {
+    /// Stable case identifier.
+    pub id: AdversarialCaseId,
+    /// Current implementation status.
+    pub status: AdversarialCaseStatus,
+}
+
+/// Returns every case and exactly one current implementation status.
+pub fn adversarial_case_partition() -> impl Iterator<Item = AdversarialCasePartition> {
+    AdversarialCaseId::ALL
+        .iter()
+        .copied()
+        .map(|id| AdversarialCasePartition {
+            id,
+            status: id.status(),
+        })
+}
+
+/// Closed domain error codes admitted by the adversarial matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedToolErrorCode {
+    /// Invalid grammar or a missing policy declaration.
+    Validation,
+    /// A hidden or unauthorized resource.
+    NotFound,
+    /// A conflicting mutation or indeterminate mutation result.
+    Conflict,
+    /// A result that correctly hit an explicit bound.
+    BoundedResult,
+    /// A classified upstream failure.
+    Upstream,
+}
+
+impl ExpectedToolErrorCode {
+    /// Returns the exact domain error code sent by the MCP server.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::BoundedResult => "bounded_result",
+            Self::Upstream => "upstream",
+        }
+    }
+}
+
+/// Named tool-error outcomes from the adversarial matrix vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedToolErrorKind {
+    /// Generic portable or native grammar rejection.
+    Validation,
+    /// Uniform hidden-resource rejection.
+    NotFound,
+    /// A conflicting or indeterminate mutation.
+    Conflict,
+    /// A correctly bounded result.
+    BoundedResult,
+    /// A classified upstream failure.
+    Upstream,
+    /// Missing local-root configuration guidance.
+    MissingRoots,
+    /// Missing staging configuration guidance.
+    MissingStaging,
+}
+
+impl ExpectedToolErrorKind {
+    /// Returns the exact matrix vocabulary spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::BoundedResult => "bounded_result",
+            Self::Upstream => "upstream",
+            Self::MissingRoots => "missing_roots",
+            Self::MissingStaging => "missing_staging",
+        }
+    }
+
+    /// Returns the exact server domain code for this outcome.
+    #[must_use]
+    pub const fn code(self) -> ExpectedToolErrorCode {
+        match self {
+            Self::Validation | Self::MissingRoots | Self::MissingStaging => {
+                ExpectedToolErrorCode::Validation
+            }
+            Self::NotFound => ExpectedToolErrorCode::NotFound,
+            Self::Conflict => ExpectedToolErrorCode::Conflict,
+            Self::BoundedResult => ExpectedToolErrorCode::BoundedResult,
+            Self::Upstream => ExpectedToolErrorCode::Upstream,
+        }
+    }
+}
+
+/// One exact expected outcome from the adversarial matrix vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedOutcome {
+    /// A fully validated domain tool error with its fixed message.
+    ToolError {
+        /// Exact matrix error category and its corresponding domain code.
+        kind: ExpectedToolErrorKind,
+        /// Exact stable server message.
+        message: &'static str,
+    },
+    /// JSON-RPC method-not-found before argument decoding.
+    MethodNotFound,
+    /// Exact staging HTTP status and fixed small response body.
+    Http {
+        /// Exact HTTP status.
+        status: u16,
+        /// Exact small response body.
+        body: &'static [u8],
+    },
+    /// Startup fails with the exact fixed stderr category.
+    StartupRejected {
+        /// Fixed rejected-config or startup category.
+        category: &'static str,
+    },
+    /// The operation succeeds and its separate invariant must hold.
+    Accepted,
+}
+
+/// A minimal observation suitable for comparing one expected outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedOutcome<'a> {
+    /// A validated domain tool error.
+    ToolError {
+        /// Domain error code.
+        code: &'a str,
+        /// Domain error message.
+        message: &'a str,
+    },
+    /// JSON-RPC method-not-found.
+    MethodNotFound,
+    /// Staging response status and body.
+    Http {
+        /// HTTP status.
+        status: u16,
+        /// Response body.
+        body: &'a [u8],
+    },
+    /// Child startup failure category.
+    StartupRejected {
+        /// Captured fixed category.
+        category: &'a str,
+    },
+    /// Successful operation.
+    Accepted,
+}
+
+impl ExpectedOutcome {
+    /// Compares a complete observed outcome against this exact expectation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the observed outcome differs. Callers
+    /// retain redacted, case-specific evidence separately.
+    pub fn assert_matches(self, observed: ObservedOutcome<'_>) -> Result<(), String> {
+        let matches = match (self, observed) {
+            (
+                Self::ToolError { kind, message },
+                ObservedOutcome::ToolError {
+                    code: observed_code,
+                    message: observed_message,
+                },
+            ) => kind.code().as_str() == observed_code && message == observed_message,
+            (Self::MethodNotFound, ObservedOutcome::MethodNotFound)
+            | (Self::Accepted, ObservedOutcome::Accepted) => true,
+            (
+                Self::Http { status, body },
+                ObservedOutcome::Http {
+                    status: observed_status,
+                    body: observed_body,
+                },
+            ) => status == observed_status && body == observed_body,
+            (
+                Self::StartupRejected { category },
+                ObservedOutcome::StartupRejected {
+                    category: observed_category,
+                },
+            ) => category == observed_category,
+            _ => false,
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err("adversarial expected outcome mismatch".to_owned())
+        }
+    }
+
+    /// Compares a fully validated MCP error result against this expectation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when this is not a matching exact tool error.
+    pub fn assert_tool_error(self, evidence: &ToolErrorEvidence) -> Result<(), String> {
+        let message = evidence
+            .normalized_result()
+            .pointer("/structuredContent/message")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "adversarial tool error evidence omitted message".to_owned())?;
+        self.assert_matches(ObservedOutcome::ToolError {
+            code: evidence.code(),
+            message,
+        })
+    }
+}
+
+const ADVERSARIAL_VALIDATION_MESSAGE: &str =
+    "Input validation failed. Correct the supplied fields and retry.";
+const ADVERSARIAL_NOT_FOUND_MESSAGE: &str =
+    "The requested Anytype entity was not found. Verify its identifier and space.";
+const ADVERSARIAL_CONFLICT_MESSAGE: &str =
+    "The object changed or a request precondition failed. Read it again before retrying.";
+const ADVERSARIAL_BOUNDED_MESSAGE: &str =
+    "The result exceeds this workflow's limit. Retry with a paginated or chunked read.";
+const ADVERSARIAL_ROOTS_REQUIRED_MESSAGE: &str = "No artifact roots are configured. Declare roots in an any-mcp TOML config and select it with ANY_MCP_CONFIG or --config.";
+
+fn adversarial_tool_error(kind: ExpectedToolErrorKind) -> ExpectedOutcome {
+    let message = match kind {
+        ExpectedToolErrorKind::Validation => ADVERSARIAL_VALIDATION_MESSAGE,
+        ExpectedToolErrorKind::NotFound => ADVERSARIAL_NOT_FOUND_MESSAGE,
+        ExpectedToolErrorKind::Conflict => ADVERSARIAL_CONFLICT_MESSAGE,
+        ExpectedToolErrorKind::BoundedResult => ADVERSARIAL_BOUNDED_MESSAGE,
+        ExpectedToolErrorKind::MissingRoots => ADVERSARIAL_ROOTS_REQUIRED_MESSAGE,
+        ExpectedToolErrorKind::Upstream | ExpectedToolErrorKind::MissingStaging => {
+            return ExpectedOutcome::ToolError {
+                kind,
+                message: "Anytype could not complete the request. Retry later or inspect redacted server diagnostics.",
+            };
+        }
+    };
+    ExpectedOutcome::ToolError { kind, message }
+}
+
+/// Content-free execution partition for one adversarial acceptance run.
+#[derive(Default)]
+pub struct AdversarialExecution {
+    executed: BTreeSet<AdversarialCaseId>,
+    unsupported: BTreeSet<AdversarialCaseId>,
+    forbidden_log_needles: Vec<Zeroizing<Vec<u8>>>,
+    uniform_not_found_digest: Option<String>,
+}
+
+impl fmt::Debug for AdversarialExecution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdversarialExecution")
+            .field("executed_count", &self.executed.len())
+            .field("unsupported_count", &self.unsupported.len())
+            .field("forbidden_needle_count", &self.forbidden_log_needles.len())
+            .finish()
+    }
+}
+
+impl AdversarialExecution {
+    /// Records one case only after its complete assertions pass.
+    pub fn record_executed(&mut self, id: AdversarialCaseId) -> Result<(), String> {
+        if self.unsupported.contains(&id) || !self.executed.insert(id) {
+            return Err("adversarial case executed more than once".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Records one matrix-approved platform-unsupported case.
+    pub fn record_unsupported(&mut self, id: AdversarialCaseId) -> Result<(), String> {
+        if self.executed.contains(&id) || !self.unsupported.insert(id) {
+            return Err("adversarial case partitioned more than once".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Merges a disjoint content-free execution partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if either partition reports the same case.
+    pub fn merge(&mut self, other: Self) -> Result<(), String> {
+        for id in other.executed {
+            self.record_executed(id)?;
+        }
+        for id in other.unsupported {
+            self.record_unsupported(id)?;
+        }
+        self.forbidden_log_needles
+            .extend(other.forbidden_log_needles);
+        if let Some(digest) = other.uniform_not_found_digest {
+            if let Some(existing) = &self.uniform_not_found_digest {
+                if existing != &digest {
+                    return Err("TRAV uniform not-found payloads diverged".to_owned());
+                }
+            } else {
+                self.uniform_not_found_digest = Some(digest);
+            }
+        }
+        Ok(())
+    }
+
+    /// Retains one sensitive value only for the later redacted log audit.
+    pub fn record_forbidden_log_needle(&mut self, value: &[u8]) -> Result<(), String> {
+        if value.is_empty() || value.len() > SERVER_LOG_NEEDLE_BYTES {
+            return Err("adversarial forbidden log needle was outside the audit limit".to_owned());
+        }
+        if !self
+            .forbidden_log_needles
+            .iter()
+            .any(|needle| needle.as_slice() == value)
+        {
+            self.forbidden_log_needles
+                .push(Zeroizing::new(value.to_vec()));
+        }
+        Ok(())
+    }
+
+    /// Appends transient forbidden log values without exposing them in evidence.
+    pub fn append_forbidden_log_needles<'a>(&'a self, destination: &mut Vec<&'a [u8]>) {
+        destination.extend(
+            self.forbidden_log_needles
+                .iter()
+                .map(|needle| needle.as_slice()),
+        );
+    }
+
+    /// Returns transient forbidden log values for immediate redacted auditing.
+    #[must_use]
+    pub fn forbidden_log_needles(&self) -> Vec<&[u8]> {
+        self.forbidden_log_needles
+            .iter()
+            .map(|needle| needle.as_slice())
+            .collect()
+    }
+
+    /// Records the canonical payload digest shared by uniform not-found cases.
+    pub fn record_uniform_not_found_payload(&mut self, result: &Value) -> Result<(), String> {
+        let encoded = serde_json::to_vec(result)
+            .map_err(|_| "encode uniform adversarial not-found payload".to_owned())?;
+        let digest = hex_digest(&Sha256::digest(encoded));
+        if let Some(existing) = &self.uniform_not_found_digest {
+            if existing != &digest {
+                return Err("TRAV uniform not-found payloads diverged".to_owned());
+            }
+        } else {
+            self.uniform_not_found_digest = Some(digest);
+        }
+        Ok(())
+    }
+
+    /// Number of cases actually executed on this platform.
+    #[must_use]
+    pub fn executed_count(&self) -> usize {
+        self.executed.len()
+    }
+
+    /// Number of cases explicitly unsupported on this platform.
+    #[must_use]
+    pub fn unsupported_count(&self) -> usize {
+        self.unsupported.len()
+    }
+
+    /// Proves this run partitions all 43 cases owned by the ticket exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if any assigned case is absent or a pending
+    /// family appears in the execution record.
+    pub fn assert_ticket_complete(&self) -> Result<(), String> {
+        let assigned = AdversarialCaseId::ALL
+            .iter()
+            .copied()
+            .filter(|id| {
+                matches!(
+                    id.family(),
+                    AdversarialFamily::PathTraversal
+                        | AdversarialFamily::PathAliases
+                        | AdversarialFamily::MaliciousMetadata
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let observed = self
+            .executed
+            .union(&self.unsupported)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if observed != assigned
+            || self
+                .unsupported
+                .iter()
+                .any(|id| id.status() != AdversarialCaseStatus::PlatformUnsupported)
+        {
+            return Err("adversarial ticket execution partition was incomplete".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Proves this execution contains exactly the supplied case IDs.
+    pub fn assert_exact(&self, expected: &[AdversarialCaseId]) -> Result<(), String> {
+        let expected_count = expected.len();
+        let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+        let observed = self
+            .executed
+            .union(&self.unsupported)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if expected.len() != expected_count
+            || expected.len() != observed.len()
+            || expected != observed
+        {
+            return Err("adversarial execution did not match its exact owner inventory".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Fixture inputs for the path, alias, and hostile-metadata scenarios.
+pub struct ArtifactAdversarialRun<'a> {
+    /// Control plane under test, retained only as a fixed evidence category.
+    pub control: ArtifactControlPlane,
+    /// Strict private-root policy backing this server.
+    pub policy: &'a ArtifactPolicyFixture,
+    /// Disposable space that owns every created Anytype resource.
+    pub ctx: &'a TestContext,
+    /// Retained-root counter used only by direct grammar-rejection assertions.
+    pub root_access_attempts: Option<&'a dyn Fn() -> u64>,
+    /// Successful import-open counter used to prove alias targets stay unread.
+    pub successful_import_opens: Option<&'a dyn Fn() -> u64>,
+}
+
+fn local_source(root: &str, path: &str) -> Value {
+    json!({"local": {"root": root, "path": path}})
+}
+
+fn local_destination(root: &str, path: &str) -> Value {
+    json!({"local": {"root": root, "path": path}})
+}
+
+fn native_relative(value: &str) -> Value {
+    #[cfg(unix)]
+    let (encoding, bytes) = ("unix-bytes-base64url", value.as_bytes().to_vec());
+    #[cfg(windows)]
+    let (encoding, bytes) = (
+        "windows-wtf16le-base64url",
+        value
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    json!({"encoding": encoding, "value": URL_SAFE_NO_PAD.encode(bytes)})
+}
+
+fn native_submission_value(value: &Value) -> Result<&str, String> {
+    value
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "adversarial native input omitted its encoded value".to_owned())
+}
+
+#[cfg(windows)]
+fn native_wtf16(units: &[u16]) -> Value {
+    let bytes = units
+        .iter()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect::<Vec<_>>();
+    json!({"encoding": "windows-wtf16le-base64url", "value": URL_SAFE_NO_PAD.encode(bytes)})
+}
+
+fn file_import_arguments(
+    space: &str,
+    source: Value,
+    name: &str,
+    media_type: Option<&str>,
+) -> Value {
+    let mut arguments = json!({
+        "space": space,
+        "source": source,
+        "name": name,
+        "idempotency_key": format!("adversarial-import-{}", unique_suffix()),
+    });
+    if let Some(media_type) = media_type {
+        arguments["media_type"] = Value::String(media_type.to_owned());
+    }
+    arguments
+}
+
+fn seed_control_import_source(
+    policy: &ArtifactPolicyFixture,
+    source_name: &str,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let path = policy.import_root().join(source_name);
+        fs::write(&path, b"malicious filename source")
+            .map_err(|_| "write MAL-01 control source".to_owned())?;
+        secure_files(std::slice::from_ref(&path))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (policy, source_name);
+    Ok(())
+}
+
+async fn adversarial_refusal(
+    driver: &mut impl McpDriver,
+    tool: &'static str,
+    arguments: Value,
+    kind: ExpectedToolErrorKind,
+    submitted: &[&str],
+) -> Result<ToolErrorEvidence, String> {
+    let evidence = driver.call_tool_error(tool, arguments).await?;
+    adversarial_tool_error(kind).assert_tool_error(&evidence)?;
+    if refusal_discloses_submitted(evidence.normalized_result(), submitted)? {
+        return Err("adversarial refusal disclosed submitted input".to_owned());
+    }
+    Ok(evidence)
+}
+
+fn refusal_discloses_submitted(result: &Value, submitted: &[&str]) -> Result<bool, String> {
+    let encoded =
+        serde_json::to_string(result).map_err(|_| "encode adversarial tool refusal".to_owned())?;
+    for value in submitted.iter().filter(|value| !value.is_empty()) {
+        let json_encoded = serde_json::to_string(value)
+            .map_err(|_| "encode adversarial submitted input".to_owned())?;
+        if encoded.contains(*value)
+            || encoded.contains(&json_encoded)
+            || value_includes(result, value)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn value_includes(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(needle),
+        Value::Array(values) => values.iter().any(|value| value_includes(value, needle)),
+        Value::Object(values) => values.values().any(|value| value_includes(value, needle)),
+        _ => false,
+    }
+}
+
+fn assert_adversarial_response_frame(result: &Value) -> Result<(), String> {
+    let envelope = json!({"jsonrpc": "2.0", "id": 0, "result": result});
+    let mut frame = serde_json::to_vec(&envelope)
+        .map_err(|_| "encode adversarial response frame".to_owned())?;
+    frame.push(b'\n');
+    let tokenizer =
+        tiktoken_rs::cl100k_base().map_err(|_| "initialize artifact frame tokenizer".to_owned())?;
+    let bytes = u64::try_from(frame.len())
+        .map_err(|_| "adversarial response frame exceeds the addressable range".to_owned())?;
+    let tokens = u64::try_from(
+        tokenizer
+            .encode_with_special_tokens(
+                std::str::from_utf8(&frame)
+                    .map_err(|_| "adversarial response frame was not UTF-8".to_owned())?,
+            )
+            .len(),
+    )
+    .map_err(|_| "adversarial response token count exceeds the addressable range".to_owned())?;
+    if bytes > ARTIFACT_FRAME_CEILING_BYTES || tokens > ARTIFACT_FRAME_CEILING_TOKENS {
+        return Err("artifact response exceeded its fixed MCP frame ceiling".to_owned());
+    }
+    Ok(())
+}
+
+async fn artifact_object_ids(ctx: &TestContext) -> Result<BTreeSet<String>, String> {
+    let page = ctx
+        .client
+        .objects(&ctx.space_id)
+        .limit(200)
+        .list()
+        .await
+        .map_err(|_| "capture adversarial object inventory".to_owned())?;
+    let objects = page
+        .collect_all()
+        .await
+        .map_err(|_| "capture adversarial object inventory".to_owned())?;
+    Ok(objects.into_iter().map(|object| object.id).collect())
+}
+
+async fn adversarial_seed_file(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+    name: &str,
+) -> Result<String, String> {
+    let imported = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                &run.ctx.space_id,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                name,
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    let file_id = required_str(&imported, "/file_id")?;
+    run.ctx.register_file(&file_id);
+    Ok(file_id)
+}
+
+async fn adversarial_seed_document(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<String, String> {
+    let created = driver
+        .call_tool(
+            "document_import_create",
+            json!({
+                "space": run.ctx.space_id,
+                "source": local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::CREATE_SOURCE,
+                ),
+                "source_format": "markdown",
+                "object_type": "page",
+                "name": format!("Adversarial document {}", unique_suffix()),
+                "idempotency_key": format!("adversarial-document-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    let object_id = required_str(&created, "/object_id")?;
+    run.ctx.register_object(&object_id);
+    Ok(object_id)
+}
+
+/// Executes TRAV-01 through TRAV-18 against one production router.
+///
+/// TRAV-19 and TRAV-20 require distinct runtime root policies and are exposed
+/// as separate helpers below. Every rejected argument is compared against the
+/// complete canonical tool result and checked for submitted-text disclosure.
+///
+/// # Errors
+///
+/// Returns a fixed category on the first outcome, inventory, or cleanup
+/// mismatch.
+pub async fn run_artifact_traversal_default(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let mut execution = AdversarialExecution::default();
+    let space = run.ctx.space_id.as_str();
+    let escape_sentinel = run.policy.base.join("escape.bin");
+    fs::write(&escape_sentinel, b"traversal escape sentinel")
+        .map_err(|_| "seed traversal escape sibling".to_owned())?;
+    secure_files(std::slice::from_ref(&escape_sentinel))?;
+    let fixture_before = RootInventory::capture(&run.policy.base)?;
+    let import_before = RootInventory::capture(run.policy.import_root())?;
+    let export_before = RootInventory::capture(run.policy.export_root())?;
+    let object_ids_before = artifact_object_ids(run.ctx).await?;
+    let root_access_before = run.root_access_attempts.map(|counter| counter());
+    let portable = [
+        (AdversarialCaseId::Trav01, "../escape.bin"),
+        (AdversarialCaseId::Trav02, "/etc/passwd"),
+        (AdversarialCaseId::Trav03, "safe/../../escape.bin"),
+        (AdversarialCaseId::Trav04, "%2e%2e%2fescape.bin"),
+        (AdversarialCaseId::Trav05, "..\\escape.bin"),
+        (AdversarialCaseId::Trav06, "C:/escape.bin"),
+        (AdversarialCaseId::Trav11, "a//file.bin"),
+        (AdversarialCaseId::Trav12, "dir/"),
+        (AdversarialCaseId::Trav14, "sub/../file.bin"),
+    ];
+    for (id, path) in portable {
+        adversarial_refusal(
+            driver,
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, path),
+                "adversarial.bin",
+                None,
+            ),
+            ExpectedToolErrorKind::Validation,
+            &[path],
+        )
+        .await?;
+        execution.record_executed(id)?;
+    }
+
+    let native_escape = native_relative("../escape.bin");
+    let native_escape_value = native_submission_value(&native_escape)?.to_owned();
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            json!({"local": {
+                "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                "path_native": native_escape,
+            }}),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[&native_escape_value, "../escape.bin"],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Trav07)?;
+
+    let native_same = native_relative(ArtifactPolicyFixture::FILE_SOURCE);
+    let native_same_value = native_submission_value(&native_same)?.to_owned();
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            json!({"local": {
+                "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                "path": ArtifactPolicyFixture::FILE_SOURCE,
+                "path_native": native_same,
+            }}),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[ArtifactPolicyFixture::FILE_SOURCE, &native_same_value],
+    )
+    .await?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            json!({"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT}}),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Trav08)?;
+
+    let native_control = native_relative("safe\nfile.bin");
+    let native_control_value = native_submission_value(&native_control)?.to_owned();
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            json!({"local": {
+                "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                "path_native": native_control,
+            }}),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[&native_control_value, "safe\nfile.bin"],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Trav09)?;
+
+    for path in ["a".repeat(4_097), "b".repeat(256)] {
+        adversarial_refusal(
+            driver,
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &path),
+                "adversarial.bin",
+                None,
+            ),
+            ExpectedToolErrorKind::Validation,
+            &[],
+        )
+        .await?;
+    }
+    execution.record_executed(AdversarialCaseId::Trav10)?;
+
+    import_before.assert_unchanged()?;
+    export_before.assert_unchanged()?;
+    fixture_before.assert_unchanged()?;
+    if artifact_object_ids(run.ctx).await? != object_ids_before {
+        return Err("TRAV malformed paths changed the Anytype object inventory".to_owned());
+    }
+
+    if let Some(before) = root_access_before {
+        let after = run
+            .root_access_attempts
+            .map(|counter| counter())
+            .ok_or_else(|| "adversarial root counter disappeared".to_owned())?;
+        if after != before {
+            return Err("TRAV malformed paths reached the retained-root boundary".to_owned());
+        }
+    }
+
+    let file_id = adversarial_seed_file(driver, run, "adversarial-seed.bin").await?;
+    let fixture_before = RootInventory::capture(&run.policy.base)?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let export_before = run.policy.export_snapshot()?;
+    let traversal_export = json!({
+        "space": space,
+        "file_id": file_id,
+        "destination": local_destination(
+            ArtifactPolicyFixture::EXPORT_ROOT,
+            "../escape.out",
+        ),
+        "idempotency_key": format!("adversarial-export-{}", unique_suffix()),
+    });
+    for _ in 0..2 {
+        adversarial_refusal(
+            driver,
+            "file_export",
+            traversal_export.clone(),
+            ExpectedToolErrorKind::Validation,
+            &["../escape.out"],
+        )
+        .await?;
+    }
+    if run.policy.export_snapshot()? != export_before
+        || artifact_object_ids(run.ctx).await? != objects_before
+    {
+        return Err("TRAV-13 changed the export root".to_owned());
+    }
+    fixture_before.assert_unchanged()?;
+    execution.record_executed(AdversarialCaseId::Trav13)?;
+
+    let fixture_before = RootInventory::capture(&run.policy.base)?;
+    let import_before = RootInventory::capture(run.policy.import_root())?;
+    let export_before = RootInventory::capture(run.policy.export_root())?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let capability_refusal = adversarial_refusal(
+        driver,
+        "file_export",
+        json!({
+            "space": space,
+            "file_id": file_id,
+            "destination": local_destination(
+                ArtifactPolicyFixture::IMPORT_ROOT,
+                "denied.out",
+            ),
+            "idempotency_key": format!("adversarial-export-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::NotFound,
+        &[],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Trav15)?;
+
+    let unknown_refusal = adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source("nope", ArtifactPolicyFixture::FILE_SOURCE),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[],
+    )
+    .await?;
+    if capability_refusal.normalized_result() != unknown_refusal.normalized_result() {
+        return Err("TRAV uniform not-found payloads diverged".to_owned());
+    }
+    execution.record_uniform_not_found_payload(capability_refusal.normalized_result())?;
+    execution.record_uniform_not_found_payload(unknown_refusal.normalized_result())?;
+    execution.record_executed(AdversarialCaseId::Trav16)?;
+    fixture_before.assert_unchanged()?;
+    import_before.assert_unchanged()?;
+    export_before.assert_unchanged()?;
+    if artifact_object_ids(run.ctx).await? != objects_before {
+        return Err("TRAV capability denials changed the Anytype object inventory".to_owned());
+    }
+
+    let before_create = artifact_object_ids(run.ctx).await?;
+    let fixture_before = RootInventory::capture(&run.policy.base)?;
+    adversarial_refusal(
+        driver,
+        "document_import_create",
+        json!({
+            "space": space,
+            "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, "../escape.md"),
+            "source_format": "markdown",
+            "object_type": "page",
+            "name": "Adversarial traversal",
+            "idempotency_key": format!("adversarial-document-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Validation,
+        &["../escape.md"],
+    )
+    .await?;
+    if artifact_object_ids(run.ctx).await? != before_create {
+        return Err("TRAV-17 created an Anytype object".to_owned());
+    }
+    fixture_before.assert_unchanged()?;
+    execution.record_executed(AdversarialCaseId::Trav17)?;
+
+    let object_id = adversarial_seed_document(driver, run).await?;
+    let fixture_before = RootInventory::capture(&run.policy.base)?;
+    let import_before = RootInventory::capture(run.policy.import_root())?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let export_before = run.policy.export_snapshot()?;
+    let traversal_document_export = json!({
+        "space": space,
+        "object_id": object_id,
+        "destination": local_destination(
+            ArtifactPolicyFixture::EXPORT_ROOT,
+            "../escape.md",
+        ),
+        "idempotency_key": format!("adversarial-document-export-{}", unique_suffix()),
+    });
+    for _ in 0..2 {
+        adversarial_refusal(
+            driver,
+            "document_export",
+            traversal_document_export.clone(),
+            ExpectedToolErrorKind::Validation,
+            &["../escape.md"],
+        )
+        .await?;
+    }
+    if run.policy.export_snapshot()? != export_before
+        || artifact_object_ids(run.ctx).await? != objects_before
+    {
+        return Err("TRAV-18 changed the export root".to_owned());
+    }
+    fixture_before.assert_unchanged()?;
+    import_before.assert_unchanged()?;
+    execution.record_executed(AdversarialCaseId::Trav18)?;
+    Ok(execution)
+}
+
+/// Executes TRAV-19 against a runtime whose frozen client-root set is empty.
+pub async fn run_artifact_empty_client_roots_case(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let fixture_before = RootInventory::capture(&run.policy.base)?;
+    let import_before = RootInventory::capture(run.policy.import_root())?;
+    let export_before = RootInventory::capture(run.policy.export_root())?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let refusal = adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(
+                ArtifactPolicyFixture::IMPORT_ROOT,
+                ArtifactPolicyFixture::FILE_SOURCE,
+            ),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[],
+    )
+    .await?;
+    fixture_before.assert_unchanged()?;
+    import_before.assert_unchanged()?;
+    export_before.assert_unchanged()?;
+    if artifact_object_ids(run.ctx).await? != objects_before {
+        return Err("TRAV-19 changed the Anytype object inventory".to_owned());
+    }
+    let mut execution = AdversarialExecution::default();
+    execution.record_uniform_not_found_payload(refusal.normalized_result())?;
+    execution.record_executed(AdversarialCaseId::Trav19)?;
+    Ok(execution)
+}
+
+/// Executes TRAV-20 against a runtime with the artifacts toolset selected but
+/// no configured roots.
+pub async fn run_artifact_missing_roots_case(
+    driver: &mut impl McpDriver,
+    space_id: &str,
+) -> Result<AdversarialExecution, String> {
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space_id,
+            local_source("inbox", "valid.bin"),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::MissingRoots,
+        &["valid.bin"],
+    )
+    .await?;
+    let mut execution = AdversarialExecution::default();
+    execution.record_executed(AdversarialCaseId::Trav20)?;
+    Ok(execution)
+}
+
+/// Executes the default-policy alias cases. ALIAS-07 owns a deliberately
+/// rejected child startup and is therefore completed by the process owner.
+///
+/// # Errors
+///
+/// Returns a fixed category if probed volume semantics, exact tool outcomes,
+/// original bytes, or staged-record state diverge.
+pub async fn run_artifact_alias_cases(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let mut execution = AdversarialExecution::default();
+    let space = run.ctx.space_id.as_str();
+    let file_id = adversarial_seed_file(driver, run, "alias-seed.bin").await?;
+
+    let case_suffix = unique_suffix();
+    let lower = format!("alias-{case_suffix}-report.bin");
+    let upper = lower.to_ascii_uppercase();
+    let original = b"alias-original";
+    fs::write(run.policy.export.join(&lower), original)
+        .map_err(|_| "seed alias export fixture".to_owned())?;
+    secure_files(std::slice::from_ref(&run.policy.export.join(&lower)))?;
+    match probe_volume_case_folding(run.policy.export_root())? {
+        VolumeCaseFolding::Insensitive => {
+            adversarial_refusal(
+                driver,
+                "file_export",
+                json!({
+                    "space": space,
+                    "file_id": file_id,
+                    "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &upper),
+                    "idempotency_key": format!("alias-case-export-{}", unique_suffix()),
+                }),
+                ExpectedToolErrorKind::Conflict,
+                &[],
+            )
+            .await?;
+        }
+        VolumeCaseFolding::Sensitive => {
+            driver
+                .call_tool(
+                    "file_export",
+                    json!({
+                        "space": space,
+                        "file_id": file_id,
+                        "destination": local_destination(
+                            ArtifactPolicyFixture::EXPORT_ROOT,
+                            &upper,
+                        ),
+                        "idempotency_key": format!("alias-case-export-{}", unique_suffix()),
+                    }),
+                )
+                .await?;
+            if run.policy.read_export(&upper)? != ARTIFACT_FILE_PAYLOAD {
+                return Err("ALIAS-01 distinct export bytes diverged".to_owned());
+            }
+        }
+    }
+    if run.policy.read_export(&lower)? != original {
+        return Err("ALIAS-01 replaced the original file".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Alias01)?;
+
+    let nfc = format!("alias-{case_suffix}-caf\u{e9}.bin");
+    let nfd = format!("alias-{case_suffix}-cafe\u{301}.bin");
+    fs::write(run.policy.export.join(&nfc), original)
+        .map_err(|_| "seed normalization fixture".to_owned())?;
+    secure_files(std::slice::from_ref(&run.policy.export.join(&nfc)))?;
+    match probe_volume_normalization(run.policy.export_root())? {
+        VolumeNormalization::Equivalent => {
+            adversarial_refusal(
+                driver,
+                "file_export",
+                json!({
+                    "space": space,
+                    "file_id": file_id,
+                    "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &nfd),
+                    "idempotency_key": format!("alias-normalization-{}", unique_suffix()),
+                }),
+                ExpectedToolErrorKind::Conflict,
+                &[],
+            )
+            .await?;
+        }
+        VolumeNormalization::Distinct => {
+            driver
+                .call_tool(
+                    "file_export",
+                    json!({
+                        "space": space,
+                        "file_id": file_id,
+                        "destination": local_destination(
+                            ArtifactPolicyFixture::EXPORT_ROOT,
+                            &nfd,
+                        ),
+                        "idempotency_key": format!("alias-normalization-{}", unique_suffix()),
+                    }),
+                )
+                .await?;
+            if run.policy.read_export(&nfd)? != ARTIFACT_FILE_PAYLOAD {
+                return Err("ALIAS-02 distinct export bytes diverged".to_owned());
+            }
+        }
+    }
+    if run.policy.read_export(&nfc)? != original {
+        return Err("ALIAS-02 replaced the original file".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Alias02)?;
+
+    #[cfg(windows)]
+    {
+        fs::write(run.policy.export.join("report.bin"), original)
+            .map_err(|_| "seed Windows alias fixture".to_owned())?;
+        secure_files(std::slice::from_ref(&run.policy.export.join("report.bin")))?;
+        for destination in ["report.bin.", "report.bin "] {
+            adversarial_refusal(
+                driver,
+                "file_export",
+                json!({
+                    "space": space,
+                    "file_id": file_id,
+                    "destination": local_destination(
+                        ArtifactPolicyFixture::EXPORT_ROOT,
+                        destination,
+                    ),
+                    "idempotency_key": format!("alias-windows-{}", unique_suffix()),
+                }),
+                ExpectedToolErrorKind::Validation,
+                &[],
+            )
+            .await?;
+        }
+        if run.policy.read_export("report.bin")? != original {
+            return Err("ALIAS-03 replaced the original file".to_owned());
+        }
+        execution.record_executed(AdversarialCaseId::Alias03)?;
+
+        let long_name = format!("long-artifact-name-{case_suffix}.bin");
+        fs::write(run.policy.export.join(&long_name), original)
+            .map_err(|_| "seed Windows short-name fixture".to_owned())?;
+        secure_files(std::slice::from_ref(&run.policy.export.join(&long_name)))?;
+        if run.policy.export.join("REPORT~1.BIN").exists() {
+            adversarial_refusal(
+                driver,
+                "file_export",
+                json!({
+                    "space": space,
+                    "file_id": file_id,
+                    "destination": local_destination(
+                        ArtifactPolicyFixture::EXPORT_ROOT,
+                        "REPORT~1.BIN",
+                    ),
+                    "idempotency_key": format!("alias-short-name-{}", unique_suffix()),
+                }),
+                ExpectedToolErrorKind::Conflict,
+                &[],
+            )
+            .await?;
+        } else {
+            driver
+                .call_tool(
+                    "file_export",
+                    json!({
+                        "space": space,
+                        "file_id": file_id,
+                        "destination": local_destination(
+                            ArtifactPolicyFixture::EXPORT_ROOT,
+                            "REPORT~1.BIN",
+                        ),
+                        "idempotency_key": format!("alias-short-name-{}", unique_suffix()),
+                    }),
+                )
+                .await?;
+        }
+        if run.policy.read_export(&long_name)? != original {
+            return Err("ALIAS-04 replaced the long-name file".to_owned());
+        }
+        execution.record_executed(AdversarialCaseId::Alias04)?;
+
+        for name in [
+            "CON",
+            "NUL",
+            "COM1",
+            "LPT1",
+            "NUL.txt",
+            "COM¹",
+            "COM².bin",
+            "COM³",
+            "LPT¹",
+            "LPT².txt",
+            "LPT³",
+        ] {
+            adversarial_refusal(
+                driver,
+                "file_import",
+                file_import_arguments(
+                    space,
+                    local_source(ArtifactPolicyFixture::IMPORT_ROOT, name),
+                    "adversarial.bin",
+                    None,
+                ),
+                ExpectedToolErrorKind::Validation,
+                &[],
+            )
+            .await?;
+        }
+        execution.record_executed(AdversarialCaseId::Alias05)?;
+    }
+    #[cfg(not(windows))]
+    for id in [
+        AdversarialCaseId::Alias03,
+        AdversarialCaseId::Alias04,
+        AdversarialCaseId::Alias05,
+    ] {
+        execution.record_unsupported(id)?;
+    }
+
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source("Inbox", ArtifactPolicyFixture::FILE_SOURCE),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Alias06)?;
+
+    let real_name = format!("alias-latin-a-{case_suffix}.bin");
+    let homoglyph = real_name.replacen('a', "\u{430}", 1);
+    run.policy.seed_import(&real_name, b"homoglyph-source")?;
+    let before = RootInventory::capture(run.policy.import_root())?;
+    let successful_opens_before = run.successful_import_opens.map(|counter| counter());
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &homoglyph),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[],
+    )
+    .await?;
+    before.assert_unchanged()?;
+    if let Some(before) = successful_opens_before {
+        let after = run
+            .successful_import_opens
+            .map(|counter| counter())
+            .ok_or_else(|| "adversarial successful-open counter disappeared".to_owned())?;
+        if before != after {
+            return Err("ALIAS-08 opened the real source file".to_owned());
+        }
+    }
+    execution.record_executed(AdversarialCaseId::Alias08)?;
+
+    let allocation = allocate_stage_upload(
+        driver,
+        space,
+        ARTIFACT_FILE_PAYLOAD.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(ARTIFACT_FILE_PAYLOAD)),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    upload_stage_bytes(&allocation, ARTIFACT_FILE_PAYLOAD, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    let before_status = stage_head_status(&allocation).await?;
+    let uppercase_url = allocation.url().replace(
+        allocation.record(),
+        &allocation.record().to_ascii_uppercase(),
+    );
+    let outcome = RawStagingClient::new()?
+        .send(
+            Method::GET,
+            &uppercase_url,
+            allocation.handle(),
+            &[],
+            Vec::new(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 404,
+        body: b"not found\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: outcome.status,
+        body: &outcome.body,
+    })?;
+    if stage_head_status(&allocation).await? != before_status {
+        return Err("ALIAS-09 changed the staged record".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Alias09)?;
+    Ok(execution)
+}
+
+/// Executes the default-policy hostile filename, MIME, and metadata cases.
+/// MAL-10/MAL-12 use the reduced payload-ceiling policy and MAL-13 uses an
+/// active validator policy, so those cases have dedicated helpers below.
+///
+/// # Errors
+///
+/// Returns a fixed category if any exact result, object inventory, staging
+/// state, readback identity, or caller-selected export destination diverges.
+pub async fn run_artifact_malicious_metadata_default(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let mut execution = AdversarialExecution::default();
+    let space = run.ctx.space_id.as_str();
+    let before_names = artifact_object_ids(run.ctx).await?;
+    let hostile_sources = ['\n', '\r', '\t', '\u{1b}']
+        .into_iter()
+        .map(|control| format!("mal01-{control}-{}.bin", unique_suffix()))
+        .collect::<Vec<_>>();
+    for source_name in &hostile_sources {
+        seed_control_import_source(run.policy, source_name)?;
+        execution.record_forbidden_log_needle(source_name.as_bytes())?;
+        adversarial_refusal(
+            driver,
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, source_name),
+                "adversarial.bin",
+                None,
+            ),
+            ExpectedToolErrorKind::Validation,
+            &[source_name],
+        )
+        .await?;
+    }
+    if artifact_object_ids(run.ctx).await? != before_names {
+        return Err("MAL-01 created an Anytype object".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal01)?;
+
+    let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
+    let imported = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                &bidi_name,
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    let bidi_file_id = required_str(&imported, "/file_id")?;
+    run.ctx.register_file(&bidi_file_id);
+    let fetched = run
+        .ctx
+        .client
+        .files()
+        .get(space, &bidi_file_id)
+        .get()
+        .await
+        .map_err(|_| "read back adversarial file name".to_owned())?;
+    if fetched.name.as_deref() != Some(bidi_name.as_str()) {
+        return Err("MAL-02 name did not round-trip exactly".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal02)?;
+
+    let accepted_name = "n".repeat(255);
+    let accepted = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                &accepted_name,
+                None,
+            ),
+        )
+        .await?;
+    run.ctx.register_file(&required_str(&accepted, "/file_id")?);
+    let before_invalid_names = artifact_object_ids(run.ctx).await?;
+    for name in [String::new(), "n".repeat(256), "invalid\nname".to_owned()] {
+        adversarial_refusal(
+            driver,
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                &name,
+                None,
+            ),
+            ExpectedToolErrorKind::Validation,
+            &[&name],
+        )
+        .await?;
+    }
+    if artifact_object_ids(run.ctx).await? != before_invalid_names {
+        return Err("MAL-03 created an object for an invalid name".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal03)?;
+
+    let markdown = b"# staged MIME\n";
+    let allocation = allocate_stage_upload(
+        driver,
+        space,
+        markdown.len() as u64,
+        ARTIFACT_MARKDOWN_MEDIA_TYPE,
+        Some(&artifact_sha256(markdown)),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    upload_stage_bytes(&allocation, markdown, ARTIFACT_MARKDOWN_MEDIA_TYPE).await?;
+    let before_stage = stage_head_status(&allocation).await?;
+    let before_objects = artifact_object_ids(run.ctx).await?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            json!({"staged_handle": allocation.handle()}),
+            "staged-mime.bin",
+            Some(ARTIFACT_FILE_MEDIA_TYPE),
+        ),
+        ExpectedToolErrorKind::Conflict,
+        &[],
+    )
+    .await?;
+    if stage_head_status(&allocation).await? != before_stage
+        || artifact_object_ids(run.ctx).await? != before_objects
+    {
+        return Err("MAL-04 consumed its stage or created an object".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Mal04)?;
+
+    let staging_before = run.policy.staging_snapshot()?;
+    adversarial_refusal(
+        driver,
+        "artifact_stage_upload",
+        json!({
+            "space": space,
+            "size_bytes": 4,
+            "media_type": "text/plain; charset=utf-8",
+        }),
+        ExpectedToolErrorKind::Validation,
+        &[],
+    )
+    .await?;
+    if run.policy.staging_snapshot()? != staging_before {
+        return Err("MAL-05 allocated a staging record".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal05)?;
+
+    for media_type in [
+        "text /plain".to_owned(),
+        "text/\nplain".to_owned(),
+        "x".repeat(256),
+    ] {
+        adversarial_refusal(
+            driver,
+            "artifact_stage_upload",
+            json!({
+                "space": space,
+                "size_bytes": 4,
+                "media_type": media_type,
+            }),
+            ExpectedToolErrorKind::Validation,
+            &[],
+        )
+        .await?;
+    }
+    if run.policy.staging_snapshot()? != staging_before {
+        return Err("MAL-06 allocated a staging record".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal06)?;
+
+    let executable_name = format!("hostile-executable-{}.bin", unique_suffix());
+    let executable_bytes = b"\x7fELF\x02\x01\x01adversarial-script-text";
+    run.policy.seed_import(&executable_name, executable_bytes)?;
+    let executable = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &executable_name),
+                "declared-markdown.bin",
+                Some(ARTIFACT_MARKDOWN_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    let executable_id = required_str(&executable, "/file_id")?;
+    run.ctx.register_file(&executable_id);
+    if executable.pointer("/receipt/declared_media_type")
+        != Some(&Value::String(ARTIFACT_MARKDOWN_MEDIA_TYPE.to_owned()))
+        || executable.pointer("/receipt/stored_media_type").is_some()
+    {
+        return Err("MAL-07 conflated declared and stored MIME evidence".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal07)?;
+
+    let invalid_utf8_name = format!("invalid-utf8-{}.md", unique_suffix());
+    run.policy
+        .seed_import(&invalid_utf8_name, b"\xf0\x28\x8c\x28")?;
+    let before_document = artifact_object_ids(run.ctx).await?;
+    adversarial_refusal(
+        driver,
+        "document_import_create",
+        json!({
+            "space": space,
+            "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &invalid_utf8_name),
+            "source_format": "markdown",
+            "object_type": "page",
+            "name": "Invalid UTF-8 document",
+            "idempotency_key": format!("invalid-utf8-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Validation,
+        &[],
+    )
+    .await?;
+    if artifact_object_ids(run.ctx).await? != before_document {
+        return Err("MAL-08 created an Anytype object".to_owned());
+    }
+    #[cfg(windows)]
+    {
+        let surrogate_content_name = format!("invalid-utf16-content-{}.md", unique_suffix());
+        run.policy
+            .seed_import(&surrogate_content_name, b"\xff\xfe\x00\xd8")?;
+        adversarial_refusal(
+            driver,
+            "document_import_create",
+            json!({
+                "space": space,
+                "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &surrogate_content_name),
+                "source_format": "markdown",
+                "object_type": "page",
+                "name": "Invalid UTF-16 document content",
+                "idempotency_key": format!("invalid-utf16-content-{}", unique_suffix()),
+            }),
+            ExpectedToolErrorKind::Validation,
+            &[],
+        )
+        .await?;
+        let native_surrogate = native_wtf16(&[0xd800]);
+        let native_surrogate_value = native_submission_value(&native_surrogate)?.to_owned();
+        let native_surrogate_lossy = String::from_utf16_lossy(&[0xd800]);
+        adversarial_refusal(
+            driver,
+            "document_import_create",
+            json!({
+                "space": space,
+                "source": {"local": {
+                    "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                    "path_native": native_surrogate,
+                }},
+                "source_format": "markdown",
+                "object_type": "page",
+                "name": "Invalid native document path",
+                "idempotency_key": format!("invalid-native-utf8-{}", unique_suffix()),
+            }),
+            ExpectedToolErrorKind::Validation,
+            &[&native_surrogate_value, &native_surrogate_lossy],
+        )
+        .await?;
+        if artifact_object_ids(run.ctx).await? != before_document {
+            return Err("MAL-08 native path created an Anytype object".to_owned());
+        }
+    }
+    execution.record_executed(AdversarialCaseId::Mal08)?;
+
+    let bom_name = format!("bom-{}.md", unique_suffix());
+    run.policy.seed_import(&bom_name, b"\xef\xbb\xbf# BOM\n")?;
+    adversarial_refusal(
+        driver,
+        "document_import_create",
+        json!({
+            "space": space,
+            "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &bom_name),
+            "source_format": "markdown",
+            "object_type": "page",
+            "name": "BOM document",
+            "idempotency_key": format!("bom-document-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Validation,
+        &[],
+    )
+    .await?;
+    if artifact_object_ids(run.ctx).await? != before_document {
+        return Err("MAL-09 created an Anytype object".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal09)?;
+
+    let boundary_name = "b".repeat(255);
+    run.policy.seed_import(&boundary_name, b"boundary")?;
+    let boundary = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &boundary_name),
+                "boundary.bin",
+                None,
+            ),
+        )
+        .await?;
+    run.ctx.register_file(&required_str(&boundary, "/file_id")?);
+    let over_boundary = "b".repeat(256);
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &over_boundary),
+            "boundary.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Mal11)?;
+
+    let hostile_upstream_name = "../evil";
+    let uploaded = run
+        .ctx
+        .client
+        .files()
+        .upload(space)
+        .bytes(hostile_upstream_name, ARTIFACT_FILE_PAYLOAD.to_vec())
+        .mime(ARTIFACT_FILE_MEDIA_TYPE)
+        .upload()
+        .await
+        .map_err(|_| "seed hostile upstream file name".to_owned())?;
+    run.ctx.register_file(&uploaded.id);
+    if uploaded.name.as_deref() != Some(hostile_upstream_name) {
+        return Err("MAL-14 upstream did not retain the hostile name".to_owned());
+    }
+    let escape = run.policy.base.join("evil");
+    fs::write(&escape, b"escape-sentinel")
+        .map_err(|_| "seed reverse traversal sentinel".to_owned())?;
+    secure_files(std::slice::from_ref(&escape))?;
+    let destination = format!("safe-export-{}.bin", unique_suffix());
+    driver
+        .call_tool(
+            "file_export",
+            json!({
+                "space": space,
+                "file_id": uploaded.id,
+                "destination": local_destination(
+                    ArtifactPolicyFixture::EXPORT_ROOT,
+                    &destination,
+                ),
+                "idempotency_key": format!("reverse-traversal-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if run.policy.read_export(&destination)? != ARTIFACT_FILE_PAYLOAD
+        || fs::read(&escape).ok().as_deref() != Some(b"escape-sentinel")
+    {
+        return Err("MAL-14 wrote outside the caller destination".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal14)?;
+    Ok(execution)
+}
+
+/// Executes the adversarial cases supported by the default strict policy.
+/// Distinct runtime-policy cases are merged by the direct and spawned owners.
+pub async fn run_artifact_adversarial_default(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let mut execution = run_artifact_traversal_default(driver, run).await?;
+    execution.merge(run_artifact_alias_cases(driver, run).await?)?;
+    execution.merge(run_artifact_malicious_metadata_default(driver, run).await?)?;
+    Ok(execution)
+}
+
+/// Executes the three canonical adversarial cases through one stdio child.
+///
+/// # Errors
+///
+/// Returns a fixed category when a sentinel outcome, no-mutation assertion, or
+/// exact three-case ownership partition diverges.
+pub async fn run_artifact_adversarial_stdio_sentinels(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let mut execution = AdversarialExecution::default();
+    let space = run.ctx.space_id.as_str();
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, "../escape.bin"),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &["../escape.bin"],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Trav01)?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source("nope", "../escape.bin"),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &["../escape.bin"],
+    )
+    .await?;
+
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source("Inbox", ArtifactPolicyFixture::FILE_SOURCE),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Alias06)?;
+
+    let source_name = format!("mal01-\n-{}.bin", unique_suffix());
+    seed_control_import_source(run.policy, &source_name)?;
+    execution.record_forbidden_log_needle(source_name.as_bytes())?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source_name),
+            "adversarial.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[&source_name],
+    )
+    .await?;
+    if artifact_object_ids(run.ctx).await? != objects_before {
+        return Err("MAL-01 created an Anytype object".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal01)?;
+    execution.assert_exact(ADVERSARIAL_STDIO_SENTINEL_IDS)?;
+    Ok(execution)
+}
+
+/// Executes MAL-10 and MAL-12 under the reduced one-MiB payload profile.
+///
+/// # Errors
+///
+/// Returns a fixed category when the exact byte boundary, Markdown bound, or
+/// disposable resource ownership diverges.
+pub async fn run_artifact_payload_boundary_cases(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    if run.policy.options().limits != ArtifactLimitProfile::PayloadCeiling {
+        return Err("payload adversarial cases require the reviewed limit profile".to_owned());
+    }
+    let mut execution = AdversarialExecution::default();
+    let space = run.ctx.space_id.as_str();
+    let limit = usize::try_from(run.policy.options().limits.artifact_bytes())
+        .map_err(|_| "payload limit exceeds the addressable range".to_owned())?;
+
+    let over_markdown_name = format!("over-markdown-{}.md", unique_suffix());
+    run.policy
+        .seed_import(&over_markdown_name, &vec![b'x'; limit.saturating_add(1)])?;
+    let over_markdown = tokio::time::timeout(
+        Duration::from_secs(15),
+        adversarial_refusal(
+            driver,
+            "document_import_create",
+            json!({
+                "space": space,
+                "source": local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    &over_markdown_name,
+                ),
+                "source_format": "markdown",
+                "object_type": "page",
+                "name": "Bounded Markdown document",
+                "idempotency_key": format!("bounded-markdown-{}", unique_suffix()),
+            }),
+            ExpectedToolErrorKind::BoundedResult,
+            &[],
+        ),
+    )
+    .await
+    .map_err(|_| "MAL-10 exceeded the fixed completion deadline")??;
+    assert_adversarial_response_frame(over_markdown.normalized_result())?;
+    let deep_name = format!("deep-markdown-{}.md", unique_suffix());
+    let deep_markdown = format!("{}leaf\n", "> ".repeat(128));
+    run.policy
+        .seed_import(&deep_name, deep_markdown.as_bytes())?;
+    let deep_result = tokio::time::timeout(
+        Duration::from_secs(15),
+        driver.call_tool_full_result(
+            "document_import_create",
+            json!({
+                "space": space,
+                "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &deep_name),
+                "source_format": "markdown",
+                "object_type": "page",
+                "name": "Deep bounded Markdown document",
+                "idempotency_key": format!("deep-markdown-{}", unique_suffix()),
+            }),
+        ),
+    )
+    .await
+    .map_err(|_| "MAL-10 exceeded the fixed completion deadline")??;
+    assert_adversarial_response_frame(&deep_result)?;
+    let deep = deep_result
+        .get("structuredContent")
+        .ok_or_else(|| "MAL-10 complete result omitted structured content".to_owned())?;
+    run.ctx.register_object(&required_str(deep, "/object_id")?);
+    execution.record_executed(AdversarialCaseId::Mal10)?;
+
+    let exact_name = format!("exact-payload-{}.bin", unique_suffix());
+    run.policy.seed_import(&exact_name, &vec![0x5a; limit])?;
+    let exact = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &exact_name),
+                "exact-payload.bin",
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    run.ctx.register_file(&required_str(&exact, "/file_id")?);
+    if exact.pointer("/receipt/size_bytes").and_then(Value::as_u64) != Some(limit as u64) {
+        return Err("MAL-12 exact payload boundary changed".to_owned());
+    }
+    let over_name = format!("over-payload-{}.bin", unique_suffix());
+    run.policy
+        .seed_import(&over_name, &vec![0x5a; limit.saturating_add(1)])?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &over_name),
+            "over-payload.bin",
+            Some(ARTIFACT_FILE_MEDIA_TYPE),
+        ),
+        ExpectedToolErrorKind::BoundedResult,
+        &[],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Mal12)?;
+    Ok(execution)
+}
+
+/// Executes MAL-13 with the reviewed optional, hash-pinned validator policy.
+/// Non-activating platforms record the matrix-approved unsupported status.
+pub async fn run_artifact_hostile_validator_case(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let mut execution = AdversarialExecution::default();
+    if !VALIDATOR_PLATFORM_ACTIVATES {
+        execution.record_unsupported(AdversarialCaseId::Mal13)?;
+        return Ok(execution);
+    }
+    if run.policy.options().validators != FixtureValidatorPolicy::Optional {
+        return Err("hostile metadata case requires the reviewed validator policy".to_owned());
+    }
+    let name = format!("hostile-image-{}.png", unique_suffix());
+    let bytes = hostile_png_metadata_fixture();
+    run.policy.seed_import(&name, &bytes)?;
+    let imported = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                &run.ctx.space_id,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &name),
+                "hostile-image.png",
+                Some("image/png"),
+            ),
+        )
+        .await?;
+    run.ctx.register_file(&required_str(&imported, "/file_id")?);
+    let validators = imported
+        .get("validators")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "MAL-13 omitted validator evidence".to_owned())?;
+    if validators.as_slice()
+        != [json!({
+            "id": FIXTURE_VALIDATOR_ID,
+            "status": "accepted",
+            "detected_media_type": "image/png",
+        })]
+    {
+        return Err("MAL-13 validator evidence was not exact".to_owned());
+    }
+    let encoded = serde_json::to_vec(&imported)
+        .map_err(|_| "encode hostile validator evidence".to_owned())?;
+    if encoded.len() > ARTIFACT_FRAME_CEILING_BYTES as usize
+        || encoded
+            .windows(b"<script>".len())
+            .any(|window| window == b"<script>")
+    {
+        return Err("MAL-13 exposed unbounded hostile metadata".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Mal13)?;
+    Ok(execution)
+}
+
+fn hostile_png_metadata_fixture() -> Vec<u8> {
+    let mut image = b"\x89PNG\r\n\x1a\n".to_vec();
+    png_chunk(
+        &mut image,
+        *b"IHDR",
+        &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0],
+    );
+    let mut comment = b"ASCII\0\0\0".to_vec();
+    comment.extend(std::iter::repeat_n(b'X', 60 * 1024));
+    comment.extend_from_slice(b"<script>adversarial</script>");
+    let mut exif = b"MM\0*\0\0\0\x08\0\x01\x92\x86\0\x07".to_vec();
+    exif.extend_from_slice(
+        &u32::try_from(comment.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    exif.extend_from_slice(&26_u32.to_be_bytes());
+    exif.extend_from_slice(&0_u32.to_be_bytes());
+    exif.extend_from_slice(&comment);
+    png_chunk(&mut image, *b"eXIf", &exif);
+    png_chunk(
+        &mut image,
+        *b"IDAT",
+        &[
+            0x78, 0x01, 0x01, 0x05, 0x00, 0xfa, 0xff, 0, 1, 2, 3, 0xff, 1, 0x10, 1, 5,
+        ],
+    );
+    png_chunk(&mut image, *b"IEND", &[]);
+    image
+}
+
+fn png_chunk(output: &mut Vec<u8>, kind: [u8; 4], bytes: &[u8]) {
+    let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(&kind);
+    output.extend_from_slice(bytes);
+    let mut crc_input = Vec::with_capacity(kind.len().saturating_add(bytes.len()));
+    crc_input.extend_from_slice(&kind);
+    crc_input.extend_from_slice(bytes);
+    output.extend_from_slice(&png_crc32(&crc_input).to_be_bytes());
+}
+
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xedb8_8320
+            };
+        }
+    }
+    !crc
+}
+
+/// Content-free exact inventory of a fixture root.
+///
+/// Inventory entries retain only relative names, file kinds, byte counts, and
+/// SHA-256 digests. The custom debug representation never exposes those names.
+pub struct RootInventory {
+    #[cfg(any(unix, windows))]
+    root: cap_std::fs::Dir,
+    #[cfg(any(unix, windows))]
+    device: u64,
+    #[cfg(any(unix, windows))]
+    inode: u64,
+    entries: BTreeMap<PathBuf, RootInventoryEntry>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum RootInventoryEntry {
+    Directory,
+    File { size_bytes: u64, sha256: String },
+}
+
+impl fmt::Debug for RootInventory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RootInventory")
+            .field("entry_count", &self.entries.len())
+            .finish()
+    }
+}
+
+impl RootInventory {
+    /// Captures an exact, no-follow inventory of one private fixture root.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the root cannot be read, contains a
+    /// symlink or special file, or changes while being captured.
+    #[cfg(unix)]
+    pub fn capture(root: &Path) -> Result<Self, String> {
+        use std::os::unix::{fs::MetadataExt, fs::OpenOptionsExt};
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
+        let root_file = options
+            .open(root)
+            .map_err(|_| "capture artifact root inventory".to_owned())?;
+        let metadata = root_file
+            .metadata()
+            .map_err(|_| "capture artifact root inventory".to_owned())?;
+        if !metadata.file_type().is_dir() {
+            return Err("capture artifact root inventory".to_owned());
+        }
+        let root = cap_std::fs::Dir::from_std_file(root_file);
+        let mut entries = BTreeMap::new();
+        root_inventory_visit(&root, &mut entries)?;
+        Ok(Self {
+            root,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            entries,
+        })
+    }
+
+    /// Captures a no-follow directory handle on Windows before walking it.
+    #[cfg(windows)]
+    pub fn capture(root: &Path) -> Result<Self, String> {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let root_file = options
+            .open(root)
+            .map_err(|_| "capture artifact root inventory".to_owned())?;
+        let metadata = root_file
+            .metadata()
+            .map_err(|_| "capture artifact root inventory".to_owned())?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("capture artifact root inventory".to_owned());
+        }
+        let root = cap_std::fs::Dir::from_std_file(root_file);
+        let mut entries = BTreeMap::new();
+        root_inventory_visit(&root, &mut entries)?;
+        Ok(Self {
+            root,
+            device: metadata.volume_serial_number().unwrap_or_default().into(),
+            inode: metadata.file_index().unwrap_or_default(),
+            entries,
+        })
+    }
+
+    /// Refuses root inventory capture where no no-follow descriptor primitive
+    /// is available in this harness target.
+    #[cfg(not(any(unix, windows)))]
+    pub fn capture(_root: &Path) -> Result<Self, String> {
+        Err("capture artifact root inventory is unsupported on this platform".to_owned())
+    }
+
+    /// Fails unless the root exactly matches this prior content-free capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the root changed or cannot be captured.
+    #[cfg(any(unix, windows))]
+    pub fn assert_unchanged(&self) -> Result<(), String> {
+        use cap_fs_ext::MetadataExt;
+
+        let metadata = self
+            .root
+            .metadata(".")
+            .map_err(|_| "capture artifact root inventory".to_owned())?;
+        if !metadata.file_type().is_dir()
+            || metadata.dev() != self.device
+            || metadata.ino() != self.inode
+        {
+            return Err("artifact root inventory changed".to_owned());
+        }
+        let mut entries = BTreeMap::new();
+        root_inventory_visit(&self.root, &mut entries)?;
+        if self.entries == entries {
+            Ok(())
+        } else {
+            Err("artifact root inventory changed".to_owned())
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn assert_unchanged(&self) -> Result<(), String> {
+        let _ = self;
+        Err("capture artifact root inventory is unsupported on this platform".to_owned())
+    }
+
+    /// Returns the number of files and directories captured.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn root_inventory_visit(
+    root: &cap_std::fs::Dir,
+    entries: &mut BTreeMap<PathBuf, RootInventoryEntry>,
+) -> Result<(), String> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+
+    let mut directories = vec![(
+        PathBuf::new(),
+        root.try_clone()
+            .map_err(|_| "capture artifact root inventory".to_owned())?,
+    )];
+    while let Some((relative, directory)) = directories.pop() {
+        let iterator = directory
+            .read_dir(".")
+            .map_err(|_| "capture artifact root inventory".to_owned())?;
+        for entry in iterator {
+            let entry = entry.map_err(|_| "capture artifact root inventory".to_owned())?;
+            let name = entry.file_name();
+            let child_relative = relative.join(name);
+            let mut options = cap_std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .follow(FollowSymlinks::No)
+                .maybe_dir(true);
+            let file = entry
+                .open_with(&options)
+                .map_err(|_| "capture artifact root inventory".to_owned())?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| "capture artifact root inventory".to_owned())?;
+            let file_type = metadata.file_type();
+            if file_type.is_dir() {
+                if entries
+                    .insert(child_relative.clone(), RootInventoryEntry::Directory)
+                    .is_some()
+                {
+                    return Err("capture artifact root inventory".to_owned());
+                }
+                directories.push((
+                    child_relative,
+                    cap_std::fs::Dir::from_std_file(file.into_std()),
+                ));
+            } else if file_type.is_file() {
+                let digest = root_inventory_file_digest(file.into_std())?;
+                let entry = RootInventoryEntry::File {
+                    size_bytes: metadata.len(),
+                    sha256: digest,
+                };
+                if entries.insert(child_relative, entry).is_some() {
+                    return Err("capture artifact root inventory".to_owned());
+                }
+            } else {
+                return Err("capture artifact root inventory".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+fn root_inventory_file_digest(mut file: File) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| "capture artifact root inventory".to_owned())?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex_digest(&digest.finalize()))
+}
+
+/// Observed case behavior for the volume containing an artifact root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeCaseFolding {
+    /// The differently cased private name referred to the created file.
+    Insensitive,
+    /// The differently cased private name was distinct.
+    Sensitive,
+}
+
+/// Observed Unicode-normalization behavior for an artifact root volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeNormalization {
+    /// NFC and NFD spellings referred to the created file.
+    Equivalent,
+    /// NFC and NFD spellings were distinct paths.
+    Distinct,
+}
+
+/// Probes case folding by creating and removing exactly one private file.
+///
+/// # Errors
+///
+/// Returns a fixed category when the root cannot safely host the probe or the
+/// temporary private file cannot be removed.
+pub fn probe_volume_case_folding(root: &Path) -> Result<VolumeCaseFolding, String> {
+    with_private_volume_probe(root, "case", |probe| {
+        let alternate = probe.with_file_name(
+            probe
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "probe artifact root capability".to_owned())?
+                .to_ascii_uppercase(),
+        );
+        volume_alias_result(
+            &alternate,
+            VolumeCaseFolding::Insensitive,
+            VolumeCaseFolding::Sensitive,
+        )
+    })
+}
+
+/// Probes Unicode normalization by creating and removing exactly one private file.
+///
+/// # Errors
+///
+/// Returns a fixed category when the root cannot safely host the probe or the
+/// temporary private file cannot be removed.
+pub fn probe_volume_normalization(root: &Path) -> Result<VolumeNormalization, String> {
+    with_private_volume_probe(root, "normalization-\u{e9}", |probe| {
+        let name = probe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "probe artifact root capability".to_owned())?;
+        let alternate = probe.with_file_name(name.replace('\u{e9}', "e\u{301}"));
+        volume_alias_result(
+            &alternate,
+            VolumeNormalization::Equivalent,
+            VolumeNormalization::Distinct,
+        )
+    })
+}
+
+fn with_private_volume_probe<T>(
+    root: &Path,
+    kind: &str,
+    probe: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let metadata =
+        fs::symlink_metadata(root).map_err(|_| "probe artifact root capability".to_owned())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("probe artifact root capability".to_owned());
+    }
+    let path = root.join(format!(".any-mcp-{kind}-probe-{}", unique_suffix()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|_| "probe artifact root capability".to_owned())?;
+    let write = file
+        .write_all(b"artifact-volume-probe")
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "probe artifact root capability".to_owned());
+    drop(file);
+    let result = write.and_then(|()| probe(&path));
+    let cleanup = fs::remove_file(&path).map_err(|_| "probe artifact root capability".to_owned());
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        _ => Err("probe artifact root capability".to_owned()),
+    }
+}
+
+fn volume_alias_result<T: Copy>(alternate: &Path, equivalent: T, distinct: T) -> Result<T, String> {
+    match fs::symlink_metadata(alternate) {
+        Ok(_) => Ok(equivalent),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(distinct),
+        Err(_) => Err("probe artifact root capability".to_owned()),
+    }
+}
+
+/// Minimal data-plane client for requests MCP arguments cannot represent.
+pub struct RawStagingClient {
+    client: reqwest::Client,
+}
+
+/// Bounded status/body observation from a raw staging request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawStagingOutcome {
+    /// Exact HTTP status.
+    pub status: u16,
+    /// Complete fixed response body, capped before allocation can grow.
+    pub body: Vec<u8>,
+}
+
+impl fmt::Debug for RawStagingClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RawStagingClient")
+    }
+}
+
+impl RawStagingClient {
+    /// Creates the bounded raw staging client without making a network request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the HTTP client cannot be constructed.
+    pub fn new() -> Result<Self, String> {
+        staging_client().map(|client| Self { client })
+    }
+
+    /// Sends a staging request with verbatim additional headers.
+    ///
+    /// Duplicate supplied headers are retained, allowing tests to exercise
+    /// protocol requests the MCP tool surface cannot build.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the request cannot be sent or read.
+    pub async fn send(
+        &self,
+        method: Method,
+        url: &str,
+        bearer: &str,
+        headers: &[(HeaderName, HeaderValue)],
+        body: Vec<u8>,
+    ) -> Result<RawStagingOutcome, String> {
+        let mut additional = reqwest::header::HeaderMap::new();
+        for (name, value) in headers {
+            additional.append(name.clone(), value.clone());
+        }
+        let response = self
+            .client
+            .request(method, url)
+            .bearer_auth(bearer)
+            .headers(additional)
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| "send raw staging request".to_owned())?;
+        let status = response.status().as_u16();
+        let mut body = Vec::with_capacity(4_096);
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "read raw staging response".to_owned())?;
+            if chunk.len() > 4_096usize.saturating_sub(body.len()) {
+                return Err("raw staging response exceeded its fixed bound".to_owned());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(RawStagingOutcome { status, body })
+    }
+}
 /// Fixed canonical MIME essence asserted for the smoke file.
 pub const ARTIFACT_FILE_MEDIA_TYPE: &str = "application/octet-stream";
 /// Fixed canonical MIME essence asserted for staged Markdown uploads.
@@ -965,6 +3631,28 @@ impl ArtifactPolicyFixture {
     #[must_use]
     pub fn config_path(&self) -> &Path {
         &self.config
+    }
+
+    /// Returns the private fixture-base bytes for a redacted server-log audit.
+    ///
+    /// Callers pass the value directly to [`audit_server_log`] and must not
+    /// include it in failure text or content-free evidence.
+    #[must_use]
+    pub fn log_forbidden_needle(&self) -> Zeroizing<Vec<u8>> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            Zeroizing::new(self.base.as_os_str().as_bytes().to_vec())
+        }
+        #[cfg(not(unix))]
+        Zeroizing::new(self.base.to_string_lossy().as_bytes().to_vec())
+    }
+
+    /// Returns the private fixture-base bytes for immediate log auditing.
+    #[must_use]
+    pub fn forbidden_log_needle(&self) -> Zeroizing<Vec<u8>> {
+        self.log_forbidden_needle()
     }
 
     /// Physical directory backing the logical import root.
@@ -4023,69 +6711,426 @@ pub struct ArtifactServerLogAudit {
     pub known_classes: BTreeMap<&'static str, u64>,
     /// Error lines matching no known class.
     pub unclassified_error_lines: u64,
+    /// Submitted secrets or fixture paths observed in the audited bytes.
+    pub forbidden_needle_matches: u64,
+    /// Lines that exceeded the fixed audit ceiling.
+    pub oversized_lines: u64,
 }
 
 impl ArtifactServerLogAudit {
     /// Whether the window contains no panic, fatal, or new error class.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.panic_or_fatal_lines == 0 && self.unclassified_error_lines == 0
+        self.panic_or_fatal_lines == 0
+            && self.unclassified_error_lines == 0
+            && self.forbidden_needle_matches == 0
+            && self.oversized_lines == 0
     }
 }
 
-/// Current byte length of a captured server log, used as a window baseline.
-///
-/// # Errors
-///
-/// Returns a fixed message when the log cannot be inspected.
-pub fn server_log_offset(path: &Path) -> Result<u64, String> {
-    fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .map_err(|_| "inspect captured server log".to_owned())
+const SERVER_LOG_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+const SERVER_LOG_LINE_BYTES: usize = 64 * 1024;
+const SERVER_LOG_NEEDLE_BYTES: usize = 4 * 1024;
+const SERVER_LOG_ANCHOR_BYTES: usize = 256;
+
+/// Retained opened capability and immutable baseline for one server-log audit.
+pub struct ArtifactServerLogBaseline {
+    file: File,
+    #[cfg(any(unix, windows))]
+    parent: cap_std::fs::Dir,
+    #[cfg(any(unix, windows))]
+    name: OsString,
+    #[cfg(any(unix, windows))]
+    device: u64,
+    #[cfg(any(unix, windows))]
+    inode: u64,
+    size_bytes: u64,
+    anchor_digest: String,
 }
 
-/// Classifies error lines appended to a captured server log after `from_offset`.
-///
-/// Only counts and fixed category names are retained; no log line is returned.
+impl fmt::Debug for ArtifactServerLogBaseline {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactServerLogBaseline")
+            .field("size_bytes", &self.size_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opens and validates a captured server log before an acceptance operation.
 ///
 /// # Errors
 ///
-/// Returns a fixed message when the log cannot be read or shrank below the
-/// recorded baseline.
-pub fn audit_server_log(path: &Path, from_offset: u64) -> Result<ArtifactServerLogAudit, String> {
-    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+/// Returns a fixed category when the path cannot be opened as an owner-private
+/// regular file. The retained descriptor prevents a later path substitution.
+#[cfg(unix)]
+pub fn server_log_baseline(path: &Path) -> Result<ArtifactServerLogBaseline, String> {
+    use std::{
+        io::{Seek, SeekFrom},
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+    };
 
-    let mut file = fs::File::open(path).map_err(|_| "read captured server log".to_owned())?;
-    let length = file
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| "open captured server log capability".to_owned())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| "open captured server log capability".to_owned())?
+        .to_owned();
+    let mut parent_options = OpenOptions::new();
+    parent_options
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    let parent_file = parent_options
+        .open(parent_path)
+        .map_err(|_| "open captured server log capability".to_owned())?;
+    let parent = cap_std::fs::Dir::from_std_file(parent_file);
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(cap_fs_ext::FollowSymlinks::No);
+    let mut file = parent
+        .open_with(Path::new(&name), &options)
+        .map_err(|_| "open captured server log capability".to_owned())?
+        .into_std();
+    let metadata = file
         .metadata()
-        .map_err(|_| "read captured server log".to_owned())?
-        .len();
-    if from_offset > length {
-        return Err("captured server log shrank below its baseline".to_owned());
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err("captured server log is not an owner-private regular file".to_owned());
     }
-    file.seek(SeekFrom::Start(from_offset))
-        .map_err(|_| "read captured server log".to_owned())?;
+    let size_bytes = metadata.len();
+    let anchor_start = size_bytes.saturating_sub(SERVER_LOG_ANCHOR_BYTES as u64);
+    file.seek(SeekFrom::Start(anchor_start))
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    let mut anchor = Vec::new();
+    (&mut file)
+        .take(SERVER_LOG_ANCHOR_BYTES as u64)
+        .read_to_end(&mut anchor)
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    Ok(ArtifactServerLogBaseline {
+        file,
+        parent,
+        name,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size_bytes,
+        anchor_digest: hex_digest(&Sha256::digest(anchor)),
+    })
+}
 
-    // Stream the appended window one line at a time so a multi-hundred-megabyte
-    // captured log is never held in memory, and so non-UTF-8 bytes outside the
-    // audited window can never fail the audit.
-    let mut reader = BufReader::new(file);
-    let mut audit = ArtifactServerLogAudit::default();
-    let mut raw = Vec::new();
-    loop {
-        raw.clear();
-        let read = reader
-            .read_until(b'\n', &mut raw)
-            .map_err(|_| "read captured server log".to_owned())?;
-        if read == 0 {
-            break;
-        }
-        while matches!(raw.last(), Some(b'\n' | b'\r')) {
-            raw.pop();
-        }
-        classify_server_log_line(&mut audit, &String::from_utf8_lossy(&raw));
+/// Opens the Windows log through retained no-reparse parent and file handles.
+#[cfg(windows)]
+pub fn server_log_baseline(path: &Path) -> Result<ArtifactServerLogBaseline, String> {
+    use std::{
+        io::{Seek, SeekFrom},
+        os::windows::fs::{MetadataExt, OpenOptionsExt},
+    };
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| "open captured server log capability".to_owned())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| "open captured server log capability".to_owned())?
+        .to_owned();
+    let mut parent_options = OpenOptions::new();
+    parent_options
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let parent_file = parent_options
+        .open(parent_path)
+        .map_err(|_| "open captured server log capability".to_owned())?;
+    let parent_metadata = parent_file
+        .metadata()
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err("captured server log parent is not a retained directory".to_owned());
     }
+    let parent = cap_std::fs::Dir::from_std_file(parent_file);
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(cap_fs_ext::FollowSymlinks::No);
+    let mut file = parent
+        .open_with(Path::new(&name), &options)
+        .map_err(|_| "open captured server log capability".to_owned())?
+        .into_std();
+    let metadata = file
+        .metadata()
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    let device = metadata
+        .volume_serial_number()
+        .map(u64::from)
+        .ok_or_else(|| "inspect captured server log capability".to_owned())?;
+    let inode = metadata
+        .file_index()
+        .ok_or_else(|| "inspect captured server log capability".to_owned())?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !acceptance_owner_private_file(&file)
+    {
+        return Err("captured server log is not an owner-private regular file".to_owned());
+    }
+    let size_bytes = metadata.len();
+    let anchor_start = size_bytes.saturating_sub(SERVER_LOG_ANCHOR_BYTES as u64);
+    file.seek(SeekFrom::Start(anchor_start))
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    let mut anchor = Vec::new();
+    (&mut file)
+        .take(SERVER_LOG_ANCHOR_BYTES as u64)
+        .read_to_end(&mut anchor)
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    Ok(ArtifactServerLogBaseline {
+        file,
+        parent,
+        name,
+        device,
+        inode,
+        size_bytes,
+        anchor_digest: hex_digest(&Sha256::digest(anchor)),
+    })
+}
+
+#[cfg(unix)]
+fn assert_server_log_namespace_current(baseline: &ArtifactServerLogBaseline) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(cap_fs_ext::FollowSymlinks::No);
+    let current = baseline
+        .parent
+        .open_with(Path::new(&baseline.name), &options)
+        .map_err(|_| "captured server log namespace changed".to_owned())?
+        .into_std();
+    let metadata = current
+        .metadata()
+        .map_err(|_| "captured server log namespace changed".to_owned())?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.dev() != baseline.device
+        || metadata.ino() != baseline.inode
+    {
+        return Err("captured server log namespace changed".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn assert_server_log_namespace_current(baseline: &ArtifactServerLogBaseline) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(cap_fs_ext::FollowSymlinks::No);
+    let current = baseline
+        .parent
+        .open_with(Path::new(&baseline.name), &options)
+        .map_err(|_| "captured server log namespace changed".to_owned())?
+        .into_std();
+    let metadata = current
+        .metadata()
+        .map_err(|_| "captured server log namespace changed".to_owned())?;
+    let device = metadata
+        .volume_serial_number()
+        .map(u64::from)
+        .ok_or_else(|| "captured server log namespace changed".to_owned())?;
+    let inode = metadata
+        .file_index()
+        .ok_or_else(|| "captured server log namespace changed".to_owned())?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !acceptance_owner_private_file(&current)
+        || device != baseline.device
+        || inode != baseline.inode
+    {
+        return Err("captured server log namespace changed".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn assert_server_log_descriptor_current(
+    baseline: &ArtifactServerLogBaseline,
+    file: &File,
+) -> Result<u64, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file
+        .metadata()
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.dev() != baseline.device
+        || metadata.ino() != baseline.inode
+        || metadata.len() < baseline.size_bytes
+    {
+        return Err("captured server log capability changed".to_owned());
+    }
+    Ok(metadata.len())
+}
+
+#[cfg(windows)]
+fn assert_server_log_descriptor_current(
+    baseline: &ArtifactServerLogBaseline,
+    file: &File,
+) -> Result<u64, String> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "inspect captured server log capability".to_owned())?;
+    let device = metadata
+        .volume_serial_number()
+        .map(u64::from)
+        .ok_or_else(|| "inspect captured server log capability".to_owned())?;
+    let inode = metadata
+        .file_index()
+        .ok_or_else(|| "inspect captured server log capability".to_owned())?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !acceptance_owner_private_file(file)
+        || device != baseline.device
+        || inode != baseline.inode
+        || metadata.len() < baseline.size_bytes
+    {
+        return Err("captured server log capability changed".to_owned());
+    }
+    Ok(metadata.len())
+}
+
+/// Refuses server-log audits on platforms without the required no-follow file
+/// descriptor semantics.
+#[cfg(not(any(unix, windows)))]
+pub fn server_log_baseline(_path: &Path) -> Result<ArtifactServerLogBaseline, String> {
+    Err("captured server log capability is unsupported on this platform".to_owned())
+}
+
+/// Audits bytes appended to one retained server-log capability.
+///
+/// The caller supplies the fixture paths, transient staging capabilities, and
+/// child credentials that must never appear in the log. The audit retains only
+/// counters and fixed category names.
+///
+/// # Errors
+///
+/// Returns a fixed category when the retained file changed identity, shrank,
+/// rotated, exceeded the window limit, or cannot be read.
+#[cfg(any(unix, windows))]
+pub fn audit_server_log(
+    baseline: &ArtifactServerLogBaseline,
+    forbidden_needles: &[&[u8]],
+) -> Result<ArtifactServerLogAudit, String> {
+    audit_server_log_with_snapshot_hook(baseline, forbidden_needles, || {})
+}
+
+#[cfg(any(unix, windows))]
+fn audit_server_log_with_snapshot_hook(
+    baseline: &ArtifactServerLogBaseline,
+    forbidden_needles: &[&[u8]],
+    after_snapshot: impl FnOnce(),
+) -> Result<ArtifactServerLogAudit, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if forbidden_needles
+        .iter()
+        .any(|needle| needle.is_empty() || needle.len() > SERVER_LOG_NEEDLE_BYTES)
+    {
+        return Err("captured server log needle was outside the audit limit".to_owned());
+    }
+    assert_server_log_namespace_current(baseline)?;
+    let mut file = baseline
+        .file
+        .try_clone()
+        .map_err(|_| "read captured server log capability".to_owned())?;
+    let snapshot_size = assert_server_log_descriptor_current(baseline, &file)?;
+    let anchor_start = baseline
+        .size_bytes
+        .saturating_sub(SERVER_LOG_ANCHOR_BYTES as u64);
+    file.seek(SeekFrom::Start(anchor_start))
+        .map_err(|_| "read captured server log capability".to_owned())?;
+    let mut anchor = Vec::new();
+    (&mut file)
+        .take(baseline.size_bytes - anchor_start)
+        .read_to_end(&mut anchor)
+        .map_err(|_| "read captured server log capability".to_owned())?;
+    if hex_digest(&Sha256::digest(anchor)) != baseline.anchor_digest {
+        return Err("captured server log baseline changed".to_owned());
+    }
+    let window_bytes = snapshot_size - baseline.size_bytes;
+    if window_bytes > SERVER_LOG_WINDOW_BYTES {
+        return Err("captured server log window exceeded the audit limit".to_owned());
+    }
+    after_snapshot();
+    file.seek(SeekFrom::Start(baseline.size_bytes))
+        .map_err(|_| "read captured server log capability".to_owned())?;
+    let mut audit = ArtifactServerLogAudit::default();
+    let mut line = Vec::new();
+    let mut line_overflowed = false;
+    let mut scan_tail = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut remaining = window_bytes;
+    while remaining != 0 {
+        let maximum = usize::try_from(remaining.min(chunk.len() as u64))
+            .map_err(|_| "read captured server log capability".to_owned())?;
+        let read = file
+            .read(&mut chunk[..maximum])
+            .map_err(|_| "read captured server log capability".to_owned())?;
+        if read == 0 {
+            return Err("captured server log shrank during audit".to_owned());
+        }
+        remaining = remaining.saturating_sub(read as u64);
+        let bytes = &chunk[..read];
+        if contains_forbidden(&scan_tail, bytes, forbidden_needles) {
+            audit.forbidden_needle_matches = audit.forbidden_needle_matches.saturating_add(1);
+        }
+        let retained = SERVER_LOG_NEEDLE_BYTES.saturating_sub(1);
+        scan_tail.extend_from_slice(bytes);
+        if scan_tail.len() > retained {
+            let remove = scan_tail.len() - retained;
+            scan_tail.drain(..remove);
+        }
+        for byte in bytes {
+            if *byte == b'\n' {
+                classify_server_log_bytes(&mut audit, &line);
+                line.clear();
+                line_overflowed = false;
+            } else if line.len() < SERVER_LOG_LINE_BYTES {
+                line.push(*byte);
+            } else if !line_overflowed {
+                audit.oversized_lines = audit.oversized_lines.saturating_add(1);
+                line_overflowed = true;
+            }
+        }
+    }
+    if !line.is_empty() {
+        classify_server_log_bytes(&mut audit, &line);
+    }
+    assert_server_log_namespace_current(baseline)?;
     Ok(audit)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn audit_server_log(
+    _baseline: &ArtifactServerLogBaseline,
+    _forbidden_needles: &[&[u8]],
+) -> Result<ArtifactServerLogAudit, String> {
+    Err("captured server log capability is unsupported on this platform".to_owned())
+}
+
+fn contains_forbidden(prefix: &[u8], bytes: &[u8], needles: &[&[u8]]) -> bool {
+    let mut combined = Vec::with_capacity(prefix.len().saturating_add(bytes.len()));
+    combined.extend_from_slice(prefix);
+    combined.extend_from_slice(bytes);
+    needles.iter().any(|needle| {
+        combined
+            .windows(needle.len())
+            .any(|candidate| candidate == *needle)
+    })
 }
 
 /// Classifies a bounded captured-log window without retaining any line.
@@ -4120,6 +7165,11 @@ fn classify_server_log_line(audit: &mut ArtifactServerLogAudit, line: &str) {
             audit.unclassified_error_lines = audit.unclassified_error_lines.saturating_add(1);
         }
     }
+}
+
+fn classify_server_log_bytes(audit: &mut ArtifactServerLogAudit, line: &[u8]) {
+    let line = String::from_utf8_lossy(line);
+    classify_server_log_line(audit, &line);
 }
 
 fn is_panic_or_fatal(line: &str) -> bool {
@@ -4407,16 +7457,24 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("any-mcp-log-{}", unique_suffix()));
         fs::create_dir_all(&directory).expect("create audit fixture directory");
         let path = directory.join("server.log");
-        let mut bytes =
-            b"{\"level\":\"error\",\"msg\":\"pre-baseline unclassified \xff\xfe\"}\n".to_vec();
-        let baseline = u64::try_from(bytes.len()).expect("baseline offset");
-        bytes.extend_from_slice(
-            b"{\"level\":\"error\",\"msg\":\"process next pending upload item\"}\r\n",
-        );
-        bytes.extend_from_slice(b"{\"level\":\"info\",\"msg\":\"ordinary\"}\n");
-        fs::write(&path, &bytes).expect("write audit fixture log");
+        fs::write(
+            &path,
+            b"{\"level\":\"error\",\"msg\":\"pre-baseline unclassified \xff\xfe\"}\n",
+        )
+        .expect("write baseline log");
+        secure_files(std::slice::from_ref(&path)).expect("secure baseline log");
+        let baseline = server_log_baseline(&path).expect("open baseline capability");
+        let mut appended =
+            b"{\"level\":\"error\",\"msg\":\"process next pending upload item\"}\r\n".to_vec();
+        appended.extend_from_slice(b"{\"level\":\"info\",\"msg\":\"ordinary\"}\n");
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open audit log")
+            .write_all(&appended)
+            .expect("append audit log");
 
-        let audit = audit_server_log(&path, baseline).expect("audit appended window");
+        let audit = audit_server_log(&baseline, &[]).expect("audit appended window");
         assert_eq!(audit.inspected_lines, 2);
         assert_eq!(audit.panic_or_fatal_lines, 0);
         assert_eq!(audit.unclassified_error_lines, 0);
@@ -4425,10 +7483,60 @@ mod tests {
             Some(1)
         );
 
-        let total = u64::try_from(bytes.len()).expect("total length");
+        fs::write(&path, b"short\n").expect("truncate audit log");
         assert!(
-            audit_server_log(&path, total.saturating_add(1)).is_err(),
+            audit_server_log(&baseline, &[]).is_err(),
             "a shrunken log must fail closed"
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn server_log_audit_stops_at_its_snapshotted_end() {
+        let directory = std::env::temp_dir().join(format!("any-mcp-log-{}", unique_suffix()));
+        fs::create_dir_all(&directory).expect("create audit fixture directory");
+        let path = directory.join("server.log");
+        fs::write(&path, b"").expect("write baseline log");
+        secure_files(std::slice::from_ref(&path)).expect("secure baseline log");
+        let baseline = server_log_baseline(&path).expect("open baseline capability");
+
+        let audit = audit_server_log_with_snapshot_hook(&baseline, &[], || {
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open growing audit log")
+                .write_all(b"{\"level\":\"fatal\",\"msg\":\"late append\"}\n")
+                .expect("append after snapshot");
+        })
+        .expect("audit snapshotted window");
+        assert_eq!(audit.inspected_lines, 0);
+        assert!(audit.is_clean());
+        assert!(
+            !audit_server_log(&baseline, &[])
+                .expect("audit late append")
+                .is_clean()
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn server_log_audit_rejects_rotation_and_reopen() {
+        let directory = std::env::temp_dir().join(format!("any-mcp-log-{}", unique_suffix()));
+        fs::create_dir_all(&directory).expect("create audit fixture directory");
+        let path = directory.join("server.log");
+        let rotated = directory.join("server.log.1");
+        fs::write(&path, b"").expect("write baseline log");
+        secure_files(std::slice::from_ref(&path)).expect("secure baseline log");
+        let baseline = server_log_baseline(&path).expect("open baseline capability");
+
+        fs::rename(&path, &rotated).expect("rotate server log");
+        fs::write(&path, b"{\"level\":\"fatal\",\"msg\":\"new inode\"}\n")
+            .expect("write replacement server log");
+        secure_files(std::slice::from_ref(&path)).expect("secure replacement log");
+        assert!(
+            audit_server_log(&baseline, &[]).is_err(),
+            "rotation and reopen must fail closed"
         );
         let _ = fs::remove_dir_all(&directory);
     }
@@ -5182,5 +8290,180 @@ mod tests {
         let skipped: DisposableRun<u8> =
             DisposableRun::Skipped(anytype::test_util::DisposableSkip::PrefixNotConfigured);
         assert!(require_completed(skipped, "artifact smoke").is_err());
+    }
+
+    #[test]
+    fn adversarial_families_are_closed_and_round_trip() {
+        let mut names = std::collections::BTreeSet::new();
+        for family in AdversarialFamily::ALL {
+            assert!(
+                names.insert(family.as_str()),
+                "duplicate adversarial family"
+            );
+            assert_eq!(AdversarialFamily::parse(family.as_str()), Some(*family));
+        }
+        assert_eq!(names.len(), 11);
+        assert_eq!(AdversarialFamily::parse("aliases"), None);
+    }
+
+    #[test]
+    fn adversarial_case_inventory_is_exact_closed_and_partitioned() {
+        let expected_family_counts = [
+            (AdversarialFamily::PathTraversal, 20_usize),
+            (AdversarialFamily::SymlinkReparse, 13),
+            (AdversarialFamily::RenameRace, 10),
+            (AdversarialFamily::PathAliases, 9),
+            (AdversarialFamily::HardLinks, 6),
+            (AdversarialFamily::MaliciousMetadata, 14),
+            (AdversarialFamily::HandleReplay, 16),
+            (AdversarialFamily::PartialWrites, 12),
+            (AdversarialFamily::ProcessCrash, 7),
+            (AdversarialFamily::OutputFlood, 7),
+            (AdversarialFamily::Cleanup, 8),
+        ];
+        let mut ids = std::collections::BTreeSet::new();
+        for case in AdversarialCaseId::ALL {
+            assert!(ids.insert(case.as_str()), "duplicate adversarial case");
+            assert_eq!(AdversarialCaseId::parse(case.as_str()), Some(*case));
+        }
+        assert_eq!(ids.len(), 122);
+        assert_eq!(AdversarialCaseId::parse("TRAV-21"), None);
+        for (family, expected) in expected_family_counts {
+            assert_eq!(
+                AdversarialCaseId::ALL
+                    .iter()
+                    .filter(|case| case.family() == family)
+                    .count(),
+                expected,
+                "unexpected {} inventory count",
+                family.as_str()
+            );
+        }
+
+        let partition = adversarial_case_partition().collect::<Vec<_>>();
+        assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
+        assert_eq!(
+            partition
+                .iter()
+                .filter(|entry| entry.status != AdversarialCaseStatus::Pending)
+                .count(),
+            43
+        );
+        assert_eq!(
+            partition
+                .iter()
+                .filter(|entry| entry.status == AdversarialCaseStatus::Pending)
+                .count(),
+            79
+        );
+        for case in AdversarialCaseId::ALL {
+            assert_eq!(
+                partition.iter().filter(|entry| entry.id == *case).count(),
+                1,
+                "{} is not partitioned exactly once",
+                case.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_expected_outcomes_compare_exactly() {
+        let validation = ExpectedOutcome::ToolError {
+            kind: ExpectedToolErrorKind::Validation,
+            message: "Invalid artifact argument.",
+        };
+        assert_eq!(
+            validation.assert_matches(ObservedOutcome::ToolError {
+                code: "validation",
+                message: "Invalid artifact argument.",
+            }),
+            Ok(())
+        );
+        assert!(
+            validation
+                .assert_matches(ObservedOutcome::ToolError {
+                    code: "validation",
+                    message: "different",
+                })
+                .is_err()
+        );
+        assert_eq!(
+            ExpectedToolErrorKind::MissingRoots.code(),
+            ExpectedToolErrorCode::Validation
+        );
+        assert_eq!(
+            ExpectedToolErrorKind::MissingStaging.as_str(),
+            "missing_staging"
+        );
+        assert_eq!(
+            ExpectedOutcome::Http {
+                status: 416,
+                body: b"invalid range",
+            }
+            .assert_matches(ObservedOutcome::Http {
+                status: 416,
+                body: b"invalid range",
+            }),
+            Ok(())
+        );
+        assert!(
+            ExpectedOutcome::StartupRejected {
+                category: "invalid artifact root",
+            }
+            .assert_matches(ObservedOutcome::Accepted)
+            .is_err()
+        );
+        assert_eq!(
+            ExpectedOutcome::MethodNotFound.assert_matches(ObservedOutcome::MethodNotFound),
+            Ok(())
+        );
+        assert_eq!(
+            ExpectedOutcome::Accepted.assert_matches(ObservedOutcome::Accepted),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn root_inventory_detects_byte_changes_without_debugging_names() {
+        let directory =
+            std::env::temp_dir().join(format!("any-mcp-adversarial-inventory-{}", unique_suffix()));
+        fs::create_dir_all(directory.join("nested")).expect("create inventory root");
+        fs::write(directory.join("nested/source.bin"), b"before").expect("seed inventory root");
+        let inventory = RootInventory::capture(&directory).expect("capture inventory");
+        assert_eq!(inventory.entry_count(), 2);
+        assert_eq!(inventory.assert_unchanged(), Ok(()));
+        assert!(!format!("{inventory:?}").contains("source.bin"));
+        fs::write(directory.join("nested/source.bin"), b"after!").expect("mutate inventory root");
+        assert_eq!(
+            inventory.assert_unchanged(),
+            Err("artifact root inventory changed".to_owned())
+        );
+        fs::remove_dir_all(&directory).expect("remove inventory root");
+    }
+
+    #[test]
+    fn volume_capability_probes_leave_the_private_root_unchanged() {
+        let directory =
+            std::env::temp_dir().join(format!("any-mcp-adversarial-volume-{}", unique_suffix()));
+        fs::create_dir_all(&directory).expect("create volume root");
+        let before = RootInventory::capture(&directory).expect("capture empty root");
+        let case_folding = probe_volume_case_folding(&directory).expect("case probe");
+        let normalization = probe_volume_normalization(&directory).expect("normalization probe");
+        assert!(matches!(
+            case_folding,
+            VolumeCaseFolding::Insensitive | VolumeCaseFolding::Sensitive
+        ));
+        assert!(matches!(
+            normalization,
+            VolumeNormalization::Equivalent | VolumeNormalization::Distinct
+        ));
+        assert_eq!(before.assert_unchanged(), Ok(()));
+        fs::remove_dir_all(&directory).expect("remove volume root");
+    }
+
+    #[test]
+    fn raw_staging_client_is_constructible_and_redacted() {
+        let client = RawStagingClient::new().expect("construct raw staging client");
+        assert_eq!(format!("{client:?}"), "RawStagingClient");
     }
 }

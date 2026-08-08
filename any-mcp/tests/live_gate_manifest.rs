@@ -17,8 +17,11 @@ const ADMITTED_IGNORED_LIB_TESTS: &[&str] = &[
     "schema_tag_toolset::tests::headless_direct_stdio_cache_and_scope_use_disposable_real_space",
     "schema_type_toolset::tests::headless_type_preserve_replace_clear_and_featured_stability",
     "server::headless_integration::headless_archive_applies_and_returns_verified_success",
+    "server::headless_integration::headless_artifact_alias_metadata_direct_scenarios",
+    "server::headless_integration::headless_artifact_bounded_metadata_direct_scenarios",
     "server::headless_integration::headless_artifact_direct_transport_matrix_scenario",
     "server::headless_integration::headless_artifact_policy_direct_scenarios",
+    "server::headless_integration::headless_artifact_traversal_direct_scenarios",
     "server::headless_integration::headless_create_body_canonicalization_is_verified_once",
     "server::headless_integration::headless_default_discovery_routes_paginate_and_report_ambiguity",
     "server::headless_integration::headless_direct_body_blocks_runs_shared_scenario",
@@ -83,6 +86,7 @@ const EXCLUDED_IGNORED_LIB_TESTS: &[(&str, &str)] = &[
 ];
 
 const HEADLESS_STDIO_IGNORED_TESTS: &[&str] = &[
+    "headless_artifact_adversarial_spawned_stdio_scenarios",
     "headless_artifact_content_spawned_scenarios",
     "headless_artifact_lifecycle_and_payload_scenarios",
     "headless_artifact_policy_spawned_scenarios",
@@ -214,7 +218,7 @@ fn compact_whitespace(value: &str) -> String {
 
 #[test]
 fn ignored_library_manifest_is_closed_and_filter_safe() {
-    assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 32);
+    assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 35);
     assert_sorted_unique(ADMITTED_IGNORED_LIB_TESTS);
     assert!(
         ADMITTED_IGNORED_LIB_TESTS
@@ -242,7 +246,7 @@ fn ignored_library_manifest_is_closed_and_filter_safe() {
         .chain(excluded.iter().copied())
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    assert_eq!(declared.len(), 42, "manifest contains duplicate entries");
+    assert_eq!(declared.len(), 45, "manifest contains duplicate entries");
     assert_eq!(ignored_tests("lib", false), declared);
 }
 
@@ -250,7 +254,7 @@ fn ignored_library_manifest_is_closed_and_filter_safe() {
 fn whole_binary_live_target_manifests_are_closed() {
     assert_sorted_unique(HEADLESS_STDIO_IGNORED_TESTS);
     assert_sorted_unique(DISCUSSIONS_STDIO_IGNORED_TESTS);
-    assert_eq!(HEADLESS_STDIO_IGNORED_TESTS.len(), 25);
+    assert_eq!(HEADLESS_STDIO_IGNORED_TESTS.len(), 26);
     assert_eq!(DISCUSSIONS_STDIO_IGNORED_TESTS.len(), 1);
     assert_eq!(
         inventory_drift(

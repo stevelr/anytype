@@ -24,6 +24,9 @@ use anytype::{
     test_util::{DisposableFailureCategory, TestContext, unique_suffix},
 };
 
+#[cfg(windows)]
+pub(super) use super::acceptance_owner_private_file;
+
 /// Seeded value that must never appear in stderr or protocol errors.
 pub const BODY_DIAGNOSTIC_SECRET: &str = "SECRET_BODY_DIAGNOSTIC_SENTINEL";
 /// Exact root-inclusive DFS item count in the live pagination fixture.
@@ -2256,6 +2259,17 @@ pub trait McpDriver {
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>>;
 
+    /// Returns the complete serialized MCP tool result for frame-bound checks.
+    fn call_tool_full_result<'a>(
+        &'a mut self,
+        _name: &'static str,
+        _arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(std::future::ready(Err(
+            "driver does not expose complete tool results".to_owned(),
+        )))
+    }
+
     fn call_tool_error<'a>(
         &'a mut self,
         name: &'static str,
@@ -4330,25 +4344,31 @@ mod artifact_acceptance;
 // transport matrix, so no single target names the complete harness surface.
 #[allow(unused_imports)]
 pub use artifact_acceptance::{
-    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ARTIFACT_CREATE_MARKDOWN, ARTIFACT_FILE_MEDIA_TYPE,
+    ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_DEFAULT_CASE_IDS, ADVERSARIAL_SPECIAL_CASE_IDS,
+    ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_CREATE_MARKDOWN, ARTIFACT_FILE_MEDIA_TYPE,
     ARTIFACT_FILE_PAYLOAD, ARTIFACT_FRAME_CEILING_BYTES, ARTIFACT_FRAME_CEILING_TOKENS,
     ARTIFACT_PAYLOAD_FRAME_DELTA_BYTES, ARTIFACT_PAYLOAD_FRAME_DELTA_TOKENS, ARTIFACT_TOOL_NAMES,
-    ARTIFACT_UPDATE_MARKDOWN, ArtifactCatalogSnapshot, ArtifactContentEvidence, ArtifactContentRun,
-    ArtifactContentScenario, ArtifactControlPlane, ArtifactDataPlane, ArtifactDirectorySnapshot,
-    ArtifactDocumentRecord, ArtifactFileRecord, ArtifactFrameMeasurement,
-    ArtifactLifecycleScenario, ArtifactLimitProfile, ArtifactMimeFixture, ArtifactPolicyEvidence,
-    ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyProbe, ArtifactPolicyRun,
-    ArtifactPolicyScenario, ArtifactProbeExpectation, ArtifactProbeOutcome, ArtifactServerLogAudit,
-    ArtifactSmokeEvidence, ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStatusEvidence,
-    ArtifactTransport, ArtifactValidatorOutcome, ArtifactValidatorProbe, ArtifactValidatorRecord,
-    CanonicalizationEffect, FixtureSpacePolicy, FixtureValidatorPolicy, PinnedValidatorExecutable,
-    UNAUTHORIZED_SPACE_ID, allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
-    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
-    assert_payload_frame_independence, audit_server_log, classify_canonicalization,
-    classify_collision_frames, classify_server_log, measure_artifact_frame, probe_expectation,
-    reject_oversized_stage_chunk, release_stage_upload, require_completed,
-    run_artifact_content_scenario, run_artifact_policy_scenario, run_artifact_smoke_scenario,
-    server_log_offset, stage_head_status, upload_stage_bytes, validate_tool_frame,
+    ARTIFACT_UPDATE_MARKDOWN, AdversarialCaseId, AdversarialExecution, ArtifactAdversarialRun,
+    ArtifactCatalogSnapshot, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
+    ArtifactControlPlane, ArtifactDataPlane, ArtifactDirectorySnapshot, ArtifactDocumentRecord,
+    ArtifactFileRecord, ArtifactFrameMeasurement, ArtifactLifecycleScenario, ArtifactLimitProfile,
+    ArtifactMimeFixture, ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyOptions,
+    ArtifactPolicyProbe, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactProbeExpectation,
+    ArtifactProbeOutcome, ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeEvidence,
+    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStatusEvidence, ArtifactTransport,
+    ArtifactValidatorOutcome, ArtifactValidatorProbe, ArtifactValidatorRecord,
+    CanonicalizationEffect, ExpectedOutcome, FixtureSpacePolicy, FixtureValidatorPolicy,
+    ObservedOutcome, PinnedValidatorExecutable, UNAUTHORIZED_SPACE_ID, allocate_stage_upload,
+    artifact_catalog_snapshot, artifact_sha256, assert_artifact_content_parity,
+    assert_artifact_parity, assert_artifact_policy_parity, assert_payload_frame_independence,
+    audit_server_log, classify_canonicalization, classify_collision_frames, classify_server_log,
+    measure_artifact_frame, probe_expectation, reject_oversized_stage_chunk, release_stage_upload,
+    require_completed, run_artifact_adversarial_default, run_artifact_adversarial_stdio_sentinels,
+    run_artifact_alias_cases, run_artifact_content_scenario, run_artifact_empty_client_roots_case,
+    run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
+    run_artifact_missing_roots_case, run_artifact_payload_boundary_cases,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
+    server_log_baseline, stage_head_status, upload_stage_bytes, validate_tool_frame,
     wait_for_stage_reaped,
 };
 

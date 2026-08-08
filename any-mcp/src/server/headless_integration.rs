@@ -8,7 +8,9 @@
 use std::{
     collections::{BTreeMap, HashSet},
     future::Future,
+    path::PathBuf,
     pin::Pin,
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -28,26 +30,39 @@ use anytype::{
         with_disposable_space_context,
     },
 };
+#[allow(deprecated)]
+use rmcp::model::Root;
 use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject, ReadResourceRequestParams};
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use super::*;
+use crate::artifact_client_roots::ClientRootsSource;
 use crate::artifact_config::{ArtifactConfig, SpaceReference};
 use crate::optional_toolsets::{
     OptionalToolsetSelection, production_optional_metadata, production_optional_registries,
 };
 use crate::runtime::{RuntimeContext, StartupStatus};
 
+#[cfg(windows)]
+pub(super) use crate::artifact_roots::acceptance_owner_private_file;
+
 #[path = "../../tests/support/live_scenario.rs"]
 pub(super) mod live_scenario;
 
 use live_scenario::{
-    ArtifactControlPlane, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
-    ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy, UNAUTHORIZED_SPACE_ID,
-    assert_artifact_parity, assert_artifact_policy_parity, require_completed,
-    run_artifact_policy_scenario, run_artifact_smoke_scenario,
+    ADVERSARIAL_DEFAULT_CASE_IDS, ADVERSARIAL_SPECIAL_CASE_IDS, AdversarialExecution,
+    ArtifactAdversarialRun, ArtifactControlPlane, ArtifactLimitProfile, ArtifactPolicyFixture,
+    ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogBaseline,
+    ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy, FixtureValidatorPolicy,
+    UNAUTHORIZED_SPACE_ID, assert_artifact_parity, assert_artifact_policy_parity, audit_server_log,
+    require_completed, run_artifact_alias_cases, run_artifact_empty_client_roots_case,
+    run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
+    run_artifact_missing_roots_case, run_artifact_payload_boundary_cases,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
+    server_log_baseline,
 };
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
@@ -257,6 +272,21 @@ impl McpDriver for DirectRouterDriver<'_> {
             result
                 .structured_content
                 .ok_or_else(|| format!("{name} success omitted structured content"))
+        })
+    }
+
+    fn call_tool_full_result<'a>(
+        &'a mut self,
+        name: &'static str,
+        arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
+        Box::pin(async move {
+            let result = call(self.server, name, arguments).await;
+            if result.is_error == Some(true) {
+                return Err(format!("{name} returned a tool error"));
+            }
+            serde_json::to_value(result)
+                .map_err(|_| format!("{name} complete result was not serializable"))
         })
     }
 
@@ -2575,6 +2605,89 @@ fn headless_direct_ordinary_tools_cover_representative_layouts() {
     });
 }
 
+const ARTIFACT_REDACTED_LOG_ENV: &str = "ANY_MCP_HEADLESS_REDACTED_LOG_FILE";
+const DISPOSABLE_CREDENTIAL_ENV_NAMES: [&str; 4] = [
+    "ANYTYPE_KEY_HTTP_TOKEN",
+    "ANYTYPE_KEY_ACCOUNT_ID",
+    "ANYTYPE_KEY_ACCOUNT_KEY",
+    "ANYTYPE_KEY_SESSION_TOKEN",
+];
+
+fn required_artifact_log_baseline() -> Result<ArtifactServerLogBaseline, TestError> {
+    let path = std::env::var_os(ARTIFACT_REDACTED_LOG_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| TestError::Assertion {
+            message: "direct adversarial acceptance requires a captured redacted log".to_owned(),
+        })?;
+    server_log_baseline(&path).map_err(|_| TestError::Assertion {
+        message: "capture direct adversarial log baseline".to_owned(),
+    })
+}
+
+fn disposable_credential_log_needles(
+    ctx: &TestContext,
+) -> Result<Vec<Zeroizing<Vec<u8>>>, TestError> {
+    let environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| TestError::Assertion {
+            message: "direct adversarial acceptance requires disposable credentials".to_owned(),
+        })?;
+    let mut command = Command::new("any-mcp");
+    environment
+        .configure(&mut command)
+        .map_err(|_| TestError::Assertion {
+            message: "capture disposable credential audit needles".to_owned(),
+        })?;
+    let needles = command
+        .get_envs()
+        .filter_map(|(name, value)| {
+            let name = name.to_str()?;
+            DISPOSABLE_CREDENTIAL_ENV_NAMES
+                .contains(&name)
+                .then_some(value?)
+        })
+        .filter_map(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
+        .collect::<Vec<_>>();
+    if needles.len() < 2 {
+        return Err(TestError::Assertion {
+            message: "direct adversarial acceptance requires disposable credentials".to_owned(),
+        });
+    }
+    Ok(needles)
+}
+
+fn audit_direct_adversarial_log(
+    baseline: &ArtifactServerLogBaseline,
+    owned_needles: &[Zeroizing<Vec<u8>>],
+    execution: &AdversarialExecution,
+) -> Result<(), TestError> {
+    let mut needles = owned_needles
+        .iter()
+        .map(|needle| needle.as_slice())
+        .collect::<Vec<_>>();
+    execution.append_forbidden_log_needles(&mut needles);
+    let audit = audit_server_log(baseline, &needles).map_err(|_| TestError::Assertion {
+        message: "audit direct adversarial log window".to_owned(),
+    })?;
+    eprintln!(
+        "direct adversarial log inspected={} panic_or_fatal={} unclassified={} forbidden={} oversized={}",
+        audit.inspected_lines,
+        audit.panic_or_fatal_lines,
+        audit.unclassified_error_lines,
+        audit.forbidden_needle_matches,
+        audit.oversized_lines,
+    );
+    if !audit.is_clean() {
+        return Err(TestError::Assertion {
+            message: "direct adversarial log audit was not clean".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Builds a read-write direct-router server that owns the fixture's policy.
 async fn live_artifact_server(
     ctx: &TestContext,
@@ -2589,6 +2702,21 @@ async fn live_artifact_server_with(
     policy: &ArtifactPolicyFixture,
     read_only: bool,
 ) -> Result<AnyMcpServer, TestError> {
+    let contents = policy.policy_contents().map_err(|_| TestError::Assertion {
+        message: "read artifact acceptance policy".to_owned(),
+    })?;
+    let artifact = ArtifactConfig::from_toml(&contents).map_err(|_| TestError::Assertion {
+        message: "parse artifact acceptance policy".to_owned(),
+    })?;
+    let runtime = live_artifact_runtime(ctx, &artifact, read_only).await?;
+    Ok(AnyMcpServer::new(runtime).expect("production artifacts MCP catalog"))
+}
+
+async fn live_artifact_runtime(
+    ctx: &TestContext,
+    artifact: &ArtifactConfig,
+    read_only: bool,
+) -> Result<RuntimeContext, TestError> {
     ctx.client
         .ping_http()
         .await
@@ -2597,31 +2725,87 @@ async fn live_artifact_server_with(
         .ping_grpc()
         .await
         .expect("artifact suite requires authenticated gRPC");
-    let contents = policy.policy_contents().map_err(|_| TestError::Assertion {
-        message: "read artifact acceptance policy".to_owned(),
-    })?;
-    let artifact = ArtifactConfig::from_toml(&contents).map_err(|_| TestError::Assertion {
-        message: "parse artifact acceptance policy".to_owned(),
-    })?;
     let selected = OptionalToolsetSelection::parse(
         Some("artifacts".to_owned()),
         &production_optional_metadata(),
     )
     .expect("complete artifacts registry");
-    let runtime = RuntimeContext::from_parts_with_artifact_policy(
+    RuntimeContext::from_parts_with_artifact_policy(
         ctx.client.clone(),
         StartupStatus {
             http_available: true,
             grpc_available: true,
         },
         selected,
-        &artifact,
+        artifact,
         read_only,
     )
     .await
     .map_err(|_| TestError::Assertion {
         message: "activate artifact acceptance runtime".to_owned(),
+    })
+}
+
+#[derive(Debug)]
+struct EmptyClientRootsSource;
+
+#[allow(deprecated)]
+impl ClientRootsSource for EmptyClientRootsSource {
+    fn advertises_roots(&self) -> bool {
+        true
+    }
+
+    fn list_roots(&self) -> Pin<Box<dyn Future<Output = Result<Vec<Root>, ()>> + Send + '_>> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
+    }
+}
+
+/// Builds a production artifact runtime whose client-root authority is frozen empty.
+async fn live_artifact_server_with_empty_client_roots(
+    ctx: &TestContext,
+    policy: &ArtifactPolicyFixture,
+) -> Result<AnyMcpServer, TestError> {
+    let contents = policy.policy_contents().map_err(|_| TestError::Assertion {
+        message: "read artifact acceptance policy".to_owned(),
     })?;
+    let artifact = ArtifactConfig::from_toml(&contents).map_err(|_| TestError::Assertion {
+        message: "parse artifact acceptance policy".to_owned(),
+    })?;
+    let runtime = live_artifact_runtime(ctx, &artifact, false).await?;
+    runtime.client_roots().enable();
+    runtime
+        .client_roots()
+        .install_source(Arc::new(EmptyClientRootsSource));
+    let roots = runtime
+        .artifact_roots()
+        .ok_or_else(|| TestError::Assertion {
+            message: "activate artifact roots before client narrowing".to_owned(),
+        })?;
+    runtime
+        .client_roots()
+        .effective(roots, runtime.request_timeout())
+        .await
+        .map_err(|_| TestError::Assertion {
+            message: "freeze empty client-root authority".to_owned(),
+        })?;
+    Ok(AnyMcpServer::new(runtime).expect("production artifacts MCP catalog"))
+}
+
+/// Builds a selected artifacts runtime with no configured local roots.
+async fn live_artifact_server_without_roots(ctx: &TestContext) -> Result<AnyMcpServer, TestError> {
+    const ROOTLESS_POLICY: &str = "schema_version = 1\n[spaces]\nread_only = false\n";
+    let artifact =
+        ArtifactConfig::from_toml(ROOTLESS_POLICY).map_err(|_| TestError::Assertion {
+            message: "parse rootless artifact acceptance policy".to_owned(),
+        })?;
+    let runtime = live_artifact_runtime(ctx, &artifact, false).await?;
+    if runtime.artifact_config().import_root_count() != 0
+        || runtime.artifact_config().export_root_count() != 0
+    {
+        return Err(TestError::Assertion {
+            message: "rootless artifact runtime retained configured roots".to_owned(),
+        });
+    }
     Ok(AnyMcpServer::new(runtime).expect("production artifacts MCP catalog"))
 }
 
@@ -2681,6 +2865,268 @@ async fn headless_artifact_direct_transport_matrix_scenario() {
     .await
     .expect("cleanup-safe direct artifact acceptance matrix");
     require_completed(outcome, "direct artifact acceptance matrix")
+        .expect("prefix-authorized disposable admission");
+}
+
+/// Runs every path-traversal case owned by the direct-router acceptance target.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_traversal_direct_scenarios() {
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-traversal",
+        |ctx| {
+            Box::pin(async move {
+                let log_baseline = required_artifact_log_baseline()?;
+                let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
+                let policy = ArtifactPolicyFixture::create_with(
+                    &ctx.space_id,
+                    ArtifactPolicyOptions {
+                        staging: false,
+                        ..ArtifactPolicyOptions::default()
+                    },
+                )
+                .map_err(|_| TestError::Assertion {
+                    message: "create traversal acceptance policy".to_owned(),
+                })?;
+                log_needles.push(policy.forbidden_log_needle());
+
+                let mut execution =
+                    {
+                        let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                        let mut driver = DirectRouterDriver { server: &server };
+                        let root_registry = server.runtime().artifact_roots().ok_or_else(|| {
+                            TestError::Assertion {
+                                message: "direct traversal runtime omitted retained roots"
+                                    .to_owned(),
+                            }
+                        })?;
+                        let root_access_attempts = || root_registry.acceptance_access_attempts();
+                        let successful_import_opens =
+                            || root_registry.acceptance_successful_import_opens();
+                        let run = ArtifactAdversarialRun {
+                            control: ArtifactControlPlane::DirectRouter,
+                            policy: &policy,
+                            ctx: ctx.as_ref(),
+                            root_access_attempts: Some(&root_access_attempts),
+                            successful_import_opens: Some(&successful_import_opens),
+                        };
+                        Box::pin(run_artifact_traversal_default(&mut driver, &run))
+                            .await
+                            .map_err(|_| TestError::Assertion {
+                                message: "direct traversal acceptance failed".to_owned(),
+                            })?
+                    };
+
+                let empty_client_roots = {
+                    let server =
+                        live_artifact_server_with_empty_client_roots(ctx.as_ref(), &policy).await?;
+                    let mut driver = DirectRouterDriver { server: &server };
+                    let run = ArtifactAdversarialRun {
+                        control: ArtifactControlPlane::DirectRouter,
+                        policy: &policy,
+                        ctx: ctx.as_ref(),
+                        root_access_attempts: None,
+                        successful_import_opens: None,
+                    };
+                    Box::pin(run_artifact_empty_client_roots_case(&mut driver, &run))
+                        .await
+                        .map_err(|_| TestError::Assertion {
+                            message: "direct empty-client-roots acceptance failed".to_owned(),
+                        })?
+                };
+                execution
+                    .merge(empty_client_roots)
+                    .map_err(|_| TestError::Assertion {
+                        message: "merge traversal acceptance evidence".to_owned(),
+                    })?;
+
+                let missing_roots = {
+                    let server = live_artifact_server_without_roots(ctx.as_ref()).await?;
+                    let mut driver = DirectRouterDriver { server: &server };
+                    Box::pin(run_artifact_missing_roots_case(&mut driver, &ctx.space_id))
+                        .await
+                        .map_err(|_| TestError::Assertion {
+                            message: "direct missing-roots acceptance failed".to_owned(),
+                        })?
+                };
+                execution
+                    .merge(missing_roots)
+                    .map_err(|_| TestError::Assertion {
+                        message: "merge traversal acceptance evidence".to_owned(),
+                    })?;
+                let expected = ADVERSARIAL_DEFAULT_CASE_IDS[..18]
+                    .iter()
+                    .chain(&ADVERSARIAL_SPECIAL_CASE_IDS[..2])
+                    .copied()
+                    .collect::<Vec<_>>();
+                execution
+                    .assert_exact(&expected)
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct traversal execution partition was incomplete".to_owned(),
+                    })?;
+                audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct traversal acceptance");
+    require_completed(outcome, "direct traversal acceptance")
+        .expect("prefix-authorized disposable admission");
+}
+
+/// Runs the default-policy alias and hostile-metadata direct-router cases.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_alias_metadata_direct_scenarios() {
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-alias-metadata",
+        |ctx| {
+            Box::pin(async move {
+                let log_baseline = required_artifact_log_baseline()?;
+                let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
+                let policy = ArtifactPolicyFixture::create(&ctx.space_id).map_err(|_| {
+                    TestError::Assertion {
+                        message: "create alias-metadata acceptance policy".to_owned(),
+                    }
+                })?;
+                log_needles.push(policy.forbidden_log_needle());
+                let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                let mut driver = DirectRouterDriver { server: &server };
+                let root_registry =
+                    server
+                        .runtime()
+                        .artifact_roots()
+                        .ok_or_else(|| TestError::Assertion {
+                            message: "direct alias runtime omitted retained roots".to_owned(),
+                        })?;
+                let successful_import_opens = || root_registry.acceptance_successful_import_opens();
+                let run = ArtifactAdversarialRun {
+                    control: ArtifactControlPlane::DirectRouter,
+                    policy: &policy,
+                    ctx: ctx.as_ref(),
+                    root_access_attempts: None,
+                    successful_import_opens: Some(&successful_import_opens),
+                };
+                let mut execution = Box::pin(run_artifact_alias_cases(&mut driver, &run))
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct alias acceptance failed".to_owned(),
+                    })?;
+                let metadata = Box::pin(run_artifact_malicious_metadata_default(&mut driver, &run))
+                    .await
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct malicious-metadata acceptance failed".to_owned(),
+                    })?;
+                execution
+                    .merge(metadata)
+                    .map_err(|_| TestError::Assertion {
+                        message: "merge alias-metadata acceptance evidence".to_owned(),
+                    })?;
+                execution
+                    .assert_exact(&ADVERSARIAL_DEFAULT_CASE_IDS[18..])
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct alias-metadata execution partition was incomplete"
+                            .to_owned(),
+                    })?;
+                audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct alias-metadata acceptance");
+    require_completed(outcome, "direct alias-metadata acceptance")
+        .expect("prefix-authorized disposable admission");
+}
+
+/// Runs payload-boundary and hostile-validator cases under their exact policies.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_bounded_metadata_direct_scenarios() {
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-bounded-metadata",
+        |ctx| {
+            Box::pin(async move {
+                let log_baseline = required_artifact_log_baseline()?;
+                let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
+                let mut execution = {
+                    let policy = ArtifactPolicyFixture::create_with(
+                        &ctx.space_id,
+                        ArtifactPolicyOptions {
+                            limits: ArtifactLimitProfile::PayloadCeiling,
+                            ..ArtifactPolicyOptions::default()
+                        },
+                    )
+                    .map_err(|_| TestError::Assertion {
+                        message: "create payload-boundary acceptance policy".to_owned(),
+                    })?;
+                    log_needles.push(policy.forbidden_log_needle());
+                    let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                    let mut driver = DirectRouterDriver { server: &server };
+                    let run = ArtifactAdversarialRun {
+                        control: ArtifactControlPlane::DirectRouter,
+                        policy: &policy,
+                        ctx: ctx.as_ref(),
+                        root_access_attempts: None,
+                        successful_import_opens: None,
+                    };
+                    Box::pin(run_artifact_payload_boundary_cases(&mut driver, &run))
+                        .await
+                        .map_err(|_| TestError::Assertion {
+                            message: "direct payload-boundary acceptance failed".to_owned(),
+                        })?
+                };
+
+                let validator = {
+                    let policy = ArtifactPolicyFixture::create_with(
+                        &ctx.space_id,
+                        ArtifactPolicyOptions {
+                            validators: FixtureValidatorPolicy::Optional,
+                            ..ArtifactPolicyOptions::default()
+                        },
+                    )
+                    .map_err(|_| TestError::Assertion {
+                        message: "create hostile-validator acceptance policy".to_owned(),
+                    })?;
+                    log_needles.push(policy.forbidden_log_needle());
+                    let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                    let mut driver = DirectRouterDriver { server: &server };
+                    let run = ArtifactAdversarialRun {
+                        control: ArtifactControlPlane::DirectRouter,
+                        policy: &policy,
+                        ctx: ctx.as_ref(),
+                        root_access_attempts: None,
+                        successful_import_opens: None,
+                    };
+                    Box::pin(run_artifact_hostile_validator_case(&mut driver, &run))
+                        .await
+                        .map_err(|_| TestError::Assertion {
+                            message: "direct hostile-validator acceptance failed".to_owned(),
+                        })?
+                };
+                execution
+                    .merge(validator)
+                    .map_err(|_| TestError::Assertion {
+                        message: "merge bounded-metadata acceptance evidence".to_owned(),
+                    })?;
+                execution
+                    .assert_exact(&ADVERSARIAL_SPECIAL_CASE_IDS[3..])
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct bounded-metadata execution partition was incomplete"
+                            .to_owned(),
+                    })?;
+                audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct bounded-metadata acceptance");
+    require_completed(outcome, "direct bounded-metadata acceptance")
         .expect("prefix-authorized disposable admission");
 }
 

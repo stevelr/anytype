@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add closed real-server adversarial artifact coverage for 43 traversal,
+  filesystem-alias, filename, MIME, and metadata cases. Direct-router and
+  stable/preview stdio owners enforce exact case partitions, fixed refusal
+  payloads, retained-root access and successful-open counters, descriptor-bound
+  redacted-log audits, private-root/staging invariants, and platform capability
+  records.
 - Protect every cleanup-owned ignored live test with serial direct-router,
   spawned-stdio, and discussions-process gates. Closed offline manifests and
   executable-count checks reject renamed, missing, skipped, or zero-test

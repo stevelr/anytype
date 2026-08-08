@@ -1861,6 +1861,23 @@ most 128 bytes/32 tokens, and an `artifact_bytes + 1` reservation is refused as
 `bounded_result`. Payload bytes never enter an MCP argument, result, transcript,
 or diagnostic.
 
+The adversarial family owns a closed 122-case inventory. The 43 cases assigned
+to this gate
+exercise traversal and native-path grammar, capability-indistinguishable root
+refusals, volume case and normalization aliases, Windows device names,
+staging-record case sensitivity, bounded names and payloads, MIME conflicts,
+invalid document encodings, and hostile upstream metadata. Direct-router
+owners execute every case, while stable and preview stdio repeat the default
+case set and the production startup rejection. Each owner records a fixed case
+ID only after its exact outcome, resource inventory, staging state, and cleanup
+assertions pass. Windows-only aliases and non-activating validator targets are
+explicit capability records rather than silent skips; the remaining 79 cases
+stay closed and pending for the subsequent link, race, handle, crash, flood,
+and cleanup tickets. Direct traversal and alias checks also snapshot test-only
+retained-root access and successful-open counters, while every live owner binds
+its log audit to one opened owner-private descriptor and rejects bounded-window
+matches for fixture paths, transient handles, or credentials.
+
 The validator scenarios declare one real host `file(1)`-compatible executable
 pinned by absolute path and SHA-256; nothing is shipped or synthesized, and the
 fixture admits exactly the ownership and mode that the production validator
@@ -1873,10 +1890,11 @@ Fixture discipline is part of the harness rather than each scenario: a
 prefix-authorized disposable space, a private `0700` policy tree with `0600`
 sources and operator policy, immediate registration of every created object and
 file, exact teardown when the fixture is dropped, and rejection of skipped
-disposable admission. Setting `ANY_MCP_ARTIFACT_SERVER_LOG` to a captured
-Anytype server log makes the spawned matrix audit the appended window and fail
-on any panic, fatal, or error class outside the already isolated upstream set;
-only counts and fixed category names are reported, never log lines.
+disposable admission. The protected gate requires
+`ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to name its captured Anytype server log.
+Direct and spawned owners audit only the descriptor-bound appended window and
+fail on any panic, fatal, or error class outside the already isolated upstream
+set; only counts and fixed category names are reported, never log lines.
 
 Select the live acceptance targets explicitly — two direct-router cases by
 their exact paths, and the four spawned cases by their shared prefix:
