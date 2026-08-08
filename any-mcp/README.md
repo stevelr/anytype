@@ -1896,7 +1896,7 @@ Direct and spawned owners audit only the descriptor-bound appended window and
 fail on any panic, fatal, or error class outside the already isolated upstream
 set; only counts and fixed category names are reported, never log lines.
 
-Select the live acceptance targets explicitly — five direct-router cases by
+Select the live acceptance targets explicitly: five direct-router cases by
 their exact paths, and the five spawned cases by their shared prefix:
 
 ```sh

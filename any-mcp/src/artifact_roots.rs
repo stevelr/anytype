@@ -1518,7 +1518,7 @@ fn safe_windows_security(file: &File) -> bool {
 }
 
 /// Validates an owner-private, non-reparse regular file for Windows acceptance evidence.
-#[cfg(all(windows, any(test, feature = "acceptance-harness")))]
+#[cfg(windows)]
 #[doc(hidden)]
 #[must_use]
 pub fn acceptance_owner_private_file(file: &File) -> bool {
