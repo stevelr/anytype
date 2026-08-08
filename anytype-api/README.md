@@ -1078,6 +1078,21 @@ ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_kanban_fixtu
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_process_watcher watcher_completes_on_real_import_finish_fallback -- --ignored --exact --test-threads=1 --nocapture
 ```
 
+The checked-in live-gate manifest assigns every ignored test to the required,
+scheduled soak, or excluded tier. Verify that closed inventory without a server:
+
+```sh
+cargo test --locked -p anytype --test live_gate_manifest
+```
+
+To reproduce one required live-gate entry exactly, use env-only credentials and
+run the selected test in its own process:
+
+```sh
+source .test-env
+ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test --locked -p anytype --test test_body test_body_read_preserves_typed_variants_ids_and_order -- --ignored --exact --test-threads=1 --nocapture
+```
+
 Process watcher import-finish coverage uses a real Markdown import in the fresh
 cleanup-owned space created by `with_disposable_space_context`. The watcher
 subscribes and unsubscribes from the configured gRPC server, accepts empty-space

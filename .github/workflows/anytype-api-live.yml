@@ -1,46 +1,31 @@
-# Cross-platform regression gates for the bounded Anytype MCP server.
-
-name: any-mcp
+name: anytype-api live
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "31 3 * * *"
   pull_request:
     paths:
-      - ".github/workflows/any-mcp.yml"
+      - ".github/workflows/anytype-api-live.yml"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "any-mcp/**"
       - "anytype-api/**"
-      - "anytype-rpc/**"
   push:
     branches:
       - main
-    tags:
-      - "v*"
     paths:
-      - ".github/workflows/any-mcp.yml"
+      - ".github/workflows/anytype-api-live.yml"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "any-mcp/**"
       - "anytype-api/**"
-      - "anytype-rpc/**"
 
 permissions:
   contents: read
 
 jobs:
-  portable-contracts:
-    name: contracts and stdio (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+  ignored-test-inventory:
+    name: disposable ignored-test inventory
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -53,26 +38,20 @@ jobs:
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: any-mcp-${{ matrix.os }}
+          shared-key: anytype-api-inventory
 
-      - name: Run schema, catalog, token-budget, and unit tests
-        run: cargo test --locked -p any-mcp --lib
+      - name: Verify the closed ignored-test inventory
+        run: cargo test --locked -p anytype --test live_gate_manifest
 
-      - name: Run portable production-process and stdio conformance tests
-        run: cargo test --locked -p any-mcp --features acceptance-harness --test process_runtime --test stdio_conformance --test headless_stdio_e2e
-
-  headless-e2e:
-    name: stdio to headless Anytype
-    if: >-
-      github.event_name != 'schedule' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+  headless-required:
+    name: protected disposable required tier
+    if: github.event_name != 'schedule'
     environment: anytype-headless
     runs-on:
       - self-hosted
       - linux
       - anytype-headless
-    timeout-minutes: 30
+    timeout-minutes: 45
     concurrency:
       group: anytype-headless-live
       cancel-in-progress: false
@@ -88,9 +67,9 @@ jobs:
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: any-mcp-headless
+          shared-key: anytype-api-headless
 
-      - name: Run serial production-router and stdio-to-headless gates
+      - name: Run required disposable ignored tests serially
         shell: bash
         env:
           ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
@@ -118,53 +97,65 @@ jobs:
           unset test_prefix
           reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           umask 077
-          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-reviewed-XXXXXX")"
+          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-reviewed-XXXXXX")"
           reviewed_log="$reviewed_dir/server-events.jsonl"
           cp -- "$reviewed_source" "$reviewed_log"
           chmod 0600 "$reviewed_log"
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
-          printf '\nany-mcp-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
+          printf '\nanytype-api-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
           export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
           printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
-          run_required_live_gate() {
-            local label="$1"
-            shift
-            local gate_output="$reviewed_dir/$label.log"
-            set +e
-            "$@" 2>&1 | tee "$gate_output"
-            local gate_status="${PIPESTATUS[0]}"
-            set -e
-            if [[ "$gate_status" -ne 0 ]]; then
-              rm -f -- "$gate_output"
-              return "$gate_status"
-            fi
-            if grep -Fqi "skipped" "$gate_output"; then
-              rm -f -- "$gate_output"
-              printf '%s\n' "required live gate reported skipped admission" >&2
-              return 1
-            fi
-            rm -f -- "$gate_output"
-          }
           cargo run --locked -q -p anyr -- auth status --pretty
-          run_required_live_gate direct cargo test --locked -p any-mcp --lib headless_ -- \
-            --ignored --test-threads=1 --nocapture
-          run_required_live_gate stdio cargo test --locked -p any-mcp \
-            --features acceptance-harness --test headless_stdio_e2e -- \
-            --ignored --test-threads=1 --nocapture
+          python3 - required "$GITHUB_WORKSPACE/anytype-api/tests/live-gate-manifest.toml" > "$reviewed_dir/required.tsv" <<'PY'
+          import sys
+          import tomllib
+
+          tier, path = sys.argv[1:]
+          with open(path, "rb") as manifest_file:
+              manifest = tomllib.load(manifest_file)
+          for entry in manifest[tier]:
+              print(f"{entry['target']}\t{entry['test']}")
+          PY
+          while IFS=$'\t' read -r target test_name; do
+            output="$reviewed_dir/${target}-${test_name}.log"
+            set +e
+            if [[ "$target" == "lib" ]]; then
+              cargo test --locked -p anytype --lib "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
+            else
+              cargo test --locked -p anytype --test "$target" "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
+            fi
+            status="${PIPESTATUS[0]}"
+            set -e
+            if [[ "$status" -ne 0 ]]; then
+              rm -f -- "$output"
+              exit "$status"
+            fi
+            if ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output"; then
+              rm -f -- "$output"
+              printf '%s\n' "live gate did not execute exactly one test: $target::$test_name" >&2
+              exit 1
+            fi
+            if grep -Fqi "skipped" "$output"; then
+              rm -f -- "$output"
+              printf '%s\n' "live gate reported skipped admission: $target::$test_name" >&2
+              exit 1
+            fi
+            rm -f -- "$output"
+          done < "$reviewed_dir/required.tsv"
 
       - name: Retain redacted headless server evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: any-mcp-headless-server-log
+          name: anytype-api-required-server-log
           path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
           if-no-files-found: warn
           retention-days: 7
 
-  headless-clean-server-soak:
-    name: scheduled clean-server soak
+  headless-soak:
+    name: scheduled disposable characterization tier
     if: github.event_name == 'schedule'
     environment: anytype-headless
     runs-on:
@@ -187,7 +178,7 @@ jobs:
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: any-mcp-headless
+          shared-key: anytype-api-headless
 
       - name: Provision a clean isolated headless server
         shell: bash
@@ -200,7 +191,7 @@ jobs:
           test -x "$ANY_MCP_HEADLESS_RESET_SCRIPT"
           "$ANY_MCP_HEADLESS_RESET_SCRIPT"
 
-      - name: Run all serial production-router and stdio-to-headless targets
+      - name: Run soak disposable ignored tests serially
         shell: bash
         env:
           ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
@@ -228,47 +219,59 @@ jobs:
           unset test_prefix
           reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           umask 077
-          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/any-mcp-reviewed-XXXXXX")"
+          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-reviewed-XXXXXX")"
           reviewed_log="$reviewed_dir/server-events.jsonl"
           cp -- "$reviewed_source" "$reviewed_log"
           chmod 0600 "$reviewed_log"
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
-          printf '\nany-mcp-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
+          printf '\nanytype-api-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
           export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
           printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
-          run_required_live_gate() {
-            local label="$1"
-            shift
-            local gate_output="$reviewed_dir/$label.log"
-            set +e
-            "$@" 2>&1 | tee "$gate_output"
-            local gate_status="${PIPESTATUS[0]}"
-            set -e
-            if [[ "$gate_status" -ne 0 ]]; then
-              rm -f -- "$gate_output"
-              return "$gate_status"
-            fi
-            if grep -Fqi "skipped" "$gate_output"; then
-              rm -f -- "$gate_output"
-              printf '%s\n' "required live gate reported skipped admission" >&2
-              return 1
-            fi
-            rm -f -- "$gate_output"
-          }
           cargo run --locked -q -p anyr -- auth status --pretty
-          run_required_live_gate direct cargo test --locked -p any-mcp --lib headless_ -- \
-            --ignored --test-threads=1 --nocapture
-          run_required_live_gate stdio cargo test --locked -p any-mcp \
-            --features acceptance-harness --test headless_stdio_e2e -- \
-            --ignored --test-threads=1 --nocapture
+          python3 - soak "$GITHUB_WORKSPACE/anytype-api/tests/live-gate-manifest.toml" > "$reviewed_dir/soak.tsv" <<'PY'
+          import sys
+          import tomllib
 
-      - name: Retain redacted clean-server evidence on failure
+          tier, path = sys.argv[1:]
+          with open(path, "rb") as manifest_file:
+              manifest = tomllib.load(manifest_file)
+          for entry in manifest[tier]:
+              print(f"{entry['target']}\t{entry['test']}")
+          PY
+          while IFS=$'\t' read -r target test_name; do
+            output="$reviewed_dir/${target}-${test_name}.log"
+            set +e
+            if [[ "$target" == "lib" ]]; then
+              cargo test --locked -p anytype --lib "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
+            else
+              cargo test --locked -p anytype --test "$target" "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
+            fi
+            status="${PIPESTATUS[0]}"
+            set -e
+            if [[ "$status" -ne 0 ]]; then
+              rm -f -- "$output"
+              exit "$status"
+            fi
+            if ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output"; then
+              rm -f -- "$output"
+              printf '%s\n' "live gate did not execute exactly one test: $target::$test_name" >&2
+              exit 1
+            fi
+            if grep -Fqi "skipped" "$output"; then
+              rm -f -- "$output"
+              printf '%s\n' "live gate reported skipped admission: $target::$test_name" >&2
+              exit 1
+            fi
+            rm -f -- "$output"
+          done < "$reviewed_dir/soak.tsv"
+
+      - name: Retain redacted headless server evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: any-mcp-clean-server-log
+          name: anytype-api-soak-server-log
           path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
           if-no-files-found: warn
           retention-days: 7

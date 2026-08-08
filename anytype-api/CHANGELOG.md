@@ -6,6 +6,23 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Add a closed ignored-test inventory and protected disposable live gate. The
+  manifest separates 15 required cleanup-owned tests, three scheduled
+  characterization probes, and 11 excluded ambient or manual probes. Reproduce
+  the offline inventory with:
+
+  ```sh
+  cargo test --locked -p anytype --test live_gate_manifest
+  ```
+
+  Reproduce one required process after `source .test-env` with:
+
+  ```sh
+  ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test --locked -p anytype --test test_body test_body_read_preserves_typed_variants_ids_and_order -- --ignored --exact --test-threads=1 --nocapture
+  ```
+
 ---
 
 ## [Unreleased - 260806]

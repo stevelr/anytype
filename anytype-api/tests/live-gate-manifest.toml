@@ -1,0 +1,148 @@
+# Consumed by the anytype-api live gate. Every #[ignore] in this crate must
+# appear in exactly one list below; the offline inventory test fails otherwise.
+version = 1
+
+[[required]]
+target = "test_body"
+test = "test_body_read_preserves_typed_variants_ids_and_order"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_body"
+test = "test_body_read_tightened_limits_reject_real_multi_block_object"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_body"
+test = "test_body_read_missing_object_returns_public_failure_without_fixture"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_body"
+test = "test_body_read_reports_dataview_blocks_as_opaque"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_body"
+test = "test_body_show_close_lifecycle_holds_no_server_open_state"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_kanban_fixture"
+test = "representative_kanban_fixture_is_verified_and_cleanup_owned"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_chat_discovery"
+test = "test_chat_discovery_requests"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_chat_discovery"
+test = "test_chat_message_resolution_requests"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_chat_stream"
+test = "chat_stream_receives_messages"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_chat_stream"
+test = "rest_chat_stream_receives_initial_message"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_chat_prerequisites"
+test = "test_rest_chat_timestamp_history_and_edit_prerequisites"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_markdown_fidelity"
+test = "exact_exported_markdown_replacement_fidelity_matrix"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_process_watcher"
+test = "watcher_completes_on_real_import_finish_fallback"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_attached_discussions"
+test = "test_attached_discussion_get_ensure_and_repeat_are_exact"
+serial_group = "disposable_anytype_api"
+
+[[required]]
+target = "test_views"
+test = "test_direct_collection_membership_present_absent_and_query_rejection"
+serial_group = "disposable_anytype_api"
+
+[[soak]]
+target = "test_filters"
+test = "test_filter_number_checkbox_condition_matrix"
+serial_group = "disposable_anytype_api"
+
+[[soak]]
+target = "test_space_admin"
+test = "space_administration_lifecycle"
+serial_group = "disposable_anytype_api"
+
+[[soak]]
+target = "lib"
+test = "attached_discussions::tests::live_upstream_raw_object_add_discussion_repeat_is_non_idempotent"
+serial_group = "disposable_anytype_api"
+
+[[excluded]]
+target = "test_views"
+test = "test_views_list_collection_and_set"
+reason = "ambient configured Set fixture cannot be safely mutated"
+
+[[excluded]]
+target = "test_views"
+test = "test_view_list_objects_collection_and_set"
+reason = "ambient configured Set fixture cannot be safely mutated"
+
+[[excluded]]
+target = "integration"
+test = "object_crud::test_object_body_update_converges_before_exact_followup"
+reason = "ambient-space mutation duplicates disposable body coverage"
+
+[[excluded]]
+target = "test_filters"
+test = "test_filter_checkbox_true"
+reason = "legacy ambient shared-space duplicate of the disposable matrix"
+
+[[excluded]]
+target = "test_filters"
+test = "test_filter_checkbox_false"
+reason = "legacy ambient shared-space duplicate of the disposable matrix"
+
+[[excluded]]
+target = "test_filters"
+test = "test_filter_number_equal"
+reason = "legacy ambient shared-space duplicate of the disposable matrix"
+
+[[excluded]]
+target = "test_filters"
+test = "test_filter_number_greater_than"
+reason = "legacy ambient shared-space duplicate of the disposable matrix"
+
+[[excluded]]
+target = "test_filters"
+test = "test_filter_number_less_than"
+reason = "legacy ambient shared-space duplicate of the disposable matrix"
+
+[[excluded]]
+target = "test_filters"
+test = "test_filter_number_range"
+reason = "legacy ambient shared-space duplicate of the disposable matrix"
+
+[[excluded]]
+target = "test_filters"
+test = "test_filter_expression_and"
+reason = "legacy ambient shared-space duplicate of the disposable matrix"
+
+[[excluded]]
+target = "lib"
+test = "keystore::tests::test_keyring_storage_end_to_end"
+reason = "manual OS-keyring probe that can prompt for GUI authentication"
