@@ -7,7 +7,7 @@ from anyr.tests.live_gate_policy import python_ok, rust_ok
 
 
 RUST = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s"
-PYTHON = "Ran 2 tests in 0.01s\n\nOK\n"
+PYTHON = "Ran 22 tests in 0.01s\n\nOK\n"
 
 
 class LiveGatePolicyTests(unittest.TestCase):
@@ -18,7 +18,8 @@ class LiveGatePolicyTests(unittest.TestCase):
         self.assertFalse(rust_ok(RUST + "\nskipped"))
         self.assertTrue(python_ok(PYTHON))
         self.assertFalse(python_ok("Ran 0 tests in 0.01s\n\nOK\n"))
-        self.assertFalse(python_ok(PYTHON + "Ran 2 tests in 0.01s\n\nOK\n"))
+        self.assertFalse(python_ok("Ran 21 tests in 0.01s\n\nOK\n"))
+        self.assertFalse(python_ok(PYTHON + "Ran 22 tests in 0.01s\n\nOK\n"))
         self.assertFalse(python_ok(PYTHON.replace("OK", "OK (skipped=1)")))
 
     def test_required_mode_rejects_missing_binary_and_prefix(self):

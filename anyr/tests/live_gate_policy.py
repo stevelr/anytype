@@ -11,8 +11,9 @@ RUST = re.compile(
 )
 RUST_LINE = re.compile(r"^test result:.*$", re.MULTILINE)
 PYTHON_RAN = re.compile(
-    r"^Ran [1-9][0-9]* tests? in [0-9]+(?:\.[0-9]+)?s$", re.MULTILINE
+    r"^Ran ([1-9][0-9]*) tests? in [0-9]+(?:\.[0-9]+)?s$", re.MULTILINE
 )
+PYTHON_EXPECTED_TESTS = 22
 
 
 def rust_ok(output: str) -> bool:
@@ -27,9 +28,8 @@ def rust_ok(output: str) -> bool:
 def python_ok(output: str) -> bool:
     return (
         "skipped" not in output.casefold()
-        and len(PYTHON_RAN.findall(output)) == 1
+        and PYTHON_RAN.findall(output) == [str(PYTHON_EXPECTED_TESTS)]
         and len(re.findall(r"^OK$", output, re.MULTILINE)) == 1
-        and output.rstrip().endswith("\nOK")
     )
 
 

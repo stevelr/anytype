@@ -41,7 +41,7 @@ jobs:
       - anytype-headless
     timeout-minutes: 25
     concurrency:
-      group: any-mcp-headless
+      group: anytype-headless-live
       cancel-in-progress: false
 
     steps:
@@ -113,7 +113,7 @@ jobs:
           run_required_type_property_gate() {
             local output="$gate_dir/gate-type-property.log"
             set +e
-            cargo test --locked -p anyr --bins live_add_property_preserves_exact_replaceable_set -- \
+            cargo test --locked -p anyr --bins cli::types::tests::live_add_property_preserves_exact_replaceable_set -- \
               --ignored --exact --test-threads=1 --nocapture >"$output" 2>&1
             local status=$?
             set -e
