@@ -1485,6 +1485,46 @@ async fn run_sym13(
     result.and(restored)
 }
 
+/// Submits an ADS colon through the native Windows encoding and proves that
+/// grammar validation rejects it before the retained-root boundary.
+#[cfg(windows)]
+async fn run_sym10(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let root_access = run
+        .root_access_attempts
+        .ok_or_else(|| "SYM-10 requires retained-root access evidence".to_owned())?;
+    let before = root_access();
+    let native = native_wtf16(
+        "file.bin:evil"
+            .encode_utf16()
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
+    let encoded = native_submission_value(&native)?.to_owned();
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            json!({"local": {
+                "root": ArtifactPolicyFixture::IMPORT_ROOT,
+                "path_native": native,
+            }}),
+            "sym10.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[&encoded],
+    )
+    .await?;
+    if root_access() != before {
+        return Err("SYM-10 reached the retained-root boundary".to_owned());
+    }
+    Ok(())
+}
+
 /// Proves that this fixture volume reports a stable hard-link identity and a
 /// reliable link count before any hard-link scenario relies on either fact.
 ///
