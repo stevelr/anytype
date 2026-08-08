@@ -644,13 +644,20 @@ Mark start and end values are independently validated as ordered, in-bounds
 UTF-16 offsets at Unicode scalar boundaries.
 
 Downstream contract suites may opt into the disabled-by-default
-`test-fixtures` Cargo feature. It exposes only a narrow production-validated
-typed snapshot constructors for exact block-count, read-restriction, and
+`test-fixtures` Cargo feature. It exposes narrow, production-validated typed
+snapshot constructors for exact block-count, read-restriction, and
 canonical-table boundary tests. The same feature provides a boolean-only
 keystore check that proves a test-owned byte buffer contains none of the
 configured HTTP or gRPC credential bytes without returning those credentials.
 It does not add deserialization or a general snapshot-forging API and must not
 be enabled by production dependents.
+
+Downstream HTTP contract suites may instead opt into `scripted-http-fixture`.
+It provides a finite loopback HTTP script that records bounded method, path,
+and body bytes in arrival order. Each script has fixed request, header, path,
+body, and response ceilings; its errors and `Debug` implementations report
+only categories and sizes, leaving payload access explicit. This feature is
+also disabled by default and must not be enabled by production dependents.
 
 Mutations start from a snapshot and accept only typed constructors and targets
 that belong to that snapshot. Every write is sent once, then a bounded fresh
@@ -919,10 +926,10 @@ gRPC-backed method is always compiled and callable; what a gRPC-backed method
 needs is gRPC credentials in the keystore at run time, not a build-time flag.
 Building with `--no-default-features` therefore changes nothing.
 
-The only optional feature is `test-fixtures`, which is disabled by default,
-exposes narrow typed snapshot constructors and a boolean-only credential-leak
-check for downstream contract tests, and must not be enabled by production
-dependents.
+Both optional features are disabled by default and reserved for tests:
+`test-fixtures` exposes narrow typed snapshot constructors and a boolean-only
+credential-leak check, while `scripted-http-fixture` exposes the finite
+loopback HTTP script. Production dependents must not enable either feature.
 
 ## Keystore
 

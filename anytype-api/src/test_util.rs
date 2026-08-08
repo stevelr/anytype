@@ -43,6 +43,8 @@ use snafu::prelude::*;
 use tonic::Request;
 
 mod disposable;
+#[cfg(any(test, feature = "scripted-http-fixture"))]
+pub mod scripted_http;
 pub use disposable::{
     DisposableChildEnvironment, DisposableRun, DisposableSkip, DisposableTestError,
     disposable_callback_error, with_disposable_space_context,

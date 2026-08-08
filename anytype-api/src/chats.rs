@@ -4042,6 +4042,7 @@ mod tests {
     };
     use anytype_rpc::model;
     use futures::StreamExt;
+    use reqwest::StatusCode;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -4054,6 +4055,9 @@ mod tests {
         error::AnytypeError,
         filters::{Condition, Filter},
         keystore::HttpCredentials,
+        test_util::scripted_http::{
+            ScriptedHttpContentType, ScriptedHttpFixture, ScriptedHttpRequest, ScriptedHttpResponse,
+        },
     };
 
     static NEXT_SCRIPT_ID: AtomicU64 = AtomicU64::new(1);
@@ -4145,75 +4149,13 @@ mod tests {
     }
 
     async fn scripted_http_sequence(
-        responses: Vec<(&'static str, &'static str, String)>,
-    ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
-        scripted_http_sequence_with_config(responses, |_| {}).await
-    }
-
-    async fn scripted_http_sequence_with_config(
-        responses: Vec<(&'static str, &'static str, String)>,
-        configure: impl FnOnce(&mut ClientConfig),
-    ) -> (AnytypeClient, JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        responses: Vec<ScriptedHttpResponse>,
+    ) -> (AnytypeClient, ScriptedHttpFixture) {
+        let fixture = ScriptedHttpFixture::start(responses)
             .await
-            .expect("bind scripted chat HTTP sequence");
-        let address = listener
-            .local_addr()
-            .expect("scripted chat HTTP sequence address");
-        let server = tokio::spawn(async move {
-            let mut requests = Vec::with_capacity(responses.len());
-            for (status, content_type, body) in responses {
-                let (mut stream, _) = listener
-                    .accept()
-                    .await
-                    .expect("accept scripted sequence request");
-                let mut request = Vec::new();
-                let mut chunk = [0_u8; 1024];
-                let mut expected_len = None;
-                loop {
-                    let read = stream
-                        .read(&mut chunk)
-                        .await
-                        .expect("read scripted sequence request");
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&chunk[..read]);
-                    if expected_len.is_none()
-                        && let Some(header_end) =
-                            request.windows(4).position(|window| window == b"\r\n\r\n")
-                    {
-                        let headers = String::from_utf8_lossy(&request[..header_end]);
-                        let body_len = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())
-                                    .flatten()
-                            })
-                            .unwrap_or_default();
-                        expected_len = Some(header_end + 4 + body_len);
-                    }
-                    if expected_len.is_some_and(|length| request.len() >= length) {
-                        break;
-                    }
-                }
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write scripted sequence response");
-                requests.push(String::from_utf8(request).expect("HTTP request is UTF-8"));
-            }
-            requests
-        });
-
-        let client = scripted_client(address, "chat-http-sequence", configure);
-        (client, server)
+            .expect("start bounded scripted chat HTTP sequence");
+        let client = scripted_client(fixture.address(), "chat-http-sequence", |_| {});
+        (client, fixture)
     }
 
     fn scripted_message(
@@ -4241,11 +4183,27 @@ mod tests {
         serde_json::json!({"messages": messages}).to_string()
     }
 
+    fn scripted_json_response(status: StatusCode, body: String) -> ScriptedHttpResponse {
+        ScriptedHttpResponse::new(status, ScriptedHttpContentType::Json, body.into_bytes())
+    }
+
+    fn scripted_text_response(status: StatusCode, body: &str) -> ScriptedHttpResponse {
+        ScriptedHttpResponse::new(
+            status,
+            ScriptedHttpContentType::Text,
+            body.as_bytes().to_vec(),
+        )
+    }
+
     fn request_json(request: &str) -> serde_json::Value {
         let (_, body) = request
             .split_once("\r\n\r\n")
             .expect("request contains headers");
         serde_json::from_str(body).expect("request body is JSON")
+    }
+
+    fn captured_request_json(request: &ScriptedHttpRequest) -> serde_json::Value {
+        serde_json::from_slice(request.body()).expect("captured request body is JSON")
     }
 
     #[test]
@@ -4336,22 +4294,19 @@ mod tests {
     async fn older_history_preserves_order_and_uses_only_opaque_before_successors() {
         let timestamp = 1_717_405_200_i64;
         let responses = vec![
-            (
-                "200 OK",
-                "application/json",
+            scripted_json_response(
+                StatusCode::OK,
                 scripted_messages_response(vec![
                     scripted_message("m2", "o2", "middle", timestamp, timestamp),
                     scripted_message("m3", "o3", "newest", timestamp, timestamp),
                 ]),
             ),
-            (
-                "201 Created",
-                "application/json",
+            scripted_json_response(
+                StatusCode::CREATED,
                 r#"{"message_id":"newer-message"}"#.to_string(),
             ),
-            (
-                "200 OK",
-                "application/json",
+            scripted_json_response(
+                StatusCode::OK,
                 scripted_messages_response(vec![scripted_message(
                     "m1", "o1", "oldest", timestamp, timestamp,
                 )]),
@@ -4397,20 +4352,27 @@ mod tests {
         );
         assert!(second.next_before.is_none());
 
-        let requests = server.await.expect("scripted history requests");
+        let requests = server.finish().await.expect("scripted history requests");
         assert_eq!(requests.len(), 3);
-        assert!(
-            requests[0]
-                .starts_with("GET /v1/spaces/space-id/chats/chat-id/messages?limit=2 HTTP/1.1")
+        assert_eq!(requests[0].method(), "GET");
+        assert_eq!(
+            requests[0].path(),
+            "/v1/spaces/space-id/chats/chat-id/messages?limit=2"
         );
-        assert!(
-            requests[1].starts_with("POST /v1/spaces/space-id/chats/chat-id/messages HTTP/1.1")
+        assert_eq!(requests[1].method(), "POST");
+        assert_eq!(
+            requests[1].path(),
+            "/v1/spaces/space-id/chats/chat-id/messages"
         );
-        let second_line = requests[2].lines().next().expect("second request line");
-        assert!(second_line.starts_with("GET /v1/spaces/space-id/chats/chat-id/messages?"));
-        assert!(second_line.contains("limit=2"));
-        assert!(second_line.contains("before_order_id=o2"));
-        assert!(!second_line.contains("after_order_id"));
+        assert_eq!(requests[2].method(), "GET");
+        assert!(
+            requests[2]
+                .path()
+                .starts_with("/v1/spaces/space-id/chats/chat-id/messages?")
+        );
+        assert!(requests[2].path().contains("limit=2"));
+        assert!(requests[2].path().contains("before_order_id=o2"));
+        assert!(!requests[2].path().contains("after_order_id"));
     }
 
     #[tokio::test]
@@ -4542,13 +4504,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn older_history_retry_failure_has_four_physical_attempts() {
         let responses = (0..4)
-            .map(|_| {
-                (
-                    "504 Gateway Timeout",
-                    "text/plain",
-                    "retryable failure".to_string(),
-                )
-            })
+            .map(|_| scripted_text_response(StatusCode::GATEWAY_TIMEOUT, "retryable failure"))
             .collect();
         let (client, server) = scripted_http_sequence(responses).await;
         let error = client
@@ -4559,11 +4515,16 @@ mod tests {
             .get()
             .await
             .expect_err("history GET must stop after its finite status retry budget");
-        assert!(matches!(error, AnytypeError::ApiError { code: 504, .. }));
-        let requests = server.await.expect("scripted retry-failure requests");
+        let requests = server.finish().await;
+        assert!(
+            matches!(error, AnytypeError::ApiError { code: 504, .. }),
+            "unexpected retry terminal error: {error:?}; fixture: {requests:?}"
+        );
+        let requests = requests.expect("scripted retry-failure requests");
         assert_eq!(requests.len(), 4);
         assert!(requests.iter().all(|request| {
-            request.starts_with("GET /v1/spaces/space-id/chats/chat-id/messages?limit=2 HTTP/1.1")
+            request.method() == "GET"
+                && request.path() == "/v1/spaces/space-id/chats/chat-id/messages?limit=2"
         }));
         let metrics = client.http_metrics();
         assert_eq!(metrics.logical_operations, 1);
@@ -4640,17 +4601,9 @@ mod tests {
         let before = scripted_message("m1", "o1", "before", 1, 1);
         let after = scripted_message("m1", "o1", "after", 1, 2);
         let responses = vec![
-            (
-                "200 OK",
-                "application/json",
-                scripted_message_response(before),
-            ),
-            ("200 OK", "application/json", String::new()),
-            (
-                "200 OK",
-                "application/json",
-                scripted_message_response(after),
-            ),
+            scripted_json_response(StatusCode::OK, scripted_message_response(before)),
+            scripted_json_response(StatusCode::OK, String::new()),
+            scripted_json_response(StatusCode::OK, scripted_message_response(after)),
         ];
         let (client, server) = scripted_http_sequence(responses).await;
         let evidence = client
@@ -4663,19 +4616,25 @@ mod tests {
         assert!(evidence.after.modified_at > evidence.before.modified_at);
         assert_eq!(evidence.after.content.text, "after");
 
-        let requests = server.await.expect("scripted edit requests");
+        let requests = server.finish().await.expect("scripted edit requests");
         assert_eq!(requests.len(), 3);
-        assert!(
-            requests[0].starts_with("GET /v1/spaces/space-id/chats/chat-id/messages/m1 HTTP/1.1")
+        assert_eq!(requests[0].method(), "GET");
+        assert_eq!(
+            requests[0].path(),
+            "/v1/spaces/space-id/chats/chat-id/messages/m1"
         );
-        assert!(
-            requests[1].starts_with("PATCH /v1/spaces/space-id/chats/chat-id/messages/m1 HTTP/1.1")
+        assert_eq!(requests[1].method(), "PATCH");
+        assert_eq!(
+            requests[1].path(),
+            "/v1/spaces/space-id/chats/chat-id/messages/m1"
         );
-        assert!(
-            requests[2].starts_with("GET /v1/spaces/space-id/chats/chat-id/messages/m1 HTTP/1.1")
+        assert_eq!(requests[2].method(), "GET");
+        assert_eq!(
+            requests[2].path(),
+            "/v1/spaces/space-id/chats/chat-id/messages/m1"
         );
         assert_eq!(
-            request_json(&requests[1]),
+            captured_request_json(&requests[1]),
             serde_json::json!({
                 "text": "after",
                 "style": "paragraph",
@@ -4689,17 +4648,9 @@ mod tests {
         let before = scripted_message("m1", "o1", "before", 1, 2);
         let after = scripted_message("m1", "o1", "after", 1, 2);
         let responses = vec![
-            (
-                "200 OK",
-                "application/json",
-                scripted_message_response(before),
-            ),
-            ("200 OK", "application/json", String::new()),
-            (
-                "200 OK",
-                "application/json",
-                scripted_message_response(after),
-            ),
+            scripted_json_response(StatusCode::OK, scripted_message_response(before)),
+            scripted_json_response(StatusCode::OK, String::new()),
+            scripted_json_response(StatusCode::OK, scripted_message_response(after)),
         ];
         let (client, server) = scripted_http_sequence(responses).await;
         let error = client
@@ -4711,7 +4662,11 @@ mod tests {
             .expect_err("equal modified_at must fail");
         assert!(matches!(error, AnytypeError::ChatEditTimestampNotAdvanced));
         assert_eq!(
-            server.await.expect("scripted equal-timestamp edit").len(),
+            server
+                .finish()
+                .await
+                .expect("scripted equal-timestamp edit")
+                .len(),
             3
         );
     }

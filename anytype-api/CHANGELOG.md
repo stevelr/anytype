@@ -19,6 +19,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add a reusable `scripted-http-fixture` feature for downstream contract tests.
+  Its loopback server applies fixed ceilings to the finite response sequence
+  and captured request methods, paths, and bodies, while errors and debug output
+  retain only payload-free categories and sizes. The chat history/edit sequence
+  fixture exercises the shared boundary.
 - Add a closed ignored-test inventory and protected disposable live gate. The
   manifest separates 17 required cleanup-owned tests, three scheduled
   characterization probes, and two excluded ambient or manual probes. Reproduce
