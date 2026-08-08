@@ -9336,16 +9336,28 @@ impl ArtifactLifecycleScenario {
     /// Strict policy options realizing this scenario.
     #[must_use]
     pub const fn policy_options(self) -> ArtifactPolicyOptions {
-        let limits = match self {
-            Self::Quota => ArtifactLimitProfile::Quota,
-            Self::TtlCleanup => ArtifactLimitProfile::TtlCleanup,
-            Self::Cancellation | Self::PayloadCeiling => ArtifactLimitProfile::PayloadCeiling,
-            Self::Collision | Self::RestartStaleGeneration => ArtifactLimitProfile::Default,
+        let (limits, spaces) = match self {
+            Self::Quota => (
+                ArtifactLimitProfile::Quota,
+                FixtureSpacePolicy::AllowedUnderTest,
+            ),
+            Self::TtlCleanup => (
+                ArtifactLimitProfile::TtlCleanup,
+                FixtureSpacePolicy::Omitted,
+            ),
+            Self::Cancellation | Self::PayloadCeiling => (
+                ArtifactLimitProfile::PayloadCeiling,
+                FixtureSpacePolicy::AllowedUnderTest,
+            ),
+            Self::Collision | Self::RestartStaleGeneration => (
+                ArtifactLimitProfile::Default,
+                FixtureSpacePolicy::AllowedUnderTest,
+            ),
         };
         ArtifactPolicyOptions {
             staging: true,
             read_only: false,
-            spaces: FixtureSpacePolicy::AllowedUnderTest,
+            spaces,
             validators: FixtureValidatorPolicy::Absent,
             limits,
         }

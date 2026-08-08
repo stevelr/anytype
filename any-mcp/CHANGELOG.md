@@ -10,7 +10,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Extend the closed artifact adversarial inventory with production staging
   regressions for uniform bearer refusal, route, direction, and space binding,
-  strict request grammar, rate recovery, and request-permit shedding. The
+  cross-transport not-found equivalence classes, strict request grammar, rate
+  recovery, and request-permit shedding. The
   partial-write owner now drives malformed raw HTTP, disconnect/resume, offset,
   hash, consumed-handle replay, inventory, quota-allocation, and download-range
   assertions; the

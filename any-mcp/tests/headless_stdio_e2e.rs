@@ -39,7 +39,10 @@ use anytype::{
         with_disposable_space_context,
     },
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
+};
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -7565,6 +7568,22 @@ async fn run_artifact_quota_acceptance(
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn well_formed_unknown_stage_handle() -> String {
+    let record = [0x55_u8; 16];
+    let secret = [0x77_u8; 32];
+    let mut checksum = Sha256::new();
+    checksum.update(b"any-mcp/artifact-handle/v1");
+    checksum.update(record);
+    checksum.update(secret);
+    let mut bytes = Vec::with_capacity(57);
+    bytes.push(1);
+    bytes.extend_from_slice(&record);
+    bytes.extend_from_slice(&secret);
+    bytes.extend(checksum.finalize().iter().copied().take(8));
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(feature = "acceptance-harness")]
 async fn run_artifact_ttl_acceptance(
     ctx: &TestContext,
     child: &Arc<Mutex<Option<StdioDriver>>>,
@@ -7609,8 +7628,70 @@ async fn run_artifact_ttl_acceptance(
     {
         return Err("CLEAN-04 did not invalidate the expired handle and restore quota".to_owned());
     }
+    let unknown_handle = well_formed_unknown_stage_handle();
+    record_artifact_stage_log_needle(audit_needles, unknown_handle.as_bytes())?;
+    let unknown = driver
+        .call_tool_error("artifact_release", json!({"handle": unknown_handle}))
+        .await?;
+    let uniform = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        1,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, uniform.handle().as_bytes())?;
+    let wrong_space = driver
+        .call_tool_error(
+            "file_import",
+            json!({
+                "space": "any-mcp-acceptance-uniform-other-space",
+                "source": {"staged_handle": uniform.handle()},
+                "name": "hand07.bin",
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": format!("HAND-07-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if unknown.normalized_result() != expired.normalized_result()
+        || wrong_space.normalized_result() != expired.normalized_result()
+    {
+        return Err("HAND-16 MCP not-found payloads were distinguishable".to_owned());
+    }
+    let client = reqwest::Client::new();
+    let expired_http = client
+        .head(allocation.url())
+        .bearer_auth(allocation.handle())
+        .send()
+        .await
+        .map_err(|_| "HAND-16 expired HTTP request failed".to_owned())?;
+    let wrong_route = uniform
+        .url()
+        .replace(uniform.record(), "00000000000000000000000000000000");
+    let wrong_route_http = client
+        .head(wrong_route)
+        .bearer_auth(uniform.handle())
+        .send()
+        .await
+        .map_err(|_| "HAND-16 wrong-route HTTP request failed".to_owned())?;
+    if expired_http.status() != reqwest::StatusCode::NOT_FOUND
+        || wrong_route_http.status() != expired_http.status()
+        || wrong_route_http
+            .bytes()
+            .await
+            .map_err(|_| "read HAND-16 wrong-route body".to_owned())?
+            != expired_http
+                .bytes()
+                .await
+                .map_err(|_| "read HAND-16 expired body".to_owned())?
+    {
+        return Err("HAND-16 HTTP not-found payloads were distinguishable".to_owned());
+    }
+    release_stage_upload(&mut driver, &uniform).await?;
     catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
     execution.record_executed(AdversarialCaseId::Hand03)?;
+    execution.record_executed(AdversarialCaseId::Hand16)?;
     execution.record_executed(AdversarialCaseId::Clean04)?;
     execution.record_quota_not_applicable();
     Ok(execution)
@@ -8084,6 +8165,7 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                             .and_then(|execution| {
                                 execution.assert_exact(&[
                                     AdversarialCaseId::Hand03,
+                                    AdversarialCaseId::Hand16,
                                     AdversarialCaseId::Clean04,
                                 ])
                             })

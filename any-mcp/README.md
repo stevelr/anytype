@@ -1907,10 +1907,13 @@ staging, spawned-lifecycle, validator, direct-teardown, or read-only-catalog
 owner. The case partition checks that these owners cover the exact closed set
 once; a row leaves the pending partition only with its executable assertion.
 The TTL owner proves an expired handle is uniformly unavailable and restores
-quota, while the partial-write owner reuses a consumed upload handle with a new
-operation key and requires one object plus a fixed not-found refusal. The
-payload owner constructs a document above the configured Markdown ceiling and
-requires a bounded error frame without publication.
+quota. It also compares the complete normalized MCP not-found payload for
+unknown, expired, and cross-space handles, and separately compares staging HTTP
+status and body for expired and wrong-route requests. The partial-write owner
+reuses a consumed upload handle with a new operation key and requires one object
+plus a fixed not-found refusal. The payload owner constructs a document above
+the configured Markdown ceiling and requires a bounded error frame without
+publication.
 
 The hard-link cleanup case retains the staging reservation after a hostile-link
 conflict, including after the outside link is removed. That stable conflict
