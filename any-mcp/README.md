@@ -1863,15 +1863,20 @@ most 128 bytes/32 tokens, and an `artifact_bytes + 1` reservation is refused as
 or diagnostic.
 
 The adversarial family owns a closed 122-case inventory. Its case-status map
-records each implemented outcome and keeps every unexercised row pending.
+records 72 nonpending rows, either executed or explicitly unsupported for a
+required platform primitive, and keeps the remaining 50 rows pending.
 Implemented coverage exercises traversal and native-path grammar,
 capability-indistinguishable root refusals, volume case and normalization
 aliases, Windows device names, staging-record case sensitivity, bounded names
 and payloads, MIME conflicts, invalid document encodings, and hostile upstream
 metadata. The implemented dynamic set covers `SYM-01` through `SYM-13`,
-`RACE-01` through `RACE-10`, and `HLINK-01` through `HLINK-06`. Windows
-junction and non-junction reparse probes verify their native tags before they
-run. A host without the required primitive records its fixed capability outcome.
+`RACE-01` through `RACE-10`, and `HLINK-01` through `HLINK-06`. Import races
+exercise rename-over, extension, truncation, and retained-root swap outcomes;
+the export-root swap requires a classified failure with no remaining file.
+Windows junction and non-junction reparse probes seed a target sentinel, verify
+their native tags, and prove refusal leaves both target inventory and object
+inventory unchanged. A host without the required primitive records its fixed
+capability outcome.
 Direct owners and spawned stdio owners enforce their exact partitions, and the
 spawned gate separately owns production startup rejections. Each owner
 records a fixed case ID only after its exact outcome, resource inventory,

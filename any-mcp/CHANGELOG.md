@@ -22,6 +22,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   one-shot gates; stable stdio repeats import and export gate rows in isolated
   child processes. Windows junction and reparse rows verify native reparse tags
   before containment checks, with fixed capability outcomes when unavailable.
+- Make dynamic race and reparse acceptance evidence match the closed matrix:
+  stable stdio inventories all four repeated dynamic rows, import rows perform
+  their exact rename-over, extension, truncation, or retained-root-swap
+  mutation, and moved export roots require a classified refusal with no
+  published file. Windows reparse targets contain verified sentinels, while
+  unsupported Unix-only rows remain explicit capability outcomes.
 - Preserve staged bytes, registry ownership, and charged quota after the
   `HLINK-05` hostile-link cleanup conflict. A later release returns the same
   fixed conflict after the outside link is removed, preventing retry-pathname

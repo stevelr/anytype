@@ -510,10 +510,14 @@ const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStat
                 AdversarialCaseStatus::PlatformUnsupported
             }
         }
-        AdversarialCaseId::Race05
-        | AdversarialCaseId::Race09
-        | AdversarialCaseId::Race10
-        | AdversarialCaseId::Hlink03 => {
+        AdversarialCaseId::Race05 => {
+            if cfg!(unix) {
+                AdversarialCaseStatus::Executed
+            } else {
+                AdversarialCaseStatus::PlatformUnsupported
+            }
+        }
+        AdversarialCaseId::Race09 | AdversarialCaseId::Race10 | AdversarialCaseId::Hlink03 => {
             if cfg!(any(unix, windows)) {
                 AdversarialCaseStatus::Executed
             } else {
@@ -1655,6 +1659,10 @@ async fn run_sym07(
     let junction = run.policy.import_root().join(&name);
     fs::create_dir(&target).map_err(|_| "create SYM-07 target".to_owned())?;
     secure_directories(&[&target])?;
+    let sentinel = target.join("source.bin");
+    let sentinel_bytes = b"SYM-07 reparse sentinel";
+    fs::write(&sentinel, sentinel_bytes).map_err(|_| "seed SYM-07 target sentinel".to_owned())?;
+    secure_files(std::slice::from_ref(&sentinel))?;
     let status = Command::new("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(&junction)
@@ -1665,6 +1673,8 @@ async fn run_sym07(
         let _ = fs::remove_dir(&junction);
         return Ok(false);
     }
+    let target_before = RootInventory::capture(&target)?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
     let source = format!("{name}/source.bin");
     adversarial_refusal(
         driver,
@@ -1679,6 +1689,12 @@ async fn run_sym07(
         &[&source],
     )
     .await?;
+    target_before.assert_unchanged()?;
+    if fs::read(&sentinel).ok().as_deref() != Some(sentinel_bytes)
+        || artifact_object_ids(run.ctx).await? != objects_before
+    {
+        return Err("SYM-07 read or imported the junction target sentinel".to_owned());
+    }
     Ok(true)
 }
 
@@ -1698,6 +1714,10 @@ async fn run_sym08(
     let link = run.policy.import_root().join(&name);
     fs::create_dir(&target).map_err(|_| "create SYM-08 target".to_owned())?;
     secure_directories(&[&target])?;
+    let sentinel = target.join("source.bin");
+    let sentinel_bytes = b"SYM-08 reparse sentinel";
+    fs::write(&sentinel, sentinel_bytes).map_err(|_| "seed SYM-08 target sentinel".to_owned())?;
+    secure_files(std::slice::from_ref(&sentinel))?;
     if std::os::windows::fs::symlink_dir(&target, &link).is_err() {
         return Ok(false);
     }
@@ -1707,6 +1727,8 @@ async fn run_sym08(
     if tag == IO_REPARSE_TAG_MOUNT_POINT {
         return Err("SYM-08 created a junction instead of a non-junction reparse point".to_owned());
     }
+    let target_before = RootInventory::capture(&target)?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
     let source = format!("{name}/source.bin");
     adversarial_refusal(
         driver,
@@ -1721,6 +1743,12 @@ async fn run_sym08(
         &[&source],
     )
     .await?;
+    target_before.assert_unchanged()?;
+    if fs::read(&sentinel).ok().as_deref() != Some(sentinel_bytes)
+        || artifact_object_ids(run.ctx).await? != objects_before
+    {
+        return Err("SYM-08 read or imported the reparse target sentinel".to_owned());
+    }
     Ok(true)
 }
 
@@ -1872,8 +1900,7 @@ async fn run_hlink01(
 }
 
 /// Mutates a source pathname only after the import has consumed a real first
-/// chunk. The retained source descriptor must make every variant fail as a
-/// conflict, with no second upload or object left behind.
+/// chunk. Each mutation uses its matrix-defined terminal category.
 async fn run_import_gate_race(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
@@ -1893,6 +1920,7 @@ async fn run_import_gate_race(
     let bytes = vec![0x41; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_mul(2)];
     fs::write(&source, &bytes).map_err(|_| "seed gated import race source".to_owned())?;
     secure_files(std::slice::from_ref(&source))?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
     let mut lease = gates.arm_import(&key).await?;
     let request = driver.call_tool_error(
         "file_import",
@@ -1913,38 +1941,44 @@ async fn run_import_gate_race(
         }
         _ = &mut request => return Err("dynamic import race completed before its gate".to_owned()),
     }
-    let decoy = run
-        .policy
-        .base
-        .join(format!("{}-decoy-{}", id.as_str(), unique_suffix()));
-    fs::write(&decoy, b"adversarial replacement")
-        .map_err(|_| "seed gated import race replacement".to_owned())?;
-    secure_files(std::slice::from_ref(&decoy))?;
     match mutation {
-        ImportRaceMutation::Replace => fs::write(&source, b"replaced source"),
-        ImportRaceMutation::Rename => {
-            let moved = source.with_extension("moved");
-            fs::rename(&source, &moved).and_then(|_| fs::write(&source, b"replacement"))
+        ImportRaceMutation::RenameOver => {
+            let replacement = source.with_extension("replacement");
+            fs::write(&replacement, b"RACE-01 replacement")
+                .and_then(|_| fs::rename(&replacement, &source))
         }
-        ImportRaceMutation::Symlink => {
-            let moved = source.with_extension("moved");
-            fs::rename(&source, &moved)
-                .and_then(|_| create_file_symlink(&decoy, &source).map_err(std::io::Error::other))
+        ImportRaceMutation::Extend => {
+            let mut extended = bytes.clone();
+            extended.extend_from_slice(&[0x42; ACCEPTANCE_TRANSFER_CHUNK_BYTES]);
+            fs::write(&source, extended)
         }
-        ImportRaceMutation::HardLink => {
-            let moved = source.with_extension("moved");
-            fs::rename(&source, &moved).and_then(|_| fs::hard_link(&decoy, &source))
-        }
+        ImportRaceMutation::Truncate => std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .and_then(|file| file.set_len(ACCEPTANCE_TRANSFER_CHUNK_BYTES as u64)),
     }
     .map_err(|_| "apply gated import race mutation".to_owned())?;
     lease.release();
-    if request.await.is_ok() {
-        return Err("dynamic import race accepted a changed source".to_owned());
+    let refusal = request
+        .await
+        .map_err(|_| "dynamic import race accepted a changed source".to_owned())?;
+    match mutation {
+        ImportRaceMutation::RenameOver | ImportRaceMutation::Truncate => {
+            adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+        }
+        ImportRaceMutation::Extend => {
+            if !matches!(refusal.code(), "bounded_result" | "conflict") {
+                return Err("RACE-02 returned an unapproved terminal category".to_owned());
+            }
+        }
+    }
+    if artifact_object_ids(run.ctx).await? != objects_before {
+        return Err("dynamic import race changed the object inventory".to_owned());
     }
     Ok(())
 }
 
-/// Executes the first-chunk replacement case through an already armed gate.
+/// Executes the rename-over-source case through an already armed gate.
 ///
 /// This is exported for the stable stdio owner, which supplies its private
 /// child-process gate adapter.
@@ -1957,7 +1991,7 @@ pub async fn run_artifact_race01(
         driver,
         run,
         AdversarialCaseId::Race01,
-        ImportRaceMutation::Replace,
+        ImportRaceMutation::RenameOver,
         key,
     )
     .await
@@ -1965,10 +1999,79 @@ pub async fn run_artifact_race01(
 
 #[derive(Clone, Copy)]
 enum ImportRaceMutation {
-    Replace,
-    Rename,
-    Symlink,
-    HardLink,
+    RenameOver,
+    Extend,
+    Truncate,
+}
+
+/// Replaces the configured import-root pathname after the first chunk. The
+/// retained source descriptor must import the original bytes and leave the
+/// replacement root's decoy untouched.
+#[cfg(unix)]
+async fn run_import_root_swap_race(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let gates = run
+        .gate_hooks
+        .ok_or_else(|| "RACE-06 requires direct acceptance gates".to_owned())?;
+    let source_name = format!("race06-source-{}", unique_suffix());
+    let original = vec![0x43; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_mul(2)];
+    let configured = run.policy.import_root().to_path_buf();
+    let source = configured.join(&source_name);
+    fs::write(&source, &original).map_err(|_| "seed RACE-06 source".to_owned())?;
+    secure_files(std::slice::from_ref(&source))?;
+    let key = format!("race06-gate-{}", unique_suffix());
+    let mut lease = gates.arm_import(&key).await?;
+    let request = driver.call_tool(
+        "file_import",
+        json!({
+            "space": run.ctx.space_id,
+            "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source_name),
+            "name": format!("{source_name}.bin"),
+            "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+            "idempotency_key": key,
+        }),
+    );
+    tokio::pin!(request);
+    tokio::select! {
+        reached = lease.wait(Duration::from_secs(10)) => {
+            if !reached {
+                return Err("RACE-06 did not reach its exact gate".to_owned());
+            }
+        }
+        _ = &mut request => return Err("RACE-06 completed before its gate".to_owned()),
+    }
+    let moved = configured.with_file_name(format!("race06-retained-{}", unique_suffix()));
+    fs::rename(&configured, &moved).map_err(|_| "move RACE-06 retained import root".to_owned())?;
+    fs::create_dir(&configured).map_err(|_| "create RACE-06 replacement import root".to_owned())?;
+    secure_directories(&[&configured])?;
+    let decoy = configured.join(&source_name);
+    let decoy_bytes = b"RACE-06 decoy source";
+    fs::write(&decoy, decoy_bytes).map_err(|_| "seed RACE-06 decoy source".to_owned())?;
+    secure_files(std::slice::from_ref(&decoy))?;
+    lease.release();
+    let result = request.await;
+    let decoy_unchanged = fs::read(&decoy).ok().as_deref() == Some(decoy_bytes);
+    let restore = (|| {
+        fs::remove_dir_all(&configured)
+            .map_err(|_| "remove RACE-06 replacement import root".to_owned())?;
+        fs::rename(&moved, &configured).map_err(|_| "restore RACE-06 import root".to_owned())
+    })();
+    restore?;
+    let imported = result.map_err(|_| "RACE-06 did not accept the retained source".to_owned())?;
+    let file_id = required_str(&imported, "/file_id")?;
+    run.ctx.register_file(&file_id);
+    if required_str(&imported, "/receipt/sha256")? != artifact_sha256(&original)
+        || imported
+            .pointer("/receipt/size_bytes")
+            .and_then(Value::as_u64)
+            != Some(original.len() as u64)
+        || !decoy_unchanged
+    {
+        return Err("RACE-06 did not preserve original bytes and decoy isolation".to_owned());
+    }
+    Ok(())
 }
 
 /// Creates a destination only after export has passed its retained-root
@@ -2028,8 +2131,8 @@ pub async fn run_artifact_race04(
 }
 
 /// Replaces the configured export pathname after the retained-root check.
-/// The opened root remains authoritative, so a successful publication belongs
-/// only to the moved namespace and the replacement remains empty.
+/// The operation must return a classified failure and leave both namespaces
+/// without a published destination.
 #[cfg(unix)]
 async fn run_export_root_rename_race(
     driver: &mut impl McpDriver,
@@ -2042,7 +2145,7 @@ async fn run_export_root_rename_race(
     let destination = format!("race05-destination-{}", unique_suffix());
     let key = format!("race05-gate-{}", unique_suffix());
     let mut lease = gates.arm_export(&key).await?;
-    let request = driver.call_tool(
+    let request = driver.call_tool_error(
         "file_export",
         json!({
             "space": run.ctx.space_id,
@@ -2069,23 +2172,21 @@ async fn run_export_root_rename_race(
     let replacement_entries = fs::read_dir(&configured)
         .map_err(|_| "inspect RACE-05 replacement export root".to_owned())?
         .count();
-    let moved_bytes = fs::read(&moved_file).ok();
+    let moved_exists = moved_file.exists();
     let restore = (|| {
         fs::remove_dir_all(&configured)
             .map_err(|_| "remove RACE-05 replacement export root".to_owned())?;
         fs::rename(&moved, &configured).map_err(|_| "restore RACE-05 export root".to_owned())
     })();
     restore?;
-    match result {
-        Ok(_)
-            if moved_bytes.as_deref() == Some(ARTIFACT_FILE_PAYLOAD)
-                && replacement_entries == 0 =>
-        {
-            Ok(())
-        }
-        Err(_) if moved_bytes.is_none() && replacement_entries == 0 => Ok(()),
-        _ => Err("RACE-05 publication inventory was not confined to one namespace".to_owned()),
+    let refusal = result.map_err(|_| "RACE-05 accepted a moved export root".to_owned())?;
+    if !matches!(refusal.code(), "conflict" | "upstream")
+        || moved_exists
+        || replacement_entries != 0
+    {
+        return Err("RACE-05 publication inventory was not confined to one namespace".to_owned());
     }
+    Ok(())
 }
 
 /// Changes document source bytes after parsing but before the final retained
@@ -2713,12 +2814,14 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         run_sym13(driver, run).await?;
         execution.record_executed(AdversarialCaseId::Sym13)?;
     }
+    #[cfg(not(unix))]
+    execution.record_unsupported(AdversarialCaseId::Sym13)?;
 
     run_import_gate_race(
         driver,
         run,
         AdversarialCaseId::Race01,
-        ImportRaceMutation::Replace,
+        ImportRaceMutation::RenameOver,
         format!("race01-gate-{}", unique_suffix()),
     )
     .await?;
@@ -2727,7 +2830,7 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         driver,
         run,
         AdversarialCaseId::Race02,
-        ImportRaceMutation::Rename,
+        ImportRaceMutation::Extend,
         format!("race02-gate-{}", unique_suffix()),
     )
     .await?;
@@ -2736,20 +2839,18 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         driver,
         run,
         AdversarialCaseId::Race03,
-        ImportRaceMutation::Symlink,
+        ImportRaceMutation::Truncate,
         format!("race03-gate-{}", unique_suffix()),
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Race03)?;
-    run_import_gate_race(
-        driver,
-        run,
-        AdversarialCaseId::Race06,
-        ImportRaceMutation::HardLink,
-        format!("race06-gate-{}", unique_suffix()),
-    )
-    .await?;
-    execution.record_executed(AdversarialCaseId::Race06)?;
+    #[cfg(unix)]
+    {
+        run_import_root_swap_race(driver, run).await?;
+        execution.record_executed(AdversarialCaseId::Race06)?;
+    }
+    #[cfg(not(unix))]
+    execution.record_unsupported(AdversarialCaseId::Race06)?;
 
     run_export_gate_race(driver, run, format!("race04-gate-{}", unique_suffix())).await?;
     execution.record_executed(AdversarialCaseId::Race04)?;
@@ -2844,6 +2945,8 @@ pub async fn run_artifact_dynamic_filesystem_cases(
 
         #[cfg(unix)]
         run_hlink05(driver, run, &mut execution).await?;
+        #[cfg(not(unix))]
+        execution.record_unsupported(AdversarialCaseId::Hlink05)?;
     }
 
     let objects_after = artifact_object_ids(run.ctx).await?;
@@ -10454,6 +10557,14 @@ mod tests {
                 AdversarialCaseId::Race01,
                 AdversarialCaseId::Race04,
             ]
+        );
+        assert_eq!(
+            AdversarialCaseId::Race05.status(),
+            if cfg!(unix) {
+                AdversarialCaseStatus::Executed
+            } else {
+                AdversarialCaseStatus::PlatformUnsupported
+            }
         );
         for case in AdversarialCaseId::ALL {
             assert_eq!(

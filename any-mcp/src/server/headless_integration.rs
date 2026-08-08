@@ -2701,7 +2701,6 @@ fn dynamic_filesystem_direct_runtime_case_ids() -> Vec<AdversarialCaseId> {
         AdversarialCaseId::Sym08,
         AdversarialCaseId::Sym09,
         AdversarialCaseId::Sym10,
-        #[cfg(unix)]
         AdversarialCaseId::Sym13,
         AdversarialCaseId::Race01,
         AdversarialCaseId::Race02,
@@ -2717,7 +2716,6 @@ fn dynamic_filesystem_direct_runtime_case_ids() -> Vec<AdversarialCaseId> {
         AdversarialCaseId::Hlink02,
         AdversarialCaseId::Hlink03,
         AdversarialCaseId::Hlink04,
-        #[cfg(unix)]
         AdversarialCaseId::Hlink05,
         AdversarialCaseId::Hlink06,
     ]

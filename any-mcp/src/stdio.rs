@@ -72,14 +72,17 @@ where
             Ok(Some(frame)) if frame.iter().all(u8::is_ascii_whitespace) => continue,
             Ok(Some(frame)) => frame,
             Ok(None) => {
-                server.runtime().begin_shutdown();
+                shutdown_runtime(server.runtime()).await;
                 return Ok(());
             }
             Err(FrameReadError::TooLarge) => {
                 write_gate_response(&mut writer, &invalid_request(Value::Null)).await?;
                 continue;
             }
-            Err(FrameReadError::Io) => return Err(ServeError::StdioTransport),
+            Err(FrameReadError::Io) => {
+                shutdown_runtime(server.runtime()).await;
+                return Err(ServeError::StdioTransport);
+            }
         };
 
         let frame_without_bom = frame.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&frame);
@@ -131,11 +134,14 @@ where
             Err(FrameReadError::TooLarge) => {
                 return serve_modern(server, reader, writer, FirstFrame::TooLarge).await;
             }
-            Err(FrameReadError::Io) => return Err(ServeError::StdioTransport),
+            Err(FrameReadError::Io) => {
+                shutdown_runtime(server.runtime()).await;
+                return Err(ServeError::StdioTransport);
+            }
         }
     };
     let Some(first) = first else {
-        server.runtime().begin_shutdown();
+        shutdown_runtime(server.runtime()).await;
         return Ok(());
     };
 
@@ -436,7 +442,8 @@ where
             writer_result = &mut writer_task => {
                 runtime.begin_shutdown();
                 cancel_all(&cancellations).await;
-                requests.abort_all();
+                abort_requests(&mut requests).await;
+                drain_artifact_settlements(&runtime).await;
                 return match writer_result {
                     Ok(Ok(())) => Err(ServeError::StdioTransport),
                     Ok(Err(())) | Err(_) => Err(ServeError::StdioTransport),
@@ -446,9 +453,10 @@ where
                 if completed.is_some_and(|result| result.is_err()) {
                     runtime.begin_shutdown();
                     cancel_all(&cancellations).await;
-                    requests.abort_all();
+                    abort_requests(&mut requests).await;
                     drop(responses);
                     let _ = writer_task.await;
+                    drain_artifact_settlements(&runtime).await;
                     return Err(ServeError::ServiceTask);
                 }
             }
@@ -474,7 +482,8 @@ where
                     Err(FrameReadError::Io) => {
                         runtime.begin_shutdown();
                         cancel_all(&cancellations).await;
-                        requests.abort_all();
+                        abort_requests(&mut requests).await;
+                        drain_artifact_settlements(&runtime).await;
                         return Err(ServeError::StdioTransport);
                     }
                 }
@@ -489,11 +498,31 @@ where
         task_failed |= completed.is_err();
     }
     drop(responses);
-    match (task_failed, writer_task.await) {
+    let writer_result = writer_task.await;
+    drain_artifact_settlements(&runtime).await;
+    match (task_failed, writer_result) {
         (false, Ok(Ok(()))) => Ok(()),
         (true, _) => Err(ServeError::ServiceTask),
         (false, Ok(Err(()))) | (false, Err(_)) => Err(ServeError::StdioTransport),
     }
+}
+
+async fn abort_requests(requests: &mut JoinSet<()>) {
+    requests.abort_all();
+    while requests.join_next().await.is_some() {}
+}
+
+/// Waits for shutdown-owned artifact settlement after preview request work has stopped.
+async fn drain_artifact_settlements(runtime: &crate::RuntimeContext) {
+    runtime
+        .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
+        .await;
+}
+
+/// Stops runtime admission and waits for owned artifact settlement.
+async fn shutdown_runtime(runtime: &crate::RuntimeContext) {
+    runtime.begin_shutdown();
+    drain_artifact_settlements(runtime).await;
 }
 
 async fn handle_frame(
@@ -635,13 +664,27 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use serde_json::{Map, json};
     use tokio::io::{AsyncWriteExt, BufReader, duplex};
 
     use super::*;
+    use crate::artifact_toolset::ImportIdempotency;
     use crate::preview::{
         META_CLIENT_CAPABILITIES, META_CLIENT_INFO, META_PROTOCOL_VERSION, MetaError, validate_meta,
     };
+
+    struct DropMarker(Arc<AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
 
     fn test_runtime() -> crate::runtime::RuntimeContext {
         use anytype::prelude::{AnytypeClient, ClientConfig};
@@ -663,6 +706,29 @@ mod tests {
                 grpc_available: true,
             },
         )
+    }
+
+    async fn pending_settlement(runtime: &crate::runtime::RuntimeContext) -> Arc<AtomicBool> {
+        let key = [31; 32];
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import(key, [32; 32])
+                .await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        let permit = runtime
+            .admit_import_settlement(runtime.request_deadline())
+            .await
+            .expect("settlement permit");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&dropped);
+        let _receiver = runtime.supervise_import_settlement(key, permit, async move {
+            let _marker = DropMarker(marker);
+            std::future::pending().await
+        });
+        tokio::task::yield_now().await;
+        dropped
     }
 
     #[tokio::test]
@@ -692,6 +758,25 @@ mod tests {
         .await
         .expect("clean preview shutdown");
         assert!(!preview.client_roots().is_enabled());
+    }
+
+    #[tokio::test]
+    async fn preview_eof_waits_for_owned_artifact_settlement() {
+        let runtime = test_runtime();
+        let dropped = pending_settlement(&runtime).await;
+        let (client, server_side) = duplex(64);
+        drop(client);
+        let (reader, writer) = tokio::io::split(server_side);
+
+        serve_preview(
+            AnyMcpServer::new(runtime).expect("static catalog"),
+            BufReader::new(reader),
+            writer,
+        )
+        .await
+        .expect("clean preview shutdown");
+
+        assert!(dropped.load(Ordering::Acquire));
     }
 
     fn meta(version: &str) -> Map<String, Value> {
