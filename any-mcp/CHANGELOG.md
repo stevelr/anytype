@@ -14,7 +14,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   recovery, and request-permit shedding. The
   partial-write owner now drives malformed raw HTTP, disconnect/resume, offset,
   hash, consumed-handle replay, inventory, quota-allocation, and download-range
-  assertions; the
+  assertions. Four spawned cancellation owners pause before export publication,
+  inside atomic publication, after file-import dispatch, and after document
+  update dispatch; the
   process-crash owner captures a deterministic kill during a JSON-RPC frame.
   Cleanup owners cover failed import/export rollback, release and TTL
   invalidation, required-validator refusal, and read-only catalog isolation.

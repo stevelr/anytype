@@ -763,6 +763,59 @@ impl StdioDriver {
         Ok(id)
     }
 
+    /// Cancels one gated call and requires both its exact conflict result and
+    /// a subsequent ping response.
+    #[cfg(feature = "acceptance-harness")]
+    fn cancel_tool_call_exact(
+        &mut self,
+        name: &'static str,
+        arguments: Value,
+        gate: &ChildArtifactGate,
+    ) -> Result<ToolErrorEvidence, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "method":"tools/call",
+            "params":{"name":name,"arguments":arguments}
+        }));
+        gate.wait_ready()
+            .map_err(|_| "exact artifact cancellation never reached its gate".to_owned())?;
+        self.process.notification(
+            "notifications/cancelled",
+            json!({"requestId": id, "reason": "exact artifact acceptance cancellation"}),
+        );
+        gate.release()
+            .map_err(|_| "exact artifact cancellation did not release its gate".to_owned())?;
+        gate.wait_done()
+            .map_err(|_| "exact artifact cancellation did not settle its gate".to_owned())?;
+        let ping_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":ping_id,
+            "method":"ping",
+            "params":{}
+        }));
+        let first = self.process.read_frame();
+        self.process.record_response(&first);
+        let second = self.process.read_frame();
+        self.process.record_response(&second);
+        let [cancelled, ping] = correlate_response_pair([id, ping_id], [first, second])?;
+        if ping["result"] != json!({}) {
+            return Err("artifact child did not respond after exact cancellation".to_owned());
+        }
+        let result = cancelled
+            .get("result")
+            .ok_or_else(|| "exact artifact cancellation omitted its tool result".to_owned())?;
+        let evidence = ToolErrorEvidence::from_result(result, false)?;
+        if evidence.code() != "conflict" {
+            return Err("exact artifact cancellation did not return conflict".to_owned());
+        }
+        Ok(evidence)
+    }
+
     fn list_tool_descriptors_sync(&mut self) -> Result<Vec<Value>, String> {
         let response = self.request("tools/list", json!({}));
         response["result"]["tools"]
@@ -7858,6 +7911,350 @@ async fn run_artifact_cancellation_acceptance(
     }
     catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
     Ok(cancelled_id)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn cancellation_object_ids(
+    ctx: &TestContext,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    ctx.client
+        .objects(&ctx.space_id)
+        .limit(200)
+        .list()
+        .await
+        .map_err(|_| "capture exact cancellation object inventory".to_owned())?
+        .collect_all()
+        .await
+        .map_err(|_| "capture exact cancellation object inventory".to_owned())
+        .map(|objects| objects.into_iter().map(|object| object.id).collect())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn seed_cancellation_file(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    label: &str,
+) -> Result<String, String> {
+    let source = format!("{label}-source.bin");
+    policy.seed_import(&source, ARTIFACT_FILE_PAYLOAD)?;
+    let imported = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    }
+    .call_tool(
+        "file_import",
+        json!({
+            "space": ctx.space_id,
+            "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+            "name": format!("{label}.bin"),
+            "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+            "idempotency_key": format!("{label}-seed-{}", unique_suffix()),
+        }),
+    )
+    .await?;
+    let file_id = imported
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "cancellation file seed omitted file_id".to_owned())?
+        .to_owned();
+    ctx.register_file(&file_id);
+    Ok(file_id)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_file_export_cancellation_case(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    gate: &ChildArtifactGate,
+    case: AdversarialCaseId,
+) -> Result<(), String> {
+    let label = case.as_str().to_ascii_lowercase();
+    let file_id = seed_cancellation_file(ctx, child, policy, &label).await?;
+    let destination = format!("{label}-destination.bin");
+    let before = policy.export_snapshot()?;
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let quota_before = driver.call_tool("artifact_status", json!({})).await?;
+    let arguments = json!({
+        "space": ctx.space_id,
+        "file_id": file_id,
+        "destination": {"local": {"root": ArtifactPolicyFixture::EXPORT_ROOT, "path": destination}},
+        "idempotency_key": gate.key(),
+    });
+    lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered export-cancellation child disappeared".to_owned())?
+        .cancel_tool_call_exact("file_export", arguments, gate)?;
+    let path = policy.export_root().join(&destination);
+    let after = policy.export_snapshot()?;
+    if driver.call_tool("artifact_status", json!({})).await? != quota_before {
+        return Err("cancelled file export changed staging quota".to_owned());
+    }
+    match case {
+        AdversarialCaseId::Part08 => {
+            if path.exists() || after != before {
+                return Err("PART-08 published or retained a cancelled export".to_owned());
+            }
+        }
+        AdversarialCaseId::Part09 => {
+            if path.exists()
+                && std::fs::read(&path)
+                    .map(|bytes| bytes != ARTIFACT_FILE_PAYLOAD)
+                    .unwrap_or(true)
+            {
+                return Err("PART-09 published a partial or changed destination".to_owned());
+            }
+            let expected_ordinary = before.ordinary_files + u64::from(path.exists());
+            if after.ordinary_files != expected_ordinary
+                || after.temporary_files != before.temporary_files
+                || after.unexpected_entries != before.unexpected_entries
+            {
+                return Err("PART-09 left an invalid export-root inventory".to_owned());
+            }
+        }
+        _ => return Err("file-export cancellation received a non-export case".to_owned()),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_file_import_post_dispatch_cancellation_case(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    gate: &ChildArtifactGate,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> Result<(), String> {
+    let before = cancellation_object_ids(ctx).await?;
+    let expected = artifact_sha256(ARTIFACT_FILE_PAYLOAD);
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let allocation = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        ARTIFACT_FILE_PAYLOAD.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&expected),
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, allocation.handle().as_bytes())?;
+    upload_stage_bytes(&allocation, ARTIFACT_FILE_PAYLOAD, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    let arguments = json!({
+        "space": ctx.space_id,
+        "source": {"staged_handle": allocation.handle()},
+        "name": "part10.bin",
+        "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+        "idempotency_key": gate.key(),
+    });
+    lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered import-cancellation child disappeared".to_owned())?
+        .cancel_tool_call_exact("file_import", arguments.clone(), gate)?;
+    let after_cancel = cancellation_object_ids(ctx).await?;
+    if after_cancel.len() > before.len().saturating_add(1) || !before.is_subset(&after_cancel) {
+        return Err("PART-10 cancellation created more than one object".to_owned());
+    }
+    let imported = driver.call_tool("file_import", arguments).await?;
+    let file_id = imported
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "PART-10 replay omitted file_id".to_owned())?;
+    ctx.register_file(file_id);
+    let after_retry = cancellation_object_ids(ctx).await?;
+    if after_retry.len() != before.len().saturating_add(1)
+        || !before.is_subset(&after_retry)
+        || !after_retry.contains(file_id)
+    {
+        return Err("PART-10 retry dispatched a duplicate or lost its candidate".to_owned());
+    }
+    release_stage_upload(&mut driver, &allocation).await?;
+    if !policy.staging_snapshot()?.is_reaped() {
+        return Err("PART-10 left staged private state".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_document_post_dispatch_cancellation_case(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    gate: &ChildArtifactGate,
+) -> Result<(), String> {
+    let object = ctx
+        .client
+        .new_object(&ctx.space_id, "page")
+        .name(format!("PART-12-{}", unique_suffix()))
+        .body("# PART-12 old\n")
+        .create()
+        .await
+        .map_err(|_| "create PART-12 document".to_owned())?;
+    ctx.register_object(&object.id);
+    let old = ctx
+        .client
+        .object(&ctx.space_id, &object.id)
+        .get()
+        .await
+        .map_err(|_| "read PART-12 old document".to_owned())?
+        .markdown
+        .ok_or_else(|| "PART-12 old document omitted markdown".to_owned())?;
+    let old_sha256 = artifact_sha256(old.as_bytes());
+    let source = format!("part12-{}.md", unique_suffix());
+    policy.seed_import(&source, b"# PART-12 new\n")?;
+    let arguments = json!({
+        "space": ctx.space_id,
+        "object_id": object.id,
+        "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+        "source_format": "markdown",
+        "expected_body_sha256": old_sha256,
+        "idempotency_key": gate.key(),
+    });
+    lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered document-cancellation child disappeared".to_owned())?
+        .cancel_tool_call_exact("document_import_update", arguments.clone(), gate)?;
+    let after_cancel = ctx
+        .client
+        .object(&ctx.space_id, &object.id)
+        .get()
+        .await
+        .map_err(|_| "read PART-12 cancelled document".to_owned())?
+        .markdown
+        .ok_or_else(|| "PART-12 cancelled document omitted markdown".to_owned())?;
+    if after_cancel.contains("PART-12 old") == after_cancel.contains("PART-12 new") {
+        return Err("PART-12 produced a spliced or unrecognized body".to_owned());
+    }
+    let updated = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    }
+    .call_tool("document_import_update", arguments)
+    .await?;
+    let new_sha256 = updated
+        .get("canonical_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "PART-12 replay omitted canonical hash".to_owned())?;
+    if artifact_sha256(after_cancel.as_bytes()) != old_sha256
+        && artifact_sha256(after_cancel.as_bytes()) != new_sha256
+    {
+        return Err("PART-12 cancellation body was neither old nor new".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_exact_cancellation_cases(
+    ctx: &TestContext,
+    cleanup: [Arc<Mutex<ChildCleanupRecord>>; 4],
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<AdversarialExecution> {
+    let specs = [
+        (AdversarialCaseId::Part08, "export-prepublication"),
+        (AdversarialCaseId::Part09, "export-atomic-publication"),
+        (AdversarialCaseId::Part10, "import-post-dispatch"),
+        (AdversarialCaseId::Part12, "document-post-dispatch"),
+    ];
+    let mut execution = AdversarialExecution::default();
+    for ((case, point), cleanup_record) in specs.into_iter().zip(cleanup) {
+        let policy = Arc::new(
+            ArtifactPolicyFixture::create_with(
+                &ctx.space_id,
+                ArtifactPolicyOptions {
+                    limits: support::live_scenario::ArtifactLimitProfile::PayloadCeiling,
+                    ..ArtifactPolicyOptions::default()
+                },
+            )
+            .map_err(|_| sentinel_assertion("create exact cancellation fixture"))?,
+        );
+        record_artifact_fixture_log_needle(&policy, audit_needles)?;
+        let key = format!("{}-{}", case.as_str(), unique_suffix());
+        let (child, gate) = spawn_disposable_gated_artifact_driver(
+            ctx,
+            cleanup_record,
+            Arc::clone(&policy),
+            DriverOptions::STANDARD,
+            point,
+            key,
+        )?;
+        lock_driver(&child)
+            .as_mut()
+            .ok_or_else(|| sentinel_assertion("exact cancellation child disappeared"))?
+            .initialize();
+        let result = match case {
+            AdversarialCaseId::Part08 | AdversarialCaseId::Part09 => {
+                run_file_export_cancellation_case(ctx, &child, &policy, &gate, case).await
+            }
+            AdversarialCaseId::Part10 => {
+                run_file_import_post_dispatch_cancellation_case(
+                    ctx,
+                    &child,
+                    &policy,
+                    &gate,
+                    audit_needles,
+                )
+                .await
+            }
+            AdversarialCaseId::Part12 => {
+                run_document_post_dispatch_cancellation_case(ctx, &child, &policy, &gate).await
+            }
+            _ => Err("exact cancellation inventory contained an unrelated case".to_owned()),
+        };
+        result.map_err(|_| sentinel_assertion("exact cancellation case failed"))?;
+        finish_registered_artifact_child(&child, None)
+            .map_err(|_| sentinel_assertion("stop exact cancellation child"))?;
+        execution
+            .record_executed(case)
+            .map_err(|_| sentinel_assertion("record exact cancellation case"))?;
+    }
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_exact_cancellation_spawned_scenarios() {
+    let cleanup = std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
+    let callback_cleanup = cleanup.clone();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-exact-cancellation",
+        move |ctx| {
+            Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                let execution = run_exact_cancellation_cases(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    &callback_audit_needles,
+                )
+                .await?;
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Part08,
+                        AdversarialCaseId::Part09,
+                        AdversarialCaseId::Part10,
+                        AdversarialCaseId::Part12,
+                    ])
+                    .map_err(|_| sentinel_assertion("exact cancellation inventory diverged"))
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe exact cancellation acceptance");
+    require_completed(outcome, "exact cancellation acceptance")
+        .expect("prefix-authorized disposable admission");
+    for record in &cleanup {
+        assert_eq!(
+            *record.lock().expect("exact cancellation cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+    }
+    assert_artifact_server_log_clean(&log_baseline, &audit_needles, "exact-cancellation");
 }
 
 #[cfg(feature = "acceptance-harness")]

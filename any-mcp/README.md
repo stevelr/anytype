@@ -1914,6 +1914,11 @@ reuses a consumed upload handle with a new operation key and requires one object
 plus a fixed not-found refusal. The payload owner constructs a document above
 the configured Markdown ceiling and requires a bounded error frame without
 publication.
+Four private child gates make cancellation timing explicit: before and during
+file-export publication, after file-import dispatch, and after document-update
+dispatch. Their owners require a conflict result, no partial destination or
+spliced document, at most one imported object, idempotent retry settlement, and
+complete child cleanup.
 
 The hard-link cleanup case retains the staging reservation after a hostile-link
 conflict, including after the outside link is removed. That stable conflict
