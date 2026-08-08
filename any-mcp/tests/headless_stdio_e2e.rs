@@ -5810,6 +5810,101 @@ const ARTIFACT_LOG_NEEDLE_BYTES: usize = 4 * 1024;
 #[cfg(feature = "acceptance-harness")]
 const ARTIFACT_SERVER_LOG_ENV: &str = "ANY_MCP_HEADLESS_REDACTED_LOG_FILE";
 
+/// Test-side capability directory for one private artifact child gate.
+///
+/// The production child treats this directory and its nonce as a capability;
+/// all marker names and payloads stay derived from the nonce.
+#[cfg(feature = "acceptance-harness")]
+#[allow(dead_code)]
+struct ChildArtifactGate {
+    directory: PathBuf,
+    nonce: String,
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[allow(dead_code)]
+impl ChildArtifactGate {
+    fn create(base: &Path, point: &str, key: &str) -> TestResult<Self> {
+        let digest = Sha256::digest(format!("{}:{}:{}", point, key, unique_suffix()).as_bytes());
+        let nonce = digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let directory = base.join(format!("artifact-gate-{nonce}"));
+        std::fs::create_dir(&directory)
+            .map_err(|_| sentinel_assertion("create artifact gate directory"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| sentinel_assertion("secure artifact gate directory"))?;
+        }
+        Ok(Self { directory, nonce })
+    }
+
+    fn configure(&self, command: &mut Command, point: &str, key: &str) {
+        command
+            .env("ANY_MCP_ACCEPTANCE_GATE_DIRECTORY", &self.directory)
+            .env(
+                "ANY_MCP_ACCEPTANCE_GATE",
+                format!("1|{point}|{key}|{}", self.nonce),
+            );
+    }
+
+    fn marker(&self, kind: &str) -> PathBuf {
+        self.directory.join(format!("{kind}-{}", self.nonce))
+    }
+
+    fn wait_ready(&self) -> TestResult<()> {
+        self.wait_marker("ready")
+    }
+    fn wait_done(&self) -> TestResult<()> {
+        self.wait_marker("done")
+    }
+
+    fn wait_marker(&self, kind: &str) -> TestResult<()> {
+        let path = self.marker(kind);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !path.exists() {
+            if std::time::Instant::now() >= deadline {
+                return Err(sentinel_assertion("artifact gate marker timeout"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| sentinel_assertion("inspect artifact gate marker"))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || std::fs::read(&path).ok().as_deref() != Some(format!("{}\n", self.nonce).as_bytes())
+        {
+            return Err(sentinel_assertion("artifact gate marker was invalid"));
+        }
+        Ok(())
+    }
+
+    fn release(&self) -> TestResult<()> {
+        use std::io::Write as _;
+        let path = self.marker("release");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| sentinel_assertion("create artifact gate release marker"))?;
+        file.write_all(format!("{}\n", self.nonce).as_bytes())
+            .map_err(|_| sentinel_assertion("write artifact gate release marker"))?;
+        file.sync_all()
+            .map_err(|_| sentinel_assertion("sync artifact gate release marker"))
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl Drop for ChildArtifactGate {
+    fn drop(&mut self) {
+        let _ = self.release();
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
 #[cfg(feature = "acceptance-harness")]
 fn artifact_driver_options(control: ArtifactControlPlane) -> DriverOptions {
     // Every control plane uses the standard profile so the advertised artifact
