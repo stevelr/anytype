@@ -17,9 +17,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   cargo test --locked -p anytype --test live_gate_manifest
   ```
 
-  Reproduce one required process after `source .test-env` with:
+  Reproduce one required process with the protected env-file contract:
 
   ```sh
+  test -n "${ANY_MCP_HEADLESS_ENV_FILE:-}"
+  test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+  set -a
+  source "$ANY_MCP_HEADLESS_ENV_FILE"
+  set +a
+  test "${ANYTYPE_KEYSTORE:-}" = env
+  test -n "${ANYTYPE_KEYSTORE_SERVICE:-}"
+  test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
+  test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
   ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test --locked -p anytype --test test_body test_body_read_preserves_typed_variants_ids_and_order -- --ignored --exact --test-threads=1 --nocapture
   ```
 

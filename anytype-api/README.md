@@ -1069,7 +1069,15 @@ runs. Run each in its own admitted, single-threaded process; do not run these
 commands concurrently:
 
 ```sh
-source .test-env
+test -n "${ANY_MCP_HEADLESS_ENV_FILE:-}"
+test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+set -a
+source "$ANY_MCP_HEADLESS_ENV_FILE"
+set +a
+test "${ANYTYPE_KEYSTORE:-}" = env
+test -n "${ANYTYPE_KEYSTORE_SERVICE:-}"
+test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
+test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_body -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_discovery -- --ignored --test-threads=1 --nocapture
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test -p anytype --test test_chat_prerequisites -- --ignored --test-threads=1 --nocapture
@@ -1089,7 +1097,15 @@ To reproduce one required live-gate entry exactly, use env-only credentials and
 run the selected test in its own process:
 
 ```sh
-source .test-env
+test -n "${ANY_MCP_HEADLESS_ENV_FILE:-}"
+test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+set -a
+source "$ANY_MCP_HEADLESS_ENV_FILE"
+set +a
+test "${ANYTYPE_KEYSTORE:-}" = env
+test -n "${ANYTYPE_KEYSTORE_SERVICE:-}"
+test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
+test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
 ANYTYPE_DISPOSABLE_TEST_PROCESS=1 cargo test --locked -p anytype --test test_body test_body_read_preserves_typed_variants_ids_and_order -- --ignored --exact --test-threads=1 --nocapture
 ```
 

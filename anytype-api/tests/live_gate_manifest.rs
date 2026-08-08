@@ -178,6 +178,41 @@ fn ignored_tests(target: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn integration_test_targets() -> BTreeSet<String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .output()
+        .unwrap_or_else(|error| panic!("run cargo metadata: {error}"));
+    assert!(
+        output.status.success(),
+        "cargo metadata failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("parse cargo metadata: {error}"));
+    let package = metadata["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages
+                .iter()
+                .find(|package| package["name"].as_str() == Some("anytype"))
+        })
+        .unwrap_or_else(|| panic!("cargo metadata did not contain package anytype"));
+    let mut targets = package["targets"]
+        .as_array()
+        .unwrap_or_else(|| panic!("package anytype has no targets"))
+        .iter()
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("test")))
+        })
+        .filter_map(|target| target["name"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    targets.insert("lib".to_owned());
+    targets
+}
+
 #[test]
 fn manifest_is_a_complete_partition_of_ignored_tests() {
     let manifest = manifest();
@@ -221,11 +256,16 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
         );
     }
 
-    for (target, expected) in expected_by_target {
-        assert_eq!(
-            ignored_tests(&target),
-            expected,
-            "ignored-test inventory drifted for target {target}"
-        );
-    }
+    let actual_by_target = integration_test_targets()
+        .into_iter()
+        .map(|target| {
+            let ignored = ignored_tests(&target);
+            (target, ignored)
+        })
+        .filter(|(_, ignored)| !ignored.is_empty())
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        actual_by_target, expected_by_target,
+        "ignored-test inventory drifted from the manifest"
+    );
 }
