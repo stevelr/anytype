@@ -1380,14 +1380,14 @@ fn valid_validator_mime(value: &str) -> bool {
 
 fn parse_roots(
     roots: Vec<RawRoot>,
-    identifiers: &mut BTreeSet<LogicalRootId>,
+    identifiers: &mut BTreeSet<String>,
 ) -> Result<Vec<RootDefinition>, ArtifactConfigError> {
     roots
         .into_iter()
         .map(|root| {
             let id = LogicalRootId::parse(&root.id)
                 .map_err(|_| ArtifactConfigError::new(ConfigProblem::Root))?;
-            if !identifiers.insert(id.clone()) {
+            if !identifiers.insert(id.as_str().to_ascii_lowercase()) {
                 return Err(ArtifactConfigError::new(ConfigProblem::Root));
             }
             let path = match (root.path, root.path_native) {
@@ -1976,6 +1976,20 @@ mod tests {
              [[roots.export]]\nid = \"café\"\npath = \"/tmp/export\"\n"
         );
         assert!(ArtifactConfig::from_toml(&duplicate).is_err());
+
+        let case_collision = format!(
+            "{MINIMAL}\n[[roots.import]]\nid = \"inbox\"\npath = \"/tmp/import\"\n\
+             [[roots.export]]\nid = \"INBOX\"\npath = \"/tmp/export\"\n"
+        );
+        let error = ArtifactConfig::from_toml(&case_collision)
+            .expect_err("ASCII case-colliding root identifiers");
+        assert_eq!(error.to_string(), "invalid any-mcp artifact root");
+
+        let distinct = format!(
+            "{MINIMAL}\n[[roots.import]]\nid = \"InboxA\"\npath = \"/tmp/import\"\n\
+             [[roots.export]]\nid = \"inboxB\"\npath = \"/tmp/export\"\n"
+        );
+        ArtifactConfig::from_toml(&distinct).expect("non-colliding mixed-case roots");
     }
 
     #[test]

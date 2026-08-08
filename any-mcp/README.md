@@ -266,7 +266,8 @@ with no overwrite mode. Tools use only the logical root ID plus a validated
 relative path. Root IDs accept Unicode letters, decimal digits, and combining
 marks plus ASCII `-` and `_`; they are trimmed at Pattern_White_Space
 boundaries and normalized to NFC. Invisible default-ignorable characters are
-rejected.
+rejected. IDs must also remain unique across import and export roots after
+ASCII case folding, so spellings such as `inbox` and `INBOX` cannot coexist.
 
 Ordinary `path` values are UTF-8. A native OS path that is not valid UTF-8 can
 use one canonical unpadded base64url representation:

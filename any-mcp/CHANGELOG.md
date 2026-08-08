@@ -30,6 +30,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reject import and export root identifiers that collide after ASCII case
+  folding, preventing platform- and operator-ambiguous aliases while
+  preserving the configured spelling of non-colliding IDs.
 - Validate local file and document export destinations before reserving their
   idempotency keys, and release reservations after other definite
   prepublication failures. Traversal, unknown roots, collisions, and staging
