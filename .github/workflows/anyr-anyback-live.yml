@@ -103,10 +103,7 @@ jobs:
             "$@" >"$output" 2>&1
             local status=$?
             set -e
-            local ran_count ok_count
-            ran_count="$(grep -Ec '^Ran [1-9][0-9]* tests? in [0-9]+(\.[0-9]+)?s$' "$output" || true)"
-            ok_count="$(grep -Ec '^OK$' "$output" || true)"
-            if [[ "$status" -ne 0 ]] || grep -Fqi skipped "$output" || [[ "$ran_count" -ne 1 ]] || [[ "$ok_count" -ne 1 ]] || [[ "$(tail -n 1 "$output")" != "OK" ]]; then
+            if [[ "$status" -ne 0 ]] || ! python3 anyr/tests/live_gate_policy.py python "$output"; then
               rm -f -- "$output"
               printf '%s\n' "required anyr live gate failed" >&2
               return 1
@@ -120,7 +117,7 @@ jobs:
               --ignored --exact --test-threads=1 --nocapture >"$output" 2>&1
             local status=$?
             set -e
-            if [[ "$status" -ne 0 ]] || grep -Fqi skipped "$output" || ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s' "$output"; then
+            if [[ "$status" -ne 0 ]] || ! python3 anyr/tests/live_gate_policy.py rust "$output"; then
               rm -f -- "$output"
               printf '%s\n' "required anyr type-property gate failed" >&2
               return 1
