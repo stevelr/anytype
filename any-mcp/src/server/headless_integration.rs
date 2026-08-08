@@ -3098,13 +3098,16 @@ async fn headless_artifact_dynamic_filesystem_direct_scenarios() {
                         let root_access_attempts = || root_registry.acceptance_access_attempts();
                         let successful_import_opens =
                             || root_registry.acceptance_successful_import_opens();
+                        let gate_hooks = DirectArtifactGateHooks(
+                            server.runtime().artifact_acceptance_gates().clone(),
+                        );
                         let run = ArtifactAdversarialRun {
                             control: ArtifactControlPlane::DirectRouter,
                             policy: &policy,
                             ctx: ctx.as_ref(),
                             root_access_attempts: Some(&root_access_attempts),
                             successful_import_opens: Some(&successful_import_opens),
-                            gate_hooks: None,
+                            gate_hooks: Some(&gate_hooks),
                         };
                         let mut driver = DirectRouterDriver { server: &server };
                         Box::pin(run_artifact_dynamic_filesystem_cases(&mut driver, &run))

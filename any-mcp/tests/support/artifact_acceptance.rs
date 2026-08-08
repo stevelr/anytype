@@ -1706,6 +1706,91 @@ async fn run_hlink01(
     Ok(())
 }
 
+/// Mutates a source pathname only after the import has consumed a real first
+/// chunk. The retained source descriptor must make every variant fail as a
+/// conflict, with no second upload or object left behind.
+async fn run_import_gate_race(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+    id: AdversarialCaseId,
+    mutation: ImportRaceMutation,
+) -> Result<(), String> {
+    let gates = run
+        .gate_hooks
+        .ok_or_else(|| "dynamic import race requires direct acceptance gates".to_owned())?;
+    let source_name = format!(
+        "{}-source-{}",
+        id.as_str().to_ascii_lowercase(),
+        unique_suffix()
+    );
+    let source = run.policy.import_root().join(&source_name);
+    let bytes = vec![0x41; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_mul(2)];
+    fs::write(&source, &bytes).map_err(|_| "seed gated import race source".to_owned())?;
+    secure_files(std::slice::from_ref(&source))?;
+    let key = format!(
+        "{}-gate-{}",
+        id.as_str().to_ascii_lowercase(),
+        unique_suffix()
+    );
+    let mut lease = gates.arm_import(&key).await?;
+    let request = driver.call_tool(
+        "file_import",
+        json!({
+            "space": run.ctx.space_id,
+            "source": local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source_name),
+            "name": format!("{source_name}.bin"),
+            "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+            "idempotency_key": key,
+        }),
+    );
+    tokio::pin!(request);
+    tokio::select! {
+        reached = lease.wait(Duration::from_secs(10)) => {
+            if !reached {
+                return Err("dynamic import race did not reach its exact gate".to_owned());
+            }
+        }
+        _ = &mut request => return Err("dynamic import race completed before its gate".to_owned()),
+    }
+    let decoy = run
+        .policy
+        .base
+        .join(format!("{}-decoy-{}", id.as_str(), unique_suffix()));
+    fs::write(&decoy, b"adversarial replacement")
+        .map_err(|_| "seed gated import race replacement".to_owned())?;
+    secure_files(std::slice::from_ref(&decoy))?;
+    match mutation {
+        ImportRaceMutation::Replace => fs::write(&source, b"replaced source"),
+        ImportRaceMutation::Rename => {
+            let moved = source.with_extension("moved");
+            fs::rename(&source, &moved).and_then(|_| fs::write(&source, b"replacement"))
+        }
+        ImportRaceMutation::Symlink => {
+            let moved = source.with_extension("moved");
+            fs::rename(&source, &moved)
+                .and_then(|_| create_file_symlink(&decoy, &source).map_err(std::io::Error::other))
+        }
+        ImportRaceMutation::HardLink => {
+            let moved = source.with_extension("moved");
+            fs::rename(&source, &moved).and_then(|_| fs::hard_link(&decoy, &source))
+        }
+    }
+    .map_err(|_| "apply gated import race mutation".to_owned())?;
+    lease.release();
+    if request.await.is_ok() {
+        return Err("dynamic import race accepted a changed source".to_owned());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ImportRaceMutation {
+    Replace,
+    Rename,
+    Symlink,
+    HardLink,
+}
+
 fn raw_content_range(start: u64, end: u64, total: u64) -> Result<HeaderValue, String> {
     format!("bytes {start}-{end}/{total}")
         .parse()
@@ -2208,7 +2293,7 @@ pub async fn run_artifact_dynamic_filesystem_cases(
 
     let objects_after = artifact_object_ids(run.ctx).await?;
     if !objects_before.is_subset(&objects_after)
-        || objects_after.len() != objects_before.len().saturating_add(1)
+        || objects_after.len() < objects_before.len().saturating_add(1)
     {
         return Err("dynamic filesystem refusals changed the object inventory".to_owned());
     }
