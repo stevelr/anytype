@@ -145,6 +145,8 @@ pub enum ScriptedHttpRequestErrorKind {
 /// Payload-free failure from a scripted HTTP fixture.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScriptedHttpFixtureError {
+    /// No Tokio runtime is active for loopback networking and task ownership.
+    NoRuntime,
     /// The script did not contain a response.
     EmptyScript,
     /// The script exceeded its request/response count ceiling.
@@ -191,6 +193,9 @@ pub enum ScriptedHttpFixtureError {
 impl fmt::Display for ScriptedHttpFixtureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NoRuntime => {
+                formatter.write_str("scripted HTTP fixture requires an active Tokio runtime")
+            }
             Self::EmptyScript => formatter.write_str("scripted HTTP fixture requires a response"),
             Self::ScriptTooLong { count, limit } => write!(
                 formatter,
@@ -280,12 +285,13 @@ impl ScriptedHttpFixture {
     ///
     /// # Errors
     ///
-    /// Returns a payload-free error when the script violates a ceiling or the
-    /// loopback listener cannot be created.
+    /// Returns a payload-free error when no Tokio runtime is active, the script
+    /// violates a ceiling, or the loopback listener cannot be created.
     pub async fn start(
         responses: Vec<ScriptedHttpResponse>,
     ) -> Result<Self, ScriptedHttpFixtureError> {
         validate_responses(&responses)?;
+        tokio::runtime::Handle::try_current().map_err(|_| ScriptedHttpFixtureError::NoRuntime)?;
         let response_count = responses.len();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -736,5 +742,13 @@ mod tests {
             kind: ScriptedHttpRequestErrorKind::InvalidHeader,
         };
         assert!(!format!("{error:?} {error}").contains("fixture-secret-value"));
+    }
+
+    #[test]
+    fn start_without_tokio_runtime_returns_typed_error() {
+        let result = futures::executor::block_on(ScriptedHttpFixture::start(vec![
+            ScriptedHttpResponse::new(StatusCode::OK, ScriptedHttpContentType::Text, Vec::new()),
+        ]));
+        assert!(matches!(result, Err(ScriptedHttpFixtureError::NoRuntime)));
     }
 }
