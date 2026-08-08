@@ -30,6 +30,11 @@ def open_regular(path: Path) -> tuple[int, os.stat_result]:
     if not stat.S_ISREG(metadata.st_mode):
         os.close(descriptor)
         raise OSError("not regular")
+    if os.name == "posix" and (
+        metadata.st_mode & 0o777 != 0o600 or metadata.st_uid != os.geteuid()
+    ):
+        os.close(descriptor)
+        raise OSError("unsafe source")
     return descriptor, metadata
 
 
@@ -63,12 +68,10 @@ def start(source: Path, context: Path) -> None:
 
 def read_context(path: Path) -> dict[str, str]:
     descriptor, metadata = open_regular(path)
-    try:
+    with os.fdopen(descriptor, "rb") as source:
         if metadata.st_mode & 0o077 or metadata.st_size > 4096:
             raise OSError("unsafe context")
-        contents = os.read(descriptor, metadata.st_size + 1).decode("ascii")
-    finally:
-        os.close(descriptor)
+        contents = source.read(4097).decode("ascii")
     values: dict[str, str] = {}
     for line in contents.splitlines():
         key, separator, value = line.partition("=")

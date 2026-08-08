@@ -96,6 +96,7 @@ class EvidenceTests(unittest.TestCase):
                 root / "artifact",
             )
             source.write_bytes(b"stale-allowlisted-event\n")
+            source.chmod(0o600)
             with contextlib.redirect_stdout(io.StringIO()):
                 reviewed_evidence.start(source, context)
             with source.open("ab") as output:
@@ -117,11 +118,13 @@ class EvidenceTests(unittest.TestCase):
                 )
                 artifact = root / f"artifact-{mutation}"
                 source.write_bytes(b"original-anchor")
+                source.chmod(0o600)
                 with contextlib.redirect_stdout(io.StringIO()):
                     reviewed_evidence.start(source, context)
                 if mutation == "replace":
                     replacement = root / "replacement"
                     replacement.write_bytes(b"PRIVATE_REPLACEMENT")
+                    replacement.chmod(0o600)
                     os.replace(replacement, source)
                 else:
                     source.write_bytes(b"changed-anchor-PRIVATE")
