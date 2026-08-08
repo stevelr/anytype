@@ -16,6 +16,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   process-crash owner captures a deterministic kill during a JSON-RPC frame.
   Cleanup owners cover failed import/export rollback, release and TTL
   invalidation, required-validator refusal, and read-only catalog isolation.
+  Flood owners measure maximum-occupancy aggregate status and bounded spawned
+  diagnostics.
   These and the remaining handle, process-crash, output-flood, and
   failure-cleanup rows stay pending until their live case-specific owners pass.
 - Add closed real-server adversarial artifact coverage for 43 traversal,

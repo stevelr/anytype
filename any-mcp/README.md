@@ -1874,6 +1874,8 @@ fragment. Their inventory status advances only after the live owner passes.
 Cleanup owners likewise assert failed import/export rollback, single-use
 release, TTL invalidation, required-validator refusal, and read-only catalog
 isolation without promoting those rows before live execution.
+Flood owners measure aggregate status at maximum staged-record occupancy and
+bound/redact the spawned child's diagnostic burst.
 Implemented coverage exercises traversal and native-path grammar,
 capability-indistinguishable root refusals, volume case and normalization
 aliases, Windows device names, staging-record case sensitivity, bounded names

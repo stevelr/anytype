@@ -50,11 +50,11 @@ mod support;
 use support::live_scenario::{
     ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
     ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD,
-    ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution, ArtifactAdversarialRun,
-    ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane,
-    ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks, ArtifactGateLease,
-    ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun,
-    ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
+    ARTIFACT_FRAME_CEILING_BYTES, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
+    ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
+    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks,
+    ArtifactGateLease, ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
+    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
     ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
     ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
     allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
@@ -6525,6 +6525,10 @@ async fn run_spawned_artifact_adversarial_default(
     })?;
     if control == ArtifactControlPlane::SpawnedStableStdio {
         execution
+            .record_executed(AdversarialCaseId::Flood07)
+            .map_err(|_| sentinel_assertion("record stable FLOOD-07 evidence"))?;
+        execution.record_quota_not_applicable();
+        execution
             .merge(
                 run_spawned_artifact_gated_race(
                     ctx,
@@ -6552,6 +6556,7 @@ async fn run_spawned_artifact_adversarial_default(
     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
     if control == ArtifactControlPlane::SpawnedStableStdio {
         expected.extend(ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS);
+        expected.push(AdversarialCaseId::Flood07);
     }
     execution
         .assert_exact(&expected)
@@ -6890,7 +6895,11 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
                     if control == ArtifactControlPlane::SpawnedStableStdio {
                         expected.extend(ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS);
-                        expected.extend([AdversarialCaseId::Sym11, AdversarialCaseId::Sym12]);
+                        expected.extend([
+                            AdversarialCaseId::Sym11,
+                            AdversarialCaseId::Sym12,
+                            AdversarialCaseId::Flood07,
+                        ]);
                     }
                     expected.push(AdversarialCaseId::Alias07);
                     execution
@@ -7288,6 +7297,25 @@ async fn run_artifact_quota_acceptance(
     if reserved.temporary_files != 2 || reserved.unexpected_entries != 0 {
         return Err("quota reservations did not produce the exact staging snapshot".to_owned());
     }
+    let maximum_status = lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered quota child disappeared".to_owned())?
+        .measured_tool_frame("artifact_status", json!({}))?;
+    if maximum_status.frame_bytes > ARTIFACT_FRAME_CEILING_BYTES
+        || maximum_status
+            .structured_content
+            .get("staging_available_entries")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || maximum_status
+            .structured_content
+            .get("staging_available_bytes")
+            .and_then(Value::as_u64)
+            != Some(224 * 1024)
+    {
+        return Err("FLOOD-04 maximum-record status was not a bounded aggregate".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Flood04)?;
     let entry_refusal = driver
         .call_tool_error(
             "artifact_stage_upload",
@@ -7807,7 +7835,10 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                             )
                             .await
                             .and_then(|execution| {
-                                execution.assert_exact(&[AdversarialCaseId::Clean03])
+                                execution.assert_exact(&[
+                                    AdversarialCaseId::Flood04,
+                                    AdversarialCaseId::Clean03,
+                                ])
                             })
                         }
                         ArtifactLifecycleScenario::TtlCleanup => {
