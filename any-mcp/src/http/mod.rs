@@ -205,7 +205,100 @@ pub async fn serve_http(
     // Cancel remaining sessions and SSE streams, then stop admitting any
     // Anytype operation work.
     session_cancel.cancel();
-    runtime.begin_shutdown();
+    shutdown_runtime(&runtime).await;
     tracing::info!(target: "any_mcp::http", "http_transport_stopping");
     result.map_err(|listener::HttpServeError::Listener| HttpTransportError::Listener)
+}
+
+/// Waits for shutdown-owned artifact settlement after HTTP sessions have stopped.
+async fn drain_artifact_settlements(runtime: &RuntimeContext) {
+    runtime
+        .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
+        .await;
+}
+
+/// Stops runtime admission and waits for owned artifact settlement.
+async fn shutdown_runtime(runtime: &RuntimeContext) {
+    runtime.begin_shutdown();
+    drain_artifact_settlements(runtime).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
+    use anytype::prelude::{AnytypeClient, ClientConfig};
+
+    use super::*;
+    use crate::{
+        artifact_toolset::ImportIdempotency,
+        runtime::{RuntimeContext, StartupStatus},
+    };
+
+    struct DropMarker(Arc<AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    fn test_runtime() -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("any-mcp-http-shutdown-test".to_owned()),
+            app_name: "any-mcp-http-shutdown-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("test client");
+        RuntimeContext::from_parts(
+            client,
+            1,
+            Duration::from_secs(1),
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+        )
+    }
+
+    async fn pending_settlement(runtime: &RuntimeContext) -> Arc<AtomicBool> {
+        let key = [41; 32];
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import(key, [42; 32])
+                .await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        let permit = runtime
+            .admit_import_settlement(runtime.request_deadline())
+            .await
+            .expect("settlement permit");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&dropped);
+        let _receiver = runtime.supervise_import_settlement(key, permit, async move {
+            let _marker = DropMarker(marker);
+            std::future::pending().await
+        });
+        tokio::task::yield_now().await;
+        dropped
+    }
+
+    #[tokio::test]
+    async fn http_shutdown_waits_for_owned_artifact_settlement() {
+        let runtime = test_runtime();
+        let dropped = pending_settlement(&runtime).await;
+
+        shutdown_runtime(&runtime).await;
+
+        assert!(dropped.load(Ordering::Acquire));
+    }
 }
