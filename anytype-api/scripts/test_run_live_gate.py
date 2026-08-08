@@ -98,6 +98,15 @@ class LiveGateTests(unittest.TestCase):
                 GATE.run_bounded(
                     [sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.05
                 )
+            with self.assertRaises(GATE.RunnerError):
+                GATE.run_bounded(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os, time; os.close(1); os.close(2); time.sleep(5)",
+                    ],
+                    timeout=0.05,
+                )
         finally:
             GATE.OUTPUT_LIMIT = original_limit
 

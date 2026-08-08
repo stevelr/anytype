@@ -389,6 +389,8 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         assert!(block.contains("python3 anytype-api/scripts/run-live-gate.py"));
         assert!(block.contains("test -f \"/proc/self/fd/$reviewed_fd\""));
         assert!(block.contains("stat -Lc '%d|%i|%s' \"/proc/self/fd/$reviewed_fd\""));
+        assert!(block.contains("anchor_hash"));
+        assert!(block.contains("current_anchor_hash"));
         assert!(!block.contains("stat -Lc '%F"));
         assert!(!block.contains("tee"));
     }

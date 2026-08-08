@@ -88,12 +88,15 @@ jobs:
           exec {reviewed_fd}<"$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -f "/proc/self/fd/$reviewed_fd"
           IFS='|' read -r start_device start_inode start_bytes < <(stat -Lc '%d|%i|%s' "/proc/self/fd/$reviewed_fd")
-          exec {reviewed_fd}<&-
           case "$start_device:$start_inode:$start_bytes" in *[!0-9:]*|::|*::|:* ) exit 1 ;; esac
+          anchor_length=$(( start_bytes < 4096 ? start_bytes : 4096 ))
+          anchor_start=$(( start_bytes - anchor_length ))
+          anchor_hash="$(tail -c "$anchor_length" -- "/proc/self/fd/$reviewed_fd" | sha256sum | cut -d ' ' -f 1)"
+          exec {reviewed_fd}<&-
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
           context="$evidence_dir/context"
-          printf 'run_marker=%s\nstart_device=%s\nstart_inode=%s\nstart_bytes=%s\n' "$run_marker" "$start_device" "$start_inode" "$start_bytes" > "$context"
+          printf 'run_marker=%s\nstart_device=%s\nstart_inode=%s\nstart_bytes=%s\nanchor_start=%s\nanchor_length=%s\nanchor_hash=%s\n' "$run_marker" "$start_device" "$start_inode" "$start_bytes" "$anchor_start" "$anchor_length" "$anchor_hash" > "$context"
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
@@ -108,11 +111,11 @@ jobs:
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-failure-XXXXXX" 2>/dev/null)" || exit 1
           artifact="$evidence_dir/reviewed-server-events.txt"
-          marker=unavailable; start_device=unavailable; start_inode=unavailable; start_bytes=unavailable
+          marker=unavailable; start_device=unavailable; start_inode=unavailable; start_bytes=unavailable; anchor_start=unavailable; anchor_length=unavailable; anchor_hash=unavailable
           context="${ANYTYPE_API_LIVE_EVIDENCE_CONTEXT:-}"
           if [[ -r "$context" ]]; then
             while IFS= read -r line; do
-              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_device=[0-9]*) start_device="${line#start_device=}" ;; start_inode=[0-9]*) start_inode="${line#start_inode=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
+              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_device=[0-9]*) start_device="${line#start_device=}" ;; start_inode=[0-9]*) start_inode="${line#start_inode=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; anchor_start=[0-9]*) anchor_start="${line#anchor_start=}" ;; anchor_length=[0-9]*) anchor_length="${line#anchor_length=}" ;; anchor_hash=[0-9a-f]*) anchor_hash="${line#anchor_hash=}" ;; esac
             done < "$context"
           fi
           {
@@ -127,7 +130,8 @@ jobs:
               else
                 current_device=unavailable; current_inode=unavailable; current_bytes=unavailable
               fi
-              if [[ "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+              current_anchor_hash="$(tail -c "+$((anchor_start + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | head -c "$anchor_length" | sha256sum | cut -d ' ' -f 1)"
+              if [[ "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$anchor_start" =~ ^[0-9]+$ && "$anchor_length" =~ ^[0-9]+$ && "$anchor_hash" =~ ^[0-9a-f]{64}$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" && "$current_anchor_hash" == "$anchor_hash" ]]; then
                 printf 'reviewed-source=fresh-window\n'
                 tail -c "+$((start_bytes + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | tail -c 65000 2>/dev/null || true
               else
@@ -205,12 +209,15 @@ jobs:
           exec {reviewed_fd}<"$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -f "/proc/self/fd/$reviewed_fd"
           IFS='|' read -r start_device start_inode start_bytes < <(stat -Lc '%d|%i|%s' "/proc/self/fd/$reviewed_fd")
-          exec {reviewed_fd}<&-
           case "$start_device:$start_inode:$start_bytes" in *[!0-9:]*|::|*::|:* ) exit 1 ;; esac
+          anchor_length=$(( start_bytes < 4096 ? start_bytes : 4096 ))
+          anchor_start=$(( start_bytes - anchor_length ))
+          anchor_hash="$(tail -c "$anchor_length" -- "/proc/self/fd/$reviewed_fd" | sha256sum | cut -d ' ' -f 1)"
+          exec {reviewed_fd}<&-
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
           context="$evidence_dir/context"
-          printf 'run_marker=%s\nstart_device=%s\nstart_inode=%s\nstart_bytes=%s\n' "$run_marker" "$start_device" "$start_inode" "$start_bytes" > "$context"
+          printf 'run_marker=%s\nstart_device=%s\nstart_inode=%s\nstart_bytes=%s\nanchor_start=%s\nanchor_length=%s\nanchor_hash=%s\n' "$run_marker" "$start_device" "$start_inode" "$start_bytes" "$anchor_start" "$anchor_length" "$anchor_hash" > "$context"
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
@@ -225,11 +232,11 @@ jobs:
           umask 077
           evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-failure-XXXXXX" 2>/dev/null)" || exit 1
           artifact="$evidence_dir/reviewed-server-events.txt"
-          marker=unavailable; start_device=unavailable; start_inode=unavailable; start_bytes=unavailable
+          marker=unavailable; start_device=unavailable; start_inode=unavailable; start_bytes=unavailable; anchor_start=unavailable; anchor_length=unavailable; anchor_hash=unavailable
           context="${ANYTYPE_API_LIVE_EVIDENCE_CONTEXT:-}"
           if [[ -r "$context" ]]; then
             while IFS= read -r line; do
-              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_device=[0-9]*) start_device="${line#start_device=}" ;; start_inode=[0-9]*) start_inode="${line#start_inode=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
+              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_device=[0-9]*) start_device="${line#start_device=}" ;; start_inode=[0-9]*) start_inode="${line#start_inode=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; anchor_start=[0-9]*) anchor_start="${line#anchor_start=}" ;; anchor_length=[0-9]*) anchor_length="${line#anchor_length=}" ;; anchor_hash=[0-9a-f]*) anchor_hash="${line#anchor_hash=}" ;; esac
             done < "$context"
           fi
           {
@@ -244,7 +251,8 @@ jobs:
               else
                 current_device=unavailable; current_inode=unavailable; current_bytes=unavailable
               fi
-              if [[ "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+              current_anchor_hash="$(tail -c "+$((anchor_start + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | head -c "$anchor_length" | sha256sum | cut -d ' ' -f 1)"
+              if [[ "$start_device" == "$current_device" && "$start_inode" == "$current_inode" && "$start_bytes" =~ ^[0-9]+$ && "$anchor_start" =~ ^[0-9]+$ && "$anchor_length" =~ ^[0-9]+$ && "$anchor_hash" =~ ^[0-9a-f]{64}$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" && "$current_anchor_hash" == "$anchor_hash" ]]; then
                 printf 'reviewed-source=fresh-window\n'
                 tail -c "+$((start_bytes + 1))" -- "/proc/self/fd/$reviewed_fd" 2>/dev/null | tail -c 65000 2>/dev/null || true
               else

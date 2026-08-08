@@ -72,7 +72,15 @@ def run_bounded(
                     terminate(process)
                     raise RunnerError("overflow")
                 output.extend(chunk)
-        return process.wait(), bytes(output)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate(process)
+            raise RunnerError("timeout")
+        try:
+            return process.wait(timeout=remaining), bytes(output)
+        except subprocess.TimeoutExpired:
+            terminate(process)
+            raise RunnerError("timeout") from None
     finally:
         selector.close()
         if process.poll() is None:
