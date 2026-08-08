@@ -204,7 +204,6 @@ enum RecordState {
         destination: Option<AtomicExport>,
         published: bool,
     },
-    Released,
     Consumed,
 }
 
@@ -283,6 +282,21 @@ static PUBLICATION_TEST_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<Publi
 static PUBLICATION_TEST_SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> =
     std::sync::OnceLock::new();
 
+#[cfg(test)]
+#[derive(Clone)]
+struct CleanupTestPause {
+    record_name: String,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static CLEANUP_TEST_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<CleanupTestPause>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static CLEANUP_TEST_SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
 async fn begin_publication(
     lease: &mut StageWriteLease,
 ) -> Result<Arc<PublicationCompletion>, StagingError> {
@@ -304,6 +318,20 @@ async fn begin_publication(
 #[cfg(test)]
 fn pause_publication_for_test(record_name: &str) {
     let pause = PUBLICATION_TEST_PAUSE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|pause| pause.as_ref().cloned())
+        .filter(|pause| pause.record_name == record_name);
+    if let Some(pause) = pause {
+        pause.entered.wait();
+        pause.release.wait();
+    }
+}
+
+#[cfg(test)]
+fn pause_cleanup_for_test(record_name: &str) {
+    let pause = CLEANUP_TEST_PAUSE
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .ok()
@@ -592,16 +620,15 @@ impl ArtifactStaging {
                 }
             }
             let records = {
-                let mut records = staging.state.records.write().await;
+                let records = staging.state.records.write().await;
                 records
-                    .drain()
-                    .map(|(_, record)| record)
+                    .iter()
+                    .filter(|(_, record)| claim_expired_record(record))
+                    .map(|(id, record)| (*id, Arc::clone(record)))
                     .collect::<Vec<_>>()
             };
-            for record in records {
-                let name = record.record_name.clone();
-                let directory = staging.state.directory.clone();
-                let _ = tokio::task::spawn_blocking(move || directory.remove_record(&name)).await;
+            for (id, record) in records {
+                drop(staging.spawn_cleanup_coordinator(id, record));
             }
         });
     }
@@ -1264,7 +1291,7 @@ impl ArtifactStaging {
     /// Releases one exact authenticated record and removes its private file.
     pub(crate) async fn release(&self, handle: &str) -> Result<(), StagingError> {
         let (record_id, record) = self.authenticate(handle, None).await?;
-        let mut records = self.state.records.write().await;
+        let records = self.state.records.write().await;
         if !records
             .get(&record_id)
             .is_some_and(|current| Arc::ptr_eq(current, &record))
@@ -1277,46 +1304,40 @@ impl ArtifactStaging {
         let Ok(mut state) = record.state.try_lock() else {
             return Err(StagingError::Conflict);
         };
-        let target = match &mut *state {
-            RecordState::Receiving { destination, .. } => destination.take().map_or(
-                ReleaseCleanupTarget::Absent,
-                ReleaseCleanupTarget::Temporary,
-            ),
+        let pending = match &mut *state {
+            RecordState::Receiving { destination, .. } => Some((destination.take(), false)),
             RecordState::PublicationIndeterminate { completion } if completion.settled() => {
-                ReleaseCleanupTarget::Published
+                Some((None, true))
             }
             RecordState::PublicationIndeterminate { .. } => return Err(StagingError::Conflict),
             RecordState::Ready { .. } | RecordState::Available { .. } | RecordState::Consumed => {
-                ReleaseCleanupTarget::Published
+                Some((None, true))
             }
-            RecordState::CleanupPending { .. } | RecordState::Released => {
-                return Err(StagingError::NotFound);
-            }
+            RecordState::CleanupPending { .. } => return Err(StagingError::Conflict),
         };
-        *state = RecordState::Released;
-        records.remove(&record_id);
+        let Some((destination, published)) = pending else {
+            return Err(StagingError::Conflict);
+        };
+        *state = RecordState::CleanupPending {
+            destination,
+            published,
+        };
+        record.cleanup_blocked.store(true, Ordering::Release);
         drop(records);
         drop(state);
-        let name = record.record_name.clone();
-        let directory = self.state.directory.clone();
-        tokio::task::spawn_blocking(move || match target {
-            ReleaseCleanupTarget::Absent => Ok(()),
-            ReleaseCleanupTarget::Temporary(destination) => {
-                destination.discard().map_err(|_| StagingError::Upstream)
-            }
-            ReleaseCleanupTarget::Published => directory
-                .remove_record(&name)
-                .map_err(|_| StagingError::Upstream),
-        })
-        .await
-        .map_err(|_| StagingError::Upstream)?
+        let cleanup = self.spawn_cleanup_coordinator(record_id, record);
+        match cleanup.await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StagingError::Conflict),
+            Err(_) => Err(StagingError::Upstream),
+        }
     }
 
     fn take_expired_locked(
         &self,
         records: &mut HashMap<[u8; RECORD_BYTES], Arc<StageRecord>>,
         now: Instant,
-    ) -> Vec<Arc<StageRecord>> {
+    ) -> Vec<([u8; RECORD_BYTES], Arc<StageRecord>)> {
         let candidates = records
             .iter()
             .filter_map(|(id, record)| (record.expires <= now).then_some(*id))
@@ -1329,63 +1350,17 @@ impl ArtifactStaging {
             let claimed = records
                 .get(&id)
                 .is_some_and(|record| claim_expired_record(record));
-            if claimed && let Some(record) = records.remove(&id) {
-                expired.push(record);
+            if claimed && let Some(record) = records.get(&id) {
+                expired.push((id, Arc::clone(record)));
             }
         }
         expired
     }
 
-    async fn cleanup_expired(&self, expired: Vec<Arc<StageRecord>>) {
+    async fn cleanup_expired(&self, expired: Vec<([u8; RECORD_BYTES], Arc<StageRecord>)>) {
         let mut reaped = 0_usize;
-        for record in expired {
-            let target = {
-                let mut state = record.state.lock().await;
-                let target = match &mut *state {
-                    RecordState::CleanupPending {
-                        destination,
-                        published: false,
-                    } => destination.take().map_or(
-                        ExpiredCleanupTarget::Absent,
-                        ExpiredCleanupTarget::Temporary,
-                    ),
-                    RecordState::CleanupPending {
-                        destination: _,
-                        published: true,
-                    } => ExpiredCleanupTarget::Published(record.record_name.clone()),
-                    RecordState::Receiving { destination, .. } => destination.take().map_or(
-                        ExpiredCleanupTarget::Absent,
-                        ExpiredCleanupTarget::Temporary,
-                    ),
-                    RecordState::PublicationIndeterminate { completion }
-                        if completion.settled() =>
-                    {
-                        ExpiredCleanupTarget::Published(record.record_name.clone())
-                    }
-                    RecordState::Ready { .. }
-                    | RecordState::Available { .. }
-                    | RecordState::Consumed => {
-                        ExpiredCleanupTarget::Published(record.record_name.clone())
-                    }
-                    RecordState::PublicationIndeterminate { .. } | RecordState::Released => {
-                        ExpiredCleanupTarget::Busy
-                    }
-                };
-                if !matches!(&target, ExpiredCleanupTarget::Busy) {
-                    *state = RecordState::Released;
-                }
-                target
-            };
-            let directory = self.state.directory.clone();
-            let removed = tokio::task::spawn_blocking(move || match target {
-                ExpiredCleanupTarget::Absent => true,
-                ExpiredCleanupTarget::Temporary(destination) => destination.discard().is_ok(),
-                ExpiredCleanupTarget::Published(name) => directory.remove_record(&name).is_ok(),
-                ExpiredCleanupTarget::Busy => false,
-            })
-            .await
-            .unwrap_or(false);
-            if removed {
+        for (id, record) in expired {
+            if self.cleanup_coordinator(id, record).await {
                 reaped = reaped.saturating_add(1);
             }
         }
@@ -1402,7 +1377,7 @@ impl ArtifactStaging {
 
     fn spawn_expired_cleanup(
         &self,
-        expired: Vec<Arc<StageRecord>>,
+        expired: Vec<([u8; RECORD_BYTES], Arc<StageRecord>)>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         if expired.is_empty() {
             return None;
@@ -1412,28 +1387,131 @@ impl ArtifactStaging {
             staging.cleanup_expired(expired).await;
         }))
     }
+
+    async fn cleanup_pending_record(&self, record: &Arc<StageRecord>) -> bool {
+        let target = {
+            let mut state = record.state.lock().await;
+            if !transition_to_cleanup_pending(&mut state) {
+                return false;
+            }
+            match &mut *state {
+                RecordState::CleanupPending {
+                    destination,
+                    published: false,
+                } => destination.take().map_or(
+                    PendingCleanupTarget::Absent,
+                    PendingCleanupTarget::Temporary,
+                ),
+                RecordState::CleanupPending {
+                    destination: _,
+                    published: true,
+                } => PendingCleanupTarget::Published(record.record_name.clone()),
+                _ => return false,
+            }
+        };
+        let directory = self.state.directory.clone();
+        let result = tokio::task::spawn_blocking(move || match target {
+            PendingCleanupTarget::Absent => PendingCleanupResult::Removed,
+            PendingCleanupTarget::Temporary(mut destination) => {
+                if destination.discard_in_place().is_ok() {
+                    PendingCleanupResult::Removed
+                } else {
+                    PendingCleanupResult::Retain(destination)
+                }
+            }
+            PendingCleanupTarget::Published(name) => {
+                if directory.remove_record(&name).is_ok() {
+                    PendingCleanupResult::Removed
+                } else {
+                    PendingCleanupResult::RetainPublished
+                }
+            }
+        })
+        .await;
+        match result {
+            Ok(PendingCleanupResult::Removed) => true,
+            Ok(PendingCleanupResult::Retain(destination)) => {
+                let mut state = record.state.lock().await;
+                if let RecordState::CleanupPending {
+                    destination: slot,
+                    published: false,
+                } = &mut *state
+                {
+                    *slot = Some(destination);
+                }
+                false
+            }
+            Ok(PendingCleanupResult::RetainPublished) | Err(_) => false,
+        }
+    }
+
+    fn spawn_cleanup_coordinator(
+        &self,
+        id: [u8; RECORD_BYTES],
+        record: Arc<StageRecord>,
+    ) -> tokio::task::JoinHandle<bool> {
+        let staging = self.clone();
+        tokio::spawn(async move { staging.cleanup_coordinator(id, record).await })
+    }
+
+    async fn cleanup_coordinator(&self, id: [u8; RECORD_BYTES], record: Arc<StageRecord>) -> bool {
+        #[cfg(test)]
+        pause_cleanup_for_test(&record.record_name);
+        let removed = self.cleanup_pending_record(&record).await;
+        if removed {
+            self.remove_owned_record(id, &record).await;
+        } else {
+            tracing::warn!(
+                target: "any_mcp::operation",
+                operation = "artifact_staging_cleanup",
+                outcome = "retained",
+                "Artifact staging cleanup retained private on-disk evidence"
+            );
+        }
+        record.cleanup_blocked.store(false, Ordering::Release);
+        removed
+    }
+
+    async fn remove_owned_record(&self, id: [u8; RECORD_BYTES], record: &Arc<StageRecord>) {
+        let mut records = self.state.records.write().await;
+        if records
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, record))
+        {
+            records.remove(&id);
+        }
+    }
 }
 
 fn claim_expired_record(record: &StageRecord) -> bool {
-    if record.cleanup_blocked.load(Ordering::Acquire) {
+    if record
+        .cleanup_blocked
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return false;
     }
     let Ok(mut state) = record.state.try_lock() else {
         return true;
     };
-    let pending = match &mut *state {
-        RecordState::Receiving { destination, .. } => Some(match destination.take() {
-            Some(destination) => (Some(destination), false),
-            None => (None, false),
-        }),
+    if !transition_to_cleanup_pending(&mut state) {
+        record.cleanup_blocked.store(false, Ordering::Release);
+        return false;
+    }
+    true
+}
+
+fn transition_to_cleanup_pending(state: &mut RecordState) -> bool {
+    let pending = match state {
+        RecordState::Receiving { destination, .. } => Some((destination.take(), false)),
         RecordState::PublicationIndeterminate { completion } if completion.settled() => {
             Some((None, true))
         }
-        RecordState::PublicationIndeterminate { .. } => None,
         RecordState::Ready { .. } | RecordState::Available { .. } | RecordState::Consumed => {
             Some((None, true))
         }
-        RecordState::CleanupPending { .. } | RecordState::Released => None,
+        RecordState::CleanupPending { .. } => return true,
+        RecordState::PublicationIndeterminate { .. } => None,
     };
     let Some((destination, published)) = pending else {
         return false;
@@ -1445,17 +1523,16 @@ fn claim_expired_record(record: &StageRecord) -> bool {
     true
 }
 
-enum ReleaseCleanupTarget {
-    Absent,
-    Temporary(AtomicExport),
-    Published,
-}
-
-enum ExpiredCleanupTarget {
+enum PendingCleanupTarget {
     Absent,
     Temporary(AtomicExport),
     Published(String),
-    Busy,
+}
+
+enum PendingCleanupResult {
+    Removed,
+    Retain(AtomicExport),
+    RetainPublished,
 }
 
 struct IncomingWrite {
@@ -1794,9 +1871,7 @@ fn status_for(record: &StageRecord, state: &RecordState) -> StageStatus {
             ("available", record.size_bytes, Some(sha256.clone()))
         }
         RecordState::PublicationIndeterminate { .. } => ("receiving", record.size_bytes, None),
-        RecordState::CleanupPending { .. } | RecordState::Released => {
-            ("receiving", record.size_bytes, None)
-        }
+        RecordState::CleanupPending { .. } => ("receiving", record.size_bytes, None),
         RecordState::Consumed => ("consumed", record.size_bytes, None),
     };
     StageStatus {
@@ -1903,6 +1978,30 @@ mod tests {
             .get_or_init(|| std::sync::Mutex::new(None))
             .lock()
             .expect("publication pause lock") = None;
+    }
+
+    fn install_cleanup_pause(
+        record_name: &str,
+    ) -> (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let pause = CleanupTestPause {
+            record_name: record_name.to_owned(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        };
+        *CLEANUP_TEST_PAUSE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("cleanup pause lock") = Some(pause);
+        (entered, release)
+    }
+
+    fn clear_cleanup_pause() {
+        *CLEANUP_TEST_PAUSE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("cleanup pause lock") = None;
     }
 
     #[tokio::test]
@@ -2121,6 +2220,64 @@ mod tests {
             .release(&allocation.handle)
             .await
             .expect("release export");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linked_staged_record_retains_quota_until_safe_ttl_cleanup() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_export(space_id(), 5, Some("application/octet-stream".to_owned()))
+            .await
+            .expect("allocate export");
+        let before_release = test.staging.available_quota().await;
+        let mut lease = test
+            .staging
+            .begin_write(
+                &allocation.handle,
+                Some(&allocation.record),
+                StageDirection::Export,
+                0,
+            )
+            .await
+            .expect("lease export");
+        let mut destination = lease.take_destination().expect("export destination");
+        destination.write_all(b"hello").expect("write export");
+        test.staging
+            .finish_export(
+                lease,
+                destination,
+                5,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_owned(),
+            )
+            .await
+            .expect("publish export");
+
+        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        let retained_link = test.root.join("retained-link.bin");
+        std::fs::hard_link(&staged_path, &retained_link).expect("link staged record");
+
+        assert!(matches!(
+            test.staging.release(&allocation.handle).await,
+            Err(StagingError::Conflict)
+        ));
+        assert_eq!(test.staging.available_quota().await, before_release);
+        assert!(staged_path.exists());
+        assert!(retained_link.exists());
+        assert_eq!(test.staging.state.records.read().await.len(), 1);
+
+        std::fs::remove_file(&retained_link).expect("remove retained link");
+        let expired = {
+            let mut records = test.staging.state.records.write().await;
+            test.staging
+                .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
+        };
+        assert_eq!(expired.len(), 1);
+        test.staging.cleanup_expired(expired).await;
+
+        assert!(!staged_path.exists());
+        assert!(test.staging.state.records.read().await.is_empty());
     }
 
     #[tokio::test]
@@ -2391,6 +2548,125 @@ mod tests {
             .await
             .expect("release restored import");
         assert!(test.staging.state.records.read().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_release_keeps_published_cleanup_coordinator_alive() {
+        let _serial = CLEANUP_TEST_SERIAL
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_export(space_id(), 5, Some("application/octet-stream".to_owned()))
+            .await
+            .expect("allocate export");
+        let mut lease = test
+            .staging
+            .begin_write(
+                &allocation.handle,
+                Some(&allocation.record),
+                StageDirection::Export,
+                0,
+            )
+            .await
+            .expect("lease export");
+        let mut destination = lease.take_destination().expect("export destination");
+        destination.write_all(b"hello").expect("write export");
+        test.staging
+            .finish_export(
+                lease,
+                destination,
+                5,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_owned(),
+            )
+            .await
+            .expect("publish export");
+        let (entered, release) = install_cleanup_pause(&format!("{}.bin", allocation.record));
+        let staging = test.staging.clone();
+        let handle = allocation.handle.clone();
+        let release_task = tokio::spawn(async move { staging.release(&handle).await });
+        tokio::task::spawn_blocking(move || entered.wait())
+            .await
+            .expect("cleanup coordinator entered");
+        release_task.abort();
+        assert!(
+            release_task
+                .await
+                .expect_err("release task cancelled")
+                .is_cancelled()
+        );
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release cleanup coordinator");
+        clear_cleanup_pause();
+
+        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !test.staging.state.records.read().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("coordinator settled map ownership");
+        assert!(!staged_path.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_release_keeps_temporary_cleanup_coordinator_alive() {
+        let _serial = CLEANUP_TEST_SERIAL
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(
+                space_id(),
+                5,
+                Some("application/octet-stream".to_owned()),
+                None,
+            )
+            .await
+            .expect("allocate import");
+        let (entered, release) = install_cleanup_pause(&format!("{}.bin", allocation.record));
+        let staging = test.staging.clone();
+        let handle = allocation.handle.clone();
+        let release_task = tokio::spawn(async move { staging.release(&handle).await });
+        tokio::task::spawn_blocking(move || entered.wait())
+            .await
+            .expect("cleanup coordinator entered");
+        release_task.abort();
+        assert!(
+            release_task
+                .await
+                .expect_err("release task cancelled")
+                .is_cancelled()
+        );
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release cleanup coordinator");
+        clear_cleanup_pause();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !test.staging.state.records.read().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("coordinator settled map ownership");
+        let names = std::fs::read_dir(&test.root)
+            .expect("read staging root")
+            .map(|entry| {
+                entry
+                    .expect("staging entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![".any-mcp-staging.lock"]);
     }
 
     #[tokio::test]

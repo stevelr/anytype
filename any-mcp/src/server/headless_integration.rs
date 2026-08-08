@@ -53,16 +53,17 @@ pub(super) use crate::artifact_roots::acceptance_owner_private_file;
 pub(super) mod live_scenario;
 
 use live_scenario::{
-    ADVERSARIAL_DEFAULT_CASE_IDS, ADVERSARIAL_SPECIAL_CASE_IDS, AdversarialExecution,
-    ArtifactAdversarialRun, ArtifactControlPlane, ArtifactLimitProfile, ArtifactPolicyFixture,
-    ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit,
-    ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactTransport, FixtureSpacePolicy,
-    FixtureValidatorPolicy, UNAUTHORIZED_SPACE_ID, assert_artifact_parity,
+    ADVERSARIAL_DEFAULT_CASE_IDS, ADVERSARIAL_SPECIAL_CASE_IDS, AdversarialCaseId,
+    AdversarialExecution, ArtifactAdversarialRun, ArtifactControlPlane, ArtifactLimitProfile,
+    ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario,
+    ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactTransport,
+    FixtureSpacePolicy, FixtureValidatorPolicy, UNAUTHORIZED_SPACE_ID, assert_artifact_parity,
     assert_artifact_policy_parity, audit_server_log, require_completed, run_artifact_alias_cases,
-    run_artifact_empty_client_roots_case, run_artifact_hostile_validator_case,
-    run_artifact_malicious_metadata_default, run_artifact_missing_roots_case,
-    run_artifact_payload_boundary_cases, run_artifact_policy_scenario, run_artifact_smoke_scenario,
-    run_artifact_traversal_default, server_log_baseline,
+    run_artifact_dynamic_filesystem_cases, run_artifact_empty_client_roots_case,
+    run_artifact_hostile_validator_case, run_artifact_malicious_metadata_default,
+    run_artifact_missing_roots_case, run_artifact_payload_boundary_cases,
+    run_artifact_policy_scenario, run_artifact_smoke_scenario, run_artifact_traversal_default,
+    server_log_baseline,
 };
 use live_scenario::{
     BODY_PAGINATION_ITEM_COUNT, ChatsRegistryFixture, McpDriver, OptionalFastWorkflow,
@@ -2613,6 +2614,21 @@ const DISPOSABLE_CREDENTIAL_ENV_NAMES: [&str; 4] = [
     "ANYTYPE_KEY_SESSION_TOKEN",
 ];
 
+fn dynamic_filesystem_direct_runtime_case_ids() -> Vec<AdversarialCaseId> {
+    vec![
+        AdversarialCaseId::Sym01,
+        AdversarialCaseId::Sym02,
+        AdversarialCaseId::Sym03,
+        AdversarialCaseId::Sym04,
+        AdversarialCaseId::Sym05,
+        AdversarialCaseId::Sym06,
+        AdversarialCaseId::Sym09,
+        AdversarialCaseId::Hlink01,
+        AdversarialCaseId::Hlink02,
+        AdversarialCaseId::Hlink04,
+    ]
+}
+
 fn required_artifact_log_baseline() -> Result<ArtifactServerLogBaseline, TestError> {
     let path = std::env::var_os(ARTIFACT_REDACTED_LOG_ENV)
         .filter(|value| !value.is_empty())
@@ -2988,6 +3004,80 @@ async fn headless_artifact_traversal_direct_scenarios() {
     execution
         .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
         .expect("bounded traversal owner evidence");
+}
+
+/// Runs the implemented dynamic filesystem cases owned by the direct router.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_dynamic_filesystem_direct_scenarios() {
+    let owner_evidence = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let callback_evidence = std::sync::Arc::clone(&owner_evidence);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-dynamic-filesystem",
+        move |ctx| {
+            Box::pin(async move {
+                let log_baseline = required_artifact_log_baseline()?;
+                let mut log_needles = disposable_credential_log_needles(ctx.as_ref())?;
+                let policy = ArtifactPolicyFixture::create(&ctx.space_id).map_err(|_| {
+                    TestError::Assertion {
+                        message: "create dynamic filesystem acceptance policy".to_owned(),
+                    }
+                })?;
+                log_needles.push(policy.forbidden_log_needle());
+                let execution =
+                    {
+                        let server = live_artifact_server(ctx.as_ref(), &policy).await?;
+                        let root_registry = server.runtime().artifact_roots().ok_or_else(|| {
+                            TestError::Assertion {
+                                message: "dynamic filesystem runtime omitted retained roots"
+                                    .to_owned(),
+                            }
+                        })?;
+                        let root_access_attempts = || root_registry.acceptance_access_attempts();
+                        let successful_import_opens =
+                            || root_registry.acceptance_successful_import_opens();
+                        let run = ArtifactAdversarialRun {
+                            control: ArtifactControlPlane::DirectRouter,
+                            policy: &policy,
+                            ctx: ctx.as_ref(),
+                            root_access_attempts: Some(&root_access_attempts),
+                            successful_import_opens: Some(&successful_import_opens),
+                        };
+                        let mut driver = DirectRouterDriver { server: &server };
+                        Box::pin(run_artifact_dynamic_filesystem_cases(&mut driver, &run))
+                            .await
+                            .map_err(|_| TestError::Assertion {
+                                message: "direct dynamic filesystem acceptance failed".to_owned(),
+                            })?
+                    };
+                execution
+                    .assert_exact(&dynamic_filesystem_direct_runtime_case_ids())
+                    .map_err(|_| TestError::Assertion {
+                        message: "direct dynamic filesystem execution partition was incomplete"
+                            .to_owned(),
+                    })?;
+                *callback_evidence.lock().map_err(|_| TestError::Assertion {
+                    message: "retain dynamic filesystem owner evidence".to_owned(),
+                })? = Some((log_baseline, log_needles, execution));
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct dynamic filesystem acceptance");
+    require_completed(outcome, "direct dynamic filesystem acceptance")
+        .expect("prefix-authorized disposable admission");
+    let (log_baseline, log_needles, execution) = owner_evidence
+        .lock()
+        .expect("dynamic filesystem owner evidence lock")
+        .take()
+        .expect("dynamic filesystem owner evidence");
+    let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)
+        .expect("post-cleanup dynamic filesystem log audit");
+    execution
+        .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
+        .expect("bounded dynamic filesystem owner evidence");
 }
 
 /// Runs the default-policy alias and hostile-metadata direct-router cases.

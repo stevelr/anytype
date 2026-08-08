@@ -1862,20 +1862,21 @@ most 128 bytes/32 tokens, and an `artifact_bytes + 1` reservation is refused as
 `bounded_result`. Payload bytes never enter an MCP argument, result, transcript,
 or diagnostic.
 
-The adversarial family owns a closed 122-case inventory. The 43 cases assigned
-to this gate
-exercise traversal and native-path grammar, capability-indistinguishable root
-refusals, volume case and normalization aliases, Windows device names,
-staging-record case sensitivity, bounded names and payloads, MIME conflicts,
-invalid document encodings, and hostile upstream metadata. Direct owners
-execute the 42 non-startup cases. Stable and preview stdio each repeat four
-sentinels, while the spawned gate separately owns the production startup
-rejection. Each owner records a fixed case
-ID only after its exact outcome, resource inventory, staging state, and cleanup
-assertions pass. Windows-only aliases and non-activating validator targets are
-explicit capability records rather than silent skips; the remaining 79 cases
-stay closed and pending for the subsequent link, race, handle, crash, flood,
-and cleanup tickets. Direct traversal and alias checks also snapshot test-only
+The adversarial family owns a closed 122-case inventory. Its case-status map
+records each implemented outcome and keeps every unexercised row pending.
+Implemented coverage exercises traversal and native-path grammar,
+capability-indistinguishable root refusals, volume case and normalization
+aliases, Windows device names, staging-record case sensitivity, bounded names
+and payloads, MIME conflicts, invalid document encodings, and hostile upstream
+metadata. The implemented dynamic subset is `SYM-01` through `SYM-06`,
+`SYM-09`, startup `SYM-11` and `SYM-12`, and `HLINK-01`, `HLINK-02`, and
+`HLINK-04`. Remaining rename-race and dynamic filesystem rows stay pending.
+Direct owners and spawned stdio owners enforce their exact partitions, and the
+spawned gate separately owns production startup rejections. Each owner
+records a fixed case ID only after its exact outcome, resource inventory,
+staging state, and cleanup assertions pass. Windows-only aliases and
+non-activating validator targets are explicit capability records rather than
+silent skips. Direct traversal and alias checks also snapshot test-only
 retained-root access and successful-open counters, while every live owner binds
 its log audit to one opened owner-private descriptor and rejects bounded-window
 matches for fixture paths, transient handles, or credentials.
@@ -1898,7 +1899,7 @@ Direct and spawned owners audit only the descriptor-bound appended window and
 fail on any panic, fatal, or error class outside the already isolated upstream
 set; only counts and fixed category names are reported, never log lines.
 
-Select the live acceptance targets explicitly: five direct-router cases by
+Select the live acceptance targets explicitly: six direct-router cases by
 their exact paths, and the five spawned cases by their shared prefix:
 
 ```sh
@@ -1917,6 +1918,9 @@ cargo test -p any-mcp --lib headless_artifact_alias_metadata_direct_scenarios \
 cargo test -p any-mcp --lib headless_artifact_bounded_metadata_direct_scenarios \
   -- --ignored --exact \
   server::headless_integration::headless_artifact_bounded_metadata_direct_scenarios
+cargo test -p any-mcp --lib headless_artifact_dynamic_filesystem_direct_scenarios \
+  -- --ignored --exact \
+  server::headless_integration::headless_artifact_dynamic_filesystem_direct_scenarios
 cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e \
   headless_artifact_ -- --ignored --test-threads=1
 ```

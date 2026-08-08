@@ -39,7 +39,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anytype::{
@@ -205,6 +205,13 @@ macro_rules! adversarial_case_ids {
                     | Self::Mal09 | Self::Mal10 | Self::Mal11 | Self::Mal12 | Self::Mal14 => {
                         AdversarialCaseStatus::Executed
                     }
+                    Self::Sym01 | Self::Sym02 | Self::Sym03 | Self::Sym04 | Self::Sym05
+                    | Self::Sym06 | Self::Sym07 | Self::Sym08 | Self::Sym09 | Self::Sym10
+                    | Self::Sym11 | Self::Sym12 | Self::Sym13 | Self::Race01 | Self::Race02
+                    | Self::Race03 | Self::Race04 | Self::Race05 | Self::Race06 | Self::Race07
+                    | Self::Race08 | Self::Race09 | Self::Race10 | Self::Hlink01
+                    | Self::Hlink02 | Self::Hlink03 | Self::Hlink04 | Self::Hlink05
+                    | Self::Hlink06 => dynamic_filesystem_status(self),
                     Self::Alias03 | Self::Alias04 | Self::Alias05 => alias_windows_status(),
                     Self::Mal13 => validator_platform_status(),
                     _ => AdversarialCaseStatus::Pending,
@@ -339,6 +346,92 @@ pub const ADVERSARIAL_STDIO_SENTINEL_IDS: &[AdversarialCaseId] = &[
     AdversarialCaseId::Mal02,
 ];
 
+/// Exact dynamic-filesystem cases owned by `any-d9ia.8.2.3`.
+pub const ADVERSARIAL_DYNAMIC_FILESYSTEM_CASE_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Sym01,
+    AdversarialCaseId::Sym02,
+    AdversarialCaseId::Sym03,
+    AdversarialCaseId::Sym04,
+    AdversarialCaseId::Sym05,
+    AdversarialCaseId::Sym06,
+    AdversarialCaseId::Sym07,
+    AdversarialCaseId::Sym08,
+    AdversarialCaseId::Sym09,
+    AdversarialCaseId::Sym10,
+    AdversarialCaseId::Sym11,
+    AdversarialCaseId::Sym12,
+    AdversarialCaseId::Sym13,
+    AdversarialCaseId::Race01,
+    AdversarialCaseId::Race02,
+    AdversarialCaseId::Race03,
+    AdversarialCaseId::Race04,
+    AdversarialCaseId::Race05,
+    AdversarialCaseId::Race06,
+    AdversarialCaseId::Race07,
+    AdversarialCaseId::Race08,
+    AdversarialCaseId::Race09,
+    AdversarialCaseId::Race10,
+    AdversarialCaseId::Hlink01,
+    AdversarialCaseId::Hlink02,
+    AdversarialCaseId::Hlink03,
+    AdversarialCaseId::Hlink04,
+    AdversarialCaseId::Hlink05,
+    AdversarialCaseId::Hlink06,
+];
+
+/// Runtime rows in the direct owner; startup-only SYM-11/12 are merged later.
+pub const ADVERSARIAL_DYNAMIC_RUNTIME_CASE_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Sym01,
+    AdversarialCaseId::Sym02,
+    AdversarialCaseId::Sym03,
+    AdversarialCaseId::Sym04,
+    AdversarialCaseId::Sym05,
+    AdversarialCaseId::Sym06,
+    AdversarialCaseId::Sym07,
+    AdversarialCaseId::Sym08,
+    AdversarialCaseId::Sym09,
+    AdversarialCaseId::Sym10,
+    AdversarialCaseId::Sym13,
+    AdversarialCaseId::Race01,
+    AdversarialCaseId::Race02,
+    AdversarialCaseId::Race03,
+    AdversarialCaseId::Race04,
+    AdversarialCaseId::Race05,
+    AdversarialCaseId::Race06,
+    AdversarialCaseId::Race07,
+    AdversarialCaseId::Race08,
+    AdversarialCaseId::Race09,
+    AdversarialCaseId::Race10,
+    AdversarialCaseId::Hlink01,
+    AdversarialCaseId::Hlink02,
+    AdversarialCaseId::Hlink03,
+    AdversarialCaseId::Hlink04,
+    AdversarialCaseId::Hlink05,
+    AdversarialCaseId::Hlink06,
+];
+
+/// Implemented dynamic-filesystem sentinels repeated through stable stdio.
+pub const ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS: &[AdversarialCaseId] =
+    &[AdversarialCaseId::Sym01, AdversarialCaseId::Hlink01];
+
+/// Fixture root replaced by a directory symlink before a startup probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactSymlinkStartupTarget {
+    /// The configured client-visible import root (SYM-11).
+    ImportRoot,
+    /// The private staging root (SYM-12).
+    StagingRoot,
+}
+
+/// Content-free result of one bounded startup probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactStartupCaseOutcome {
+    /// Startup failed with the supplied fixed diagnostic category.
+    Rejected(&'static str),
+    /// The target cannot create directory symlinks on this platform.
+    Unsupported,
+}
+
 /// Whether a case is executed now, explicitly unsupported, or still pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdversarialCaseStatus {
@@ -363,6 +456,30 @@ const fn validator_platform_status() -> AdversarialCaseStatus {
         AdversarialCaseStatus::Executed
     } else {
         AdversarialCaseStatus::PlatformUnsupported
+    }
+}
+
+const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStatus {
+    match id {
+        AdversarialCaseId::Sym01
+        | AdversarialCaseId::Sym02
+        | AdversarialCaseId::Sym03
+        | AdversarialCaseId::Sym04
+        | AdversarialCaseId::Sym05
+        | AdversarialCaseId::Sym06
+        | AdversarialCaseId::Sym09
+        | AdversarialCaseId::Sym11
+        | AdversarialCaseId::Sym12
+        | AdversarialCaseId::Hlink01
+        | AdversarialCaseId::Hlink02
+        | AdversarialCaseId::Hlink04 => {
+            if cfg!(any(unix, windows)) {
+                AdversarialCaseStatus::Executed
+            } else {
+                AdversarialCaseStatus::PlatformUnsupported
+            }
+        }
+        _ => AdversarialCaseStatus::Pending,
     }
 }
 
@@ -640,6 +757,18 @@ impl AdversarialExecution {
     pub fn record_unsupported(&mut self, id: AdversarialCaseId) -> Result<(), String> {
         let reason = unsupported_reason(id)
             .ok_or_else(|| "adversarial case has no approved unsupported reason".to_owned())?;
+        self.record_unsupported_with_reason(id, reason)
+    }
+
+    /// Records one capability-probed unsupported case with a fixed safe reason.
+    pub fn record_unsupported_with_reason(
+        &mut self,
+        id: AdversarialCaseId,
+        reason: &'static str,
+    ) -> Result<(), String> {
+        if !approved_unsupported_reason(id, reason) {
+            return Err("adversarial unsupported reason was not approved".to_owned());
+        }
         if self.executed.contains(&id) || !self.unsupported.insert(id) {
             return Err("adversarial case partitioned more than once".to_owned());
         }
@@ -656,8 +785,13 @@ impl AdversarialExecution {
         for id in other.executed {
             self.record_executed(id)?;
         }
-        for id in other.unsupported {
-            self.record_unsupported(id)?;
+        for id in other.unsupported.iter().copied() {
+            let reason = other
+                .unsupported_reasons
+                .get(&id)
+                .copied()
+                .ok_or_else(|| "adversarial unsupported reason was missing".to_owned())?;
+            self.record_unsupported_with_reason(id, reason)?;
         }
         self.quota_restored.extend(other.quota_restored);
         self.forbidden_log_needles
@@ -858,8 +992,66 @@ fn unsupported_reason(id: AdversarialCaseId) -> Option<&'static str> {
         AdversarialCaseId::Alias04 if !cfg!(windows) => Some("windows_only"),
         AdversarialCaseId::Alias04 if cfg!(windows) => Some("windows_8dot3_unavailable"),
         AdversarialCaseId::Mal13 if !VALIDATOR_PLATFORM_ACTIVATES => Some("validator_not_active"),
+        AdversarialCaseId::Sym07 | AdversarialCaseId::Sym08 | AdversarialCaseId::Sym10
+            if !cfg!(windows) =>
+        {
+            Some("windows_only")
+        }
+        AdversarialCaseId::Sym13
+        | AdversarialCaseId::Race05
+        | AdversarialCaseId::Race06
+        | AdversarialCaseId::Hlink03
+        | AdversarialCaseId::Hlink05
+            if !cfg!(unix) =>
+        {
+            Some("unix_only")
+        }
+        AdversarialCaseId::Sym01
+        | AdversarialCaseId::Sym02
+        | AdversarialCaseId::Sym03
+        | AdversarialCaseId::Sym04
+        | AdversarialCaseId::Sym05
+        | AdversarialCaseId::Sym06
+        | AdversarialCaseId::Sym09
+        | AdversarialCaseId::Sym11
+        | AdversarialCaseId::Sym12
+        | AdversarialCaseId::Race01
+        | AdversarialCaseId::Race02
+        | AdversarialCaseId::Race03
+        | AdversarialCaseId::Race04
+        | AdversarialCaseId::Race07
+        | AdversarialCaseId::Race08
+        | AdversarialCaseId::Race09
+        | AdversarialCaseId::Race10
+        | AdversarialCaseId::Hlink01
+        | AdversarialCaseId::Hlink02
+        | AdversarialCaseId::Hlink04
+        | AdversarialCaseId::Hlink06
+            if !cfg!(any(unix, windows)) =>
+        {
+            Some("filesystem_primitive_unavailable")
+        }
         _ => None,
     }
+}
+
+fn approved_unsupported_reason(id: AdversarialCaseId, reason: &'static str) -> bool {
+    unsupported_reason(id) == Some(reason)
+        || matches!(
+            (id, reason),
+            (
+                AdversarialCaseId::Sym11 | AdversarialCaseId::Sym12,
+                "symlink_creation_unavailable"
+            ) | (
+                AdversarialCaseId::Hlink01
+                    | AdversarialCaseId::Hlink02
+                    | AdversarialCaseId::Hlink03
+                    | AdversarialCaseId::Hlink04
+                    | AdversarialCaseId::Hlink05
+                    | AdversarialCaseId::Hlink06,
+                "link_count_unavailable"
+            )
+        )
 }
 
 /// Fixture inputs for the path, alias, and hostile-metadata scenarios.
@@ -1139,6 +1331,372 @@ async fn adversarial_seed_document(
     let object_id = required_str(&created, "/object_id")?;
     run.ctx.register_object(&object_id);
     Ok(object_id)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileObservation {
+    len: u64,
+    modified: Option<SystemTime>,
+    accessed: Option<SystemTime>,
+}
+
+fn observe_file(path: &Path) -> Result<FileObservation, String> {
+    let metadata = fs::metadata(path).map_err(|_| "observe adversarial file".to_owned())?;
+    Ok(FileObservation {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        accessed: metadata.accessed().ok(),
+    })
+}
+
+fn create_file_symlink(target: &Path, link: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link)
+        .map_err(|_| "create adversarial file symlink".to_owned())?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(target, link)
+        .map_err(|_| "create adversarial file symlink".to_owned())?;
+    #[cfg(not(any(unix, windows)))]
+    return Err("adversarial file symlinks are unavailable".to_owned());
+    Ok(())
+}
+
+fn create_directory_symlink(target: &Path, link: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link)
+        .map_err(|_| "create adversarial directory symlink".to_owned())?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(target, link)
+        .map_err(|_| "create adversarial directory symlink".to_owned())?;
+    #[cfg(not(any(unix, windows)))]
+    return Err("adversarial directory symlinks are unavailable".to_owned());
+    Ok(())
+}
+
+async fn run_sym01(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let outside = run
+        .policy
+        .base
+        .join(format!("sym01-outside-{}", unique_suffix()));
+    let link_name = format!("sym01-link-{}", unique_suffix());
+    let link = run.policy.import.join(&link_name);
+    fs::write(&outside, b"SYM-01 outside sentinel")
+        .map_err(|_| "seed SYM-01 outside file".to_owned())?;
+    secure_files(std::slice::from_ref(&outside))?;
+    create_file_symlink(&outside, &link)?;
+    let before = observe_file(&outside)?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &link_name),
+            "sym01.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&link_name],
+    )
+    .await?;
+    if observe_file(&outside)? != before {
+        return Err("SYM-01 read or changed the outside file".to_owned());
+    }
+    Ok(())
+}
+
+async fn run_hlink01(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let outside = run
+        .policy
+        .base
+        .join(format!("hlink01-outside-{}", unique_suffix()));
+    let link_name = format!("hlink01-link-{}", unique_suffix());
+    let link = run.policy.import.join(&link_name);
+    fs::write(&outside, b"HLINK-01 outside sentinel")
+        .map_err(|_| "seed HLINK-01 outside file".to_owned())?;
+    secure_files(std::slice::from_ref(&outside))?;
+    fs::hard_link(&outside, &link).map_err(|_| "create HLINK-01 hard link".to_owned())?;
+    let before = observe_file(&outside)?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &link_name),
+            "hlink01.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&link_name],
+    )
+    .await?;
+    if observe_file(&outside)? != before {
+        return Err("HLINK-01 read or changed the outside file".to_owned());
+    }
+    Ok(())
+}
+
+/// Executes the currently closed dynamic-filesystem rows against one router.
+///
+/// Race rows remain absent until their production synchronization seams are
+/// available; callers' exact-owner assertion therefore fails closed rather
+/// than reporting unobserved cases.
+///
+/// # Errors
+///
+/// Returns a fixed category on the first production outcome, invariant, or
+/// quota mismatch.
+pub async fn run_artifact_dynamic_filesystem_cases(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let mut execution = AdversarialExecution::default();
+
+    run_sym01(driver, run).await?;
+    execution.record_executed(AdversarialCaseId::Sym01)?;
+
+    let sym02_name = format!("sym02-link-{}", unique_suffix());
+    create_file_symlink(
+        &run.policy.import.join(ArtifactPolicyFixture::FILE_SOURCE),
+        &run.policy.import.join(&sym02_name),
+    )?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &sym02_name),
+            "sym02.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&sym02_name],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Sym02)?;
+
+    let sym03_target = run
+        .policy
+        .import
+        .join(format!("sym03-target-{}", unique_suffix()));
+    let sym03_link_name = format!("sym03-link-{}", unique_suffix());
+    fs::create_dir(&sym03_target).map_err(|_| "create SYM-03 target directory".to_owned())?;
+    secure_directories(&[&sym03_target])?;
+    fs::write(sym03_target.join("source.bin"), b"SYM-03 source")
+        .map_err(|_| "seed SYM-03 source".to_owned())?;
+    secure_files(&[sym03_target.join("source.bin")])?;
+    create_directory_symlink(&sym03_target, &run.policy.import.join(&sym03_link_name))?;
+    let sym03_path = format!("{sym03_link_name}/source.bin");
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &sym03_path),
+            "sym03.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&sym03_path],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Sym03)?;
+
+    let sym04_name = format!("sym04-link-{}", unique_suffix());
+    create_file_symlink(
+        &run.policy
+            .base
+            .join(format!("sym04-missing-{}", unique_suffix())),
+        &run.policy.import.join(&sym04_name),
+    )?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &sym04_name),
+            "sym04.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&sym04_name],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Sym04)?;
+
+    let file_id = adversarial_seed_file(driver, run, "dynamic-export-source.bin").await?;
+    let sym05_escape = run
+        .policy
+        .base
+        .join(format!("sym05-escape-{}", unique_suffix()));
+    let sym05_link_name = format!("sym05-link-{}", unique_suffix());
+    fs::create_dir(&sym05_escape).map_err(|_| "create SYM-05 escape directory".to_owned())?;
+    secure_directories(&[&sym05_escape])?;
+    create_directory_symlink(&sym05_escape, &run.policy.export.join(&sym05_link_name))?;
+    let sym05_path = format!("{sym05_link_name}/out.bin");
+    adversarial_refusal(
+        driver,
+        "file_export",
+        json!({
+            "space": run.ctx.space_id,
+            "file_id": file_id,
+            "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &sym05_path),
+            "idempotency_key": format!("sym05-export-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::NotFound,
+        &[&sym05_path],
+    )
+    .await?;
+    if fs::read_dir(&sym05_escape)
+        .map_err(|_| "inspect SYM-05 escape directory".to_owned())?
+        .next()
+        .is_some()
+    {
+        return Err("SYM-05 changed the escape directory".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Sym05)?;
+
+    let sym06_target = run
+        .policy
+        .base
+        .join(format!("sym06-target-{}", unique_suffix()));
+    let sym06_name = format!("sym06-link-{}", unique_suffix());
+    let sym06_bytes = b"SYM-06 escape sentinel";
+    fs::write(&sym06_target, sym06_bytes).map_err(|_| "seed SYM-06 target".to_owned())?;
+    secure_files(std::slice::from_ref(&sym06_target))?;
+    create_file_symlink(&sym06_target, &run.policy.export.join(&sym06_name))?;
+    adversarial_refusal(
+        driver,
+        "file_export",
+        json!({
+            "space": run.ctx.space_id,
+            "file_id": file_id,
+            "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &sym06_name),
+            "idempotency_key": format!("sym06-export-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Conflict,
+        &[&sym06_name],
+    )
+    .await?;
+    if fs::read(&sym06_target).ok().as_deref() != Some(sym06_bytes) {
+        return Err("SYM-06 changed the escape target".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Sym06)?;
+
+    let sym09_path = "file.bin:evil";
+    let root_access = run
+        .root_access_attempts
+        .ok_or_else(|| "SYM-09 requires retained-root access evidence".to_owned())?;
+    let root_access_before = root_access();
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, sym09_path),
+            "sym09.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[sym09_path],
+    )
+    .await?;
+    if root_access() != root_access_before {
+        return Err("SYM-09 reached the retained-root boundary".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Sym09)?;
+
+    run_hlink01(driver, run).await?;
+    execution.record_executed(AdversarialCaseId::Hlink01)?;
+
+    let hlink02_name = format!("hlink02-link-{}", unique_suffix());
+    fs::hard_link(
+        run.policy.import.join(ArtifactPolicyFixture::FILE_SOURCE),
+        run.policy.import.join(&hlink02_name),
+    )
+    .map_err(|_| "create HLINK-02 hard link".to_owned())?;
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            &run.ctx.space_id,
+            local_source(ArtifactPolicyFixture::IMPORT_ROOT, &hlink02_name),
+            "hlink02.bin",
+            None,
+        ),
+        ExpectedToolErrorKind::NotFound,
+        &[&hlink02_name],
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Hlink02)?;
+
+    let hlink04_target = run
+        .policy
+        .base
+        .join(format!("hlink04-target-{}", unique_suffix()));
+    let hlink04_name = format!("hlink04-link-{}", unique_suffix());
+    let hlink04_bytes = b"HLINK-04 outside sentinel";
+    fs::write(&hlink04_target, hlink04_bytes).map_err(|_| "seed HLINK-04 target".to_owned())?;
+    secure_files(std::slice::from_ref(&hlink04_target))?;
+    fs::hard_link(&hlink04_target, run.policy.export.join(&hlink04_name))
+        .map_err(|_| "create HLINK-04 hard link".to_owned())?;
+    adversarial_refusal(
+        driver,
+        "file_export",
+        json!({
+            "space": run.ctx.space_id,
+            "file_id": file_id,
+            "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &hlink04_name),
+            "idempotency_key": format!("hlink04-export-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Conflict,
+        &[&hlink04_name],
+    )
+    .await?;
+    if fs::read(&hlink04_target).ok().as_deref() != Some(hlink04_bytes) {
+        return Err("HLINK-04 changed the outside file".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Hlink04)?;
+
+    let objects_after = artifact_object_ids(run.ctx).await?;
+    if !objects_before.is_subset(&objects_after)
+        || objects_after.len() != objects_before.len().saturating_add(1)
+    {
+        return Err("dynamic filesystem refusals changed the object inventory".to_owned());
+    }
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    Ok(execution)
+}
+
+/// Repeats the implemented stable-stdio dynamic filesystem sentinels.
+///
+/// # Errors
+///
+/// Returns a fixed category if either production refusal, filesystem
+/// invariant, or staging quota diverges.
+pub async fn run_artifact_dynamic_filesystem_stdio_sentinels(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let mut execution = AdversarialExecution::default();
+    run_sym01(driver, run).await?;
+    execution.record_executed(AdversarialCaseId::Sym01)?;
+    run_hlink01(driver, run).await?;
+    execution.record_executed(AdversarialCaseId::Hlink01)?;
+    if artifact_object_ids(run.ctx).await? != objects_before {
+        return Err("dynamic stdio refusals changed the object inventory".to_owned());
+    }
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    Ok(execution)
 }
 
 /// Executes TRAV-01 through TRAV-18 against one production router.
@@ -3714,6 +4272,87 @@ pub struct ArtifactPolicyFixture {
     staging_base_url: Option<String>,
     validator: Option<PinnedValidatorExecutable>,
     options: ArtifactPolicyOptions,
+}
+
+/// Replaces the selected configured directory with a symlink to its renamed
+/// original, leaving the policy text unchanged for a startup rejection probe.
+///
+/// # Errors
+///
+/// Returns a fixed category when a supported target cannot rename the private
+/// directory or create the required directory symlink.
+pub fn prepare_artifact_symlink_startup_case(
+    policy: &ArtifactPolicyFixture,
+    target: ArtifactSymlinkStartupTarget,
+) -> Result<bool, String> {
+    let path = match target {
+        ArtifactSymlinkStartupTarget::ImportRoot => &policy.import,
+        ArtifactSymlinkStartupTarget::StagingRoot => &policy.staging,
+    };
+    let retained = policy.base.join(match target {
+        ArtifactSymlinkStartupTarget::ImportRoot => "startup-import-retained",
+        ArtifactSymlinkStartupTarget::StagingRoot => "startup-staging-retained",
+    });
+    fs::rename(path, &retained)
+        .map_err(|_| "prepare artifact symlink startup fixture".to_owned())?;
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&retained, path)
+        .map_err(|_| "prepare artifact symlink startup fixture".to_owned())?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&retained, path)
+        .map_err(|_| "prepare artifact symlink startup fixture".to_owned())?;
+    #[cfg(not(any(unix, windows)))]
+    {
+        fs::rename(&retained, path)
+            .map_err(|_| "restore unsupported artifact startup fixture".to_owned())?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Records the exact SYM-11/SYM-12 startup observations.
+///
+/// # Errors
+///
+/// Returns a fixed category if a child reports the wrong diagnostic or the
+/// startup partition cannot be recorded exactly once.
+pub fn record_artifact_dynamic_filesystem_startup_cases(
+    sym11: ArtifactStartupCaseOutcome,
+    sym12: ArtifactStartupCaseOutcome,
+) -> Result<AdversarialExecution, String> {
+    let mut execution = AdversarialExecution::default();
+    for (id, observed, expected) in [
+        (
+            AdversarialCaseId::Sym11,
+            sym11,
+            "invalid any-mcp artifact root",
+        ),
+        (
+            AdversarialCaseId::Sym12,
+            sym12,
+            "invalid any-mcp staging policy",
+        ),
+    ] {
+        match observed {
+            ArtifactStartupCaseOutcome::Rejected(category) if category == expected => {
+                execution.record_executed(id)?;
+            }
+            ArtifactStartupCaseOutcome::Unsupported if !cfg!(any(unix, windows)) => {
+                execution.record_unsupported_with_reason(id, "symlink_creation_unavailable")?;
+            }
+            ArtifactStartupCaseOutcome::Unsupported => {
+                return Err(
+                    "artifact startup symlink setup was unexpectedly unavailable".to_owned(),
+                );
+            }
+            ArtifactStartupCaseOutcome::Rejected(_) => {
+                return Err("artifact startup rejection category diverged".to_owned());
+            }
+        }
+    }
+    execution.record_quota_not_applicable();
+    Ok(execution)
 }
 
 impl ArtifactPolicyFixture {
@@ -8524,19 +9163,28 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
+        let implemented = 55;
         assert_eq!(
             partition
                 .iter()
                 .filter(|entry| entry.status != AdversarialCaseStatus::Pending)
                 .count(),
-            43
+            implemented
         );
         assert_eq!(
             partition
                 .iter()
                 .filter(|entry| entry.status == AdversarialCaseStatus::Pending)
                 .count(),
-            79
+            122 - implemented
+        );
+        assert_eq!(
+            AdversarialCaseId::Hlink06.status(),
+            AdversarialCaseStatus::Pending
+        );
+        assert_eq!(
+            ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
+            [AdversarialCaseId::Sym01, AdversarialCaseId::Hlink01]
         );
         for case in AdversarialCaseId::ALL {
             assert_eq!(
@@ -8544,6 +9192,61 @@ mod tests {
                 1,
                 "{} is not partitioned exactly once",
                 case.as_str()
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn dynamic_startup_fixture_replaces_only_the_selected_root() {
+        let policy = ArtifactPolicyFixture::create("startup-symlink-fixture")
+            .expect("create startup fixture");
+        let staging_before = fs::canonicalize(&policy.staging).expect("canonical staging root");
+        assert_eq!(
+            prepare_artifact_symlink_startup_case(
+                &policy,
+                ArtifactSymlinkStartupTarget::ImportRoot,
+            ),
+            Ok(true)
+        );
+        assert!(
+            fs::symlink_metadata(&policy.import)
+                .expect("inspect configured import root")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(policy.base.join("startup-import-retained").is_dir());
+        assert_eq!(
+            fs::canonicalize(&policy.staging).expect("canonical staging root after setup"),
+            staging_before
+        );
+    }
+
+    #[test]
+    fn dynamic_startup_evidence_rejects_forged_categories_and_capabilities() {
+        let exact = record_artifact_dynamic_filesystem_startup_cases(
+            ArtifactStartupCaseOutcome::Rejected("invalid any-mcp artifact root"),
+            ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
+        )
+        .expect("record exact startup evidence");
+        assert_eq!(
+            exact.assert_exact(&[AdversarialCaseId::Sym11, AdversarialCaseId::Sym12]),
+            Ok(())
+        );
+        assert!(
+            record_artifact_dynamic_filesystem_startup_cases(
+                ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
+                ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
+            )
+            .is_err()
+        );
+        if cfg!(any(unix, windows)) {
+            assert!(
+                record_artifact_dynamic_filesystem_startup_cases(
+                    ArtifactStartupCaseOutcome::Unsupported,
+                    ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
+                )
+                .is_err()
             );
         }
     }

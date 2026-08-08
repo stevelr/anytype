@@ -20,6 +20,7 @@ const ADMITTED_IGNORED_LIB_TESTS: &[&str] = &[
     "server::headless_integration::headless_artifact_alias_metadata_direct_scenarios",
     "server::headless_integration::headless_artifact_bounded_metadata_direct_scenarios",
     "server::headless_integration::headless_artifact_direct_transport_matrix_scenario",
+    "server::headless_integration::headless_artifact_dynamic_filesystem_direct_scenarios",
     "server::headless_integration::headless_artifact_policy_direct_scenarios",
     "server::headless_integration::headless_artifact_traversal_direct_scenarios",
     "server::headless_integration::headless_create_body_canonicalization_is_verified_once",
@@ -218,7 +219,7 @@ fn compact_whitespace(value: &str) -> String {
 
 #[test]
 fn ignored_library_manifest_is_closed_and_filter_safe() {
-    assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 35);
+    assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 36);
     assert_sorted_unique(ADMITTED_IGNORED_LIB_TESTS);
     assert!(
         ADMITTED_IGNORED_LIB_TESTS
@@ -246,7 +247,7 @@ fn ignored_library_manifest_is_closed_and_filter_safe() {
         .chain(excluded.iter().copied())
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    assert_eq!(declared.len(), 45, "manifest contains duplicate entries");
+    assert_eq!(declared.len(), 46, "manifest contains duplicate entries");
     assert_eq!(ignored_tests("lib", false), declared);
 }
 

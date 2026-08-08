@@ -16,6 +16,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   records. Artifact status now exposes only aggregate remaining staging bytes
   and entries so acceptance runs can prove quota restoration without record
   metadata.
+- Add real-server coverage for `SYM-01` through `SYM-06`, `SYM-09`, startup
+  `SYM-11` and `SYM-12`, and `HLINK-01`, `HLINK-02`, and `HLINK-04`. Remaining
+  rename-race and dynamic filesystem rows stay pending in the closed inventory.
 - Protect every cleanup-owned ignored live test with serial direct-router,
   spawned-stdio, and discussions-process gates. Closed offline manifests and
   executable-count checks reject renamed, missing, skipped, or zero-test

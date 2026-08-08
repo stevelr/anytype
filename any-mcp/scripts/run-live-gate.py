@@ -19,7 +19,7 @@ TEST_SUMMARY = re.compile(
     rb"test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored; 0 measured; "
     rb"[0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s"
 )
-EXPECTED = {"direct": 35, "stdio": 26, "discussions": 1}
+EXPECTED = {"direct": 36, "stdio": 26, "discussions": 1}
 COMMAND_LABELS = {"auth", "reset"}
 
 

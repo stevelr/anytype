@@ -54,12 +54,14 @@ use support::live_scenario::{
     ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactLifecycleScenario,
     ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun, ArtifactPolicyScenario,
     ArtifactServerLogAudit, ArtifactServerLogBaseline, ArtifactSmokeFixture,
-    ArtifactStageAllocation, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
-    allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
-    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
-    assert_payload_frame_independence, audit_server_log, classify_collision_frames,
-    measure_artifact_frame, reject_oversized_stage_chunk, release_stage_upload,
-    run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
+    ArtifactStageAllocation, ArtifactStartupCaseOutcome, ArtifactSymlinkStartupTarget,
+    ArtifactTransport, ExpectedOutcome, ObservedOutcome, allocate_stage_upload,
+    artifact_catalog_snapshot, artifact_sha256, assert_artifact_content_parity,
+    assert_artifact_parity, assert_artifact_policy_parity, assert_payload_frame_independence,
+    audit_server_log, classify_collision_frames, measure_artifact_frame,
+    prepare_artifact_symlink_startup_case, record_artifact_dynamic_filesystem_startup_cases,
+    reject_oversized_stage_chunk, release_stage_upload, run_artifact_adversarial_stdio_sentinels,
+    run_artifact_content_scenario, run_artifact_dynamic_filesystem_stdio_sentinels,
     run_artifact_policy_scenario, run_artifact_smoke_scenario, server_log_baseline,
     stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
@@ -5793,6 +5795,9 @@ const ADVERSARIAL_STDIO_CONTROLS: [ArtifactControlPlane; 2] = [
     ArtifactControlPlane::SpawnedPreviewStdio,
 ];
 
+const DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS: [AdversarialCaseId; 2] =
+    [AdversarialCaseId::Sym01, AdversarialCaseId::Hlink01];
+
 /// Aggregate diagnostic limits for one complete adversarial production child.
 #[cfg(feature = "acceptance-harness")]
 const ADVERSARIAL_CHILD_OUTPUT_BYTES: u64 = 1_048_576;
@@ -6059,7 +6064,16 @@ async fn run_spawned_artifact_adversarial_default(
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
-        Box::pin(run_artifact_adversarial_stdio_sentinels(&mut driver, &run)).await
+        Box::pin(async {
+            let mut execution = run_artifact_adversarial_stdio_sentinels(&mut driver, &run).await?;
+            if control == ArtifactControlPlane::SpawnedStableStdio {
+                execution.merge(
+                    run_artifact_dynamic_filesystem_stdio_sentinels(&mut driver, &run).await?,
+                )?;
+            }
+            Ok::<_, String>(execution)
+        })
+        .await
     };
     let process = finish_registered_artifact_child(&child, None).map_err(|_| {
         eprintln!(
@@ -6082,8 +6096,12 @@ async fn run_spawned_artifact_adversarial_default(
         );
         sentinel_assertion("spawned adversarial artifact scenarios failed")
     })?;
+    let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
+    if control == ArtifactControlPlane::SpawnedStableStdio {
+        expected.extend(DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS);
+    }
     execution
-        .assert_exact(ADVERSARIAL_STDIO_SENTINEL_IDS)
+        .assert_exact(&expected)
         .map_err(|_| sentinel_assertion("spawned adversarial case inventory diverged"))?;
     for needle in execution.forbidden_log_needles() {
         record_artifact_log_needle(audit_needles, needle)?;
@@ -6205,6 +6223,89 @@ fn run_alias07_startup_rejection(
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn run_dynamic_symlink_startup_rejection(
+    ctx: &TestContext,
+    target: ArtifactSymlinkStartupTarget,
+    category: &'static str,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<ArtifactStartupCaseOutcome> {
+    let policy = ArtifactPolicyFixture::create(&ctx.space_id)
+        .map_err(|_| sentinel_assertion("create dynamic symlink startup fixture"))?;
+    let fixture_needle = artifact_fixture_log_needle(&policy)?;
+    record_artifact_log_needle(audit_needles, &fixture_needle)?;
+    if !prepare_artifact_symlink_startup_case(&policy, target)
+        .map_err(|_| sentinel_assertion("prepare dynamic symlink startup fixture"))?
+    {
+        return Ok(ArtifactStartupCaseOutcome::Unsupported);
+    }
+
+    let credential_needles = disposable_child_credential_needles(ctx)?;
+    let environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| sentinel_assertion("dynamic symlink startup omitted child environment"))?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    environment.configure(&mut command)?;
+    configure_stdio_command(&mut command, DriverOptions::STANDARD, Some("artifacts"));
+    command.env("ANY_MCP_CONFIG", policy.config_path());
+
+    let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(5));
+    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+        .expect_err("dynamic symlink startup rejection closes stdout without a frame");
+    let panic_text = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic");
+    if panic_text != "bounded protocol process failed: child_eof" {
+        return Err(sentinel_assertion(
+            "dynamic symlink startup rejection did not produce the bounded EOF category",
+        ));
+    }
+    let failure = process.take_failure().ok_or_else(|| {
+        sentinel_assertion("dynamic symlink startup omitted bounded process evidence")
+    })?;
+    if failure.category != "child_eof"
+        || failure.output.exit_category != "exit_code"
+        || !failure.output.stdout.is_empty()
+        || failure.output.stderr.len() > support::process::MAX_STDERR_BYTES
+    {
+        return Err(sentinel_assertion(
+            "dynamic symlink startup violated the production output contract",
+        ));
+    }
+    let stderr = std::str::from_utf8(&failure.output.stderr)
+        .map_err(|_| sentinel_assertion("dynamic symlink startup stderr was not UTF-8"))?;
+    let expected_suffix = format!("any-mcp startup or service failure reason={category}");
+    let lines = stderr
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if !matches!(
+        lines.as_slice(),
+        [line]
+            if line.strip_suffix(&expected_suffix).is_some_and(|prefix| {
+                prefix
+                    .split_ascii_whitespace()
+                    .any(|field| field == "ERROR")
+            })
+    ) {
+        return Err(sentinel_assertion(
+            "dynamic symlink startup category diverged",
+        ));
+    }
+    if contains_bytes(&failure.output.stderr, &fixture_needle)
+        || credential_needles
+            .iter()
+            .any(|needle| contains_bytes(&failure.output.stderr, needle))
+    {
+        return Err(sentinel_assertion(
+            "dynamic symlink startup diagnostics exposed forbidden values",
+        ));
+    }
+    Ok(ArtifactStartupCaseOutcome::Rejected(category))
+}
+
+#[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
@@ -6244,11 +6345,41 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                     execution
                         .merge(startup)
                         .map_err(|_| sentinel_assertion("merge spawned adversarial evidence"))?;
-                    let expected = ADVERSARIAL_STDIO_SENTINEL_IDS
-                        .iter()
-                        .copied()
-                        .chain(std::iter::once(AdversarialCaseId::Alias07))
-                        .collect::<Vec<_>>();
+                    if control == ArtifactControlPlane::SpawnedStableStdio {
+                        let sym11 = run_dynamic_symlink_startup_rejection(
+                            ctx.as_ref(),
+                            ArtifactSymlinkStartupTarget::ImportRoot,
+                            "invalid any-mcp artifact root",
+                            &callback_audit_needles,
+                        )?;
+                        let sym12 = run_dynamic_symlink_startup_rejection(
+                            ctx.as_ref(),
+                            ArtifactSymlinkStartupTarget::StagingRoot,
+                            "invalid any-mcp staging policy",
+                            &callback_audit_needles,
+                        )?;
+                        let startup =
+                            record_artifact_dynamic_filesystem_startup_cases(sym11, sym12)
+                                .map_err(|_| {
+                                    sentinel_assertion("record dynamic symlink startup outcomes")
+                                })?;
+                        startup
+                            .assert_exact(&[AdversarialCaseId::Sym11, AdversarialCaseId::Sym12])
+                            .map_err(|_| {
+                                sentinel_assertion(
+                                    "dynamic symlink startup owner inventory diverged",
+                                )
+                            })?;
+                        execution.merge(startup).map_err(|_| {
+                            sentinel_assertion("merge dynamic symlink startup evidence")
+                        })?;
+                    }
+                    let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
+                    if control == ArtifactControlPlane::SpawnedStableStdio {
+                        expected.extend(DYNAMIC_FILESYSTEM_STDIO_SENTINEL_IDS);
+                        expected.extend([AdversarialCaseId::Sym11, AdversarialCaseId::Sym12]);
+                    }
+                    expected.push(AdversarialCaseId::Alias07);
                     execution
                         .assert_exact(&expected)
                         .map_err(|_| sentinel_assertion("spawned owner inventory diverged"))?;

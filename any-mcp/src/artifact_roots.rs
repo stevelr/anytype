@@ -554,9 +554,7 @@ impl StagingDirectory {
         let path = RelativeNativePath::from_utf8(record_name)
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
         let (parent, name) = walk_parent(&self.root, &path)?;
-        parent
-            .remove_file(Path::new(&name))
-            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        remove_private_file(&parent, Path::new(&name), 1)?;
         sync_parent_directory(&parent).map_err(|_| RootAccessError::new(RootProblem::Containment))
     }
 }
@@ -606,14 +604,7 @@ fn cleanup_stale_staging_files(root: &RootCapability) -> Result<(), RootAccessEr
         if !stale_staging_name(name_utf8) {
             return Err(RootAccessError::new(RootProblem::Activation));
         }
-        let metadata = directory
-            .symlink_metadata(Path::new(&name))
-            .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
-        if !metadata.is_file() {
-            return Err(RootAccessError::new(RootProblem::Activation));
-        }
-        directory
-            .remove_file(Path::new(&name))
+        remove_private_file(&directory, Path::new(&name), 1)
             .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
         reconciled = reconciled.saturating_add(1);
     }
@@ -651,9 +642,39 @@ fn lowercase_hex(byte: u8) -> bool {
     byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct ExportPublicationTestPause {
+    temporary_name: OsString,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static EXPORT_PUBLICATION_TEST_PAUSE: OnceLock<
+    std::sync::Mutex<Option<ExportPublicationTestPause>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+fn pause_export_publication_for_test(temporary_name: &OsString) {
+    let pause = EXPORT_PUBLICATION_TEST_PAUSE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|pause| pause.as_ref().cloned())
+        .filter(|pause| &pause.temporary_name == temporary_name);
+    if let Some(pause) = pause {
+        pause.entered.wait();
+        pause.release.wait();
+    }
+}
+
 /// One bounded same-directory export which is invisible until commit.
 pub struct AtomicExport {
     parent: Dir,
+    root: RootCapability,
+    path: RelativeNativePath,
+    parent_identity: FileIdentity,
     file: Option<File>,
     temporary_name: OsString,
     destination_name: OsString,
@@ -674,12 +695,19 @@ impl fmt::Debug for AtomicExport {
 }
 
 impl AtomicExport {
-    /// Removes an unpublished private destination and confirms parent metadata.
-    pub(crate) fn discard(mut self) -> Result<(), RootAccessError> {
-        self.file.take();
-        self.parent
-            .remove_file(Path::new(&self.temporary_name))
-            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    /// Removes an unpublished private destination without discarding its
+    /// retained capability when the file is no longer safe to unlink.
+    pub(crate) fn discard_in_place(&mut self) -> Result<(), RootAccessError> {
+        if let Some(file) = self.file.as_ref() {
+            let metadata = file
+                .metadata()
+                .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+            if !private_file_with_links(file, &metadata, 1) || !safe_windows_security(file) {
+                return Err(RootAccessError::new(RootProblem::Changed));
+            }
+            self.file.take();
+        }
+        remove_private_file(&self.parent, Path::new(&self.temporary_name), 1)?;
         sync_parent_directory(&self.parent)
             .map_err(|_| RootAccessError::new(RootProblem::Containment))
     }
@@ -730,6 +758,9 @@ impl AtomicExport {
         }
         let source_identity = file_identity(&file, &metadata)
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        self.verify_export_namespace()?;
+        #[cfg(test)]
+        pause_export_publication_for_test(&self.temporary_name);
 
         match self.parent.hard_link(
             Path::new(&self.temporary_name),
@@ -741,6 +772,10 @@ impl AtomicExport {
                 return Err(RootAccessError::new(RootProblem::Collision));
             }
             Err(_) => return Err(RootAccessError::new(RootProblem::Containment)),
+        }
+        if self.verify_export_namespace().is_err() {
+            drop(file);
+            return Err(self.settle_namespace_mismatch());
         }
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
@@ -757,16 +792,13 @@ impl AtomicExport {
         if !published_metadata.is_file()
             || published_metadata.len() != self.written
             || published_identity != source_identity
+            || !private_file_with_links(&published, &published_metadata, 2)
             || !safe_windows_security(&published)
         {
             return Err(RootAccessError::new(RootProblem::Indeterminate));
         }
         drop(file);
-        if self
-            .parent
-            .remove_file(Path::new(&self.temporary_name))
-            .is_err()
-        {
+        if remove_private_file(&self.parent, Path::new(&self.temporary_name), 2).is_err() {
             return Err(RootAccessError::new(RootProblem::Indeterminate));
         }
         sync_parent_directory(&self.parent)
@@ -780,7 +812,44 @@ impl AtomicExport {
             file: published,
             length: self.written,
             snapshot,
+            namespace: None,
         })
+    }
+
+    fn verify_export_namespace(&self) -> Result<(), RootAccessError> {
+        let (parent, _) = walk_parent(&self.root, &self.path)
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        let identity =
+            directory_identity(&parent).map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        if identity != self.parent_identity {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        Ok(())
+    }
+
+    fn remove_mismatched_publication(&mut self) -> bool {
+        let destination_absent =
+            remove_private_file(&self.parent, Path::new(&self.destination_name), 2).is_ok()
+                || private_name_absent(&self.parent, Path::new(&self.destination_name));
+        if !destination_absent {
+            return false;
+        }
+        self.published = false;
+        let temporary_absent =
+            remove_private_file(&self.parent, Path::new(&self.temporary_name), 1).is_ok()
+                || private_name_absent(&self.parent, Path::new(&self.temporary_name));
+        temporary_absent
+            && sync_parent_directory(&self.parent).is_ok()
+            && private_name_absent(&self.parent, Path::new(&self.destination_name))
+            && private_name_absent(&self.parent, Path::new(&self.temporary_name))
+    }
+
+    fn settle_namespace_mismatch(&mut self) -> RootAccessError {
+        if self.remove_mismatched_publication() {
+            RootAccessError::new(RootProblem::Changed)
+        } else {
+            RootAccessError::new(RootProblem::Indeterminate)
+        }
     }
 }
 
@@ -820,8 +889,14 @@ impl Write for AtomicExport {
 impl Drop for AtomicExport {
     fn drop(&mut self) {
         self.file.take();
-        let _ = self.parent.remove_file(Path::new(&self.temporary_name));
+        let _ = remove_private_file(&self.parent, Path::new(&self.temporary_name), 1);
     }
+}
+
+#[derive(Clone)]
+struct NamespaceBinding {
+    root: RootCapability,
+    path: RelativeNativePath,
 }
 
 /// An opened, preflighted import source.
@@ -830,6 +905,7 @@ pub struct AnchoredImport {
     /// Source length observed after the anchored no-follow open.
     pub length: u64,
     snapshot: FileSnapshot,
+    namespace: Option<NamespaceBinding>,
 }
 
 impl fmt::Debug for AnchoredImport {
@@ -878,6 +954,13 @@ impl AnchoredImport {
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
         if snapshot != self.snapshot {
             return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        if let Some(binding) = &self.namespace {
+            let reopened = open_import_at(&binding.root, &binding.path, u64::MAX)
+                .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            if reopened.snapshot != self.snapshot {
+                return Err(RootAccessError::new(RootProblem::Changed));
+            }
         }
         Ok(())
     }
@@ -1316,6 +1399,10 @@ fn open_import_at(
         file,
         length: metadata.len(),
         snapshot,
+        namespace: Some(NamespaceBinding {
+            root: root.clone(),
+            path: path.clone(),
+        }),
     })
 }
 
@@ -1365,6 +1452,7 @@ fn begin_atomic_export_at(
     maximum_bytes: u64,
 ) -> Result<AtomicExport, RootAccessError> {
     let (parent, destination_name) = walk_parent(root, path)?;
+    let parent_identity = directory_identity(&parent)?;
     match parent.symlink_metadata(Path::new(&destination_name)) {
         Ok(_) => return Err(RootAccessError::new(RootProblem::Collision)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1390,6 +1478,9 @@ fn begin_atomic_export_at(
                 }
                 return Ok(AtomicExport {
                     parent,
+                    root: root.clone(),
+                    path: path.clone(),
+                    parent_identity,
                     file: Some(file),
                     temporary_name,
                     destination_name,
@@ -1403,6 +1494,46 @@ fn begin_atomic_export_at(
         }
     }
     Err(RootAccessError::new(RootProblem::Containment))
+}
+
+fn directory_identity(directory: &Dir) -> Result<FileIdentity, RootAccessError> {
+    let file = directory
+        .try_clone()
+        .map(Dir::into_std_file)
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    file_identity(&file, &metadata).map_err(|_| RootAccessError::new(RootProblem::Containment))
+}
+
+fn remove_private_file(
+    parent: &Dir,
+    name: &Path,
+    expected_links: u32,
+) -> Result<(), RootAccessError> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = parent
+        .open_with(name, &options)
+        .map(cap_std::fs::File::into_std)
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    if !private_file_with_links(&file, &metadata, expected_links) || !safe_windows_security(&file) {
+        return Err(RootAccessError::new(RootProblem::Changed));
+    }
+    parent
+        .remove_file(name)
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))
+}
+
+fn private_name_absent(parent: &Dir, name: &Path) -> bool {
+    matches!(
+        parent.symlink_metadata(name),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    )
 }
 
 fn owner_private_create_options() -> OpenOptions {
@@ -1487,6 +1618,16 @@ fn safe_import_metadata(_: &File, _: &std::fs::Metadata) -> bool {
 
 #[cfg(unix)]
 fn safe_created_export_metadata(_: &File, metadata: &std::fs::Metadata) -> bool {
+    private_file_with_links_unix(metadata, 1)
+}
+
+#[cfg(unix)]
+fn private_file_with_links(_: &File, metadata: &std::fs::Metadata, expected_links: u32) -> bool {
+    private_file_with_links_unix(metadata, expected_links)
+}
+
+#[cfg(unix)]
+fn private_file_with_links_unix(metadata: &std::fs::Metadata, expected_links: u32) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     // SAFETY: `geteuid` has no memory or ownership preconditions.
@@ -1494,16 +1635,33 @@ fn safe_created_export_metadata(_: &File, metadata: &std::fs::Metadata) -> bool 
     metadata.is_file()
         && metadata.uid() == effective_user
         && metadata.mode() & 0o077 == 0
-        && metadata.nlink() == 1
+        && metadata.nlink() == u64::from(expected_links)
 }
 
 #[cfg(windows)]
 fn safe_created_export_metadata(file: &File, metadata: &std::fs::Metadata) -> bool {
-    safe_import_metadata(file, metadata)
+    private_file_with_links(file, metadata, 1)
+}
+
+#[cfg(windows)]
+fn private_file_with_links(file: &File, metadata: &std::fs::Metadata, expected_links: u32) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.is_file()
+        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && windows_security::handle_metadata(file)
+            .map(|handle| handle.number_of_links == expected_links)
+            .unwrap_or(false)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn safe_created_export_metadata(_: &File, _: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(not(any(unix, windows)))]
+fn private_file_with_links(_: &File, _: &std::fs::Metadata, _: u32) -> bool {
     false
 }
 
@@ -2069,6 +2227,177 @@ mod tests {
         fs::remove_dir_all(base).expect("cleanup");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn import_revalidation_rejects_namespace_rename_over() {
+        let (base, import, export) = temporary_tree();
+        let source_path = import.join("source.bin");
+        fs::write(&source_path, b"original").expect("write original source");
+        let effective = RootRegistry::activate(&config(&import, &export))
+            .expect("activate")
+            .static_policy();
+        let source = effective
+            .open_import(
+                "inbox",
+                &RelativeNativePath::from_utf8("source.bin").expect("source path"),
+                64,
+            )
+            .expect("open source");
+
+        fs::rename(&source_path, import.join("replaced-source.bin")).expect("rename source");
+        fs::write(&source_path, b"replacement").expect("write replacement source");
+
+        assert!(source.verify_unchanged().is_err());
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_export_rejects_parent_moved_outside_retained_root() {
+        let (base, import, export) = temporary_tree();
+        let original_parent = export.join("safe");
+        fs::create_dir(&original_parent).expect("create export parent");
+        let effective = RootRegistry::activate(&config(&import, &export))
+            .expect("activate")
+            .static_policy();
+        let path = RelativeNativePath::from_utf8("safe/result.bin").expect("export path");
+        let mut pending = effective
+            .begin_atomic_export("outbox", &path, 64)
+            .expect("begin export");
+        pending.write_all(b"private bytes").expect("write export");
+
+        let moved_parent = base.join("moved-parent");
+        fs::rename(&original_parent, &moved_parent).expect("move export parent");
+        fs::create_dir(&original_parent).expect("replace export parent");
+
+        assert!(pending.commit().is_err());
+        assert!(!moved_parent.join("result.bin").exists());
+        assert!(!original_parent.join("result.bin").exists());
+        drop(effective);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_export_rechecks_parent_after_prepublication_pause() {
+        let (base, import, export) = temporary_tree();
+        let original_parent = export.join("safe");
+        fs::create_dir(&original_parent).expect("create export parent");
+        let effective = RootRegistry::activate(&config(&import, &export))
+            .expect("activate")
+            .static_policy();
+        let path = RelativeNativePath::from_utf8("safe/result.bin").expect("export path");
+        let mut pending = effective
+            .begin_atomic_export("outbox", &path, 64)
+            .expect("begin export");
+        pending.write_all(b"private bytes").expect("write export");
+        let temporary_name = pending.temporary_name.clone();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *EXPORT_PUBLICATION_TEST_PAUSE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("publication pause lock") = Some(ExportPublicationTestPause {
+            temporary_name,
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+
+        let commit = std::thread::spawn(move || pending.commit());
+        entered.wait();
+        let moved_parent = base.join("moved-parent");
+        let moved = fs::rename(&original_parent, &moved_parent);
+        let replaced = fs::create_dir(&original_parent);
+        release.wait();
+        let result = commit.join().expect("commit thread");
+        *EXPORT_PUBLICATION_TEST_PAUSE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("publication pause lock") = None;
+        moved.expect("move export parent");
+        replaced.expect("replace export parent");
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == RootAccessErrorKind::Changed
+        ));
+        assert!(
+            fs::read_dir(&moved_parent)
+                .expect("inspect moved parent")
+                .next()
+                .is_none()
+        );
+        assert!(
+            fs::read_dir(&original_parent)
+                .expect("inspect replacement parent")
+                .next()
+                .is_none()
+        );
+        drop(effective);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_export_mismatch_is_indeterminate_when_cleanup_is_not_proven() {
+        let (base, import, export) = temporary_tree();
+        let effective = RootRegistry::activate(&config(&import, &export))
+            .expect("activate")
+            .static_policy();
+        let path = RelativeNativePath::from_utf8("result.bin").expect("export path");
+        let mut pending = effective
+            .begin_atomic_export("outbox", &path, 64)
+            .expect("begin export");
+        pending.write_all(b"private bytes").expect("write export");
+        let retained_link = base.join("retained-link.bin");
+        fs::hard_link(export.join(&pending.temporary_name), &retained_link)
+            .expect("retain unexpected private link");
+
+        assert_eq!(
+            pending.settle_namespace_mismatch().kind(),
+            RootAccessErrorKind::Indeterminate
+        );
+        assert!(export.join(&pending.temporary_name).is_file());
+        assert!(retained_link.is_file());
+        drop(pending);
+        drop(effective);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_export_preserves_retained_whole_root_identity() {
+        let (base, import, export) = temporary_tree();
+        let effective = RootRegistry::activate(&config(&import, &export))
+            .expect("activate")
+            .static_policy();
+        let path = RelativeNativePath::from_utf8("result.bin").expect("export path");
+        let mut pending = effective
+            .begin_atomic_export("outbox", &path, 64)
+            .expect("begin export");
+        pending
+            .write_all(b"retained root bytes")
+            .expect("write export");
+
+        let retained_export = base.join("retained-export");
+        fs::rename(&export, &retained_export).expect("retain opened export root");
+        fs::create_dir(&export).expect("create replacement export root");
+
+        assert_eq!(pending.commit(), Ok(19));
+        assert_eq!(
+            fs::read(retained_export.join("result.bin")).expect("read retained publication"),
+            b"retained root bytes"
+        );
+        assert!(
+            fs::read_dir(&export)
+                .expect("inspect replacement root")
+                .next()
+                .is_none()
+        );
+        drop(effective);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
     #[test]
     fn staging_activation_locks_one_generation_and_reconciles_private_files() {
         let (base, import, export) = temporary_tree();
@@ -2081,6 +2410,15 @@ mod tests {
         .expect("stale record");
         fs::write(staging.join(".any-mcp-0123456789abcdef.tmp"), b"partial")
             .expect("stale temporary");
+        #[cfg(unix)]
+        for name in [
+            "0123456789abcdef0123456789abcdef.bin",
+            ".any-mcp-0123456789abcdef.tmp",
+        ] {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(staging.join(name), fs::Permissions::from_mode(0o600))
+                .expect("owner-private stale staging fixture");
+        }
         let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
         let path = AbsoluteNativePath::from_utf8(
             staging.to_str().expect("temporary staging path is UTF-8"),
@@ -2099,6 +2437,28 @@ mod tests {
         let second = StagingDirectory::activate(&path, &registry).expect("next generation");
         drop(second);
         drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_activation_refuses_hard_linked_stale_record() {
+        let (base, import, export) = temporary_tree();
+        let staging = base.join("staging");
+        fs::create_dir(&staging).expect("staging directory");
+        let record = staging.join("0123456789abcdef0123456789abcdef.bin");
+        let retained_link = base.join("retained-link.bin");
+        fs::write(&record, b"stale").expect("stale record");
+        fs::hard_link(&record, &retained_link).expect("hard-link stale record");
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
+        let path = AbsoluteNativePath::from_utf8(
+            staging.to_str().expect("temporary staging path is UTF-8"),
+        )
+        .expect("staging path");
+
+        assert!(StagingDirectory::activate(&path, &registry).is_err());
+        assert!(record.exists());
+        assert!(retained_link.exists());
         fs::remove_dir_all(base).expect("cleanup");
     }
 

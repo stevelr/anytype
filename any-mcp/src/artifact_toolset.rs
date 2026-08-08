@@ -1328,6 +1328,15 @@ impl PreparedImport {
         }
     }
 
+    fn verify_before_dispatch(&self) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Local { source, .. } => source
+                .verify_unchanged()
+                .map_err(|error| classify_root_error(&error)),
+            Self::Staged(_) => Ok(()),
+        }
+    }
+
     fn root_id(&self) -> Option<String> {
         match self {
             Self::Local { root_id, .. } => Some(root_id.clone()),
@@ -1907,7 +1916,7 @@ enum ExportCompletion {
         root_id: String,
     },
     Remote {
-        lease: StageWriteLease,
+        lease: Box<StageWriteLease>,
         allocation: StageAllocation,
     },
 }
@@ -2039,7 +2048,10 @@ async fn file_export(
             };
             (
                 destination,
-                ExportCompletion::Remote { lease, allocation },
+                ExportCompletion::Remote {
+                    lease: Box::new(lease),
+                    allocation,
+                },
                 preflight.etag,
             )
         }
@@ -2064,7 +2076,7 @@ async fn file_export(
             if let ExportCompletion::Remote { lease, allocation } = completion
                 && let Ok(staging) = staging(runtime)
             {
-                let _ = staging.abort_write(lease, &allocation.handle).await;
+                let _ = staging.abort_write(*lease, &allocation.handle).await;
             }
             runtime.artifact_operations().remove(key).await;
             return Err(error);
@@ -2129,7 +2141,7 @@ async fn file_export(
                 }
             };
             if let Err(error) = staging
-                .finish_export(lease, destination, size, sha256.clone())
+                .finish_export(*lease, destination, size, sha256.clone())
                 .await
                 .map_err(classify_staging_error)
             {
@@ -2175,6 +2187,10 @@ struct PreparedDocument {
 }
 
 impl PreparedDocument {
+    fn verify_before_dispatch(&self) -> Result<(), ArtifactToolError> {
+        self.source.verify_before_dispatch()
+    }
+
     async fn consume_staged(
         &mut self,
         runtime: &RuntimeContext,
@@ -2188,6 +2204,26 @@ impl PreparedDocument {
             .map_err(classify_staging_error)?;
         Ok(true)
     }
+}
+
+async fn verify_document_source_before_dispatch(
+    operations: &ArtifactOperationState,
+    key: [u8; 32],
+    source: &PreparedDocument,
+) -> Result<(), ArtifactToolError> {
+    settle_document_source_revalidation(operations, key, source.verify_before_dispatch()).await
+}
+
+async fn settle_document_source_revalidation(
+    operations: &ArtifactOperationState,
+    key: [u8; 32],
+    result: Result<(), ArtifactToolError>,
+) -> Result<(), ArtifactToolError> {
+    if let Err(error) = result {
+        operations.remove(key).await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -2569,6 +2605,7 @@ async fn document_import_create(
     for property in &properties {
         request = property.apply(request);
     }
+    verify_document_source_before_dispatch(runtime.artifact_operations(), key, &source).await?;
     let created = match request.create().await {
         Ok(created) => created,
         Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -2736,6 +2773,7 @@ async fn document_import_update(
         DocumentMutationIdempotency::Dispatch => {}
     }
     if source.dispatched == current_body {
+        verify_document_source_before_dispatch(runtime.artifact_operations(), key, &source).await?;
         let consumed = source.consume_staged(runtime).await?;
         let output = document_output(
             &space_id,
@@ -2765,6 +2803,7 @@ async fn document_import_update(
     let wire = representation
         .as_ref()
         .map_or(source.dispatched.as_str(), |value| value.wire());
+    verify_document_source_before_dispatch(runtime.artifact_operations(), key, &source).await?;
     let updated = match runtime
         .client()
         .update_object(space_id.as_str(), object_id.as_str())
@@ -3575,6 +3614,73 @@ mod tests {
             state.reserve_document_mutation(key, fingerprint).await,
             Err(ArtifactToolError::Indeterminate)
         ));
+    }
+
+    #[tokio::test]
+    async fn document_predispatch_conflict_releases_reservation() {
+        let base = std::env::temp_dir().join(format!(
+            "any-mcp-document-predispatch-{}-{}",
+            std::process::id(),
+            getrandom::u64().unwrap_or(0)
+        ));
+        let import = base.join("import");
+        let export = base.join("export");
+        std::fs::create_dir_all(&import).expect("create import fixture");
+        std::fs::create_dir_all(&export).expect("create export fixture");
+        let source_path = import.join("document.md");
+        let retained_path = import.join("retained.md");
+        let replacement_path = import.join("replacement.md");
+        std::fs::write(&source_path, b"original\n").expect("write original source");
+        std::fs::write(&replacement_path, b"replaced\n").expect("write replacement source");
+        let config = crate::artifact_config::ArtifactConfig::from_toml(&format!(
+            "schema_version = 1\n[spaces]\nread_only = false\n\
+             [[roots.import]]\nid = \"inbox\"\npath = {import:?}\n\
+             [[roots.export]]\nid = \"outbox\"\npath = {export:?}\n"
+        ))
+        .expect("parse fixture config");
+        let roots =
+            crate::artifact_roots::RootRegistry::activate(&config).expect("activate fixture roots");
+        let relative = RelativeNativePath::from_utf8("document.md").expect("relative source");
+        let prepared = PreparedImport::Local {
+            source: roots
+                .static_policy()
+                .open_import("inbox", &relative, 64)
+                .expect("open source"),
+            sha256: digest_bytes(b"original\n"),
+            root_id: "inbox".to_owned(),
+        };
+
+        let state = ArtifactOperationState::default();
+        let key = digest_fields(b"key", &[b"document-predispatch"]);
+        let fingerprint = digest_fields(b"fingerprint", &[b"document-predispatch"]);
+        assert!(matches!(
+            state.reserve_document_mutation(key, fingerprint).await,
+            Ok(DocumentMutationIdempotency::Dispatch)
+        ));
+
+        std::fs::rename(&source_path, &retained_path).expect("retain original name");
+        std::fs::rename(&replacement_path, &source_path).expect("replace source name");
+        assert_eq!(
+            settle_document_source_revalidation(&state, key, prepared.verify_before_dispatch())
+                .await,
+            Err(ArtifactToolError::Conflict)
+        );
+        assert!(!state.entries.lock().await.contains_key(&key));
+        assert!(matches!(
+            state.reserve_document_mutation(key, fingerprint).await,
+            Ok(DocumentMutationIdempotency::Dispatch)
+        ));
+
+        let fresh_key = digest_fields(b"key", &[b"document-predispatch-retry"]);
+        assert!(matches!(
+            state
+                .reserve_document_mutation(fresh_key, fingerprint)
+                .await,
+            Ok(DocumentMutationIdempotency::Dispatch)
+        ));
+
+        drop(prepared);
+        std::fs::remove_dir_all(base).expect("clean fixture");
     }
 
     fn traversal_destination() -> ResolvedDestination {
