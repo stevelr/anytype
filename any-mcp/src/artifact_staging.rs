@@ -182,7 +182,9 @@ impl Drop for StageSource {
         // handed to an import settlement task.  The task publishes its ledger
         // terminal state only after this guard is released, so a cancelled or
         // panicked task leaves a non-acquirable reconciliation record.
-        if let RecordState::Ready { import } = &*self.lease {
+        if self.operation != [0; 32]
+            && let RecordState::Ready { import } = &*self.lease
+        {
             *self.lease = RecordState::Reconciliation {
                 import: Arc::clone(import),
                 operation: self.operation,
@@ -1316,7 +1318,7 @@ impl ArtifactStaging {
         if record.direction != StageDirection::Import || &record.space_id != space_id {
             return Err(StagingError::NotFound);
         }
-        let mut state = Arc::clone(&record.state).lock_owned().await;
+        let state = Arc::clone(&record.state).lock_owned().await;
         let RecordState::Ready { import } = &*state else {
             return Err(StagingError::NotFound);
         };
@@ -1325,10 +1327,6 @@ impl ArtifactStaging {
             .verify_unchanged()
             .map_err(|_| StagingError::Conflict)?;
         let import = Arc::clone(import);
-        *state = RecordState::Reconciliation {
-            import: Arc::clone(&import),
-            operation: [0; 32],
-        };
         Ok(StageSource {
             file: import
                 .source
@@ -1351,16 +1349,11 @@ impl ArtifactStaging {
         source: &mut StageSource,
         operation: [u8; 32],
     ) -> Result<(), StagingError> {
-        let RecordState::Reconciliation {
-            operation: bound, ..
-        } = &mut *source.lease
-        else {
+        let RecordState::Ready { import } = &*source.lease else {
             return Err(StagingError::NotFound);
         };
-        if *bound != [0; 32] && *bound != operation {
-            return Err(StagingError::NotFound);
-        }
-        *bound = operation;
+        let import = Arc::clone(import);
+        *source.lease = RecordState::Reconciliation { import, operation };
         source.operation = operation;
         Ok(())
     }
@@ -1400,6 +1393,45 @@ impl ArtifactStaging {
             media_type: record.media_type.clone(),
             record: record_hex(&record_id),
         })
+    }
+
+    /// Consumes a same-operation reconciliation record after candidate
+    /// verification without reopening a readable staged source.
+    pub(crate) async fn consume_reconciliation(
+        &self,
+        handle: &str,
+        space_id: &SpaceId,
+        operation: [u8; 32],
+    ) -> Result<(), StagingError> {
+        let (_, record) = self.authenticate(handle, None).await?;
+        if record.direction != StageDirection::Import || &record.space_id != space_id {
+            return Err(StagingError::NotFound);
+        }
+        let mut state = record.state.lock().await;
+        let prior = std::mem::replace(
+            &mut *state,
+            RecordState::Receiving {
+                destination: None,
+                offset: 0,
+            },
+        );
+        let RecordState::Reconciliation {
+            import,
+            operation: retained,
+        } = prior
+        else {
+            *state = prior;
+            return Err(StagingError::NotFound);
+        };
+        if retained != operation {
+            *state = RecordState::Reconciliation {
+                import,
+                operation: retained,
+            };
+            return Err(StagingError::NotFound);
+        }
+        *state = RecordState::Consumed { import, operation };
+        Ok(())
     }
 
     /// Reads authenticated import metadata without acquiring the one-use
@@ -1702,10 +1734,20 @@ fn transition_to_cleanup_pending(state: &mut RecordState) -> bool {
                 return false;
             }
         },
-        prior @ RecordState::Reconciliation { .. } | prior @ RecordState::Consumed { .. } => {
-            *state = prior;
-            return false;
-        }
+        RecordState::Reconciliation { import, operation } => match Arc::try_unwrap(import) {
+            Ok(import) => (None, Some(import.source), false),
+            Err(import) => {
+                *state = RecordState::Reconciliation { import, operation };
+                return false;
+            }
+        },
+        RecordState::Consumed { import, operation } => match Arc::try_unwrap(import) {
+            Ok(import) => (None, Some(import.source), false),
+            Err(import) => {
+                *state = RecordState::Consumed { import, operation };
+                return false;
+            }
+        },
         RecordState::Available { source, .. } => (None, Some(source), false),
         prior @ RecordState::CleanupPending { .. } => {
             *state = prior;
@@ -2237,6 +2279,7 @@ mod tests {
     #[tokio::test]
     async fn staged_import_accepts_sequential_ranges_and_consumes_once() {
         let test = test_staging().await;
+        let quota_before = test.staging.available_quota().await;
         let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let allocation = test
             .staging
@@ -2319,6 +2362,11 @@ mod tests {
                 .is_err(),
             "a wrong key cannot inspect consumed authority"
         );
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release consumed reconciliation source");
+        assert_eq!(test.staging.available_quota().await, quota_before);
     }
 
     #[tokio::test]

@@ -364,28 +364,22 @@ impl RuntimeContext {
     pub(crate) fn supervise_import_settlement<F>(
         &self,
         key: [u8; 32],
+        permit: tokio::sync::OwnedSemaphorePermit,
         operation: F,
     ) -> tokio::sync::oneshot::Receiver<Result<FileImportOutput, ArtifactToolError>>
     where
         F: Future<Output = Result<FileImportOutput, ArtifactToolError>> + Send + 'static,
     {
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let permits = Arc::clone(&self.settlement_permits);
         let active = Arc::clone(&self.settlement_active);
         let notify = Arc::clone(&self.settlement_notify);
         let shutdown = self.shutdown.clone();
         let operations = self.artifact_operations.clone();
+        // Count the worker before spawning so shutdown drain includes it from
+        // admission through terminal settlement; the owned permit prevents an
+        // unbounded post-reservation queue.
+        active.fetch_add(1, Ordering::AcqRel);
         tokio::spawn(async move {
-            let permit = tokio::select! {
-                permit = permits.acquire_owned() => permit.ok(),
-                () = shutdown.cancelled() => None,
-            };
-            let Some(permit) = permit else {
-                operations.settle_import_timeout(key).await;
-                let _ = sender.send(Err(ArtifactToolError::Indeterminate));
-                return;
-            };
-            active.fetch_add(1, Ordering::AcqRel);
             let mut child = tokio::spawn(operation);
             let result = tokio::select! {
                 joined = &mut child => match joined {
@@ -408,6 +402,22 @@ impl RuntimeContext {
             let _ = sender.send(result);
         });
         receiver
+    }
+
+    /// Admits a settlement before an idempotency reservation is created.
+    /// This prevents reserved operations from accumulating behind an
+    /// unbounded internal task queue.
+    pub(crate) async fn admit_import_settlement(
+        &self,
+        deadline: Instant,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ArtifactToolError> {
+        let acquire = Arc::clone(&self.settlement_permits).acquire_owned();
+        tokio::select! {
+            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), acquire) => {
+                result.ok().and_then(Result::ok).ok_or(ArtifactToolError::Bounded)
+            }
+            () = self.shutdown.cancelled() => Err(ArtifactToolError::Indeterminate),
+        }
     }
 
     /// Waits only a bounded interval for owned artifact settlement tasks.
@@ -1328,10 +1338,17 @@ mod tests {
         let key = [7; 32];
         let fingerprint = [9; 32];
         assert!(matches!(
-            runtime.artifact_operations().reserve_import(key, fingerprint).await,
+            runtime
+                .artifact_operations()
+                .reserve_import(key, fingerprint)
+                .await,
             Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
         ));
-        let receiver = runtime.supervise_import_settlement(key, async move {
+        let permit = runtime
+            .admit_import_settlement(runtime.request_deadline())
+            .await
+            .expect("settlement permit");
+        let receiver = runtime.supervise_import_settlement(key, permit, async move {
             panic!("test settlement panic");
             #[allow(unreachable_code)]
             Ok::<_, ArtifactToolError>(unreachable!())
@@ -1344,7 +1361,10 @@ mod tests {
             .drain_artifact_settlements(Duration::from_millis(100))
             .await;
         assert!(matches!(
-            runtime.artifact_operations().reserve_import(key, fingerprint).await,
+            runtime
+                .artifact_operations()
+                .reserve_import(key, fingerprint)
+                .await,
             Err(ArtifactToolError::Indeterminate)
         ));
     }

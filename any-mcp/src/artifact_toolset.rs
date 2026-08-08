@@ -1679,11 +1679,18 @@ async fn file_import(
         ResolvedSource::Local(_) => None,
     };
     let mut source = match &staged_handle {
-        Some(handle) => staging(runtime)?
-            .import_metadata(handle, &space_id)
-            .await
-            .map(PreparedImport::StagedReplay)
-            .map_err(classify_staging_error)?,
+        Some(handle) => match staging(runtime)?.import_source(handle, &space_id).await {
+            // Fresh staged imports acquire and clone their one-use authority
+            // before reservation.  An unbound lease drops back to Ready if a
+            // later ledger decision rejects it.
+            Ok(source) => PreparedImport::Staged(source),
+            Err(StagingError::NotFound) => staging(runtime)?
+                .import_metadata(handle, &space_id)
+                .await
+                .map(PreparedImport::StagedReplay)
+                .map_err(classify_staging_error)?,
+            Err(error) => return Err(classify_staging_error(error)),
+        },
         None => prepare_import_source(runtime, resolved_source, &space_id).await?,
     };
     if declared_media_type
@@ -1723,6 +1730,9 @@ async fn file_import(
     {
         return Err(ArtifactToolError::Indeterminate);
     }
+    let settlement_permit = runtime
+        .admit_import_settlement(runtime.request_deadline())
+        .await?;
     match runtime
         .artifact_operations()
         .reserve_import(key, fingerprint)
@@ -1739,6 +1749,7 @@ async fn file_import(
                 }
             }
             output.reused = true;
+            drop(settlement_permit);
             return Ok(*output);
         }
         ImportIdempotency::VerifyCandidate(candidate) => {
@@ -1760,6 +1771,12 @@ async fn file_import(
                 cancellation,
             )
             .await?;
+            if let Some(handle) = staged_handle.as_deref() {
+                staging(runtime)?
+                    .consume_reconciliation(handle, &space_id, key)
+                    .await
+                    .map_err(classify_staging_error)?;
+            }
             let output = import_output(
                 &space_id,
                 &candidate,
@@ -1776,25 +1793,29 @@ async fn file_import(
                 .artifact_operations()
                 .set_outcome(key, OperationOutcome::ImportComplete(output.clone()))
                 .await;
+            drop(settlement_permit);
             return Ok(output);
         }
         ImportIdempotency::Dispatch => {
             if let Some(handle) = staged_handle {
-                let mut staged = staging(runtime)?
-                    .import_source(&handle, &space_id)
-                    .await
-                    .map_err(classify_staging_error)?;
+                let PreparedImport::Staged(staged) = &mut source else {
+                    // A different operation held reconciliation authority.
+                    // Undo the provisional reservation before reporting the
+                    // fixed staged-source failure.
+                    runtime.artifact_operations().remove(key).await;
+                    return Err(ArtifactToolError::NotFound);
+                };
+                let _ = handle;
                 staging(runtime)?
-                    .bind_import_operation(&mut staged, key)
+                    .bind_import_operation(staged, key)
                     .map_err(classify_staging_error)?;
-                source = PreparedImport::Staged(staged);
             }
         }
     }
     let owned_runtime = runtime.clone();
     let owned_cancellation = CancellationToken::new();
     let operation_timeout = runtime.artifact_config().limits.operation_timeout;
-    let receiver = runtime.supervise_import_settlement(key, async move {
+    let receiver = runtime.supervise_import_settlement(key, settlement_permit, async move {
         let result = match tokio::time::timeout(
             operation_timeout,
             settle_reserved_import(
@@ -3889,10 +3910,9 @@ mod tests {
         let state = ArtifactOperationState::default();
         let key = digest_fields(b"key", &[b"phase"]);
         let fingerprint = digest_fields(b"fingerprint", &[b"phase"]);
-        let candidate = EntityId::new(
-            "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ".to_owned(),
-        )
-        .expect("candidate");
+        let candidate =
+            EntityId::new("bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ".to_owned())
+                .expect("candidate");
 
         assert!(matches!(
             state.reserve_import(key, fingerprint).await,
