@@ -5024,9 +5024,17 @@ mod tests {
     async fn opening_transport_failure_discards_raw_url_and_source() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("reserve closed endpoint");
-        let address = listener.local_addr().expect("closed endpoint address");
-        drop(listener);
+            .expect("bind transport failure endpoint");
+        let address = listener
+            .local_addr()
+            .expect("transport failure endpoint address");
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("accept transport failure request");
+            drop(socket);
+        });
 
         let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
         let key_path = std::env::temp_dir().join(format!(
@@ -5061,6 +5069,7 @@ mod tests {
         for secret in ["alice", "secret", "test-token", &address_secret] {
             assert!(!rendered.contains(secret));
         }
+        server.await.expect("transport failure server");
     }
 
     #[tokio::test]
