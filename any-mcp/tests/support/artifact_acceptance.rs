@@ -479,8 +479,18 @@ const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStat
         | AdversarialCaseId::Race01
         | AdversarialCaseId::Race02
         | AdversarialCaseId::Race03
-        | AdversarialCaseId::Race06 => {
+        | AdversarialCaseId::Race06
+        | AdversarialCaseId::Race07
+        | AdversarialCaseId::Race08
+        | AdversarialCaseId::Hlink06 => {
             if cfg!(any(unix, windows)) {
+                AdversarialCaseStatus::Executed
+            } else {
+                AdversarialCaseStatus::PlatformUnsupported
+            }
+        }
+        AdversarialCaseId::Sym13 | AdversarialCaseId::Hlink05 => {
+            if cfg!(unix) {
                 AdversarialCaseStatus::Executed
             } else {
                 AdversarialCaseStatus::PlatformUnsupported
@@ -2225,6 +2235,18 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     }
     execution.record_executed(AdversarialCaseId::Sym09)?;
 
+    #[cfg(windows)]
+    {
+        run_sym10(driver, run).await?;
+        execution.record_executed(AdversarialCaseId::Sym10)?;
+    }
+
+    #[cfg(unix)]
+    {
+        run_sym13(driver, run).await?;
+        execution.record_executed(AdversarialCaseId::Sym13)?;
+    }
+
     run_import_gate_race(
         driver,
         run,
@@ -2257,6 +2279,8 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Race06)?;
+
+    run_raw_staging_races(driver, run, &mut execution).await?;
 
     // Every hard-link row shares this capability observation. A filesystem
     // that cannot prove identity and the 2-to-1 count transition contributes
@@ -2326,6 +2350,9 @@ pub async fn run_artifact_dynamic_filesystem_cases(
             return Err("HLINK-04 changed the outside file".to_owned());
         }
         execution.record_executed(AdversarialCaseId::Hlink04)?;
+
+        #[cfg(unix)]
+        run_hlink05(driver, run, &mut execution).await?;
     }
 
     let objects_after = artifact_object_ids(run.ctx).await?;
@@ -9901,7 +9928,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 59;
+        let implemented = 64;
         assert_eq!(
             partition
                 .iter()
@@ -9918,7 +9945,7 @@ mod tests {
         );
         assert_eq!(
             AdversarialCaseId::Hlink06.status(),
-            AdversarialCaseStatus::Pending
+            AdversarialCaseStatus::Executed
         );
         assert_eq!(
             ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
