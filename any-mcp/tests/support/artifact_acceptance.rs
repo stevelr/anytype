@@ -1128,25 +1128,20 @@ pub struct ArtifactAdversarialRun<'a> {
     pub gate_hooks: Option<&'a dyn ArtifactGateHooks>,
 }
 
+/// Boxed result of arming one operation-specific acceptance gate.
+pub type ArtifactGateFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>>;
+
 /// Test-harness-owned gate adapter, deliberately independent of the library's
 /// concrete gate type so this support module compiles both in-crate and as an
 /// external integration-test module.
 pub trait ArtifactGateHooks: Send + Sync {
     /// Arms the exact import operation selected by its raw idempotency key.
-    fn arm_import<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>>;
+    fn arm_import<'a>(&'a self, key: &'a str) -> ArtifactGateFuture<'a>;
     /// Arms the exact export operation selected by its raw idempotency key.
-    fn arm_export<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>>;
+    fn arm_export<'a>(&'a self, key: &'a str) -> ArtifactGateFuture<'a>;
     /// Arms the exact document operation selected by its raw idempotency key.
-    fn arm_document<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ArtifactGateLease>, String>> + Send + 'a>>;
+    fn arm_document<'a>(&'a self, key: &'a str) -> ArtifactGateFuture<'a>;
 }
 
 /// One armed, re-armable test synchronization point.
@@ -2463,8 +2458,7 @@ async fn run_raw_staging_races(
                     handle,
                     headers,
                     first_body,
-                    arrived,
-                    release,
+                    (arrived, release),
                 )
                 .await
         }
@@ -2483,8 +2477,7 @@ async fn run_raw_staging_races(
                     handle,
                     headers,
                     overlap,
-                    arrived,
-                    release,
+                    (arrived, release),
                 )
                 .await
         }
@@ -4799,9 +4792,9 @@ impl RawStagingClient {
         bearer: Zeroizing<String>,
         headers: Vec<(HeaderName, HeaderValue)>,
         body: Vec<u8>,
-        arrived: Arc<tokio::sync::Barrier>,
-        release: Arc<tokio::sync::Barrier>,
+        barriers: (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>),
     ) -> Result<RawStagingOutcome, String> {
+        let (arrived, release) = barriers;
         let mut additional = reqwest::header::HeaderMap::new();
         for (name, value) in headers {
             additional.append(name, value);

@@ -2247,6 +2247,10 @@ async fn run_body_scenario_inner(
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+/// Boxed result of dispatching two tool calls before awaiting either one.
+pub type ConcurrentToolCallFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(Value, Value), String>> + 'a>>;
+
 /// Test-only transport seam used by both direct-router and stdio drivers.
 pub trait McpDriver {
     fn body_acceptance_metrics(&self) -> Option<BodyDriverMetrics> {
@@ -2285,7 +2289,7 @@ pub trait McpDriver {
         _name: &'static str,
         _left: Value,
         _right: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<(Value, Value), String>> + 'a>> {
+    ) -> ConcurrentToolCallFuture<'a> {
         Box::pin(std::future::ready(Err(
             "driver does not expose concurrent tool calls".to_owned(),
         )))
