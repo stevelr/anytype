@@ -2859,7 +2859,9 @@ pub async fn run_chats_registry_scenario(
         return Err("chat_message_list omitted the cleanup-owned seed".to_owned());
     }
     let mut search_observed = false;
-    for attempt in 0..20 {
+    const SEARCH_ATTEMPTS: usize = 60;
+    const SEARCH_RETRY_DELAY: Duration = Duration::from_millis(250);
+    for attempt in 0..SEARCH_ATTEMPTS {
         let search = driver
             .call_tool(
                 "chat_message_search",
@@ -2875,8 +2877,8 @@ pub async fn run_chats_registry_scenario(
             search_observed = true;
             break;
         }
-        if attempt != 19 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        if attempt + 1 != SEARCH_ATTEMPTS {
+            tokio::time::sleep(SEARCH_RETRY_DELAY).await;
         }
     }
     if !search_observed {

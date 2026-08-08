@@ -671,6 +671,7 @@ impl StdioDriver {
         name: &'static str,
         arguments: Value,
         pause_ready: &Path,
+        pause_released: &Path,
     ) -> Result<u64, String> {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -705,7 +706,45 @@ impl StdioDriver {
             "notifications/cancelled",
             json!({"requestId": id, "reason": "artifact acceptance cancellation"}),
         );
-        let ping = self.request("ping", json!({}));
+        while !pause_released.is_file() {
+            if std::time::Instant::now() >= deadline {
+                return Err("artifact cancellation did not release the paused operation".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let marker = std::fs::read(pause_released)
+            .map_err(|_| "read artifact cancellation release handshake".to_owned())?;
+        if marker != b"cancelled\n" {
+            return Err("artifact cancellation did not stop the paused operation".to_owned());
+        }
+        let ping_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":ping_id,
+            "method":"ping",
+            "params":{}
+        }));
+        let first = self.process.read_frame();
+        self.process.record_response(&first);
+        let ping = if first["id"].as_u64() == Some(ping_id) {
+            first
+        } else {
+            let second = self.process.read_frame();
+            self.process.record_response(&second);
+            let [cancelled, ping] = correlate_response_pair([id, ping_id], [first, second])?;
+            if cancelled["result"]["isError"].as_bool() != Some(true)
+                || cancelled
+                    .pointer("/result/structuredContent/code")
+                    .and_then(Value::as_str)
+                    != Some("conflict")
+            {
+                return Err(
+                    "artifact cancellation did not return the fixed conflict result".to_owned(),
+                );
+            }
+            ping
+        };
         if ping["result"] != json!({}) {
             return Err("artifact child did not respond after cancellation".to_owned());
         }
@@ -818,6 +857,42 @@ impl StdioDriver {
         let output = self.process.finish();
         (transcript, output, "scenario_panic")
     }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn correlate_response_pair(ids: [u64; 2], responses: [Value; 2]) -> Result<[Value; 2], String> {
+    let [first, second] = responses;
+    match (first["id"].as_u64(), second["id"].as_u64()) {
+        (Some(id), Some(other)) if id == ids[0] && other == ids[1] => Ok([first, second]),
+        (Some(id), Some(other)) if id == ids[1] && other == ids[0] => Ok([second, first]),
+        _ => Err("paired responses did not match the two outstanding requests".to_owned()),
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn cancellation_response_pair_is_correlated_in_either_arrival_order() {
+    let cancelled = json!({
+        "jsonrpc": "2.0",
+        "id": 41,
+        "result": {"isError": true, "structuredContent": {"code": "conflict"}}
+    });
+    let ping = json!({"jsonrpc": "2.0", "id": 42, "result": {}});
+
+    let ordered = correlate_response_pair([41, 42], [ping.clone(), cancelled.clone()])
+        .expect("reverse arrival order is correlated");
+    assert_eq!(ordered, [cancelled, ping]);
+    assert!(
+        correlate_response_pair(
+            [41, 42],
+            [
+                json!({"jsonrpc": "2.0", "id": 41, "result": {}}),
+                json!({"jsonrpc": "2.0", "id": 43, "result": {}}),
+            ],
+        )
+        .is_err(),
+        "an unrelated response must not be left queued"
+    );
 }
 
 impl McpDriver for StdioDriver {
@@ -1214,6 +1289,7 @@ fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
         .map_err(|_| sentinel_assertion("reviewed log keystore could not be opened"))?;
     inspect_reviewed_body_server_log_at(
         std::env::var_os("ANY_MCP_HEADLESS_REDACTED_LOG_FILE"),
+        std::env::var_os("ANY_MCP_HEADLESS_EVIDENCE_CONTEXT"),
         Some(&marker),
         secrets,
         |log| {
@@ -1226,6 +1302,7 @@ fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
 
 fn inspect_reviewed_body_server_log_at(
     path: Option<OsString>,
+    context_path: Option<OsString>,
     marker: Option<&str>,
     secrets: &[&[u8]],
     credentials_absent: impl FnOnce(&[u8]) -> bool,
@@ -1236,9 +1313,14 @@ fn inspect_reviewed_body_server_log_at(
         ));
     };
     let path = PathBuf::from(path);
-    if !path.is_absolute() {
+    let Some(context_path) = context_path.map(PathBuf::from) else {
         return Err(sentinel_assertion(
-            "reviewed headless server-log path was not absolute",
+            "reviewed headless server-log context was not configured",
+        ));
+    };
+    if !path.is_absolute() || !context_path.is_absolute() {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log paths were not absolute",
         ));
     }
     let marker = marker
@@ -1249,7 +1331,75 @@ fn inspect_reviewed_body_server_log_at(
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
         .ok_or_else(|| sentinel_assertion("reviewed headless server-log marker was invalid"))?;
-    let metadata = std::fs::symlink_metadata(&path)
+    let mut context_options = std::fs::OpenOptions::new();
+    context_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        context_options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let context_file = context_options
+        .open(&context_path)
+        .map_err(|_| sentinel_assertion("reviewed headless server-log context was unreadable"))?;
+    let context_metadata = context_file
+        .metadata()
+        .map_err(|_| sentinel_assertion("reviewed headless server-log context was unreadable"))?;
+    if !context_metadata.file_type().is_file() {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log context was not a regular file",
+        ));
+    }
+    if context_metadata.len() > 4096 {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log context was oversized",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // SAFETY: `geteuid` has no preconditions and does not dereference
+        // pointers or mutate process state.
+        let effective_uid = unsafe { libc::geteuid() };
+        if context_metadata.permissions().mode() & 0o777 != 0o600
+            || context_metadata.uid() != effective_uid
+        {
+            return Err(sentinel_assertion(
+                "reviewed headless server-log context ownership or permissions were unsafe",
+            ));
+        }
+    }
+    use std::io::Read as _;
+    let mut context = String::new();
+    context_file
+        .take(4097)
+        .read_to_string(&mut context)
+        .map_err(|_| sentinel_assertion("reviewed headless server-log context was unreadable"))?;
+    if context.len() > 4096 {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log context was oversized",
+        ));
+    }
+    let context = parse_reviewed_evidence_context(&context)?;
+    if context.run_marker != marker {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log marker did not match its context",
+        ));
+    }
+    let mut source_options = std::fs::OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        source_options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = source_options
+        .open(&path)
+        .map_err(|_| sentinel_assertion("reviewed headless server log was unreadable"))?;
+    let metadata = file
+        .metadata()
         .map_err(|_| sentinel_assertion("reviewed headless server log metadata was unreadable"))?;
     if !metadata.file_type().is_file() {
         return Err(sentinel_assertion(
@@ -1268,46 +1418,273 @@ fn inspect_reviewed_body_server_log_at(
                 "reviewed headless server log ownership or permissions were unsafe",
             ));
         }
-    }
-    let log = std::fs::read(path)
-        .map_err(|_| sentinel_assertion("reviewed headless server log was unreadable"))?;
-    if log.is_empty()
-        || log.len() > 524_288
-        || std::str::from_utf8(&log).is_err()
-        || secrets
-            .iter()
-            .any(|secret| !secret.is_empty() && contains_bytes(&log, secret))
-        || !credentials_absent(&log)
-    {
-        return Err(sentinel_assertion(
-            "reviewed headless server log violated size/UTF-8/redaction bounds",
-        ));
-    }
-    let marker_line = format!("any-mcp-run-marker={marker}");
-    let mut marker_count = 0usize;
-    let mut event_count = 0usize;
-    for line in std::str::from_utf8(&log)
-        .map_err(|_| sentinel_assertion("reviewed headless server log was not UTF-8"))?
-        .lines()
-    {
-        if line.is_empty() {
-            continue;
-        } else if line == marker_line {
-            marker_count = marker_count.saturating_add(1);
-        } else if reviewed_server_event_line(line) {
-            event_count = event_count.saturating_add(1);
-        } else {
+        if metadata.dev() != context.start_device
+            || metadata.ino() != context.start_inode
+            || metadata.len() < context.start_bytes
+        {
             return Err(sentinel_assertion(
-                "reviewed headless server log contained a non-allowlisted line",
+                "reviewed headless server log identity or size changed",
             ));
         }
     }
-    if marker_count != 1 || event_count == 0 {
+    #[cfg(not(unix))]
+    return Err(sentinel_assertion(
+        "reviewed headless server log identity requires Unix metadata",
+    ));
+    #[cfg(unix)]
+    {
+        let mut file = file;
+        let log = {
+            use std::io::{Read, Seek, SeekFrom};
+
+            if context.anchor_length > 4096
+                || context.anchor_start.saturating_add(context.anchor_length) != context.start_bytes
+            {
+                return Err(sentinel_assertion(
+                    "reviewed headless server-log anchor bounds were invalid",
+                ));
+            }
+            file.seek(SeekFrom::Start(context.anchor_start))
+                .map_err(|_| {
+                    sentinel_assertion("reviewed headless server-log anchor was unreadable")
+                })?;
+            let anchor_length = usize::try_from(context.anchor_length).map_err(|_| {
+                sentinel_assertion("reviewed headless server-log anchor was too large")
+            })?;
+            let mut anchor = vec![0; anchor_length];
+            file.read_exact(&mut anchor).map_err(|_| {
+                sentinel_assertion("reviewed headless server-log anchor was unreadable")
+            })?;
+            if file_sha256(&anchor) != context.anchor_hash {
+                return Err(sentinel_assertion(
+                    "reviewed headless server-log pre-start anchor changed",
+                ));
+            }
+            file.seek(SeekFrom::Start(context.start_bytes))
+                .map_err(|_| {
+                    sentinel_assertion("reviewed headless server-log window was unreadable")
+                })?;
+            let mut log = Vec::new();
+            file.take(524_289).read_to_end(&mut log).map_err(|_| {
+                sentinel_assertion("reviewed headless server-log window was unreadable")
+            })?;
+            log
+        };
+        if log.is_empty()
+            || log.len() > 524_288
+            || std::str::from_utf8(&log).is_err()
+            || secrets
+                .iter()
+                .any(|secret| !secret.is_empty() && contains_bytes(&log, secret))
+            || !credentials_absent(&log)
+        {
+            return Err(sentinel_assertion(
+                "reviewed headless server log violated size/UTF-8/redaction bounds",
+            ));
+        }
+        let mut event_count = 0usize;
+        for line in std::str::from_utf8(&log)
+            .map_err(|_| sentinel_assertion("reviewed headless server log was not UTF-8"))?
+            .lines()
+        {
+            if line.is_empty() {
+                continue;
+            } else if reviewed_server_event_line(line) {
+                event_count = event_count.saturating_add(1);
+            } else {
+                return Err(sentinel_assertion(
+                    "reviewed headless server log contained a non-allowlisted line",
+                ));
+            }
+        }
+        if event_count == 0 {
+            return Err(sentinel_assertion(
+                "reviewed headless server log lacked current-run provenance or events",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct ReviewedEvidenceContext<'a> {
+    run_marker: &'a str,
+    start_device: u64,
+    start_inode: u64,
+    start_bytes: u64,
+    anchor_start: u64,
+    anchor_length: u64,
+    anchor_hash: &'a str,
+}
+
+fn parse_reviewed_evidence_context(contents: &str) -> TestResult<ReviewedEvidenceContext<'_>> {
+    let mut run_marker = None;
+    let mut start_device = None;
+    let mut start_inode = None;
+    let mut start_bytes = None;
+    let mut anchor_start = None;
+    let mut anchor_length = None;
+    let mut anchor_hash = None;
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(sentinel_assertion(
+                "reviewed headless server-log context was invalid",
+            ));
+        };
+        let destination = match key {
+            "run_marker" => &mut run_marker,
+            "anchor_hash" => &mut anchor_hash,
+            "start_device" => {
+                if start_device
+                    .replace(parse_reviewed_context_number(value)?)
+                    .is_some()
+                {
+                    return Err(sentinel_assertion(
+                        "reviewed headless server-log context was invalid",
+                    ));
+                }
+                continue;
+            }
+            "start_inode" => {
+                if start_inode
+                    .replace(parse_reviewed_context_number(value)?)
+                    .is_some()
+                {
+                    return Err(sentinel_assertion(
+                        "reviewed headless server-log context was invalid",
+                    ));
+                }
+                continue;
+            }
+            "start_bytes" => {
+                if start_bytes
+                    .replace(parse_reviewed_context_number(value)?)
+                    .is_some()
+                {
+                    return Err(sentinel_assertion(
+                        "reviewed headless server-log context was invalid",
+                    ));
+                }
+                continue;
+            }
+            "anchor_start" => {
+                if anchor_start
+                    .replace(parse_reviewed_context_number(value)?)
+                    .is_some()
+                {
+                    return Err(sentinel_assertion(
+                        "reviewed headless server-log context was invalid",
+                    ));
+                }
+                continue;
+            }
+            "anchor_length" => {
+                if anchor_length
+                    .replace(parse_reviewed_context_number(value)?)
+                    .is_some()
+                {
+                    return Err(sentinel_assertion(
+                        "reviewed headless server-log context was invalid",
+                    ));
+                }
+                continue;
+            }
+            _ => {
+                return Err(sentinel_assertion(
+                    "reviewed headless server-log context was invalid",
+                ));
+            }
+        };
+        if destination.replace(value).is_some() {
+            return Err(sentinel_assertion(
+                "reviewed headless server-log context was invalid",
+            ));
+        }
+    }
+    let context = ReviewedEvidenceContext {
+        run_marker: run_marker.ok_or_else(|| {
+            sentinel_assertion("reviewed headless server-log context was incomplete")
+        })?,
+        start_device: start_device.ok_or_else(|| {
+            sentinel_assertion("reviewed headless server-log context was incomplete")
+        })?,
+        start_inode: start_inode.ok_or_else(|| {
+            sentinel_assertion("reviewed headless server-log context was incomplete")
+        })?,
+        start_bytes: start_bytes.ok_or_else(|| {
+            sentinel_assertion("reviewed headless server-log context was incomplete")
+        })?,
+        anchor_start: anchor_start.ok_or_else(|| {
+            sentinel_assertion("reviewed headless server-log context was incomplete")
+        })?,
+        anchor_length: anchor_length.ok_or_else(|| {
+            sentinel_assertion("reviewed headless server-log context was incomplete")
+        })?,
+        anchor_hash: anchor_hash.ok_or_else(|| {
+            sentinel_assertion("reviewed headless server-log context was incomplete")
+        })?,
+    };
+    if context.run_marker.len() != 64
+        || context.anchor_hash.len() != 64
+        || !context
+            .run_marker
+            .bytes()
+            .chain(context.anchor_hash.bytes())
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(sentinel_assertion(
-            "reviewed headless server log lacked current-run provenance or events",
+            "reviewed headless server-log context digests were invalid",
         ));
     }
-    Ok(())
+    Ok(context)
+}
+
+fn parse_reviewed_context_number(value: &str) -> TestResult<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(sentinel_assertion(
+            "reviewed headless server-log context number was invalid",
+        ));
+    }
+    value
+        .parse()
+        .map_err(|_| sentinel_assertion("reviewed headless server-log context number was invalid"))
+}
+
+struct ReviewedServerEvent {
+    values: std::collections::BTreeMap<String, String>,
+}
+
+impl<'de> serde::Deserialize<'de> for ReviewedServerEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EventVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EventVisitor {
+            type Value = ReviewedServerEvent;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a reviewed server event with unique string fields")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                use serde::de::Error as _;
+
+                let mut values = std::collections::BTreeMap::new();
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    if values.insert(key, value).is_some() {
+                        return Err(A::Error::custom("duplicate reviewed server-event key"));
+                    }
+                }
+                Ok(ReviewedServerEvent { values })
+            }
+        }
+
+        deserializer.deserialize_map(EventVisitor)
+    }
 }
 
 fn reviewed_server_event_line(line: &str) -> bool {
@@ -1318,26 +1695,24 @@ fn reviewed_server_event_line(line: &str) -> bool {
         "category",
         "fixture_id",
     ];
-    let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else {
+    let Ok(ReviewedServerEvent { values: event }) =
+        serde_json::from_str::<ReviewedServerEvent>(line)
+    else {
         return false;
     };
     event.len() >= 2
         && event.keys().all(|key| KEYS.contains(&key.as_str()))
         && event
             .get("severity")
-            .and_then(Value::as_str)
             .is_some_and(|value| !value.is_empty() && value.len() <= 32)
         && ["component", "category"].iter().any(|key| {
             event
                 .get(*key)
-                .and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty() && value.len() <= 128)
         })
-        && event.values().all(|value| {
-            value
-                .as_str()
-                .is_some_and(|value| !value.is_empty() && value.len() <= 256)
-        })
+        && event
+            .values()
+            .all(|value| !value.is_empty() && value.len() <= 256)
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1769,17 +2144,21 @@ fn spawn_disposable_artifact_driver_configured(
     command.env("ANY_MCP_CONFIG", policy.config_path());
     if pause_file_import {
         let ready = policy.acceptance_pause_ready_path();
+        let released = policy.acceptance_pause_released_path();
         let _ = std::fs::remove_file(&ready);
+        let _ = std::fs::remove_file(&released);
         command
             .env(
                 "ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE",
                 "file_import_pre_dispatch",
             )
-            .env("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY", ready);
+            .env("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY", ready)
+            .env("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_RELEASED", released);
     } else {
         command
             .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE")
-            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY");
+            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY")
+            .env_remove("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_RELEASED");
     }
     ctx.spawn_owned_child(move || {
         // The fixture tree must outlive the child so no export or staged byte
@@ -2384,7 +2763,13 @@ async fn run_disposable_stdio_lifecycle_sentinel(mode: DisposableSentinelMode) {
                 assert!(!deliberate_panic.load(Ordering::SeqCst));
             }
             Ok(Ok(DisposableRun::Skipped(_))) => unreachable!("skip handled above"),
-            Ok(Err(error)) => panic!("disposable stdio lifecycle failed: {}", error.category()),
+            Ok(Err(error)) => panic!(
+                "disposable stdio lifecycle failed: {}; setup={:?}; readiness={:?}; callback={:?}",
+                error.category(),
+                error.setup_failure(),
+                error.readiness_failure(),
+                error.callback_failure(),
+            ),
             Err(_) => panic!("disposable stdio lifecycle unexpectedly panicked"),
         },
         DisposableSentinelMode::Panic => {
@@ -6093,6 +6478,7 @@ async fn run_artifact_cancellation_acceptance(
             "file_import",
             arguments.clone(),
             &policy.acceptance_pause_ready_path(),
+            &policy.acceptance_pause_released_path(),
         )?;
     let imported = driver.call_tool("file_import", arguments).await?;
     let file_id = imported["file_id"]
@@ -7635,7 +8021,15 @@ async fn run_body_blocks_real_workflow() -> OptionalRealWorkflowRun {
         },
     ))
     .await
-    .expect("cleanup-safe shared stable/preview body scenario");
+    .unwrap_or_else(|error| {
+        panic!(
+            "cleanup-safe shared stable/preview body scenario failed: {}; setup={:?}; readiness={:?}; callback={:?}",
+            error.category(),
+            error.setup_failure(),
+            error.readiness_failure(),
+            error.callback_failure(),
+        )
+    });
     match outcome {
         DisposableRun::Completed(space_id) => {
             assert_eq!(
@@ -7726,7 +8120,7 @@ fn optional_real_workflow_registration_is_exact() {
 #[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "requires env-only disposable credentials, an authenticated headless Anytype server, ANY_MCP_HEADLESS_LOG_RUN_MARKER, and ANY_MCP_HEADLESS_REDACTED_LOG_FILE"]
+#[ignore = "requires env-only disposable credentials, an authenticated headless Anytype server, and descriptor-bound reviewed server-log context"]
 async fn headless_stdio_all_registered_optional_real_workflows() {
     for registration in OPTIONAL_REAL_WORKFLOWS {
         require_optional_workflow_executed(registration.run().await).unwrap_or_else(|message| {
@@ -7772,29 +8166,81 @@ mod keystore_tests {
         path
     }
 
-    fn inspect_log(path: &Path, marker: Option<&str>, credentials_absent: bool) -> TestResult<()> {
-        inspect_reviewed_body_server_log_at(Some(path.as_os_str().to_owned()), marker, &[], |_| {
-            credentials_absent
-        })
+    #[cfg(unix)]
+    fn write_evidence_context(path: &Path, marker: &str) -> PathBuf {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let metadata = path.metadata().expect("read reviewed log metadata");
+        let start_bytes = metadata.len();
+        let anchor_length = start_bytes.min(4096);
+        let anchor_start = start_bytes - anchor_length;
+        let contents = std::fs::read(path).expect("read reviewed log anchor");
+        let anchor = &contents[usize::try_from(anchor_start).expect("small fixture")..];
+        let context = temporary_path("reviewed-context");
+        std::fs::write(
+            &context,
+            format!(
+                "run_marker={marker}\nstart_device={}\nstart_inode={}\nstart_bytes={start_bytes}\nanchor_start={anchor_start}\nanchor_length={anchor_length}\nanchor_hash={}\n",
+                metadata.dev(),
+                metadata.ino(),
+                file_sha256(anchor),
+            ),
+        )
+        .expect("write reviewed evidence context");
+        std::fs::set_permissions(&context, std::fs::Permissions::from_mode(0o600))
+            .expect("set private context permissions");
+        context
+    }
+
+    #[cfg(unix)]
+    fn inspect_log(
+        path: &Path,
+        context: &Path,
+        marker: Option<&str>,
+        credentials_absent: bool,
+    ) -> TestResult<()> {
+        inspect_reviewed_body_server_log_at(
+            Some(path.as_os_str().to_owned()),
+            Some(context.as_os_str().to_owned()),
+            marker,
+            &[],
+            |_| credentials_absent,
+        )
     }
 
     #[test]
     fn body_server_log_inspection_fails_closed_when_path_is_missing() {
         assert!(
-            inspect_reviewed_body_server_log_at(None, Some(RUN_MARKER), &[], |_| true).is_err()
+            inspect_reviewed_body_server_log_at(None, None, Some(RUN_MARKER), &[], |_| true)
+                .is_err()
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn body_server_log_requires_private_current_allowlisted_evidence() {
-        let valid = write_reviewed_log(
-            "reviewed-valid.log",
-            format!("{REVIEWED_EVENT}\nany-mcp-run-marker={RUN_MARKER}\n").as_bytes(),
+        use std::io::Write;
+
+        let valid = write_reviewed_log("reviewed-valid.log", b"stale pre-start bytes\n");
+        let context = write_evidence_context(&valid, RUN_MARKER);
+        let crlf_context = std::fs::read_to_string(&context)
+            .expect("read LF context")
+            .replace('\n', "\r\n");
+        assert!(
+            parse_reviewed_evidence_context(&crlf_context).is_ok(),
+            "context parsing intentionally normalizes CRLF line endings"
         );
-        assert!(inspect_log(&valid, Some(RUN_MARKER), true).is_ok());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&valid)
+            .expect("open reviewed log fixture")
+            .write_all(format!("{REVIEWED_EVENT}\n").as_bytes())
+            .expect("append fresh reviewed event");
+        assert!(inspect_log(&valid, &context, Some(RUN_MARKER), true).is_ok());
         assert!(
             inspect_reviewed_body_server_log_at(
                 Some(valid.as_os_str().to_owned()),
+                Some(context.as_os_str().to_owned()),
                 Some(RUN_MARKER),
                 &[b"".as_slice()],
                 |_| true,
@@ -7804,59 +8250,126 @@ mod keystore_tests {
         assert!(
             inspect_reviewed_body_server_log_at(
                 Some(valid.as_os_str().to_owned()),
+                Some(context.as_os_str().to_owned()),
                 Some(RUN_MARKER),
                 &[b"body_acceptance".as_slice()],
                 |_| true,
             )
             .is_err()
         );
-        assert!(inspect_log(&valid, None, true).is_err());
-        assert!(inspect_log(&valid, Some(&"a".repeat(63)), true).is_err());
-        assert!(inspect_log(&valid, Some(RUN_MARKER), false).is_err());
+        assert!(inspect_log(&valid, &context, None, true).is_err());
+        assert!(inspect_log(&valid, &context, Some(&"a".repeat(63)), true).is_err());
+        assert!(inspect_log(&valid, &context, Some(RUN_MARKER), false).is_err());
 
         for (name, contents) in [
             ("reviewed-empty.log", "".to_owned()),
             ("reviewed-arbitrary.log", "arbitrary\n".to_owned()),
-            ("reviewed-no-marker.log", format!("{REVIEWED_EVENT}\n")),
-            (
-                "reviewed-no-event.log",
-                format!("any-mcp-run-marker={RUN_MARKER}\n"),
-            ),
-            (
-                "reviewed-duplicate-marker.log",
-                format!(
-                    "{REVIEWED_EVENT}\nany-mcp-run-marker={RUN_MARKER}\nany-mcp-run-marker={RUN_MARKER}\n"
-                ),
-            ),
             (
                 "reviewed-unknown-field.log",
-                format!(
-                    "{{\"severity\":\"info\",\"component\":\"anytype\",\"body\":\"forbidden\"}}\nany-mcp-run-marker={RUN_MARKER}\n"
-                ),
+                "{\"severity\":\"info\",\"component\":\"anytype\",\"body\":\"forbidden\"}\n"
+                    .to_owned(),
+            ),
+            (
+                "reviewed-duplicate-key.log",
+                "{\"severity\":\"info\",\"severity\":\"error\",\"component\":\"anytype\"}\n"
+                    .to_owned(),
             ),
         ] {
-            let path = write_reviewed_log(name, contents.as_bytes());
+            let path = write_reviewed_log(name, b"stale\n");
+            let invalid_context = write_evidence_context(&path, RUN_MARKER);
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open invalid reviewed log fixture")
+                .write_all(contents.as_bytes())
+                .expect("append invalid fresh evidence");
             assert!(
-                inspect_log(&path, Some(RUN_MARKER), true).is_err(),
+                inspect_log(&path, &invalid_context, Some(RUN_MARKER), true).is_err(),
                 "accepted {name}"
             );
             let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(invalid_context);
         }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
+        let stale_only = write_reviewed_log(
+            "reviewed-stale-only.log",
+            format!("{REVIEWED_EVENT}\n").as_bytes(),
+        );
+        let stale_context = write_evidence_context(&stale_only, RUN_MARKER);
+        assert!(
+            inspect_log(&stale_only, &stale_context, Some(RUN_MARKER), true).is_err(),
+            "a stale allowlisted event before the start offset must not pass"
+        );
+        let _ = std::fs::remove_file(stale_only);
+        let _ = std::fs::remove_file(stale_context);
 
-            std::fs::set_permissions(&valid, std::fs::Permissions::from_mode(0o640))
-                .expect("set unsafe reviewed log permissions");
-            assert!(inspect_log(&valid, Some(RUN_MARKER), true).is_err());
-        }
+        let duplicate_context = write_reviewed_log(
+            "reviewed-duplicate-context",
+            format!(
+                "{}start_bytes=0\n",
+                std::fs::read_to_string(&context).expect("read valid context")
+            )
+            .as_bytes(),
+        );
+        assert!(
+            inspect_log(&valid, &duplicate_context, Some(RUN_MARKER), true).is_err(),
+            "duplicate numeric context keys must fail"
+        );
+        let _ = std::fs::remove_file(duplicate_context);
+
+        let oversized_context = write_reviewed_log("reviewed-oversized-context", &[b'x'; 4097]);
+        assert!(
+            inspect_log(&valid, &oversized_context, Some(RUN_MARKER), true).is_err(),
+            "oversized context must fail before parsing"
+        );
+        let _ = std::fs::remove_file(oversized_context);
+
+        let source_link = temporary_path("reviewed-source-link");
+        std::os::unix::fs::symlink(&valid, &source_link).expect("create source symlink");
+        assert!(
+            inspect_log(&source_link, &context, Some(RUN_MARKER), true).is_err(),
+            "no-follow source open must reject symlinks"
+        );
+        let _ = std::fs::remove_file(source_link);
+
+        let context_link = temporary_path("reviewed-context-link");
+        std::os::unix::fs::symlink(&context, &context_link).expect("create context symlink");
+        assert!(
+            inspect_log(&valid, &context_link, Some(RUN_MARKER), true).is_err(),
+            "no-follow context open must reject symlinks"
+        );
+        let _ = std::fs::remove_file(context_link);
+
+        let replaced = write_reviewed_log("reviewed-replaced.log", b"pre-start\n");
+        let replaced_context = write_evidence_context(&replaced, RUN_MARKER);
+        let retired = temporary_path("reviewed-retired.log");
+        std::fs::rename(&replaced, &retired).expect("retire reviewed source identity");
+        std::fs::write(&replaced, format!("pre-start\n{REVIEWED_EVENT}\n"))
+            .expect("write replacement source");
+        std::fs::set_permissions(&replaced, std::fs::Permissions::from_mode(0o600))
+            .expect("set replacement source permissions");
+        assert!(
+            inspect_log(&replaced, &replaced_context, Some(RUN_MARKER), true).is_err(),
+            "replacement between anchor and audit must fail identity binding"
+        );
+        let _ = std::fs::remove_file(replaced);
+        let _ = std::fs::remove_file(retired);
+        let _ = std::fs::remove_file(replaced_context);
+
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(&valid, std::fs::Permissions::from_mode(0o640))
+            .expect("set unsafe reviewed log permissions");
+        assert!(inspect_log(&valid, &context, Some(RUN_MARKER), true).is_err());
         let _ = std::fs::remove_file(valid);
+        let _ = std::fs::remove_file(context);
 
         let directory = temporary_path("reviewed-directory");
         std::fs::create_dir(&directory).expect("create non-file fixture");
-        assert!(inspect_log(&directory, Some(RUN_MARKER), true).is_err());
+        let context = write_reviewed_log("reviewed-directory-context", b"invalid");
+        assert!(inspect_log(&directory, &context, Some(RUN_MARKER), true).is_err());
         let _ = std::fs::remove_dir(directory);
+        let _ = std::fs::remove_file(context);
     }
 
     fn temporary_path(name: &str) -> PathBuf {

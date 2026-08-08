@@ -39,12 +39,13 @@ use hyper::{
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
 use crate::{
     artifact_config::{ArtifactLimits, StagingConfig},
-    artifact_roots::{AnchoredImport, AtomicExport, RootRegistry, StagingDirectory},
+    artifact_roots::{
+        AnchoredImport, AtomicExport, PositionalReader, RootRegistry, StagingDirectory,
+    },
     domain::SpaceId,
 };
 
@@ -96,6 +97,13 @@ pub(crate) struct StageSource {
     pub(crate) sha256: String,
     pub(crate) media_type: Option<String>,
     record: [u8; RECORD_BYTES],
+    lease: tokio::sync::OwnedMutexGuard<RecordState>,
+}
+
+/// Retained staged export protected from shared-cursor concurrent reads.
+struct StageExportSource {
+    file: File,
+    lease: tokio::sync::OwnedMutexGuard<RecordState>,
 }
 
 /// Exclusive write lease for one receiving staging record.
@@ -135,6 +143,14 @@ impl fmt::Debug for StageSource {
 impl StageSource {
     pub(crate) fn record(&self) -> String {
         record_hex(&self.record)
+    }
+
+    pub(crate) fn try_clone_reader(&self) -> Result<File, StagingError> {
+        let mut reader = self.file.try_clone().map_err(|_| StagingError::Upstream)?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| StagingError::Upstream)?;
+        Ok(reader)
     }
 }
 
@@ -186,7 +202,7 @@ struct StageRecord {
     expected_sha256: Option<String>,
     expires: Instant,
     expires_at: DateTime<Utc>,
-    state: tokio::sync::Mutex<RecordState>,
+    state: Arc<tokio::sync::Mutex<RecordState>>,
 }
 
 #[derive(Debug)]
@@ -418,8 +434,13 @@ impl ArtifactStaging {
                     biased;
                     () = staging.state.shutdown.cancelled() => break,
                     () = tokio::time::sleep(cadence) => {
-                        let mut records = staging.state.records.write().await;
-                        staging.cleanup_expired_locked(&mut records).await;
+                        let expired = {
+                            let mut records = staging.state.records.write().await;
+                            staging.take_expired_locked(&mut records, Instant::now())
+                        };
+                        if let Some(cleanup) = staging.spawn_expired_cleanup(expired) {
+                            let _ = cleanup.await;
+                        }
                     }
                 }
             }
@@ -643,7 +664,7 @@ impl ArtifactStaging {
         handle: &str,
         record: &str,
     ) -> Response<StagingBody> {
-        let (file, status) = match self.export_reader(handle, Some(record)).await {
+        let (source, status) = match self.export_reader(handle, Some(record)).await {
             Ok(reader) => reader,
             Err(error) => return staging_http_error(error),
         };
@@ -659,16 +680,19 @@ impl ArtifactStaging {
             Some((offset, length)) => (offset, length, StatusCode::PARTIAL_CONTENT),
             None => (0, status.size_bytes, StatusCode::OK),
         };
-        let mut file = tokio::fs::File::from_std(file);
-        if file.seek(SeekFrom::Start(offset)).await.is_err() {
-            return fixed_response(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-        let reader = file.take(length);
+        let StageExportSource { file, lease } = source;
+        let reader = match PositionalReader::range(file, offset, length) {
+            Ok(reader) => reader,
+            Err(_) => return fixed_response(StatusCode::INTERNAL_SERVER_ERROR),
+        };
         let stream = ReaderStream::with_capacity(
             reader,
             self.state.limits.transfer_chunk_bytes.min(1024 * 1024) as usize,
         )
-        .map_ok(Frame::data);
+        .map_ok(move |bytes| {
+            let _ = &lease;
+            Frame::data(bytes)
+        });
         let body = StreamBody::new(stream).boxed_unsync();
         let mut response = Response::new(body);
         *response.status_mut() = response_status;
@@ -744,8 +768,14 @@ impl ArtifactStaging {
         {
             return Err(StagingError::Bounded);
         }
+        let expired = {
+            let mut records = self.state.records.write().await;
+            self.take_expired_locked(&mut records, Instant::now())
+        };
+        if let Some(cleanup) = self.spawn_expired_cleanup(expired) {
+            cleanup.await.map_err(|_| StagingError::Upstream)?;
+        }
         let mut records = self.state.records.write().await;
-        self.cleanup_expired_locked(&mut records).await;
         if records.len() >= self.state.limits.staging_entries {
             return Err(StagingError::Bounded);
         }
@@ -790,10 +820,10 @@ impl ArtifactStaging {
                 expected_sha256,
                 expires,
                 expires_at,
-                state: tokio::sync::Mutex::new(RecordState::Receiving {
+                state: Arc::new(tokio::sync::Mutex::new(RecordState::Receiving {
                     destination: Some(destination),
                     offset: 0,
-                }),
+                })),
             }),
         );
         Ok(StageAllocation {
@@ -977,26 +1007,27 @@ impl ArtifactStaging {
     }
 
     /// Clones the retained file behind one authenticated available export.
-    pub(crate) async fn export_reader(
+    async fn export_reader(
         &self,
         handle: &str,
         route_record: Option<&str>,
-    ) -> Result<(File, StageStatus), StagingError> {
+    ) -> Result<(StageExportSource, StageStatus), StagingError> {
         let (_, record) = self.authenticate(handle, route_record).await?;
         if record.direction != StageDirection::Export {
             return Err(StagingError::NotFound);
         }
-        let state = record.state.lock().await;
+        let state = Arc::clone(&record.state).lock_owned().await;
         let RecordState::Available { source, .. } = &*state else {
             return Err(StagingError::NotFound);
         };
         source
             .verify_unchanged()
             .map_err(|_| StagingError::Conflict)?;
-        let reader = source
+        let file = source
             .try_clone_reader()
             .map_err(|_| StagingError::Upstream)?;
-        Ok((reader, status_for(&record, &state)))
+        let status = status_for(&record, &state);
+        Ok((StageExportSource { file, lease: state }, status))
     }
 
     /// Returns a retained source for one ready import record.
@@ -1009,7 +1040,7 @@ impl ArtifactStaging {
         if record.direction != StageDirection::Import || &record.space_id != space_id {
             return Err(StagingError::NotFound);
         }
-        let state = record.state.lock().await;
+        let state = Arc::clone(&record.state).lock_owned().await;
         let RecordState::Ready { source, sha256 } = &*state else {
             return Err(StagingError::NotFound);
         };
@@ -1024,24 +1055,16 @@ impl ArtifactStaging {
             sha256: sha256.clone(),
             media_type: record.media_type.clone(),
             record: record_id,
+            lease: state,
         })
     }
 
     /// Marks one verified import source consumed.
-    pub(crate) async fn consume(&self, source: &StageSource) -> Result<(), StagingError> {
-        let record = self
-            .state
-            .records
-            .read()
-            .await
-            .get(&source.record)
-            .cloned()
-            .ok_or(StagingError::NotFound)?;
-        let mut state = record.state.lock().await;
-        if !matches!(*state, RecordState::Ready { .. }) {
+    pub(crate) async fn consume(&self, source: &mut StageSource) -> Result<(), StagingError> {
+        if !matches!(*source.lease, RecordState::Ready { .. }) {
             return Err(StagingError::NotFound);
         }
-        *state = RecordState::Consumed;
+        *source.lease = RecordState::Consumed;
         Ok(())
     }
 
@@ -1064,21 +1087,25 @@ impl ArtifactStaging {
             .map_err(|_| StagingError::Upstream)
     }
 
-    async fn cleanup_expired_locked(
+    fn take_expired_locked(
         &self,
         records: &mut HashMap<[u8; RECORD_BYTES], Arc<StageRecord>>,
-    ) {
-        let now = Instant::now();
+        now: Instant,
+    ) -> Vec<Arc<StageRecord>> {
         let expired = records
             .iter()
             .filter_map(|(id, record)| (record.expires <= now).then_some(*id))
             .take(self.state.limits.cleanup_batch)
             .collect::<Vec<_>>();
+        expired
+            .into_iter()
+            .filter_map(|id| records.remove(&id))
+            .collect()
+    }
+
+    async fn cleanup_expired(&self, expired: Vec<Arc<StageRecord>>) {
         let mut reaped = 0_usize;
-        for id in expired {
-            let Some(record) = records.remove(&id) else {
-                continue;
-            };
+        for record in expired {
             let target = {
                 let mut state = record.state.lock().await;
                 match &mut *state {
@@ -1113,6 +1140,19 @@ impl ArtifactStaging {
                 "Artifact staging cleanup completed"
             );
         }
+    }
+
+    fn spawn_expired_cleanup(
+        &self,
+        expired: Vec<Arc<StageRecord>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if expired.is_empty() {
+            return None;
+        }
+        let staging = self.clone();
+        Some(tokio::spawn(async move {
+            staging.cleanup_expired(expired).await;
+        }))
     }
 }
 
@@ -1592,7 +1632,52 @@ mod tests {
             .await
             .expect("retained import source");
         assert_eq!(source.length, 5);
-        test.staging.consume(&source).await.expect("consume source");
+        let mut reader = source.try_clone_reader().expect("rewound import reader");
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .expect("read retained import");
+        assert_eq!(bytes, b"hello");
+        let concurrent = tokio::time::timeout(
+            Duration::from_millis(20),
+            test.staging.import_source(&allocation.handle, &space_id()),
+        )
+        .await;
+        assert!(concurrent.is_err());
+        let reader = source.try_clone_reader().expect("blocking reader clone");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocking_reader = tokio::task::spawn_blocking(move || {
+            let _reader = reader;
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            source
+        });
+        started_rx.await.expect("blocking reader started");
+        blocking_reader.abort();
+        drop(blocking_reader);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                test.staging.import_source(&allocation.handle, &space_id()),
+            )
+            .await
+            .is_err(),
+            "cancelling a blocking join must not release its source lease"
+        );
+        release_tx.send(()).expect("release blocking reader");
+        let mut source = tokio::time::timeout(
+            Duration::from_secs(1),
+            test.staging.import_source(&allocation.handle, &space_id()),
+        )
+        .await
+        .expect("blocking reader released its lease")
+        .expect("reacquire retained import source");
+        test.staging
+            .consume(&mut source)
+            .await
+            .expect("consume source");
+        drop(source);
         assert!(
             test.staging
                 .import_source(&allocation.handle, &space_id())
@@ -1635,6 +1720,41 @@ mod tests {
             .await
             .expect("publish export");
 
+        let (mut first, _) = test
+            .staging
+            .export_reader(&allocation.handle, Some(&allocation.record))
+            .await
+            .expect("first export lease");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                test.staging
+                    .export_reader(&allocation.handle, Some(&allocation.record)),
+            )
+            .await
+            .is_err(),
+            "a second reader must wait for the first reader's cursor lease"
+        );
+        let mut retained = Vec::new();
+        first
+            .file
+            .read_to_end(&mut retained)
+            .expect("read first leased export");
+        assert_eq!(retained, b"hello");
+        drop(first);
+        let (mut second, _) = test
+            .staging
+            .export_reader(&allocation.handle, Some(&allocation.record))
+            .await
+            .expect("second export lease after release");
+        let mut repeated = Vec::new();
+        second
+            .file
+            .read_to_end(&mut repeated)
+            .expect("read second leased export");
+        assert_eq!(repeated, b"hello");
+        drop(second);
+
         let client = reqwest::Client::new();
         let full = client
             .get(&allocation.url)
@@ -1658,6 +1778,69 @@ mod tests {
             .release(&allocation.handle)
             .await
             .expect("release export");
+    }
+
+    #[tokio::test]
+    async fn stalled_expired_reader_does_not_block_unrelated_staging_requests() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate import");
+        let uploaded = reqwest::Client::new()
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_RANGE, "bytes 0-4/5")
+            .body("hello")
+            .send()
+            .await
+            .expect("upload staged source");
+        assert_eq!(uploaded.status(), StatusCode::CREATED);
+        let source = test
+            .staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("hold staged source lease");
+        let expired = {
+            let mut records = test.staging.state.records.write().await;
+            test.staging
+                .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
+        };
+        assert_eq!(expired.len(), 1);
+        let cleanup = test
+            .staging
+            .spawn_expired_cleanup(expired)
+            .expect("schedule expired cleanup");
+        tokio::task::yield_now().await;
+        assert!(
+            !cleanup.is_finished(),
+            "cleanup must wait for the reader lease"
+        );
+        drop(cleanup);
+
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            test.staging.allocate_export(
+                space_id(),
+                1,
+                Some("application/octet-stream".to_owned()),
+            ),
+        )
+        .await
+        .expect("unrelated allocation must not wait for expired reader")
+        .expect("allocate unrelated export");
+
+        drop(source);
+        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while staged_path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("detached cleanup completes after reader release");
     }
 
     #[tokio::test]

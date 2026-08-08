@@ -15,9 +15,12 @@ use std::{
     ffi::OsString,
     fmt,
     fs::File,
-    io::{self, Write},
+    future::Future,
+    io::{self, Seek, SeekFrom, Write},
     path::Path,
-    sync::Arc,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context, Poll},
 };
 
 #[cfg(unix)]
@@ -25,6 +28,7 @@ use cap_fs_ext::OpenOptionsExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::fs::{Dir, OpenOptions};
 use fs2::FileExt;
+use tokio::io::{AsyncRead, ReadBuf};
 
 use crate::artifact_config::{
     AbsoluteNativePath, ArtifactConfig, LogicalRootId, RelativeNativePath, RootDefinition,
@@ -32,6 +36,218 @@ use crate::artifact_config::{
 
 /// Fixed guidance returned when an operation requires an undeclared root.
 pub const ROOTS_REQUIRED_GUIDANCE: &str = "No artifact roots are configured. Declare roots in an any-mcp TOML config and select it with ANY_MCP_CONFIG or --config.";
+
+/// Cursor-independent async reader over one retained file handle.
+///
+/// Reads use explicit offsets, so cancelling a consumer cannot leave a
+/// background operation that advances another reader's shared file cursor.
+pub(crate) struct PositionalReader {
+    file: File,
+    offset: u64,
+    end: u64,
+    state: PositionalReadState,
+}
+
+enum PositionalReadState {
+    Idle,
+    Waiting {
+        permit: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            tokio::sync::OwnedSemaphorePermit,
+                            tokio::sync::AcquireError,
+                        >,
+                    > + Send,
+            >,
+        >,
+        available: usize,
+        offset: u64,
+    },
+    Reading(tokio::task::JoinHandle<(Vec<u8>, io::Result<usize>)>),
+    Buffered {
+        bytes: Vec<u8>,
+        length: usize,
+        consumed: usize,
+    },
+}
+
+const POSITIONAL_READ_CHUNK: usize = 1024 * 1024;
+#[cfg(windows)]
+const POSITIONAL_IO_LIMIT: usize = 1;
+#[cfg(not(windows))]
+const POSITIONAL_IO_LIMIT: usize = 32;
+
+fn positional_io_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(POSITIONAL_IO_LIMIT))))
+}
+
+impl PositionalReader {
+    pub(crate) fn new(file: File, length: u64) -> Self {
+        Self {
+            file,
+            offset: 0,
+            end: length,
+            state: PositionalReadState::Idle,
+        }
+    }
+
+    pub(crate) fn range(file: File, offset: u64, length: u64) -> io::Result<Self> {
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file range"))?;
+        Ok(Self {
+            file,
+            offset,
+            end,
+            state: PositionalReadState::Idle,
+        })
+    }
+}
+
+impl AsyncRead for PositionalReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let reader = self.get_mut();
+        loop {
+            match &mut reader.state {
+                PositionalReadState::Idle => {
+                    if reader.offset == reader.end || buffer.remaining() == 0 {
+                        return Poll::Ready(Ok(()));
+                    }
+                    let remaining = reader.end.saturating_sub(reader.offset);
+                    let available = usize::try_from(remaining)
+                        .unwrap_or(usize::MAX)
+                        .min(buffer.remaining())
+                        .min(POSITIONAL_READ_CHUNK);
+                    let offset = reader.offset;
+                    let semaphore = positional_io_semaphore();
+                    reader.state = PositionalReadState::Waiting {
+                        permit: Box::pin(async move { semaphore.acquire_owned().await }),
+                        available,
+                        offset,
+                    };
+                }
+                PositionalReadState::Waiting {
+                    permit,
+                    available,
+                    offset,
+                } => {
+                    let permit = match permit.as_mut().poll(context) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(permit)) => permit,
+                        Poll::Ready(Err(_)) => {
+                            return Poll::Ready(Err(io::Error::other(
+                                "positional I/O admission failed",
+                            )));
+                        }
+                    };
+                    let file = match reader.file.try_clone() {
+                        Ok(file) => file,
+                        Err(error) => return Poll::Ready(Err(error)),
+                    };
+                    let handle = match tokio::runtime::Handle::try_current() {
+                        Ok(handle) => handle,
+                        Err(_) => {
+                            return Poll::Ready(Err(io::Error::other(
+                                "positional reader requires a Tokio runtime",
+                            )));
+                        }
+                    };
+                    let available = *available;
+                    let offset = *offset;
+                    reader.state = PositionalReadState::Reading(handle.spawn_blocking(move || {
+                        let _permit = permit;
+                        let mut bytes = vec![0_u8; available];
+                        let result = positional_read(&file, &mut bytes, offset);
+                        (bytes, result)
+                    }));
+                }
+                PositionalReadState::Reading(task) => {
+                    let outcome = match Pin::new(task).poll(context) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(outcome) => outcome,
+                    };
+                    reader.state = PositionalReadState::Idle;
+                    let (bytes, result) = match outcome {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            return Poll::Ready(Err(io::Error::other(
+                                "positional read task failed",
+                            )));
+                        }
+                    };
+                    let read = match result {
+                        Ok(0) => {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "retained artifact ended early",
+                            )));
+                        }
+                        Ok(read) => read,
+                        Err(error) => return Poll::Ready(Err(error)),
+                    };
+                    if bytes.get(..read).is_none() {
+                        return Poll::Ready(Err(io::Error::other(
+                            "positional read exceeded its buffer",
+                        )));
+                    }
+                    reader.state = PositionalReadState::Buffered {
+                        bytes,
+                        length: read,
+                        consumed: 0,
+                    };
+                }
+                PositionalReadState::Buffered {
+                    bytes,
+                    length,
+                    consumed,
+                } => {
+                    if buffer.remaining() == 0 {
+                        return Poll::Ready(Ok(()));
+                    }
+                    let available = length.saturating_sub(*consumed).min(buffer.remaining());
+                    let Some(end) = consumed.checked_add(available) else {
+                        return Poll::Ready(Err(io::Error::other(
+                            "positional read buffer offset overflow",
+                        )));
+                    };
+                    let Some(contents) = bytes.get(*consumed..end) else {
+                        return Poll::Ready(Err(io::Error::other(
+                            "positional read exceeded its buffer",
+                        )));
+                    };
+                    let Some(offset) = reader.offset.checked_add(available as u64) else {
+                        return Poll::Ready(Err(io::Error::other(
+                            "retained artifact offset overflow",
+                        )));
+                    };
+                    reader.offset = offset;
+                    buffer.put_slice(contents);
+                    *consumed = end;
+                    if end == *length {
+                        reader.state = PositionalReadState::Idle;
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn positional_read(file: &File, destination: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, destination, offset)
+}
+
+#[cfg(windows)]
+fn positional_read(file: &File, destination: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, destination, offset)
+}
 
 /// Filesystem authority held by one configured logical root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -596,9 +812,14 @@ impl AnchoredImport {
     /// Returns a fixed containment error when the operating system cannot
     /// duplicate the live handle.
     pub fn try_clone_reader(&self) -> Result<File, RootAccessError> {
-        self.file
+        let mut reader = self
+            .file
             .try_clone()
-            .map_err(|_| RootAccessError::new(RootProblem::Containment))
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        Ok(reader)
     }
 
     /// Rechecks stable identity and size after streaming.
@@ -1547,6 +1768,110 @@ mod tests {
         (base, import, export)
     }
 
+    #[tokio::test]
+    async fn positional_readers_do_not_share_cursor_state() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (base, import, _) = temporary_tree();
+        let path = import.join("positional.bin");
+        fs::write(&path, b"abcdef").expect("write positional fixture");
+        let file = File::open(&path).expect("open positional fixture");
+        let clone = file.try_clone().expect("clone positional fixture");
+        let mut complete = PositionalReader::new(file, 6);
+        let mut middle = PositionalReader::range(clone, 2, 3).expect("bounded range");
+        let mut complete_bytes = Vec::new();
+        let mut middle_bytes = Vec::new();
+        complete
+            .read_to_end(&mut complete_bytes)
+            .await
+            .expect("read complete fixture");
+        middle
+            .read_to_end(&mut middle_bytes)
+            .await
+            .expect("read fixture range");
+        assert_eq!(complete_bytes, b"abcdef");
+        assert_eq!(middle_bytes, b"cde");
+        fs::remove_dir_all(base).expect("cleanup positional fixture");
+    }
+
+    #[tokio::test]
+    async fn positional_reader_accepts_a_smaller_buffer_after_pending() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (base, import, _) = temporary_tree();
+        let path = import.join("positional-repoll.bin");
+        fs::write(&path, b"abcdef").expect("write repoll fixture");
+        let file = File::open(&path).expect("open repoll fixture");
+        let task_file = file.try_clone().expect("clone repoll fixture");
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let task = tokio::task::spawn_blocking(move || {
+            let _ = release_rx.recv();
+            let mut bytes = vec![0_u8; 6];
+            let result = positional_read(&task_file, &mut bytes, 0);
+            (bytes, result)
+        });
+        let mut reader = PositionalReader::new(file, 6);
+        reader.state = PositionalReadState::Reading(task);
+        let waker = futures::task::noop_waker_ref();
+        let mut context = Context::from_waker(waker);
+        let mut large = [0_u8; 6];
+        let mut large_buffer = ReadBuf::new(&mut large);
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut context, &mut large_buffer),
+            Poll::Pending
+        ));
+        release_tx.send(()).expect("release positional read");
+
+        let mut first = [0_u8; 1];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reader.read_exact(&mut first),
+        )
+        .await
+        .expect("smaller-buffer repoll completed")
+        .expect("smaller-buffer repoll succeeded");
+        assert_eq!(&first, b"a");
+        let mut remainder = Vec::new();
+        reader
+            .read_to_end(&mut remainder)
+            .await
+            .expect("read buffered remainder");
+        assert_eq!(remainder, b"bcdef");
+        fs::remove_dir_all(base).expect("cleanup repoll fixture");
+    }
+
+    #[tokio::test]
+    async fn positional_reader_waits_for_bounded_io_admission() {
+        use tokio::io::AsyncReadExt as _;
+
+        let permits = positional_io_semaphore()
+            .acquire_many_owned(u32::try_from(POSITIONAL_IO_LIMIT).expect("permit limit"))
+            .await
+            .expect("reserve positional permits");
+        let (base, import, _) = temporary_tree();
+        let path = import.join("positional-admission.bin");
+        fs::write(&path, b"bounded").expect("write admission fixture");
+        let file = File::open(&path).expect("open admission fixture");
+        let mut reader = PositionalReader::new(file, 7);
+        let waker = futures::task::noop_waker_ref();
+        let mut context = Context::from_waker(waker);
+        let mut first = [0_u8; 7];
+        let mut first_buffer = ReadBuf::new(&mut first);
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut context, &mut first_buffer),
+            Poll::Pending
+        ));
+        assert!(matches!(reader.state, PositionalReadState::Waiting { .. }));
+        drop(permits);
+        let mut observed = Vec::new();
+        reader
+            .read_to_end(&mut observed)
+            .await
+            .expect("read after positional admission");
+        assert_eq!(observed, b"bounded");
+        fs::remove_dir_all(base).expect("cleanup admission fixture");
+    }
+
     #[test]
     fn activates_retained_roots_and_keeps_errors_path_redacted() {
         let (base, import, export) = temporary_tree();
@@ -1581,6 +1906,10 @@ mod tests {
             .expect("open import");
         let mut bytes = Vec::new();
         opened.reader().read_to_end(&mut bytes).expect("read");
+        assert_eq!(bytes, b"artifact");
+        let mut cloned = opened.try_clone_reader().expect("rewound clone");
+        bytes.clear();
+        cloned.read_to_end(&mut bytes).expect("read clone");
         assert_eq!(bytes, b"artifact");
         opened.verify_unchanged().expect("unchanged");
         assert!(

@@ -8,6 +8,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Protect every cleanup-owned ignored live test with serial direct-router,
+  spawned-stdio, and discussions-process gates. Closed offline manifests and
+  executable-count checks reject renamed, missing, skipped, or zero-test
+  cases; object-edit coverage uses a disposable space, and the redundant
+  direct-body orphan is retired in favor of the shared body scenario.
+- Restrict both self-hosted live jobs to manual dispatches and trusted pushes
+  to `main`, after the hosted contract matrix succeeds. Immutable action pins,
+  silent bounded test transcripts, and descriptor-bound post-start server-log
+  evidence keep pull-request code and stale or replaced logs outside the
+  protected runner boundary. Each driver runs in a uniquely named transient
+  user scope, and failure artifacts contain only fixed validation categories
+  and counters rather than server-log bytes.
 - Add `rich_page_resume` for one retained runtime facade recovery claim over
   the never-attempted suffix of a partial rich-page receipt. Recovery re-proves
   page, type, and authored prefix evidence, and refuses uncertain or attempted
@@ -15,6 +27,23 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Verified authenticated Streamable HTTP interoperability with MCP Inspector
   2.1.0 and Claude Code 2.1.220, including lifecycle, SSE, catalog parity, and
   session termination.
+
+### Fixed
+
+- Rewind retained artifact readers before Anytype uploads and hold an exclusive
+  staging-record lease through validation and dispatch, preventing shared file
+  offsets from producing empty or interleaved imports. Multi-chunk import
+  verification now accepts a missing upstream ETag only when the complete
+  streamed bytes match the source's expected SHA-256; exports still require a
+  strong ETag. Artifact cancellation and timeout paths now emit their fixed
+  controlled-failure diagnostic before returning. Validator inputs are rewound
+  for every configured process; validator, upload, document, and staged-export
+  reads use a bounded blocking pool with explicit offsets, so cancellation
+  cannot corrupt a shared cursor or strand unbounded file work. Expiry cleanup
+  releases the global record map before waiting on a stream and survives
+  cancellation after record removal. The live chat-search check now allows a
+  bounded indexing-convergence window before it reports a missing cleanup-owned
+  seed.
 
 ---
 

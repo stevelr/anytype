@@ -29,13 +29,14 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     artifact_config::RelativeNativePath,
     artifact_roots::{
-        AnchoredImport, EffectiveRootRegistry, ROOTS_REQUIRED_GUIDANCE, RootAccessError,
-        RootAccessErrorKind,
+        AnchoredImport, EffectiveRootRegistry, PositionalReader, ROOTS_REQUIRED_GUIDANCE,
+        RootAccessError, RootAccessErrorKind,
     },
     artifact_staging::{
         ArtifactStaging, STAGING_REQUIRED_GUIDANCE, StageAllocation, StageDirection, StageSource,
@@ -51,7 +52,7 @@ use crate::{
     },
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
-    runtime::RuntimeContext,
+    runtime::{ControlledFailureKind, OperationContext, RuntimeContext},
     schema::SchemaContractError,
     space_policy::PolicyClient,
     validation::Omittable,
@@ -1231,10 +1232,7 @@ impl PreparedImport {
             Self::Local { source, .. } => source
                 .try_clone_reader()
                 .map_err(|error| classify_root_error(&error)),
-            Self::Staged(source) => source
-                .file
-                .try_clone()
-                .map_err(|_| ArtifactToolError::Upstream),
+            Self::Staged(source) => source.try_clone_reader().map_err(classify_staging_error),
         }
     }
 
@@ -1333,7 +1331,17 @@ struct FileStreamRequest<'a> {
     maximum_bytes: u64,
     chunk_bytes: u64,
     expected_etag: Option<&'a str>,
+    expected_sha256: Option<&'a str>,
     cancellation: &'a CancellationToken,
+}
+
+fn stream_consistency_proven(
+    total: u64,
+    chunk_bytes: u64,
+    etag: Option<&str>,
+    expected_sha256: Option<&str>,
+) -> bool {
+    total <= chunk_bytes || etag.is_some() || expected_sha256.is_some()
 }
 
 async fn preflight_anytype_file(
@@ -1343,6 +1351,7 @@ async fn preflight_anytype_file(
     maximum_bytes: u64,
     chunk_bytes: u64,
     expected_etag: Option<&str>,
+    expected_sha256: Option<&str>,
 ) -> Result<FilePreflight, ArtifactToolError> {
     let head = client
         .files()
@@ -1363,7 +1372,7 @@ async fn preflight_anytype_file(
     if expected_etag.is_some_and(|expected| etag.as_deref() != Some(expected)) {
         return Err(ArtifactToolError::Conflict);
     }
-    if total > chunk_bytes && etag.is_none() {
+    if !stream_consistency_proven(total, chunk_bytes, etag.as_deref(), expected_sha256) {
         return Err(ArtifactToolError::Upstream);
     }
     Ok(FilePreflight {
@@ -1387,6 +1396,7 @@ where
         maximum_bytes,
         chunk_bytes,
         expected_etag,
+        expected_sha256,
         cancellation,
     } = request;
     let preflight = preflight_anytype_file(
@@ -1396,6 +1406,7 @@ where
         maximum_bytes,
         chunk_bytes,
         expected_etag,
+        expected_sha256,
     )
     .await?;
     let FilePreflight {
@@ -1480,11 +1491,36 @@ where
     if written != total {
         return Err(ArtifactToolError::Conflict);
     }
+    if expected_sha256.is_some_and(|expected| sha256 != expected) {
+        return Err(ArtifactToolError::Conflict);
+    }
     Ok((output, total, sha256, media_type, etag))
 }
 
 #[cfg(feature = "acceptance-harness")]
-async fn acceptance_pause_before_file_import_dispatch() {
+struct AcceptancePauseLease {
+    released: Option<std::path::PathBuf>,
+    cancellation: CancellationToken,
+}
+
+#[cfg(feature = "acceptance-harness")]
+impl Drop for AcceptancePauseLease {
+    fn drop(&mut self) {
+        if let Some(path) = self.released.take() {
+            let marker = if self.cancellation.is_cancelled() {
+                b"cancelled\n".as_slice()
+            } else {
+                b"completed\n".as_slice()
+            };
+            let _ = std::fs::write(path, marker);
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn acceptance_pause_before_file_import_dispatch(
+    cancellation: &CancellationToken,
+) -> Option<AcceptancePauseLease> {
     static PAUSE_USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if std::env::var("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE")
         .ok()
@@ -1492,11 +1528,18 @@ async fn acceptance_pause_before_file_import_dispatch() {
         == Some("file_import_pre_dispatch")
         && !PAUSE_USED.swap(true, std::sync::atomic::Ordering::AcqRel)
     {
+        let lease = AcceptancePauseLease {
+            released: std::env::var_os("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_RELEASED")
+                .map(std::path::PathBuf::from),
+            cancellation: cancellation.clone(),
+        };
         if let Some(ready) = std::env::var_os("ANY_MCP_ACCEPTANCE_ARTIFACT_PAUSE_READY") {
             let _ = std::fs::write(ready, b"ready\n");
         }
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        return Some(lease);
     }
+    None
 }
 
 async fn file_import(
@@ -1510,7 +1553,7 @@ async fn file_import(
     validate_name(&input.name)?;
     let declared_media_type = normalize_media_type(input.media_type.as_ref().map(String::as_str))?;
     let space_id = resolve_space(runtime.client(), &input.space).await?;
-    let source = prepare_import_source(runtime, input.source.resolve()?, &space_id).await?;
+    let mut source = prepare_import_source(runtime, input.source.resolve()?, &space_id).await?;
     if declared_media_type
         .as_deref()
         .zip(source.stored_media_type())
@@ -1528,7 +1571,7 @@ async fn file_import(
     let validator_findings =
         run_configured_validators(runtime, &source, declared_media_type.as_deref()).await?;
     #[cfg(feature = "acceptance-harness")]
-    acceptance_pause_before_file_import_dispatch().await;
+    let _acceptance_pause_lease = acceptance_pause_before_file_import_dispatch(cancellation).await;
     let key = idempotency_key(b"import", &input.idempotency_key);
     let fingerprint = import_fingerprint(
         &space_id,
@@ -1586,7 +1629,7 @@ async fn file_import(
         .upload(space_id.as_str())
         .reader(
             input.name.clone(),
-            tokio::fs::File::from_std(upload_file),
+            PositionalReader::new(upload_file, source_length),
             source_length,
         )
         .multipart_limit_bytes(multipart_limit)
@@ -1634,7 +1677,7 @@ async fn file_import(
         cancellation,
     )
     .await?;
-    if let PreparedImport::Staged(staged) = &source {
+    if let PreparedImport::Staged(staged) = &mut source {
         staging(runtime)?
             .consume(staged)
             .await
@@ -1727,13 +1770,17 @@ async fn verify_import_candidate(
             maximum_bytes: limits.artifact_bytes,
             chunk_bytes: limits.transfer_chunk_bytes,
             expected_etag: None,
+            expected_sha256: Some(expected_sha256),
             cancellation,
         },
         std::io::sink(),
     )
     .await
     .map_err(|_| ArtifactToolError::Indeterminate)?;
-    if stored_size != expected_size || stored_hash != expected_sha256 {
+    if stored_size != expected_size {
+        return Err(ArtifactToolError::Indeterminate);
+    }
+    if stored_hash != expected_sha256 {
         return Err(ArtifactToolError::Indeterminate);
     }
     Ok(stored_media_type)
@@ -1844,6 +1891,7 @@ async fn file_export(
                 limits.artifact_bytes,
                 limits.transfer_chunk_bytes,
                 input.expected_strong_etag.as_ref().map(String::as_str),
+                None,
             )
             .await?;
             let allocation = staging(runtime)?
@@ -1879,6 +1927,7 @@ async fn file_export(
             maximum_bytes: limits.artifact_bytes,
             chunk_bytes: limits.transfer_chunk_bytes,
             expected_etag: stream_etag.as_deref(),
+            expected_sha256: None,
             cancellation,
         },
         destination,
@@ -1977,8 +2026,11 @@ struct PreparedDocument {
 }
 
 impl PreparedDocument {
-    async fn consume_staged(&self, runtime: &RuntimeContext) -> Result<bool, ArtifactToolError> {
-        let PreparedImport::Staged(source) = &self.source else {
+    async fn consume_staged(
+        &mut self,
+        runtime: &RuntimeContext,
+    ) -> Result<bool, ArtifactToolError> {
+        let PreparedImport::Staged(source) = &mut self.source else {
             return Ok(false);
         };
         staging(runtime)?
@@ -2070,22 +2122,17 @@ async fn prepare_document(
     }
     let source_bytes = source.length();
     let source_sha256 = source.sha256().to_owned();
-    let reader = source.try_clone_reader()?;
     let maximum = limits.markdown_bytes;
-    let bytes = tokio::task::spawn_blocking(move || {
-        let capacity = usize::try_from(source_bytes).map_err(|_| ArtifactToolError::Bounded)?;
-        let mut bytes = Vec::with_capacity(capacity);
-        reader
-            .take(maximum.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| ArtifactToolError::NotFound)?;
-        if bytes.len() as u64 != source_bytes || bytes.len() as u64 > maximum {
-            return Err(ArtifactToolError::Conflict);
-        }
-        Ok::<_, ArtifactToolError>(bytes)
-    })
-    .await
-    .map_err(|_| ArtifactToolError::Upstream)??;
+    let reader = source.try_clone_reader()?;
+    let capacity = usize::try_from(source_bytes).map_err(|_| ArtifactToolError::Bounded)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    PositionalReader::new(reader, source_bytes)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| ArtifactToolError::NotFound)?;
+    if bytes.len() as u64 != source_bytes || bytes.len() as u64 > maximum {
+        return Err(ArtifactToolError::Conflict);
+    }
     source.verify_unchanged()?;
     let text = validate_document_text(bytes)?;
     let dispatched = match source_format {
@@ -2293,7 +2340,8 @@ async fn document_import_create(
     if type_key.is_empty() || type_key.len() > 255 {
         return Err(ArtifactToolError::Upstream);
     }
-    let source = prepare_document(runtime, input.source, input.source_format, &space_id).await?;
+    let mut source =
+        prepare_document(runtime, input.source, input.source_format, &space_id).await?;
     let validator_findings =
         run_configured_validators(runtime, &source.source, Some("text/markdown")).await?;
     let key = idempotency_key(b"document-create", &input.idempotency_key);
@@ -2474,7 +2522,8 @@ async fn document_import_update(
     if current_hash != input.expected_body_sha256 {
         return Err(ArtifactToolError::Conflict);
     }
-    let source = prepare_document(runtime, input.source, input.source_format, &space_id).await?;
+    let mut source =
+        prepare_document(runtime, input.source, input.source_format, &space_id).await?;
     let validator_findings =
         run_configured_validators(runtime, &source.source, Some("text/markdown")).await?;
     let key = idempotency_key(b"document-update", &input.idempotency_key);
@@ -2960,6 +3009,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         match run_artifact_operation(
                             runtime,
                             cancellation,
+                            ARTIFACT_STAGE_ALLOCATE,
                             stage_allocate(runtime, input),
                         )
                         .await
@@ -2975,6 +3025,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         match run_artifact_operation(
                             runtime,
                             cancellation,
+                            ARTIFACT_STAGE_RELEASE,
                             stage_release(runtime, input),
                         )
                         .await
@@ -2990,6 +3041,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         match run_artifact_operation(
                             runtime,
                             cancellation,
+                            DOCUMENT_IMPORT_CREATE,
                             document_import_create(runtime, input),
                         )
                         .await
@@ -3005,6 +3057,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         match run_artifact_operation(
                             runtime,
                             cancellation,
+                            DOCUMENT_IMPORT_UPDATE,
                             document_import_update(runtime, input),
                         )
                         .await
@@ -3020,6 +3073,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         match run_artifact_operation(
                             runtime,
                             cancellation,
+                            DOCUMENT_EXPORT,
                             document_export(runtime, input),
                         )
                         .await
@@ -3035,6 +3089,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         match run_artifact_operation(
                             runtime,
                             cancellation,
+                            FILE_IMPORT,
                             file_import(runtime, input, cancellation),
                         )
                         .await
@@ -3050,6 +3105,7 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
                         match run_artifact_operation(
                             runtime,
                             cancellation,
+                            FILE_EXPORT,
                             file_export(runtime, input, cancellation),
                         )
                         .await
@@ -3068,18 +3124,37 @@ impl OptionalToolsetRegistry for ArtifactRegistry {
 async fn run_artifact_operation<T, F>(
     runtime: &RuntimeContext,
     cancellation: &CancellationToken,
+    operation_name: &'static str,
     operation: F,
 ) -> Result<T, ArtifactToolError>
 where
     F: Future<Output = Result<T, ArtifactToolError>>,
 {
+    let started = std::time::Instant::now();
     tokio::select! {
         biased;
-        () = cancellation.cancelled() => Err(ArtifactToolError::Indeterminate),
+        () = cancellation.cancelled() => {
+            runtime.record_controlled_failure(
+                OperationContext::new(operation_name),
+                started.elapsed(),
+                ControlledFailureKind::Cancelled,
+            );
+            Err(ArtifactToolError::Indeterminate)
+        },
         result = tokio::time::timeout(
             runtime.artifact_config().limits.operation_timeout,
             operation,
-        ) => result.unwrap_or(Err(ArtifactToolError::Indeterminate)),
+        ) => match result {
+            Ok(result) => result,
+            Err(_) => {
+                runtime.record_controlled_failure(
+                    OperationContext::new(operation_name),
+                    started.elapsed(),
+                    ControlledFailureKind::TimedOut,
+                );
+                Err(ArtifactToolError::Indeterminate)
+            }
+        },
     }
 }
 
@@ -3144,6 +3219,19 @@ mod tests {
             Some("application/octet-stream".to_owned())
         );
         assert!(normalize_media_type(Some("text/plain; charset=utf-8")).is_err());
+    }
+
+    #[test]
+    fn multi_chunk_streams_require_a_strong_etag_or_complete_expected_hash() {
+        assert!(stream_consistency_proven(64, 64, None, None));
+        assert!(stream_consistency_proven(65, 64, Some("\"strong\""), None));
+        assert!(stream_consistency_proven(
+            65,
+            64,
+            None,
+            Some("expected-sha256")
+        ));
+        assert!(!stream_consistency_proven(65, 64, None, None));
     }
 
     #[test]

@@ -379,8 +379,8 @@ supply one through a custom `ClientBuilder` when an endpoint may not respond.
 path upload and returns a normalized `FileObject`. Adding `file_type`, `style`,
 `details`, or creation-context options selects the richer gRPC upload.
 
-Callers that already hold an authorized file handle can stream it without
-reopening a path or buffering the complete payload:
+Callers that already hold an authorized asynchronous reader can stream it
+without reopening a path or buffering the complete payload:
 
 ```rust
 let file = tokio::fs::File::from_std(opened_file);
@@ -395,7 +395,8 @@ let uploaded = client
 ```
 
 The declared length participates in the complete multipart ceiling. Reader
-uploads use REST and reject gRPC-only rich options.
+uploads fail if the source ends early or yields an extra byte, use REST, and
+reject gRPC-only rich options.
 
 REST uploads can apply request-local ceilings without changing the client
 configuration:

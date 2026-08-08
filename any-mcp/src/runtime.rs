@@ -247,6 +247,30 @@ impl RuntimeContext {
         now.checked_add(self.request_timeout).unwrap_or(now)
     }
 
+    fn next_operation_correlation_id(&self) -> u64 {
+        self.next_correlation_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(1))
+            })
+            .unwrap_or(u64::MAX)
+    }
+
+    /// Records a locally controlled failure for an operation bounded outside
+    /// the shared upstream executor.
+    pub(crate) fn record_controlled_failure(
+        &self,
+        context: OperationContext,
+        duration: Duration,
+        failure: ControlledFailureKind,
+    ) {
+        log_operation_diagnostic(
+            context,
+            self.next_operation_correlation_id(),
+            duration,
+            default_control_failure_diagnostic(failure),
+        );
+    }
+
     /// Returns the startup availability snapshot without repeating pings.
     #[must_use]
     pub const fn startup_status(&self) -> StartupStatus {
@@ -433,12 +457,7 @@ impl RuntimeContext {
         D: Fn(ControlledFailureKind) -> OperationFailureDiagnostic,
     {
         let started = Instant::now();
-        let correlation_id = self
-            .next_correlation_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(1))
-            })
-            .expect("correlation update always returns a value");
+        let correlation_id = self.next_operation_correlation_id();
         let controlled = async {
             let permit = tokio::select! {
                 biased;
@@ -836,6 +855,15 @@ fn log_classified_operation<T, E, C>(
         }
         Err(ControlledOperationError::Operation(error)) => classify(error),
     };
+    log_operation_diagnostic(context, correlation_id, duration, diagnostic);
+}
+
+fn log_operation_diagnostic(
+    context: OperationContext,
+    correlation_id: u64,
+    duration: Duration,
+    diagnostic: OperationFailureDiagnostic,
+) {
     let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
         target: "any_mcp::operation",

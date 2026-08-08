@@ -487,9 +487,18 @@ fn edited_state_matches(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
-    use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials, ResponseLimits};
+    use anytype::{
+        prelude::{AnytypeClient, ClientConfig, HttpCredentials, ResponseLimits},
+        test_util::{DisposableRun, with_disposable_space_context},
+    };
     use serde_json::{Value, json};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -1472,71 +1481,78 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a configured live Anytype server"]
-    async fn live_edit_round_trip_is_cleanup_safe() {
-        anytype::test_util::with_test_context_unit(|ctx| async move {
-            let before = "live alpha body";
-            let created = ctx
-                .client
-                .new_object(&ctx.space_id, "page")
-                .name(format!(
-                    "any-mcp object-edit {}",
-                    anytype::test_util::unique_suffix()
-                ))
-                .body(before)
-                .create()
-                .await
-                .expect("create live edit object");
-            ctx.register_object(&created.id);
+    #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+    #[serial_test::serial(disposable_anytype_api)]
+    async fn headless_edit_round_trip_is_cleanup_safe() {
+        let callback_ran = Arc::new(AtomicBool::new(false));
+        let callback_flag = Arc::clone(&callback_ran);
+        let outcome = Box::pin(with_disposable_space_context(
+            "any-mcp-object-edit",
+            move |ctx| {
+                callback_flag.store(true, Ordering::SeqCst);
+                Box::pin(async move {
+                    let before = "live alpha body";
+                    let created = ctx
+                        .client
+                        .new_object(&ctx.space_id, "page")
+                        .name(format!(
+                            "any-mcp object-edit {}",
+                            anytype::test_util::unique_suffix()
+                        ))
+                        .body(before)
+                        .create()
+                        .await?;
+                    ctx.register_object(&created.id);
 
-            let current = ctx
-                .client
-                .object(&ctx.space_id, &created.id)
-                .get()
-                .await
-                .expect("read exact current live body");
-            let exact_body = current.markdown.as_deref().unwrap_or("");
-            let expected_after = exact_body.replace("alpha", "beta");
-            let input = input(json!({
-                "space": ctx.space_id.as_str(),
-                "object_id": created.id.as_str(),
-                "edits": [{"old_text":"alpha","new_text":"beta"}],
-                "expected_body_sha256": BodySha256::digest(exact_body).as_str(),
-            }));
-            let runtime = RuntimeContext::from_parts(
-                ctx.client.clone(),
-                1,
-                Duration::from_secs(10),
-                StartupStatus {
-                    http_available: true,
-                    grpc_available: true,
-                },
-            );
-            let result = object_edit(
-                &runtime,
-                &object_edit_tool().unwrap(),
-                MutationAccess::Allowed,
-                &input,
-                &CancellationToken::new(),
-            )
-            .await;
-            assert_eq!(result.is_error, Some(false), "{result:?}");
-            assert_eq!(
-                result
-                    .structured_content
-                    .as_ref()
-                    .and_then(|value| value.get("body_sha256"))
-                    .and_then(Value::as_str),
-                Some(BodySha256::digest(&expected_after).as_str())
-            );
-            let verified = ctx
-                .client
-                .object(&ctx.space_id, &created.id)
-                .get()
-                .await
-                .expect("read edited live body");
-            assert_eq!(verified.markdown.as_deref(), Some(expected_after.as_str()));
-        })
-        .await;
+                    let current = ctx.client.object(&ctx.space_id, &created.id).get().await?;
+                    let exact_body = current.markdown.as_deref().unwrap_or("");
+                    let expected_after = exact_body.replace("alpha", "beta");
+                    let input = input(json!({
+                        "space": ctx.space_id.as_str(),
+                        "object_id": created.id.as_str(),
+                        "edits": [{"old_text":"alpha","new_text":"beta"}],
+                        "expected_body_sha256": BodySha256::digest(exact_body).as_str(),
+                    }));
+                    let runtime = RuntimeContext::from_parts(
+                        ctx.client.clone(),
+                        1,
+                        Duration::from_secs(10),
+                        StartupStatus {
+                            http_available: true,
+                            grpc_available: true,
+                        },
+                    );
+                    let result = object_edit(
+                        &runtime,
+                        &object_edit_tool().unwrap(),
+                        MutationAccess::Allowed,
+                        &input,
+                        &CancellationToken::new(),
+                    )
+                    .await;
+                    assert_eq!(result.is_error, Some(false), "{result:?}");
+                    assert_eq!(
+                        result
+                            .structured_content
+                            .as_ref()
+                            .and_then(|value| value.get("body_sha256"))
+                            .and_then(Value::as_str),
+                        Some(BodySha256::digest(&expected_after).as_str())
+                    );
+                    let verified = ctx.client.object(&ctx.space_id, &created.id).get().await?;
+                    assert_eq!(verified.markdown.as_deref(), Some(expected_after.as_str()));
+                    Ok(())
+                })
+            },
+        ))
+        .await
+        .expect("cleanup-safe object edit acceptance");
+        match outcome {
+            DisposableRun::Completed(()) => assert!(callback_ran.load(Ordering::SeqCst)),
+            DisposableRun::Skipped(reason) => {
+                assert!(!callback_ran.load(Ordering::SeqCst));
+                panic!("required disposable object edit acceptance was skipped: {reason:?}");
+            }
+        }
     }
 }

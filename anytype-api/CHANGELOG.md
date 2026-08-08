@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- Accept any bounded, sendable asynchronous reader for retained REST file
+  uploads, allowing capability-owning callers to use cursor-independent readers
+  without reopening a filesystem path. The stream rejects both shorter and
+  longer sources than its declared exact length.
+
 ### Added
 
 - Add a closed ignored-test inventory and protected disposable live gate. The

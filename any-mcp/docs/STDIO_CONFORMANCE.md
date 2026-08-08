@@ -68,13 +68,21 @@ through production stdio, then independently verify stored state through
 
 ```sh
 source .test-env
-# Prepare redacted_log and run_marker with the private derivative recipe in
-# TESTING.md.
+export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
+# Set redacted_log to the absolute mode-0600 reviewed server event file.
 export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
-export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e \
-  -- --ignored --test-threads=1
+export ANY_MCP_LIVE_PRIVATE_DIR="$(mktemp -d)"
+chmod 0700 "$ANY_MCP_LIVE_PRIVATE_DIR"
+python3 any-mcp/scripts/reviewed-evidence.py start "$redacted_log" \
+  "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" > "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"
+set -a; source "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"; set +a
+bash any-mcp/scripts/run-live-cgroup.sh test stdio -- \
+  cargo test -p any-mcp --features acceptance-harness --test headless_stdio_e2e -- \
+  --ignored --test-threads=1
+bash any-mcp/scripts/run-live-cgroup.sh test discussions -- \
+  cargo test -p any-mcp --features acceptance-harness \
+  --test discussions_stdio_acceptance -- --ignored --test-threads=1
+rm -rf -- "$ANY_MCP_LIVE_PRIVATE_DIR"
 ```
 
 The same complete scenario set also runs through the production direct router.
@@ -91,11 +99,16 @@ production child owns a separate client and deliberately exposes no test-only
 HTTP metrics endpoint, so spawned evidence uses MCP request/result/error
 category counts instead.
 
-The direct-router and spawned targets keep their server-backed scenarios
-ignored by default. The direct-router library filter also includes focused
-cross-entry regressions for optional registries and files. Run the targets or
-select scenarios by name; the harness inventory is authoritative as coverage
-evolves.
+The discussions process target starts dedicated stable and preview children
+over one disposable space. It verifies absent, attached, repeated, and
+wrong-scope results across both protocol modes, then hands the returned
+discussion ID to `chat_message_list`.
+
+The direct-router, spawned baseline, and discussions targets keep their
+server-backed scenarios ignored by default. The direct-router library filter
+also includes focused cross-entry regressions for optional registries and
+files. Run the targets or select scenarios by name; the harness inventory is
+authoritative as coverage evolves.
 
 The harness bounds individual stdout frames to 2 MiB, aggregate stdout to
 8 MiB, individual stderr lines to 64 KiB, aggregate stderr to 1 MiB, and the

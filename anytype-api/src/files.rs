@@ -5,7 +5,11 @@
 //! options continue to use gRPC.
 //!
 
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    pin::Pin,
+};
 
 use anytype_rpc::{
     anytype::rpc::{
@@ -27,6 +31,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
+use tokio::io::AsyncRead;
 use tonic::Request;
 use tracing::{debug, error, info};
 
@@ -1050,17 +1055,23 @@ impl FileHttpUploadRequest<'_> {
         self
     }
 
-    /// Upload from one already-open asynchronous file handle.
+    /// Upload from one already-authorized asynchronous reader.
     ///
     /// The declared `length` is used to bound and serialize the multipart
     /// request. The stream fails if fewer bytes are readable; callers should
     /// independently retain and verify the source identity around the upload.
     /// This source never reopens or formats a filesystem path.
     #[must_use]
-    pub fn reader(mut self, file: tokio::fs::File, length: u64) -> Self {
+    pub fn reader<R>(mut self, file: R, length: u64) -> Self
+    where
+        R: AsyncRead + Send + 'static,
+    {
         self.data = None;
         self.source_path = None;
-        self.source_reader = Some(FileUploadReader { file, length });
+        self.source_reader = Some(FileUploadReader {
+            reader: Box::pin(file),
+            length,
+        });
         self
     }
 
@@ -1631,20 +1642,21 @@ impl FileUploadRequest<'_> {
         self
     }
 
-    /// Upload from one already-open asynchronous file handle through REST.
+    /// Upload from one already-authorized asynchronous reader through REST.
     ///
     /// The source is streamed with the exact declared `length`; no path is
     /// reopened or formatted and the complete payload is not buffered.
     /// Reader uploads do not support gRPC-only rich file options.
     #[must_use]
-    pub fn reader(
-        mut self,
-        file_name: impl Into<String>,
-        file: tokio::fs::File,
-        length: u64,
-    ) -> Self {
+    pub fn reader<R>(mut self, file_name: impl Into<String>, file: R, length: u64) -> Self
+    where
+        R: AsyncRead + Send + 'static,
+    {
         self.file_name = Some(file_name.into());
-        self.source = Some(FileSource::Reader(FileUploadReader { file, length }));
+        self.source = Some(FileSource::Reader(FileUploadReader {
+            reader: Box::pin(file),
+            length,
+        }));
         self
     }
 
@@ -1917,7 +1929,9 @@ async fn http_upload_file(
                     message: "file upload reader length must be nonzero".to_string(),
                 });
             }
-            let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(reader.file));
+            let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(
+                ExactLengthReader::new(reader.reader, reader.length),
+            ));
             let name = file_name.unwrap_or_else(|| "file".to_string());
             (
                 reqwest::multipart::Part::stream_with_length(body, reader.length)
@@ -1959,10 +1973,84 @@ async fn http_upload_file(
         .await
 }
 
-#[derive(Debug)]
 struct FileUploadReader {
-    file: tokio::fs::File,
+    reader: Pin<Box<dyn AsyncRead + Send>>,
     length: u64,
+}
+
+impl fmt::Debug for FileUploadReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FileUploadReader")
+            .field("length", &self.length)
+            .finish_non_exhaustive()
+    }
+}
+
+struct ExactLengthReader {
+    reader: Pin<Box<dyn AsyncRead + Send>>,
+    remaining: u64,
+    complete: bool,
+}
+
+impl ExactLengthReader {
+    fn new(reader: Pin<Box<dyn AsyncRead + Send>>, length: u64) -> Self {
+        Self {
+            reader,
+            remaining: length,
+            complete: false,
+        }
+    }
+}
+
+impl AsyncRead for ExactLengthReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let source = self.get_mut();
+        if source.complete || buffer.remaining() == 0 {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        if source.remaining == 0 {
+            let mut probe = [0_u8; 1];
+            let mut probe_buffer = tokio::io::ReadBuf::new(&mut probe);
+            return match source.reader.as_mut().poll_read(context, &mut probe_buffer) {
+                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+                std::task::Poll::Ready(Ok(())) if probe_buffer.filled().is_empty() => {
+                    source.complete = true;
+                    std::task::Poll::Ready(Ok(()))
+                }
+                std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "file upload reader exceeded its declared length",
+                ))),
+            };
+        }
+        let available = usize::try_from(source.remaining)
+            .unwrap_or(usize::MAX)
+            .min(buffer.remaining());
+        let destination = buffer.initialize_unfilled_to(available);
+        let mut limited = tokio::io::ReadBuf::new(destination);
+        match source.reader.as_mut().poll_read(context, &mut limited) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Ready(Ok(())) => {
+                let read = limited.filled().len();
+                if read == 0 {
+                    return std::task::Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "file upload reader ended before its declared length",
+                    )));
+                }
+                source.remaining = source.remaining.saturating_sub(read as u64);
+                buffer.advance(read);
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+    }
 }
 
 enum HttpUploadSource {
@@ -2584,8 +2672,8 @@ mod tests {
     };
 
     use super::{
-        FileSource, FileStyle, FileType, FileUploadResponse, file_from_http_upload,
-        multipart_body_bytes, upload_uses_rest,
+        ExactLengthReader, FileSource, FileStyle, FileType, FileUploadResponse,
+        file_from_http_upload, multipart_body_bytes, upload_uses_rest,
     };
     use crate::{
         client::{AnytypeClient, ClientConfig},
@@ -2593,6 +2681,27 @@ mod tests {
     };
 
     static NEXT_MOCK_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[tokio::test]
+    async fn generic_upload_reader_rejects_bytes_beyond_declared_length() {
+        let (mut writer, reader) = tokio::io::duplex(16);
+        let producer = tokio::spawn(async move {
+            writer
+                .write_all(b"excess")
+                .await
+                .expect("write excess input");
+            writer.shutdown().await.expect("close excess input");
+        });
+        let mut exact = ExactLengthReader::new(Box::pin(reader), 3);
+        let mut observed = Vec::new();
+        let error = exact
+            .read_to_end(&mut observed)
+            .await
+            .expect_err("excess input must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(observed, b"exc");
+        producer.await.expect("producer task");
+    }
 
     fn complete_request_length(request: &[u8]) -> Option<usize> {
         let header_end = request

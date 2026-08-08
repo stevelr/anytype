@@ -24,6 +24,7 @@ use tokio::{
 
 use crate::{
     artifact_config::{ArtifactLimits, ValidatorConfig, ValidatorDriver},
+    artifact_roots::PositionalReader,
     artifact_toolset::ArtifactToolError,
 };
 
@@ -67,6 +68,16 @@ pub(crate) struct ValidatorRunner {
     validators: Arc<[ActivatedValidator]>,
     processes: Arc<Semaphore>,
     total_input_bytes: u64,
+}
+
+fn clone_rewound(source: &File) -> Result<File, ArtifactToolError> {
+    let mut input = source
+        .try_clone()
+        .map_err(|_| ArtifactToolError::Upstream)?;
+    input
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| ArtifactToolError::Upstream)?;
+    Ok(input)
 }
 
 impl ValidatorRunner {
@@ -147,9 +158,7 @@ impl ValidatorRunner {
             if admitted_bytes > self.total_input_bytes {
                 return Err(ArtifactToolError::Bounded);
             }
-            let input = source
-                .try_clone()
-                .map_err(|_| ArtifactToolError::Upstream)?;
+            let input = clone_rewound(source)?;
             let permit = self
                 .processes
                 .clone()
@@ -375,31 +384,18 @@ async fn run_validator(
     let stderr = child.stderr.take().ok_or(ValidatorExecutionError)?;
     let stdout_limit = validator.config.stdout_bytes;
     let stderr_limit = validator.config.stderr_bytes;
-    let input_task = tokio::spawn(write_input(stdin, input, size));
-    let stdout_task = tokio::spawn(read_bounded(stdout, stdout_limit));
-    let stderr_task = tokio::spawn(read_bounded(stderr, stderr_limit));
-    let status = match tokio::time::timeout(validator.config.timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(_)) => {
-            input_task.abort();
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(ValidatorExecutionError);
-        }
-        Err(_) => {
-            terminate_process_group(child_id);
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            input_task.abort();
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(ValidatorExecutionError);
-        }
-    };
-    let input_result = input_task.await.map_err(|_| ValidatorExecutionError)?;
-    let stdout = stdout_task.await.map_err(|_| ValidatorExecutionError)??;
-    let stderr = stderr_task.await.map_err(|_| ValidatorExecutionError)??;
+    let mut process_group = ProcessGroupGuard::new(child_id);
+    let (input_result, stdout, stderr, status) = tokio::join!(
+        write_input(stdin, input, size),
+        read_bounded(stdout, stdout_limit),
+        read_bounded(stderr, stderr_limit),
+        wait_for_validator(&mut child, child_id, validator.config.timeout),
+    );
+    process_group.disarm();
     input_result?;
+    let stdout = stdout?;
+    let stderr = stderr?;
+    let status = status?;
     if !status.success() || !stderr.is_empty() {
         return Err(ValidatorExecutionError);
     }
@@ -408,6 +404,42 @@ async fn run_validator(
         return Err(ValidatorExecutionError);
     }
     Ok(media_type)
+}
+
+async fn wait_for_validator(
+    child: &mut tokio::process::Child,
+    child_id: Option<u32>,
+    timeout: std::time::Duration,
+) -> Result<std::process::ExitStatus, ValidatorExecutionError> {
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(_)) | Err(_) => {
+            terminate_process_group(child_id);
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(ValidatorExecutionError)
+        }
+    }
+}
+
+struct ProcessGroupGuard {
+    child_id: Option<u32>,
+}
+
+impl ProcessGroupGuard {
+    fn new(child_id: Option<u32>) -> Self {
+        Self { child_id }
+    }
+
+    fn disarm(&mut self) {
+        self.child_id = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        terminate_process_group(self.child_id);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -431,7 +463,7 @@ async fn write_input(
     input: File,
     size: u64,
 ) -> Result<(), ValidatorExecutionError> {
-    let mut input = tokio::fs::File::from_std(input).take(size.saturating_add(1));
+    let mut input = PositionalReader::new(input, size);
     let copied = tokio::io::copy(&mut input, &mut stdin)
         .await
         .map_err(|_| ValidatorExecutionError)?;
@@ -609,6 +641,30 @@ mod tests {
         assert!(parse_file_mime(b"text/plain; charset=utf-8\n".to_vec()).is_err());
         assert!(parse_file_mime(vec![b'x'; 256]).is_err());
         assert!(parse_file_mime(b"not mime\n".to_vec()).is_err());
+    }
+
+    #[test]
+    fn every_validator_clone_starts_at_the_source_beginning() {
+        let suffix = getrandom::u64().expect("random suffix");
+        let source_path =
+            std::env::temp_dir().join(format!("any-mcp-validator-rewind-{suffix:016x}"));
+        std::fs::write(&source_path, b"validator source").expect("write source");
+        let source = File::open(&source_path).expect("open source");
+
+        let mut first = clone_rewound(&source).expect("first clone");
+        let mut first_bytes = Vec::new();
+        first
+            .read_to_end(&mut first_bytes)
+            .expect("read first clone");
+        let mut second = clone_rewound(&source).expect("second clone");
+        let mut second_bytes = Vec::new();
+        second
+            .read_to_end(&mut second_bytes)
+            .expect("read second clone");
+
+        assert_eq!(first_bytes, b"validator source");
+        assert_eq!(second_bytes, b"validator source");
+        std::fs::remove_file(source_path).expect("remove source");
     }
 
     /// Locates a native fixture executable via `PATH`, falling back to FHS

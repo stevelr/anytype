@@ -8125,10 +8125,7 @@ mod tests {
         time::Duration,
     };
 
-    use anytype::{
-        prelude::{AnytypeClient, ClientConfig},
-        test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
-    };
+    use anytype::prelude::{AnytypeClient, ClientConfig};
     use rmcp::model::{CallToolRequestParams, ListToolsResult};
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
@@ -13295,106 +13292,6 @@ mod tests {
                 <= encoded_size(&accepted_rich_request).expect("request params")
                     + BODY_FRAME_ENVELOPE_HEADROOM
         );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-    fn direct_router_and_object_show_verify_a_real_body_write() {
-        run_large_future(|| async {
-            let outcome = Box::pin(with_disposable_space_context(
-                "any-mcp-body-direct",
-                |ctx| {
-                    Box::pin(async move {
-                        let suffix = unique_suffix();
-                        let object = ctx
-                            .client
-                            .new_object(&ctx.space_id, "page")
-                            .name(format!("MCP direct body {suffix}"))
-                            .body("# Direct seed")
-                            .create()
-                            .await?;
-                        ctx.register_object(&object.id);
-                        let selection = OptionalToolsetSelection::parse(
-                            Some(BODY_BLOCKS_TOOLSET_NAME.to_owned()),
-                            &production_optional_metadata(),
-                        )
-                        .expect("body direct selection");
-                        let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
-                            ctx.client.clone(),
-                            4,
-                            Duration::from_secs(30),
-                            StartupStatus {
-                                http_available: true,
-                                grpc_available: true,
-                            },
-                            ApplicationProfile::Standard,
-                            false,
-                            selection,
-                        );
-                        let server = AnyMcpServer::new(runtime).expect("body direct server");
-                        let list = server
-                            .dispatch_tool(
-                                CallToolRequestParams::new(BODY_BLOCK_LIST).with_arguments(args(
-                                    json!({
-                                        "space":ctx.space_id,
-                                        "object_id":object.id,
-                                        "limit":12
-                                    }),
-                                )),
-                                &CancellationToken::new(),
-                            )
-                            .await
-                            .expect("direct list routing");
-                        assert_eq!(list.is_error, Some(false));
-                        let listed = list.structured_content.expect("direct list output");
-                        let root_id = listed["root_id"].as_str().expect("root ID");
-                        let snapshot_hash =
-                            listed["snapshot_hash"].as_str().expect("snapshot hash");
-                        let created = server
-                            .dispatch_tool(
-                                CallToolRequestParams::new(BODY_BLOCK_CREATE).with_arguments(args(
-                                    json!({
-                                        "space":ctx.space_id,
-                                        "object_id":object.id,
-                                        "expected_snapshot_hash":snapshot_hash,
-                                        "target_block_id":root_id,
-                                        "position":"last_child",
-                                        "block":{
-                                            "kind":"text",
-                                            "style":"paragraph",
-                                            "text":"direct verified block",
-                                            "marks":[]
-                                        },
-                                        "idempotency_key":format!("direct-body-{suffix}")
-                                    }),
-                                )),
-                                &CancellationToken::new(),
-                            )
-                            .await
-                            .expect("direct create routing");
-                        assert_eq!(created.is_error, Some(false));
-                        let created = created.structured_content.expect("direct create output");
-                        let block_id = created["block"]["id"].as_str().expect("created block ID");
-                        let snapshot = ctx
-                            .client
-                            .blocks()
-                            .body(&ctx.space_id, &object.id)
-                            .fetch()
-                            .await?;
-                        assert_eq!(snapshot.space_id, ctx.space_id);
-                        assert_eq!(snapshot.object_id, object.id);
-                        assert!(snapshot.iter().any(|block| block.id.as_str() == block_id));
-                        Ok(())
-                    })
-                },
-            ))
-            .await
-            .expect("cleanup-safe direct body acceptance");
-            if let DisposableRun::Skipped(reason) = outcome {
-                eprintln!("direct body acceptance skipped before callback: {reason:?}");
-            }
-        });
     }
 
     #[test]

@@ -1066,6 +1066,12 @@ impl ArtifactPolicyFixture {
         self.base.join("acceptance-pause-ready")
     }
 
+    /// Private marker written after the paused import future releases its resources.
+    #[must_use]
+    pub fn acceptance_pause_released_path(&self) -> PathBuf {
+        self.base.join("acceptance-pause-released")
+    }
+
     /// Whether the complete private fixture tree still exists.
     #[must_use]
     pub fn tree_exists(&self) -> bool {
@@ -1777,7 +1783,23 @@ pub fn validate_tool_frame(name: &str, id: u64, frame: &Value) -> Result<Value, 
         .get("result")
         .ok_or_else(|| format!("{name} frame omitted its result"))?;
     if result["isError"] != Value::Bool(false) {
-        return Err(format!("{name} frame reported a tool error"));
+        let code = result
+            .pointer("/structuredContent/code")
+            .and_then(Value::as_str)
+            .filter(|code| {
+                matches!(
+                    *code,
+                    "authentication"
+                        | "validation"
+                        | "ambiguous"
+                        | "not_found"
+                        | "conflict"
+                        | "bounded_result"
+                        | "upstream"
+                )
+            })
+            .unwrap_or("invalid");
+        return Err(format!("{name} frame reported tool error {code}"));
     }
     let content_len = result["content"]
         .as_array()
@@ -3384,6 +3406,7 @@ async fn run_validator_family(
         let transport = ArtifactTransport::new(run.control, data);
         for probe in ArtifactValidatorProbe::ALL {
             let case = format!("{}+{}", probe.as_str(), data.as_str());
+            eprintln!("artifact validator probe={case}");
             let relative = format!(
                 "validator-{}-{}-{suffix}.bin",
                 probe.as_str(),
