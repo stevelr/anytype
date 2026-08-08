@@ -35,8 +35,14 @@ pub enum ArtifactAcceptanceGatePoint {
     ImportFirstUploadChunk,
     /// The final export namespace check succeeded and publication is next.
     ExportPrepublication,
+    /// The export destination was atomically linked but durability is unsettled.
+    ExportAtomicPublication,
     /// A document import is about to perform its final source check.
     DocumentFinalRevalidation,
+    /// An Anytype file mutation returned before candidate settlement.
+    ImportPostDispatch,
+    /// An Anytype document mutation returned before candidate settlement.
+    DocumentPostDispatch,
 }
 
 /// Capability-directory environment variable used only by the private child.
@@ -170,6 +176,30 @@ impl ArtifactAcceptanceGates {
         .await
     }
 
+    /// Arms the atomic publication window for one file-export operation.
+    pub async fn arm_file_export_atomic_publication(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::ExportAtomicPublication,
+            operation_key(b"export", idempotency_key),
+        )
+        .await
+    }
+
+    /// Arms a file import after dispatch has returned and before settlement.
+    pub async fn arm_file_import_post_dispatch(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::ImportPostDispatch,
+            operation_key(b"import", idempotency_key),
+        )
+        .await
+    }
+
     /// Arms the exact final document-source revalidation selected by its key.
     pub async fn arm_document_import(
         &self,
@@ -177,6 +207,18 @@ impl ArtifactAcceptanceGates {
     ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
         self.arm(
             ArtifactAcceptanceGatePoint::DocumentFinalRevalidation,
+            operation_key(b"document", idempotency_key),
+        )
+        .await
+    }
+
+    /// Arms a document update after dispatch has returned and before settlement.
+    pub async fn arm_document_update_post_dispatch(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::DocumentPostDispatch,
             operation_key(b"document", idempotency_key),
         )
         .await
@@ -289,8 +331,11 @@ impl AcceptanceGateConfig {
         let point = match point {
             "import-first-upload-chunk" => ArtifactAcceptanceGatePoint::ImportFirstUploadChunk,
             "export-prepublication" => ArtifactAcceptanceGatePoint::ExportPrepublication,
+            "export-atomic-publication" => ArtifactAcceptanceGatePoint::ExportAtomicPublication,
             "document-final-revalidation" => ArtifactAcceptanceGatePoint::DocumentFinalRevalidation,
             "import-before-dispatch" => ArtifactAcceptanceGatePoint::ImportBeforeDispatch,
+            "import-post-dispatch" => ArtifactAcceptanceGatePoint::ImportPostDispatch,
+            "document-post-dispatch" => ArtifactAcceptanceGatePoint::DocumentPostDispatch,
             _ => return Err(AcceptanceGateSetupError::Configuration),
         };
         if raw_key.is_empty()
@@ -322,7 +367,16 @@ impl AcceptanceGateConfig {
             ArtifactAcceptanceGatePoint::ExportPrepublication => {
                 operation_key(b"export", &self.raw_key)
             }
+            ArtifactAcceptanceGatePoint::ExportAtomicPublication => {
+                operation_key(b"export", &self.raw_key)
+            }
             ArtifactAcceptanceGatePoint::DocumentFinalRevalidation => {
+                operation_key(b"document", &self.raw_key)
+            }
+            ArtifactAcceptanceGatePoint::ImportPostDispatch => {
+                operation_key(b"import", &self.raw_key)
+            }
+            ArtifactAcceptanceGatePoint::DocumentPostDispatch => {
                 operation_key(b"document", &self.raw_key)
             }
         };

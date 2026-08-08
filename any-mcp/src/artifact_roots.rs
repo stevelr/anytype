@@ -519,6 +519,106 @@ pub(crate) struct StagingInventory {
     pub(crate) tombstones: Vec<StagingInventoryFile>,
 }
 
+/// Stable native identity persisted beside one private staging payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StagingFileIdentity {
+    pub(crate) volume: u64,
+    pub(crate) file: u64,
+}
+
+/// Sequential writer for one exact private staging payload.
+pub(crate) struct StagingPayload {
+    file: File,
+    identity: FileIdentity,
+    maximum_bytes: u64,
+    written: u64,
+}
+
+impl fmt::Debug for StagingPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StagingPayload")
+            .field("maximum_bytes", &self.maximum_bytes)
+            .field("written", &self.written)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StagingPayload {
+    pub(crate) fn identity(&self) -> StagingFileIdentity {
+        StagingFileIdentity {
+            volume: self.identity.volume,
+            file: self.identity.file,
+        }
+    }
+
+    pub(crate) fn sync_all(&self) -> Result<(), RootAccessError> {
+        self.file
+            .sync_all()
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))
+    }
+
+    pub(crate) fn truncate(&mut self, offset: u64) -> Result<(), RootAccessError> {
+        if offset > self.written {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        self.file
+            .set_len(offset)
+            .and_then(|()| self.file.seek(SeekFrom::Start(offset)).map(|_| ()))
+            .and_then(|()| self.file.sync_all())
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        self.written = offset;
+        Ok(())
+    }
+
+    pub(crate) fn try_clone_reader(&self) -> io::Result<File> {
+        let mut reader = self.file.try_clone()?;
+        reader.seek(SeekFrom::Start(0))?;
+        Ok(reader)
+    }
+
+    pub(crate) fn into_anchored(self) -> Result<AnchoredImport, RootAccessError> {
+        self.sync_all()?;
+        let metadata = self
+            .file
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        let snapshot = FileSnapshot::from_file(&self.file, &metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        if snapshot.identity != self.identity || snapshot.length != self.written {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        Ok(AnchoredImport {
+            file: self.file,
+            length: self.written,
+            snapshot,
+            namespace: None,
+        })
+    }
+}
+
+impl Write for StagingPayload {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let proposed = self
+            .written
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| io::Error::other("staging payload length overflow"))?;
+        if proposed > self.maximum_bytes {
+            return Err(io::Error::other("staging payload exceeds its bound"));
+        }
+        let written = self.file.write(bytes)?;
+        self.written = self
+            .written
+            .checked_add(written as u64)
+            .ok_or_else(|| io::Error::other("staging payload length overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
 impl fmt::Debug for StagingDirectory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("StagingDirectory(<capability>)")
@@ -559,50 +659,158 @@ impl StagingDirectory {
         let tombstones = staging_child(&root, STAGING_TOMBSTONES_DIRECTORY)?;
         sync_retained_directory(&root)?;
         validate_staging_root(&root, maximum_entries)?;
-        let inventory = StagingInventory {
-            records: inventory_directory(
-                &records,
-                maximum_entries,
-                STAGING_STATE_BYTES,
-                staging_record_name,
-            )?,
-            payloads: inventory_directory(
-                &payloads,
-                maximum_entries,
-                maximum_payload_bytes,
-                staging_payload_name,
-            )?,
-            temporary: inventory_directory(
-                &temporary,
-                maximum_entries,
-                maximum_payload_bytes.max(STAGING_STATE_BYTES),
-                staging_temporary_name,
-            )?,
-            tombstones: inventory_directory(
-                &tombstones,
-                maximum_entries,
-                STAGING_STATE_BYTES,
-                staging_record_name,
-            )?,
-        };
-        Ok((Self {
+        let staging = Self {
             records,
             payloads,
             temporary,
             tombstones,
             _instance_lock: Arc::new(instance_lock),
-        }, inventory))
+        };
+        let inventory = staging.inventory(maximum_entries, maximum_payload_bytes)?;
+        Ok((staging, inventory))
     }
 
-    /// Reserves one private create-new record destination.
-    pub(crate) fn begin_record(
+    pub(crate) fn inventory(
         &self,
-        record_name: &str,
+        maximum_entries: usize,
+        maximum_payload_bytes: u64,
+    ) -> Result<StagingInventory, RootAccessError> {
+        Ok(StagingInventory {
+            records: inventory_directory(
+                &self.records,
+                maximum_entries,
+                STAGING_STATE_BYTES,
+                staging_record_name,
+            )?,
+            payloads: inventory_directory(
+                &self.payloads,
+                maximum_entries,
+                maximum_payload_bytes,
+                staging_payload_name,
+            )?,
+            temporary: inventory_directory(
+                &self.temporary,
+                maximum_entries,
+                maximum_payload_bytes.max(STAGING_STATE_BYTES),
+                staging_temporary_name,
+            )?,
+            tombstones: inventory_directory(
+                &self.tombstones,
+                maximum_entries,
+                STAGING_STATE_BYTES,
+                staging_record_name,
+            )?,
+        })
+    }
+
+    pub(crate) fn create_payload(
+        &self,
+        record_id: &str,
         maximum_bytes: u64,
-    ) -> Result<AtomicExport, RootAccessError> {
-        let path = RelativeNativePath::from_utf8(record_name)
+    ) -> Result<StagingPayload, RootAccessError> {
+        if !record_id_valid(record_id) || maximum_bytes == 0 {
+            return Err(RootAccessError::new(RootProblem::Containment));
+        }
+        let directory = retained_directory(&self.payloads.directory)?;
+        let name = format!("{record_id}.bin");
+        let file = directory
+            .open_with(Path::new(&name), &owner_private_create_options())
+            .map(cap_std::fs::File::into_std)
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-        begin_atomic_export_at(&self.payloads, &path, maximum_bytes)
+        let metadata = file
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        if !safe_created_export_metadata(&file, &metadata) || !safe_windows_security(&file) {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        let identity = file_identity(&file, &metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+        sync_parent_directory(&directory)
+            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+        Ok(StagingPayload {
+            file,
+            identity,
+            maximum_bytes,
+            written: 0,
+        })
+    }
+
+    pub(crate) fn publish_record(
+        &self,
+        record_id: &str,
+        bytes: &[u8],
+    ) -> Result<AnchoredImport, RootAccessError> {
+        self.publish_state(&self.records, record_id, bytes)
+    }
+
+    pub(crate) fn publish_tombstone(
+        &self,
+        record_id: &str,
+        bytes: &[u8],
+    ) -> Result<AnchoredImport, RootAccessError> {
+        self.publish_state(&self.tombstones, record_id, bytes)
+    }
+
+    fn publish_state(
+        &self,
+        destination: &RootCapability,
+        record_id: &str,
+        bytes: &[u8],
+    ) -> Result<AnchoredImport, RootAccessError> {
+        if !record_id_valid(record_id) || bytes.len() as u64 > STAGING_STATE_BYTES {
+            return Err(RootAccessError::new(RootProblem::TooLarge));
+        }
+        let temporary_directory = retained_directory(&self.temporary.directory)?;
+        let destination_directory = retained_directory(&destination.directory)?;
+        let random =
+            getrandom::u64().map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let temporary_name = format!("{record_id}.{random:016x}.tmp");
+        let mut file = temporary_directory
+            .open_with(Path::new(&temporary_name), &owner_private_create_options())
+            .map(cap_std::fs::File::into_std)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let result = (|| {
+            file.write_all(bytes)
+                .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+            file.sync_all()
+                .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+            if metadata.len() != bytes.len() as u64
+                || !safe_created_export_metadata(&file, &metadata)
+                || !safe_windows_security(&file)
+            {
+                return Err(RootAccessError::new(RootProblem::Changed));
+            }
+            let identity = file_identity(&file, &metadata)
+                .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            temporary_directory
+                .rename(
+                    Path::new(&temporary_name),
+                    &destination_directory,
+                    Path::new(&format!("{record_id}.json")),
+                )
+                .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+            sync_parent_directory(&destination_directory)
+                .and_then(|()| sync_parent_directory(&temporary_directory))
+                .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+            let snapshot = FileSnapshot::from_file(&file, &metadata)
+                .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+            if snapshot.identity != identity {
+                return Err(RootAccessError::new(RootProblem::Indeterminate));
+            }
+            Ok(AnchoredImport {
+                file,
+                length: bytes.len() as u64,
+                snapshot,
+                namespace: None,
+            })
+        })();
+        if result.is_err() {
+            let _ = remove_private_file(&temporary_directory, Path::new(&temporary_name), 1);
+        }
+        result
     }
 
     /// Removes one completed record after proving its retained identity.
@@ -642,6 +850,110 @@ impl StagingDirectory {
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
         sync_parent_directory(&parent).map_err(|_| RootAccessError::new(RootProblem::Containment))
     }
+
+    pub(crate) fn truncate_exact_payload(
+        &self,
+        record_name: &str,
+        expected: &AnchoredImport,
+        offset: u64,
+    ) -> Result<(), RootAccessError> {
+        let path = RelativeNativePath::from_utf8(record_name)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let (parent, name) = walk_parent(&self.payloads, &path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).follow(FollowSymlinks::No);
+        let file = parent
+            .open_with(Path::new(&name), &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let identity = file_identity(&file, &metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        if !private_file_with_links(&file, &metadata, 1)
+            || !safe_windows_security(&file)
+            || identity != expected.snapshot.identity
+            || offset > metadata.len()
+        {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        file.set_len(offset)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))
+    }
+
+    pub(crate) fn remove_exact_record_state(
+        &self,
+        record_id: &str,
+        expected: &AnchoredImport,
+    ) -> Result<(), RootAccessError> {
+        self.remove_exact_state(&self.records, record_id, expected)
+    }
+
+    pub(crate) fn remove_exact_tombstone(
+        &self,
+        record_id: &str,
+        expected: &AnchoredImport,
+    ) -> Result<(), RootAccessError> {
+        self.remove_exact_state(&self.tombstones, record_id, expected)
+    }
+
+    pub(crate) fn remove_exact_temporary(
+        &self,
+        name: &str,
+        expected: &AnchoredImport,
+    ) -> Result<(), RootAccessError> {
+        if !staging_temporary_name(name) {
+            return Err(RootAccessError::new(RootProblem::Containment));
+        }
+        remove_exact_at(&self.temporary, name, expected.snapshot.identity)
+    }
+
+    fn remove_exact_state(
+        &self,
+        capability: &RootCapability,
+        record_id: &str,
+        expected: &AnchoredImport,
+    ) -> Result<(), RootAccessError> {
+        if !record_id_valid(record_id) {
+            return Err(RootAccessError::new(RootProblem::Containment));
+        }
+        remove_exact_at(
+            capability,
+            &format!("{record_id}.json"),
+            expected.snapshot.identity,
+        )
+    }
+}
+
+fn remove_exact_at(
+    capability: &RootCapability,
+    name: &str,
+    expected: FileIdentity,
+) -> Result<(), RootAccessError> {
+    let directory = retained_directory(&capability.directory)?;
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory
+        .open_with(Path::new(name), &options)
+        .map(cap_std::fs::File::into_std)
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    let identity = file_identity(&file, &metadata)
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    if !private_file_with_links(&file, &metadata, 1)
+        || !safe_windows_security(&file)
+        || identity != expected
+    {
+        return Err(RootAccessError::new(RootProblem::Changed));
+    }
+    directory
+        .remove_file(Path::new(name))
+        .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+    sync_parent_directory(&directory).map_err(|_| RootAccessError::new(RootProblem::Containment))
 }
 
 const STAGING_LOCK_NAME: &str = "instance.lock";
@@ -790,7 +1102,10 @@ fn inventory_directory(
             .file_name()
             .into_string()
             .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
-        if !valid_name(&name) || inventory.iter().any(|known: &StagingInventoryFile| known.name == name)
+        if !valid_name(&name)
+            || inventory
+                .iter()
+                .any(|known: &StagingInventoryFile| known.name == name)
         {
             return Err(RootAccessError::new(RootProblem::Activation));
         }
@@ -808,13 +1123,19 @@ fn staging_record_name(name: &str) -> bool {
         .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(lowercase_hex))
 }
 
+fn record_id_valid(record_id: &str) -> bool {
+    record_id.len() == 32 && record_id.bytes().all(lowercase_hex)
+}
+
 fn staging_payload_name(name: &str) -> bool {
     name.strip_suffix(".bin")
         .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(lowercase_hex))
 }
 
 fn staging_temporary_name(name: &str) -> bool {
-    let Some((record, random)) = name.strip_suffix(".tmp").and_then(|name| name.split_once('.'))
+    let Some((record, random)) = name
+        .strip_suffix(".tmp")
+        .and_then(|name| name.split_once('.'))
     else {
         return false;
     };
@@ -879,31 +1200,6 @@ impl AtomicExport {
         self.acceptance_gate = Some((gates, operation));
         self
     }
-    /// Removes an unpublished private destination without discarding its
-    /// retained capability when the file is no longer safe to unlink.
-    pub(crate) fn discard_in_place(&mut self) -> Result<(), RootAccessError> {
-        if let Some(file) = self.file.as_ref() {
-            let metadata = file
-                .metadata()
-                .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-            if !private_file_with_links(file, &metadata, 1) || !safe_windows_security(file) {
-                return Err(RootAccessError::new(RootProblem::Changed));
-            }
-            self.file.take();
-        }
-        remove_private_file(&self.parent, Path::new(&self.temporary_name), 1)?;
-        sync_parent_directory(&self.parent)
-            .map_err(|_| RootAccessError::new(RootProblem::Containment))
-    }
-
-    /// Clones a read handle for pre-publication verification.
-    pub(crate) fn try_clone_reader(&self) -> io::Result<File> {
-        self.file
-            .as_ref()
-            .ok_or_else(|| io::Error::other("artifact export is not readable"))?
-            .try_clone()
-    }
-
     /// Flushes, verifies, and atomically publishes the destination.
     ///
     /// The destination must still be absent. The returned byte count is the
@@ -944,12 +1240,13 @@ impl AtomicExport {
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
         self.verify_export_namespace()?;
         #[cfg(any(test, feature = "acceptance-harness"))]
-        if let Some((gates, operation)) = self.acceptance_gate.take() {
+        if let Some((gates, operation)) = self.acceptance_gate.as_ref() {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
-            if !handle
-                .block_on(gates.reach(ArtifactAcceptanceGatePoint::ExportPrepublication, operation))
-            {
+            if !handle.block_on(gates.reach(
+                ArtifactAcceptanceGatePoint::ExportPrepublication,
+                *operation,
+            )) {
                 return Err(RootAccessError::new(RootProblem::Indeterminate));
             }
         }
@@ -963,6 +1260,17 @@ impl AtomicExport {
                 return Err(RootAccessError::new(RootProblem::Collision));
             }
             Err(_) => return Err(RootAccessError::new(RootProblem::Containment)),
+        }
+        #[cfg(any(test, feature = "acceptance-harness"))]
+        if let Some((gates, operation)) = self.acceptance_gate.take() {
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+            if !handle.block_on(gates.reach(
+                ArtifactAcceptanceGatePoint::ExportAtomicPublication,
+                operation,
+            )) {
+                return Err(RootAccessError::new(RootProblem::Indeterminate));
+            }
         }
         if self.verify_export_namespace().is_err() {
             drop(file);
@@ -1109,6 +1417,12 @@ impl fmt::Debug for AnchoredImport {
 }
 
 impl AnchoredImport {
+    pub(crate) fn staging_identity(&self) -> StagingFileIdentity {
+        StagingFileIdentity {
+            volume: self.snapshot.identity.volume,
+            file: self.snapshot.identity.file,
+        }
+    }
     /// Returns a mutable reader for the retained source.
     pub fn reader(&mut self) -> &mut File {
         &mut self.file
@@ -2541,8 +2855,8 @@ mod tests {
             staging.to_str().expect("temporary staging path is UTF-8"),
         )
         .expect("staging path");
-        let (first, inventory) = StagingDirectory::activate(&path, &registry, 4, 1024)
-            .expect("first generation");
+        let (first, inventory) =
+            StagingDirectory::activate(&path, &registry, 4, 1024).expect("first generation");
         assert!(inventory.records.is_empty());
         assert!(inventory.payloads.is_empty());
         assert!(inventory.temporary.is_empty());
@@ -2558,8 +2872,8 @@ mod tests {
         }
         assert!(StagingDirectory::activate(&path, &registry, 4, 1024).is_err());
         drop(first);
-        let (second, _) = StagingDirectory::activate(&path, &registry, 4, 1024)
-            .expect("next generation");
+        let (second, _) =
+            StagingDirectory::activate(&path, &registry, 4, 1024).expect("next generation");
         drop(second);
         drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
@@ -2580,7 +2894,10 @@ mod tests {
         .expect("staging path");
 
         assert!(StagingDirectory::activate(&path, &registry, 4, 1024).is_err());
-        assert_eq!(fs::read(&unknown).expect("unknown entry retained"), b"ambiguous");
+        assert_eq!(
+            fs::read(&unknown).expect("unknown entry retained"),
+            b"ambiguous"
+        );
         fs::remove_dir_all(base).expect("cleanup");
     }
 

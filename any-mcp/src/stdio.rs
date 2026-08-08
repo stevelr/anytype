@@ -422,6 +422,7 @@ where
     let (responses, response_rx) = mpsc::channel(MAX_IN_FLIGHT_REQUESTS);
     let mut writer_task = tokio::spawn(write_responses(writer, response_rx));
     let mut requests = JoinSet::new();
+    let runtime_shutdown = runtime.shutdown_token();
 
     match first {
         FirstFrame::Bytes(frame) => {
@@ -443,6 +444,16 @@ where
     loop {
         tokio::select! {
             biased;
+            () = runtime_shutdown.cancelled() => {
+                cancel_all(&cancellations).await;
+                abort_requests(&mut requests).await;
+                drop(responses);
+                let _ = writer_task.await;
+                runtime
+                    .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
+                    .await;
+                return Err(ServeError::ServiceTask);
+            }
             writer_result = &mut writer_task => {
                 runtime.begin_shutdown();
                 cancel_all(&cancellations).await;
@@ -527,6 +538,9 @@ async fn drain_artifact_settlements(runtime: &crate::RuntimeContext) {
 async fn shutdown_runtime(runtime: &crate::RuntimeContext) {
     runtime.begin_shutdown();
     drain_artifact_settlements(runtime).await;
+    runtime
+        .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
+        .await;
 }
 
 async fn handle_frame(

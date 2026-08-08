@@ -10,15 +10,14 @@
 //! file handles rather than reopening caller-influenced paths.
 
 use std::{
-    collections::HashMap,
-    collections::VecDeque,
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     convert::Infallible,
     fmt,
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -38,13 +37,15 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
 use crate::{
     artifact_config::{ArtifactLimits, StagingConfig},
     artifact_roots::{
-        AnchoredImport, AtomicExport, PositionalReader, RootRegistry, StagingDirectory,
+        AnchoredImport, PositionalReader, RootRegistry, StagingDirectory, StagingFileIdentity,
+        StagingInventory, StagingPayload,
     },
     domain::SpaceId,
 };
@@ -54,6 +55,7 @@ const RECORD_BYTES: usize = 16;
 const SECRET_BYTES: usize = 32;
 const CHECKSUM_BYTES: usize = 8;
 const HANDLE_BYTES: usize = 1 + RECORD_BYTES + SECRET_BYTES + CHECKSUM_BYTES;
+const DURABLE_RECORD_VERSION: u8 = 1;
 
 type StagingBody = UnsyncBoxBody<Bytes, io::Error>;
 
@@ -66,6 +68,107 @@ pub const STAGING_REQUIRED_GUIDANCE: &str =
 pub(crate) enum StageDirection {
     Import,
     Export,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DurableDirection {
+    Import,
+    Export,
+}
+
+impl From<StageDirection> for DurableDirection {
+    fn from(direction: StageDirection) -> Self {
+        match direction {
+            StageDirection::Import => Self::Import,
+            StageDirection::Export => Self::Export,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DurableStageState {
+    Allocated,
+    Receiving,
+    Ready,
+    Reconciliation,
+    Available,
+    Consumed,
+    CleanupPending,
+    PublicationIndeterminate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DurableFileIdentity {
+    volume: u64,
+    file: u64,
+}
+
+impl From<StagingFileIdentity> for DurableFileIdentity {
+    fn from(identity: StagingFileIdentity) -> Self {
+        Self {
+            volume: identity.volume,
+            file: identity.file,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableStageRecord {
+    format_version: u8,
+    generation: String,
+    record_id: String,
+    bearer_digest: String,
+    direction: DurableDirection,
+    state: DurableStageState,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    space_id: String,
+    size_bytes: u64,
+    media_type: Option<String>,
+    expected_sha256: Option<String>,
+    observed_sha256: Option<String>,
+    committed_offset: u64,
+    payload_identity: Option<DurableFileIdentity>,
+    operation_fingerprint: Option<String>,
+    uncertainty: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableTombstone {
+    format_version: u8,
+    record_id: String,
+    payload_identity: Option<DurableFileIdentity>,
+    record_identity: DurableFileIdentity,
+}
+
+struct DurableRecordOwner {
+    document: DurableStageRecord,
+    source: AnchoredImport,
+}
+
+struct RecoveredDurableRecord {
+    document: DurableStageRecord,
+    record_source: AnchoredImport,
+    payload_source: AnchoredImport,
+}
+
+struct ReconciliationOutcome {
+    cleaned: usize,
+    retained: Vec<RecoveredDurableRecord>,
+}
+
+impl fmt::Debug for DurableRecordOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DurableRecordOwner")
+            .field("state", &self.document.state)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Bounded allocation metadata returned to an MCP tool.
@@ -99,6 +202,7 @@ pub(crate) struct StageSource {
     record: [u8; RECORD_BYTES],
     operation: [u8; 32],
     restore_ready_on_drop: bool,
+    record_owner: Arc<StageRecord>,
     #[cfg(test)]
     fail_reader_clone: bool,
     lease: tokio::sync::OwnedMutexGuard<RecordState>,
@@ -112,7 +216,7 @@ struct StageExportSource {
 
 /// Exclusive write lease for one receiving staging record.
 pub(crate) struct StageWriteLease {
-    destination: Option<AtomicExport>,
+    destination: Option<StagingPayload>,
     pub(crate) offset: u64,
     pub(crate) size_bytes: u64,
     record: Arc<StageRecord>,
@@ -130,7 +234,7 @@ impl fmt::Debug for StageWriteLease {
 }
 
 impl StageWriteLease {
-    pub(crate) fn take_destination(&mut self) -> Result<AtomicExport, StagingError> {
+    pub(crate) fn take_destination(&mut self) -> Result<StagingPayload, StagingError> {
         self.destination.take().ok_or(StagingError::Conflict)
     }
 }
@@ -205,7 +309,10 @@ impl Drop for StageSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagingError {
     Disabled,
+    InvalidPolicy,
+    Reconciliation,
     NotFound,
+    BadRequest,
     Conflict,
     Bounded,
     Timeout,
@@ -224,7 +331,7 @@ impl std::error::Error for StagingError {}
 #[derive(Debug)]
 enum RecordState {
     Receiving {
-        destination: Option<AtomicExport>,
+        destination: Option<StagingPayload>,
         offset: u64,
     },
     Ready {
@@ -242,7 +349,7 @@ enum RecordState {
         completion: Arc<PublicationCompletion>,
     },
     CleanupPending {
-        destination: Option<AtomicExport>,
+        destination: Option<StagingPayload>,
         source: Option<AnchoredImport>,
         pathname_cleanup_unsafe: bool,
     },
@@ -417,6 +524,8 @@ struct StageRecord {
     expires: Instant,
     expires_at: DateTime<Utc>,
     cleanup_blocked: Arc<AtomicBool>,
+    durable: tokio::sync::Mutex<DurableRecordOwner>,
+    tombstone: tokio::sync::Mutex<Option<AnchoredImport>>,
     state: Arc<tokio::sync::Mutex<RecordState>>,
 }
 
@@ -424,6 +533,7 @@ struct StageRecord {
 struct StagingState {
     directory: StagingDirectory,
     generation_key: [u8; 32],
+    generation: String,
     public_base_url: String,
     limits: ArtifactLimits,
     records: tokio::sync::RwLock<HashMap<[u8; RECORD_BYTES], Arc<StageRecord>>>,
@@ -432,7 +542,27 @@ struct StagingState {
     connection_permits: Arc<tokio::sync::Semaphore>,
     rate_window: tokio::sync::Mutex<VecDeque<Instant>>,
     active: AtomicBool,
+    task_active: AtomicUsize,
+    task_notify: tokio::sync::Notify,
     shutdown: CancellationToken,
+}
+
+struct StagingTaskGuard {
+    state: Arc<StagingState>,
+    registered: bool,
+}
+
+impl Drop for StagingTaskGuard {
+    fn drop(&mut self) {
+        if self.registered {
+            let _ = self.state.task_active.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |active| active.checked_sub(1),
+            );
+        }
+        self.state.task_notify.notify_waiters();
+    }
 }
 
 /// Activated private staging authority for one process generation.
@@ -474,6 +604,118 @@ fn record_hex(record: &[u8; RECORD_BYTES]) -> String {
         let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"));
     }
     encoded
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn decode_hex_array<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N.saturating_mul(2) {
+        return None;
+    }
+    let mut decoded = [0_u8; N];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(*pair.first()?)?;
+        let low = hex_nibble(*pair.get(1)?)?;
+        *decoded.get_mut(index)? = high.checked_mul(16)?.checked_add(low)?;
+    }
+    Some(decoded)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn durable_json<T: Serialize>(value: &T) -> Result<Vec<u8>, StagingError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| StagingError::Reconciliation)?;
+    if bytes.len() as u64 > crate::artifact_roots::STAGING_STATE_BYTES {
+        return Err(StagingError::Reconciliation);
+    }
+    Ok(bytes)
+}
+
+fn parse_record(
+    mut file: crate::artifact_roots::StagingInventoryFile,
+) -> Result<(DurableStageRecord, AnchoredImport), StagingError> {
+    let document: DurableStageRecord =
+        serde_json::from_reader(file.source.reader()).map_err(|_| StagingError::Reconciliation)?;
+    if file.name != format!("{}.json", document.record_id)
+        || document.format_version != DURABLE_RECORD_VERSION
+        || document.record_id.len() != 32
+        || !document
+            .record_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || document.generation.len() != 64
+        || !document
+            .generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || document.bearer_digest.len() != 64
+        || !document
+            .bearer_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || document.committed_offset > document.size_bytes
+        || document
+            .expected_sha256
+            .as_ref()
+            .is_some_and(|value| !valid_sha256(value))
+        || document
+            .observed_sha256
+            .as_ref()
+            .is_some_and(|value| !valid_sha256(value))
+        || document
+            .operation_fingerprint
+            .as_ref()
+            .is_some_and(|value| !valid_sha256(value))
+        || document
+            .media_type
+            .as_ref()
+            .is_some_and(|value| value.len() > 255)
+        || document
+            .uncertainty
+            .as_ref()
+            .is_some_and(|value| value.len() > 32)
+        || SpaceId::new(&document.space_id).is_err()
+    {
+        return Err(StagingError::Reconciliation);
+    }
+    Ok((document, file.source))
+}
+
+fn parse_tombstone(
+    mut file: crate::artifact_roots::StagingInventoryFile,
+) -> Result<(DurableTombstone, AnchoredImport), StagingError> {
+    let document: DurableTombstone =
+        serde_json::from_reader(file.source.reader()).map_err(|_| StagingError::Reconciliation)?;
+    if document.format_version != DURABLE_RECORD_VERSION
+        || file.name != format!("{}.json", document.record_id)
+        || document.record_id.len() != 32
+        || !document
+            .record_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(StagingError::Reconciliation);
+    }
+    Ok((document, file.source))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn make_handle(
@@ -538,7 +780,227 @@ fn parse_handle(value: &str) -> Result<ParsedHandle, StagingError> {
     Ok(ParsedHandle { record, secret })
 }
 
+fn reconcile_inventory(
+    directory: &StagingDirectory,
+    inventory: StagingInventory,
+    limits: &ArtifactLimits,
+) -> Result<ReconciliationOutcome, StagingError> {
+    let mut records = BTreeMap::new();
+    for file in inventory.records {
+        let (document, source) = parse_record(file)?;
+        if document.size_bytes > limits.artifact_bytes
+            || records
+                .insert(document.record_id.clone(), (document, source))
+                .is_some()
+        {
+            return Err(StagingError::Reconciliation);
+        }
+    }
+    let mut payloads = BTreeMap::new();
+    let mut retained_bytes = 0_u64;
+    for file in inventory.payloads {
+        let record_id = file
+            .name
+            .strip_suffix(".bin")
+            .ok_or(StagingError::Reconciliation)?
+            .to_owned();
+        retained_bytes = retained_bytes
+            .checked_add(file.source.length)
+            .ok_or(StagingError::Reconciliation)?;
+        if retained_bytes > limits.staging_total_bytes
+            || payloads.insert(record_id, file.source).is_some()
+        {
+            return Err(StagingError::Reconciliation);
+        }
+    }
+    let mut tombstones = BTreeMap::new();
+    for file in inventory.tombstones {
+        let (document, source) = parse_tombstone(file)?;
+        if tombstones
+            .insert(document.record_id.clone(), (document, source))
+            .is_some()
+        {
+            return Err(StagingError::Reconciliation);
+        }
+    }
+    if records.len() > limits.staging_entries
+        || payloads.len() > limits.staging_entries
+        || tombstones.len() > limits.staging_entries
+    {
+        return Err(StagingError::Reconciliation);
+    }
+    let record_ids = records.keys().cloned().collect::<BTreeSet<_>>();
+    for (record_id, (document, source)) in &records {
+        if document.state == DurableStageState::Allocated {
+            if document.payload_identity.is_some() || payloads.contains_key(record_id) {
+                return Err(StagingError::Reconciliation);
+            }
+        } else {
+            let payload = payloads
+                .get(record_id)
+                .ok_or(StagingError::Reconciliation)?;
+            if document.payload_identity
+                != Some(DurableFileIdentity::from(payload.staging_identity()))
+                || payload.length < document.committed_offset
+                || payload.length > document.size_bytes
+            {
+                return Err(StagingError::Reconciliation);
+            }
+        }
+        if let Some((tombstone, _)) = tombstones.get(record_id)
+            && tombstone.record_identity != DurableFileIdentity::from(source.staging_identity())
+        {
+            return Err(StagingError::Reconciliation);
+        }
+    }
+    for (record_id, payload) in &payloads {
+        if !record_ids.contains(record_id) {
+            let Some((tombstone, _)) = tombstones.get(record_id) else {
+                return Err(StagingError::Reconciliation);
+            };
+            if tombstone.payload_identity
+                != Some(DurableFileIdentity::from(payload.staging_identity()))
+            {
+                return Err(StagingError::Reconciliation);
+            }
+        }
+    }
+    for record_id in tombstones.keys() {
+        if !records.contains_key(record_id) && !payloads.contains_key(record_id) {
+            continue;
+        }
+        let (document, _) = tombstones
+            .get(record_id)
+            .ok_or(StagingError::Reconciliation)?;
+        if let Some(payload) = payloads.get(record_id)
+            && document.payload_identity
+                != Some(DurableFileIdentity::from(payload.staging_identity()))
+        {
+            return Err(StagingError::Reconciliation);
+        }
+    }
+
+    let mut reconciled = 0_usize;
+    let mut retained = Vec::new();
+    for temporary in inventory.temporary {
+        directory
+            .remove_exact_temporary(&temporary.name, &temporary.source)
+            .map_err(|_| StagingError::Reconciliation)?;
+    }
+    let mut all_ids = record_ids;
+    all_ids.extend(payloads.keys().cloned());
+    let ids = all_ids.into_iter().collect::<Vec<_>>();
+    for record_id in ids {
+        let retain_uncertain = records.get(&record_id).is_some_and(|(document, _)| {
+            document.state == DurableStageState::Reconciliation
+                && document.uncertainty.as_deref() == Some("mutation_dispatched")
+                && document.expires_at > Utc::now()
+                && document.observed_sha256.is_some()
+                && document.operation_fingerprint.is_some()
+        });
+        if retain_uncertain {
+            let (document, record_source) = records
+                .remove(&record_id)
+                .ok_or(StagingError::Reconciliation)?;
+            let payload_source = payloads
+                .remove(&record_id)
+                .ok_or(StagingError::Reconciliation)?;
+            retained.push(RecoveredDurableRecord {
+                document,
+                record_source,
+                payload_source,
+            });
+            continue;
+        }
+        if let (Some((document, _)), Some(payload)) =
+            (records.get(&record_id), payloads.get(&record_id))
+            && document.state == DurableStageState::Receiving
+            && payload.length > document.committed_offset
+        {
+            directory
+                .truncate_exact_payload(
+                    &format!("{record_id}.bin"),
+                    payload,
+                    document.committed_offset,
+                )
+                .map_err(|_| StagingError::Reconciliation)?;
+        }
+        let existing_tombstone = tombstones.remove(&record_id);
+        let tombstone_source = if let Some((_, source)) = existing_tombstone {
+            source
+        } else if let Some((_, record_source)) = records.get(&record_id) {
+            let tombstone = DurableTombstone {
+                format_version: DURABLE_RECORD_VERSION,
+                record_id: record_id.clone(),
+                payload_identity: payloads
+                    .get(&record_id)
+                    .map(|payload| DurableFileIdentity::from(payload.staging_identity())),
+                record_identity: DurableFileIdentity::from(record_source.staging_identity()),
+            };
+            directory
+                .publish_tombstone(&record_id, &durable_json(&tombstone)?)
+                .map_err(|_| StagingError::Reconciliation)?
+        } else {
+            return Err(StagingError::Reconciliation);
+        };
+        if let Some(payload) = payloads.remove(&record_id) {
+            directory
+                .remove_exact_record(&format!("{record_id}.bin"), &payload)
+                .map_err(|_| StagingError::Reconciliation)?;
+        }
+        if let Some((_, record_source)) = records.remove(&record_id) {
+            directory
+                .remove_exact_record_state(&record_id, &record_source)
+                .map_err(|_| StagingError::Reconciliation)?;
+        }
+        directory
+            .remove_exact_tombstone(&record_id, &tombstone_source)
+            .map_err(|_| StagingError::Reconciliation)?;
+        reconciled = reconciled.saturating_add(1);
+    }
+    for (record_id, (_, source)) in tombstones {
+        directory
+            .remove_exact_tombstone(&record_id, &source)
+            .map_err(|_| StagingError::Reconciliation)?;
+    }
+    Ok(ReconciliationOutcome {
+        cleaned: reconciled,
+        retained,
+    })
+}
+
 impl ArtifactStaging {
+    async fn publish_document(
+        &self,
+        document: &DurableStageRecord,
+    ) -> Result<AnchoredImport, StagingError> {
+        let bytes = durable_json(document)?;
+        let directory = self.state.directory.clone();
+        let record_id = document.record_id.clone();
+        let task_guard = self.task_guard();
+        tokio::task::spawn_blocking(move || {
+            let _task_guard = task_guard;
+            directory.publish_record(&record_id, &bytes)
+        })
+        .await
+        .map_err(|_| StagingError::Indeterminate)?
+        .map_err(|_| StagingError::Indeterminate)
+    }
+
+    async fn persist_transition(
+        &self,
+        record: &StageRecord,
+        update: impl FnOnce(&mut DurableStageRecord),
+    ) -> Result<(), StagingError> {
+        let mut durable = record.durable.lock().await;
+        let mut next = durable.document.clone();
+        update(&mut next);
+        let source = self.publish_document(&next).await?;
+        durable.document = next;
+        durable.source = source;
+        Ok(())
+    }
+
     /// Returns content-free remaining record and byte capacity.
     pub(crate) async fn available_quota(&self) -> (u64, u32) {
         let records = self.state.records.read().await;
@@ -577,16 +1039,14 @@ impl ArtifactStaging {
             limits.staging_entries,
             limits.artifact_bytes,
         )
-            .map_err(|_| StagingError::Upstream)?;
-        if !inventory.records.is_empty()
-            || !inventory.payloads.is_empty()
-            || !inventory.temporary.is_empty()
-            || !inventory.tombstones.is_empty()
-        {
-            return Err(StagingError::Upstream);
-        }
+        .map_err(|_| StagingError::InvalidPolicy)?;
+        let reconciliation = reconcile_inventory(&directory, inventory, limits)?;
         let mut generation_key = [0_u8; 32];
         getrandom::fill(&mut generation_key).map_err(|_| StagingError::Upstream)?;
+        let generation = bytes_hex(&digest(&[
+            b"any-mcp/artifact-generation/v1",
+            &generation_key,
+        ]));
         let public_base_url = config
             .public_base_url
             .clone()
@@ -594,13 +1054,75 @@ impl ArtifactStaging {
         let listener = tokio::net::TcpListener::bind(config.bind)
             .await
             .map_err(|_| StagingError::Upstream)?;
+        let mut recovered_records = HashMap::new();
+        for recovered in reconciliation.retained {
+            let record_id = decode_hex_array::<RECORD_BYTES>(&recovered.document.record_id)
+                .ok_or(StagingError::Reconciliation)?;
+            let operation = recovered
+                .document
+                .operation_fingerprint
+                .as_deref()
+                .and_then(decode_hex_array::<32>)
+                .ok_or(StagingError::Reconciliation)?;
+            let sha256 = recovered
+                .document
+                .observed_sha256
+                .clone()
+                .ok_or(StagingError::Reconciliation)?;
+            let direction = match recovered.document.direction {
+                DurableDirection::Import => StageDirection::Import,
+                DurableDirection::Export => StageDirection::Export,
+            };
+            if direction != StageDirection::Import {
+                return Err(StagingError::Reconciliation);
+            }
+            let remaining = recovered
+                .document
+                .expires_at
+                .signed_duration_since(Utc::now())
+                .to_std()
+                .unwrap_or(Duration::ZERO);
+            let expires = Instant::now()
+                .checked_add(remaining)
+                .ok_or(StagingError::Reconciliation)?;
+            let space_id = SpaceId::new(&recovered.document.space_id)
+                .map_err(|_| StagingError::Reconciliation)?;
+            let record = Arc::new(StageRecord {
+                record_name: format!("{}.bin", recovered.document.record_id),
+                bearer_digest: [0; 32],
+                direction,
+                space_id,
+                size_bytes: recovered.document.size_bytes,
+                media_type: recovered.document.media_type.clone(),
+                expected_sha256: recovered.document.expected_sha256.clone(),
+                expires,
+                expires_at: recovered.document.expires_at,
+                cleanup_blocked: Arc::new(AtomicBool::new(false)),
+                state: Arc::new(tokio::sync::Mutex::new(RecordState::Reconciliation {
+                    import: Arc::new(RetainedImport {
+                        source: recovered.payload_source,
+                        sha256,
+                    }),
+                    operation,
+                })),
+                durable: tokio::sync::Mutex::new(DurableRecordOwner {
+                    document: recovered.document,
+                    source: recovered.record_source,
+                }),
+                tombstone: tokio::sync::Mutex::new(None),
+            });
+            if recovered_records.insert(record_id, record).is_some() {
+                return Err(StagingError::Reconciliation);
+            }
+        }
         let staging = Self {
             state: Arc::new(StagingState {
                 directory,
                 generation_key,
+                generation,
                 public_base_url,
                 limits: limits.clone(),
-                records: tokio::sync::RwLock::new(HashMap::new()),
+                records: tokio::sync::RwLock::new(recovered_records),
                 allowed_hosts: allowed_hosts(config)?,
                 request_permits: Arc::new(tokio::sync::Semaphore::new(limits.staging_requests)),
                 connection_permits: Arc::new(tokio::sync::Semaphore::new(
@@ -608,11 +1130,20 @@ impl ArtifactStaging {
                 )),
                 rate_window: tokio::sync::Mutex::new(VecDeque::new()),
                 active: AtomicBool::new(true),
+                task_active: AtomicUsize::new(0),
+                task_notify: tokio::sync::Notify::new(),
                 shutdown,
             }),
         };
         staging.spawn_listener(listener);
         staging.spawn_cleanup();
+        tracing::info!(
+            target: "any_mcp::operation",
+            operation = "artifact_staging_reconciliation",
+            outcome = "startup_complete",
+            cleanup_count = reconciliation.cleaned,
+            "Artifact staging reconciliation completed"
+        );
         Ok(staging)
     }
 
@@ -620,9 +1151,41 @@ impl ArtifactStaging {
         self.state.active.load(Ordering::Acquire) && !self.state.shutdown.is_cancelled()
     }
 
+    fn task_guard(&self) -> StagingTaskGuard {
+        let registered = self
+            .state
+            .task_active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .is_ok();
+        if !registered {
+            self.state.shutdown.cancel();
+        }
+        StagingTaskGuard {
+            state: Arc::clone(&self.state),
+            registered,
+        }
+    }
+
+    pub(crate) async fn drain(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.state.task_notify.notified();
+            if self.state.task_active.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return false;
+            }
+        }
+    }
+
     fn spawn_listener(&self, listener: tokio::net::TcpListener) {
         let staging = self.clone();
+        let task_guard = self.task_guard();
         tokio::spawn(async move {
+            let _task_guard = task_guard;
             loop {
                 let accepted = tokio::select! {
                     biased;
@@ -642,7 +1205,9 @@ impl ArtifactStaging {
                     Err(_) => continue,
                 };
                 let connection_staging = staging.clone();
+                let connection_guard = staging.task_guard();
                 tokio::spawn(async move {
+                    let _connection_guard = connection_guard;
                     let _permit = permit;
                     let service_staging = connection_staging.clone();
                     let service = service_fn(move |request| {
@@ -661,9 +1226,12 @@ impl ArtifactStaging {
                                 .staging_header_bytes
                                 .max(8 * 1024),
                         );
-                    let _ = builder
-                        .serve_connection(TokioIo::new(stream), service)
-                        .await;
+                    let connection = builder.serve_connection(TokioIo::new(stream), service);
+                    tokio::select! {
+                        biased;
+                        () = connection_staging.state.shutdown.cancelled() => {}
+                        _ = connection => {}
+                    }
                 });
             }
             staging.state.active.store(false, Ordering::Release);
@@ -672,7 +1240,9 @@ impl ArtifactStaging {
 
     fn spawn_cleanup(&self) {
         let staging = self.clone();
+        let task_guard = self.task_guard();
         tokio::spawn(async move {
+            let _task_guard = task_guard;
             let cadence = staging
                 .state
                 .limits
@@ -702,7 +1272,7 @@ impl ArtifactStaging {
                     .collect::<Vec<_>>()
             };
             for (id, record) in records {
-                drop(staging.spawn_cleanup_coordinator(id, record));
+                let _ = staging.cleanup_coordinator(id, record).await;
             }
         });
     }
@@ -876,8 +1446,9 @@ impl ArtifactStaging {
             }
         };
         if let Some(error) = outcome.error {
+            let committed = lease.offset;
             let _ = self
-                .restore_write(lease, outcome.destination, cumulative)
+                .restore_write(lease, outcome.destination, committed)
                 .await;
             return staging_http_error(error);
         }
@@ -920,8 +1491,11 @@ impl ArtifactStaging {
         };
         let requested = match single_header(request.headers(), RANGE, 128) {
             Ok(Some(range)) => match parse_download_range(range, status.size_bytes) {
-                Some(range) => Some(range),
-                None => return fixed_response(StatusCode::RANGE_NOT_SATISFIABLE),
+                DownloadRange::Valid(range) => Some(range),
+                DownloadRange::Malformed => return fixed_response(StatusCode::BAD_REQUEST),
+                DownloadRange::Unsatisfiable => {
+                    return fixed_response(StatusCode::RANGE_NOT_SATISFIABLE);
+                }
             },
             Ok(None) => None,
             Err(_) => return fixed_response(StatusCode::BAD_REQUEST),
@@ -1045,19 +1619,54 @@ impl ArtifactStaging {
         }
         let record_id = record_hex(&record);
         let record_name = format!("{record_id}.bin");
-        let directory = self.state.directory.clone();
-        let name = record_name.clone();
-        let maximum = self.state.limits.artifact_bytes;
-        let destination =
-            tokio::task::spawn_blocking(move || directory.begin_record(&name, maximum))
-                .await
-                .map_err(|_| StagingError::Upstream)?
-                .map_err(|_| StagingError::Upstream)?;
         let ttl = self.state.limits.staging_ttl;
+        let created_at = Utc::now();
         let expires = Instant::now()
             .checked_add(ttl)
             .ok_or(StagingError::Upstream)?;
         let expires_at = wall_expiry(ttl)?;
+        let allocated = DurableStageRecord {
+            format_version: DURABLE_RECORD_VERSION,
+            generation: self.state.generation.clone(),
+            record_id: record_id.clone(),
+            bearer_digest: bytes_hex(&bearer_digest),
+            direction: direction.into(),
+            state: DurableStageState::Allocated,
+            created_at,
+            expires_at,
+            space_id: space_id.as_str().to_owned(),
+            size_bytes,
+            media_type: media_type.clone(),
+            expected_sha256: expected_sha256.clone(),
+            observed_sha256: None,
+            committed_offset: 0,
+            payload_identity: None,
+            operation_fingerprint: None,
+            uncertainty: None,
+        };
+        let allocated_source = self.publish_document(&allocated).await?;
+        let directory = self.state.directory.clone();
+        let payload_id = record_id.clone();
+        let maximum = self.state.limits.artifact_bytes;
+        let task_guard = self.task_guard();
+        let destination = tokio::task::spawn_blocking(move || {
+            let _task_guard = task_guard;
+            directory.create_payload(&payload_id, maximum)
+        })
+        .await
+        .map_err(|_| StagingError::Upstream)?
+        .map_err(|_| StagingError::Upstream)?;
+        let mut receiving = allocated;
+        receiving.state = DurableStageState::Receiving;
+        receiving.payload_identity = Some(destination.identity().into());
+        let receiving_source = match self.publish_document(&receiving).await {
+            Ok(source) => source,
+            Err(error) => {
+                self.state.shutdown.cancel();
+                return Err(error);
+            }
+        };
+        drop(allocated_source);
         records.insert(
             record,
             Arc::new(StageRecord {
@@ -1071,6 +1680,11 @@ impl ArtifactStaging {
                 expires,
                 expires_at,
                 cleanup_blocked: Arc::new(AtomicBool::new(false)),
+                durable: tokio::sync::Mutex::new(DurableRecordOwner {
+                    document: receiving,
+                    source: receiving_source,
+                }),
+                tombstone: tokio::sync::Mutex::new(None),
                 state: Arc::new(tokio::sync::Mutex::new(RecordState::Receiving {
                     destination: Some(destination),
                     offset: 0,
@@ -1181,35 +1795,44 @@ impl ArtifactStaging {
     pub(crate) async fn restore_write(
         &self,
         lease: StageWriteLease,
-        destination: AtomicExport,
+        destination: StagingPayload,
         offset: u64,
     ) -> Result<(), StagingError> {
         if offset < lease.offset || offset > lease.size_bytes {
             return Err(StagingError::Conflict);
         }
+        let mut destination = destination;
+        destination
+            .truncate(offset)
+            .map_err(|_| StagingError::Indeterminate)?;
+        self.persist_transition(&lease.record, |document| {
+            document.state = DurableStageState::Receiving;
+            document.committed_offset = offset;
+        })
+        .await?;
         let mut state = lease.record.state.lock().await;
-        let RecordState::Receiving {
-            destination: slot,
-            offset: committed,
-        } = &mut *state
-        else {
-            return Err(StagingError::Conflict);
-        };
-        if slot.is_some() {
-            return Err(StagingError::Conflict);
+        match &mut *state {
+            RecordState::Receiving {
+                destination: slot,
+                offset: committed,
+            } if slot.is_none() => {
+                *slot = Some(destination);
+                *committed = offset;
+            }
+            _ => return Err(StagingError::Conflict),
         }
-        *slot = Some(destination);
-        *committed = offset;
         Ok(())
     }
 
     /// Surrenders an active writer before releasing its staging record.
     pub(crate) async fn abort_write(
         &self,
-        lease: StageWriteLease,
+        mut lease: StageWriteLease,
         handle: &str,
     ) -> Result<(), StagingError> {
-        drop(lease);
+        let destination = lease.destination.take().ok_or(StagingError::Conflict)?;
+        let offset = lease.offset;
+        self.restore_write(lease, destination, offset).await?;
         self.release(handle).await
     }
 
@@ -1217,7 +1840,7 @@ impl ArtifactStaging {
     pub(crate) async fn finish_import(
         &self,
         mut lease: StageWriteLease,
-        mut destination: AtomicExport,
+        mut destination: StagingPayload,
         observed_size: u64,
     ) -> Result<(), StagingError> {
         if lease.record.direction != StageDirection::Import || observed_size != lease.size_bytes {
@@ -1235,6 +1858,8 @@ impl ArtifactStaging {
             .as_ref()
             .is_some_and(|expected| expected != &prepublication_sha256)
         {
+            self.restore_write(lease, destination, observed_size)
+                .await?;
             return Err(StagingError::Conflict);
         }
         let completion = begin_publication(&mut lease).await?;
@@ -1242,12 +1867,14 @@ impl ArtifactStaging {
         let completion_guard = PublicationCompletionGuard(completion);
         #[cfg(test)]
         let record_name = lease.record.record_name.clone();
+        let task_guard = self.task_guard();
         let publication = tokio::task::spawn_blocking(move || {
+            let _task_guard = task_guard;
             let _completion_guard = completion_guard;
             #[cfg(test)]
             pause_publication_for_test(&record_name);
             let source = destination
-                .commit_retained()
+                .into_anchored()
                 .map_err(|_| StagingError::Indeterminate)?;
             let sha256 = hash_source(&source)?;
             Ok::<_, StagingError>((source, sha256))
@@ -1265,6 +1892,12 @@ impl ArtifactStaging {
                     .await;
             return Err(StagingError::Indeterminate);
         }
+        self.persist_transition(&lease.record, |document| {
+            document.state = DurableStageState::Ready;
+            document.committed_offset = observed_size;
+            document.observed_sha256 = Some(sha256.clone());
+        })
+        .await?;
         let mut state = lease.record.state.lock().await;
         *state = RecordState::Ready {
             import: Arc::new(RetainedImport { source, sha256 }),
@@ -1277,7 +1910,7 @@ impl ArtifactStaging {
     pub(crate) async fn finish_export(
         &self,
         mut lease: StageWriteLease,
-        destination: AtomicExport,
+        destination: StagingPayload,
         observed_size: u64,
         sha256: String,
     ) -> Result<(), StagingError> {
@@ -1289,17 +1922,25 @@ impl ArtifactStaging {
         let completion_guard = PublicationCompletionGuard(completion);
         #[cfg(test)]
         let record_name = lease.record.record_name.clone();
+        let task_guard = self.task_guard();
         let publication = tokio::task::spawn_blocking(move || {
+            let _task_guard = task_guard;
             let _completion_guard = completion_guard;
             #[cfg(test)]
             pause_publication_for_test(&record_name);
-            destination.commit_retained()
+            destination.into_anchored()
         })
         .await;
         let source = match publication {
             Ok(Ok(source)) => source,
             Ok(Err(_)) | Err(_) => return Err(StagingError::Indeterminate),
         };
+        self.persist_transition(&lease.record, |document| {
+            document.state = DurableStageState::Available;
+            document.committed_offset = observed_size;
+            document.observed_sha256 = Some(sha256.clone());
+        })
+        .await?;
         let mut state = lease.record.state.lock().await;
         *state = RecordState::Available { source, sha256 };
         drop(owner_guard);
@@ -1360,6 +2001,7 @@ impl ArtifactStaging {
             record: record_id,
             operation: [0; 32],
             restore_ready_on_drop: false,
+            record_owner: Arc::clone(&record),
             #[cfg(test)]
             fail_reader_clone: false,
             lease: state,
@@ -1369,7 +2011,7 @@ impl ArtifactStaging {
     /// Binds an already-acquired source to its idempotency operation before
     /// dispatch.  The binding is one-way and is never exposed to another
     /// staging caller.
-    pub(crate) fn bind_import_operation(
+    pub(crate) async fn bind_import_operation(
         &self,
         source: &mut StageSource,
         operation: [u8; 32],
@@ -1378,6 +2020,12 @@ impl ArtifactStaging {
             return Err(StagingError::NotFound);
         };
         let import = Arc::clone(import);
+        self.persist_transition(&source.record_owner, |document| {
+            document.state = DurableStageState::Reconciliation;
+            document.operation_fingerprint = Some(bytes_hex(&operation));
+            document.uncertainty = Some("pre_dispatch".to_owned());
+        })
+        .await?;
         *source.lease = RecordState::Reconciliation { import, operation };
         source.operation = operation;
         source.restore_ready_on_drop = true;
@@ -1386,7 +2034,7 @@ impl ArtifactStaging {
 
     /// Marks the point immediately before the bound source's upload request is
     /// dispatched.  Later drops retain reconciliation authority.
-    pub(crate) fn mark_import_dispatched(
+    pub(crate) async fn mark_import_dispatched(
         &self,
         source: &mut StageSource,
     ) -> Result<(), StagingError> {
@@ -1396,13 +2044,17 @@ impl ArtifactStaging {
         if operation != &source.operation {
             return Err(StagingError::NotFound);
         }
+        self.persist_transition(&source.record_owner, |document| {
+            document.uncertainty = Some("mutation_dispatched".to_owned());
+        })
+        .await?;
         source.restore_ready_on_drop = false;
         Ok(())
     }
 
     /// Restores a bound source after a definitive upload rejection proved that
     /// no candidate needs reconciliation.
-    pub(crate) fn restore_import_operation(
+    pub(crate) async fn restore_import_operation(
         &self,
         source: &mut StageSource,
     ) -> Result<(), StagingError> {
@@ -1421,6 +2073,12 @@ impl ArtifactStaging {
             *source.lease = RecordState::Reconciliation { import, operation };
             return Err(StagingError::NotFound);
         }
+        self.persist_transition(&source.record_owner, |document| {
+            document.state = DurableStageState::Ready;
+            document.operation_fingerprint = None;
+            document.uncertainty = None;
+        })
+        .await?;
         *source.lease = RecordState::Ready { import };
         source.operation = [0; 32];
         source.restore_ready_on_drop = false;
@@ -1489,6 +2147,12 @@ impl ArtifactStaging {
                 import,
                 operation: retained,
             } if retained == operation => {
+                self.persist_transition(&record, |document| {
+                    document.state = DurableStageState::Consumed;
+                    document.operation_fingerprint = Some(bytes_hex(&operation));
+                    document.uncertainty = None;
+                })
+                .await?;
                 *state = RecordState::Consumed { import, operation };
                 Ok(())
             }
@@ -1554,6 +2218,12 @@ impl ArtifactStaging {
             *source.lease = RecordState::Reconciliation { import, operation };
             return Err(StagingError::NotFound);
         }
+        self.persist_transition(&source.record_owner, |document| {
+            document.state = DurableStageState::Consumed;
+            document.operation_fingerprint = Some(bytes_hex(&source.operation));
+            document.uncertainty = None;
+        })
+        .await?;
         *source.lease = RecordState::Consumed { import, operation };
         source.restore_ready_on_drop = false;
         Ok(())
@@ -1639,12 +2309,18 @@ impl ArtifactStaging {
             return None;
         }
         let staging = self.clone();
+        let task_guard = self.task_guard();
         Some(tokio::spawn(async move {
+            let _task_guard = task_guard;
             staging.cleanup_expired(expired).await;
         }))
     }
 
     async fn cleanup_pending_record(&self, record: &Arc<StageRecord>) -> bool {
+        if self.prepare_cleanup(record).await.is_err() {
+            self.state.shutdown.cancel();
+            return false;
+        }
         let target = {
             let mut state = record.state.lock().await;
             if !transition_to_cleanup_pending(&mut state) {
@@ -1655,10 +2331,14 @@ impl ArtifactStaging {
                     destination,
                     source: None,
                     pathname_cleanup_unsafe: false,
-                } => destination.take().map_or(
-                    PendingCleanupTarget::Absent,
-                    PendingCleanupTarget::Temporary,
-                ),
+                } => destination
+                    .take()
+                    .map_or(PendingCleanupTarget::Absent, |destination| {
+                        PendingCleanupTarget::Temporary {
+                            name: record.record_name.clone(),
+                            destination,
+                        }
+                    }),
                 RecordState::CleanupPending {
                     destination: None,
                     source: slot @ Some(_),
@@ -1687,11 +2367,13 @@ impl ArtifactStaging {
         let directory = self.state.directory.clone();
         let result = tokio::task::spawn_blocking(move || match target {
             PendingCleanupTarget::Absent => PendingCleanupResult::Removed,
-            PendingCleanupTarget::Temporary(mut destination) => {
-                if destination.discard_in_place().is_ok() {
-                    PendingCleanupResult::Removed
-                } else {
-                    PendingCleanupResult::Retain(destination)
+            PendingCleanupTarget::Temporary { name, destination } => {
+                match destination.into_anchored() {
+                    Ok(source) if directory.remove_exact_record(&name, &source).is_ok() => {
+                        PendingCleanupResult::Removed
+                    }
+                    Ok(source) => PendingCleanupResult::RetainPublished(source),
+                    Err(_) => PendingCleanupResult::Unsafe,
                 }
             }
             PendingCleanupTarget::Published { name, source } => {
@@ -1704,18 +2386,13 @@ impl ArtifactStaging {
         })
         .await;
         match result {
-            Ok(PendingCleanupResult::Removed) => true,
-            Ok(PendingCleanupResult::Retain(destination)) => {
-                let mut state = record.state.lock().await;
-                if let RecordState::CleanupPending {
-                    destination: slot,
-                    source: None,
-                    pathname_cleanup_unsafe: false,
-                } = &mut *state
-                {
-                    *slot = Some(destination);
+            Ok(PendingCleanupResult::Removed) => {
+                if self.finish_durable_cleanup(record).await.is_ok() {
+                    true
+                } else {
+                    self.state.shutdown.cancel();
+                    false
                 }
-                false
             }
             Ok(PendingCleanupResult::RetainPublished(source)) => {
                 let mut state = record.state.lock().await;
@@ -1724,8 +2401,58 @@ impl ArtifactStaging {
                 }
                 false
             }
+            Ok(PendingCleanupResult::Unsafe) => false,
             Err(_) => false,
         }
+    }
+
+    async fn prepare_cleanup(&self, record: &StageRecord) -> Result<(), StagingError> {
+        if record.tombstone.lock().await.is_some() {
+            return Ok(());
+        }
+        self.persist_transition(record, |document| {
+            document.state = DurableStageState::CleanupPending;
+        })
+        .await?;
+        let durable = record.durable.lock().await;
+        let tombstone = DurableTombstone {
+            format_version: DURABLE_RECORD_VERSION,
+            record_id: durable.document.record_id.clone(),
+            payload_identity: durable.document.payload_identity,
+            record_identity: DurableFileIdentity::from(durable.source.staging_identity()),
+        };
+        let bytes = durable_json(&tombstone)?;
+        let record_id = durable.document.record_id.clone();
+        drop(durable);
+        let directory = self.state.directory.clone();
+        let task_guard = self.task_guard();
+        let source = tokio::task::spawn_blocking(move || {
+            let _task_guard = task_guard;
+            directory.publish_tombstone(&record_id, &bytes)
+        })
+        .await
+        .map_err(|_| StagingError::Indeterminate)?
+        .map_err(|_| StagingError::Indeterminate)?;
+        *record.tombstone.lock().await = Some(source);
+        Ok(())
+    }
+
+    async fn finish_durable_cleanup(&self, record: &StageRecord) -> Result<(), StagingError> {
+        let durable = record.durable.lock().await;
+        self.state
+            .directory
+            .remove_exact_record_state(&durable.document.record_id, &durable.source)
+            .map_err(|_| StagingError::Indeterminate)?;
+        let record_id = durable.document.record_id.clone();
+        drop(durable);
+        let mut tombstone = record.tombstone.lock().await;
+        let source = tombstone.as_ref().ok_or(StagingError::Indeterminate)?;
+        self.state
+            .directory
+            .remove_exact_tombstone(&record_id, source)
+            .map_err(|_| StagingError::Indeterminate)?;
+        *tombstone = None;
+        Ok(())
     }
 
     fn spawn_cleanup_coordinator(
@@ -1734,7 +2461,11 @@ impl ArtifactStaging {
         record: Arc<StageRecord>,
     ) -> tokio::task::JoinHandle<bool> {
         let staging = self.clone();
-        tokio::spawn(async move { staging.cleanup_coordinator(id, record).await })
+        let task_guard = self.task_guard();
+        tokio::spawn(async move {
+            let _task_guard = task_guard;
+            staging.cleanup_coordinator(id, record).await
+        })
     }
 
     async fn cleanup_coordinator(&self, id: [u8; RECORD_BYTES], record: Arc<StageRecord>) -> bool {
@@ -1839,7 +2570,10 @@ fn transition_to_cleanup_pending(state: &mut RecordState) -> bool {
 
 enum PendingCleanupTarget {
     Absent,
-    Temporary(AtomicExport),
+    Temporary {
+        name: String,
+        destination: StagingPayload,
+    },
     Published {
         name: String,
         source: AnchoredImport,
@@ -1848,19 +2582,19 @@ enum PendingCleanupTarget {
 
 enum PendingCleanupResult {
     Removed,
-    Retain(AtomicExport),
     RetainPublished(AnchoredImport),
+    Unsafe,
 }
 
 struct IncomingWrite {
-    destination: AtomicExport,
+    destination: StagingPayload,
     written: u64,
     error: Option<StagingError>,
 }
 
 async fn write_incoming(
     mut body: Incoming,
-    destination: AtomicExport,
+    destination: StagingPayload,
     maximum: u64,
     no_progress_timeout: Duration,
     shutdown: &CancellationToken,
@@ -1901,7 +2635,7 @@ async fn write_incoming(
         let frame = match frame {
             Ok(Some(Ok(frame))) => frame,
             Ok(Some(Err(_))) => {
-                receive_error = Some(StagingError::Upstream);
+                receive_error = Some(StagingError::BadRequest);
                 break;
             }
             Ok(None) => break,
@@ -2023,28 +2757,66 @@ fn parse_content_range(value: &str, expected_total: u64) -> Option<(u64, u64)> {
     Some((start, length))
 }
 
-fn parse_download_range(value: &str, total: u64) -> Option<(u64, u64)> {
-    let range = value.strip_prefix("bytes=")?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DownloadRange {
+    Valid((u64, u64)),
+    Malformed,
+    Unsatisfiable,
+}
+
+fn parse_download_range(value: &str, total: u64) -> DownloadRange {
+    let Some(range) = value.strip_prefix("bytes=") else {
+        return DownloadRange::Malformed;
+    };
     if range.contains(',') {
-        return None;
+        return DownloadRange::Malformed;
     }
-    let (start, end) = range.split_once('-')?;
+    let Some((start, end)) = range.split_once('-') else {
+        return DownloadRange::Malformed;
+    };
+    if end.contains('-') || (start.is_empty() && end.is_empty()) {
+        return DownloadRange::Malformed;
+    }
     let (start, end) = match (start.is_empty(), end.is_empty()) {
-        (false, false) => (start.parse::<u64>().ok()?, end.parse::<u64>().ok()?),
-        (false, true) => (start.parse::<u64>().ok()?, total.checked_sub(1)?),
-        (true, false) => {
-            let suffix = end.parse::<u64>().ok()?;
-            if suffix == 0 {
-                return None;
-            }
-            (total.saturating_sub(suffix), total.checked_sub(1)?)
+        (false, false) => {
+            let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+                return DownloadRange::Malformed;
+            };
+            (start, end)
         }
-        (true, true) => return None,
+        (false, true) => {
+            let Ok(start) = start.parse::<u64>() else {
+                return DownloadRange::Malformed;
+            };
+            let Some(end) = total.checked_sub(1) else {
+                return DownloadRange::Unsatisfiable;
+            };
+            (start, end)
+        }
+        (true, false) => {
+            let Ok(suffix) = end.parse::<u64>() else {
+                return DownloadRange::Malformed;
+            };
+            if suffix == 0 {
+                return DownloadRange::Unsatisfiable;
+            }
+            let Some(last) = total.checked_sub(1) else {
+                return DownloadRange::Unsatisfiable;
+            };
+            (total.saturating_sub(suffix), last)
+        }
+        (true, true) => return DownloadRange::Malformed,
     };
     if start > end || end >= total {
-        return None;
+        return DownloadRange::Unsatisfiable;
     }
-    Some((start, end.checked_sub(start)?.checked_add(1)?))
+    match end
+        .checked_sub(start)
+        .and_then(|length| length.checked_add(1))
+    {
+        Some(length) => DownloadRange::Valid((start, length)),
+        None => DownloadRange::Unsatisfiable,
+    }
 }
 
 fn full_body(bytes: Bytes) -> StagingBody {
@@ -2078,10 +2850,14 @@ fn fixed_response(status: StatusCode) -> Response<StagingBody> {
 fn staging_http_error(error: StagingError) -> Response<StagingBody> {
     fixed_response(match error {
         StagingError::Disabled | StagingError::NotFound => StatusCode::NOT_FOUND,
+        StagingError::BadRequest => StatusCode::BAD_REQUEST,
         StagingError::Conflict => StatusCode::CONFLICT,
         StagingError::Bounded => StatusCode::INSUFFICIENT_STORAGE,
         StagingError::Timeout => StatusCode::REQUEST_TIMEOUT,
-        StagingError::Upstream | StagingError::Indeterminate => StatusCode::INTERNAL_SERVER_ERROR,
+        StagingError::InvalidPolicy
+        | StagingError::Reconciliation
+        | StagingError::Upstream
+        | StagingError::Indeterminate => StatusCode::INTERNAL_SERVER_ERROR,
     })
 }
 
@@ -2216,7 +2992,7 @@ fn wall_expiry(ttl: Duration) -> Result<DateTime<Utc>, StagingError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use reqwest::header::{
         AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HOST, HeaderValue, ORIGIN, RANGE,
@@ -2278,6 +3054,23 @@ mod tests {
     fn space_id() -> SpaceId {
         SpaceId::new("bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7")
             .expect("space id")
+    }
+
+    fn payload_path(root: &Path, record: &str) -> PathBuf {
+        root.join("payloads").join(format!("{record}.bin"))
+    }
+
+    fn assert_empty_closed_layout(root: &Path) {
+        assert!(root.join("instance.lock").is_file());
+        for directory in ["records", "payloads", "tmp", "tombstones"] {
+            assert!(
+                std::fs::read_dir(root.join(directory))
+                    .expect("inspect staging layout directory")
+                    .next()
+                    .is_none(),
+                "staging layout directory was not empty: {directory}"
+            );
+        }
     }
 
     fn install_publication_pause(
@@ -2358,7 +3151,10 @@ mod tests {
             line if line.starts_with(b"HTTP/1.1 405 ") => StatusCode::METHOD_NOT_ALLOWED,
             line if line.starts_with(b"HTTP/1.1 429 ") => StatusCode::TOO_MANY_REQUESTS,
             line if line.starts_with(b"HTTP/1.1 503 ") => StatusCode::SERVICE_UNAVAILABLE,
-            _ => panic!("unexpected raw staging status category"),
+            _ => panic!(
+                "unexpected raw staging status category: {}",
+                String::from_utf8_lossy(first)
+            ),
         }
     }
 
@@ -2441,6 +3237,7 @@ mod tests {
         assert_eq!(bytes, b"hello");
         test.staging
             .bind_import_operation(&mut source, [1; 32])
+            .await
             .expect("bind import operation");
         assert!(
             tokio::time::timeout(
@@ -2473,12 +3270,15 @@ mod tests {
             .expect("reacquire after pre-dispatch rollback");
         test.staging
             .bind_import_operation(&mut source, [1; 32])
+            .await
             .expect("rebind import operation");
         test.staging
             .mark_import_dispatched(&mut source)
+            .await
             .expect("mark upload dispatched");
         test.staging
             .restore_import_operation(&mut source)
+            .await
             .expect("definitive rejection restores staged authority");
         drop(source);
         let mut source = test
@@ -2488,6 +3288,7 @@ mod tests {
             .expect("reacquire after definitive rejection");
         test.staging
             .bind_import_operation(&mut source, [1; 32])
+            .await
             .expect("bind final import operation");
         test.staging
             .consume(&mut source)
@@ -2612,6 +3413,22 @@ mod tests {
             .expect("ranged staged download");
         assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(range.bytes().await.expect("range bytes"), b"ell".as_slice());
+        let unsatisfiable = client
+            .get(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(RANGE, "bytes=5-5")
+            .send()
+            .await
+            .expect("unsatisfiable range");
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        let malformed = client
+            .get(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(RANGE, "bytes=invalid")
+            .send()
+            .await
+            .expect("malformed range");
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
         test.staging
             .release(&allocation.handle)
             .await
@@ -2651,7 +3468,7 @@ mod tests {
             .await
             .expect("publish export");
 
-        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        let staged_path = payload_path(&test.root, &allocation.record);
         let retained_link = test.root.join("retained-link.bin");
         std::fs::hard_link(&staged_path, &retained_link).expect("link staged record");
 
@@ -2731,7 +3548,7 @@ mod tests {
             .await
             .expect("publish export");
 
-        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        let staged_path = payload_path(&test.root, &allocation.record);
         let outside_original = test.root.join("outside-original.bin");
         std::fs::hard_link(&staged_path, &outside_original).expect("link staged record");
         assert!(matches!(
@@ -2816,7 +3633,7 @@ mod tests {
         .expect("allocate unrelated export");
 
         drop(source);
-        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        let staged_path = payload_path(&test.root, &allocation.record);
         tokio::time::timeout(Duration::from_secs(1), async {
             while staged_path.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3039,8 +3856,14 @@ mod tests {
         assert_eq!(parse_content_range("bytes 5-9/10", 10), Some((5, 5)));
         assert_eq!(parse_content_range("bytes 5-9/11", 10), None);
         assert_eq!(parse_content_range("bytes 9-5/10", 10), None);
-        assert_eq!(parse_download_range("bytes=10-10", 10), None);
-        assert_eq!(parse_download_range("bytes=invalid", 10), None);
+        assert_eq!(
+            parse_download_range("bytes=10-10", 10),
+            DownloadRange::Unsatisfiable
+        );
+        assert_eq!(
+            parse_download_range("bytes=invalid", 10),
+            DownloadRange::Malformed
+        );
 
         let mut headers = hyper::HeaderMap::new();
         headers.append(AUTHORIZATION, HeaderValue::from_static("Bearer first"));
@@ -3055,6 +3878,120 @@ mod tests {
             parse_single_u64(&headers, CONTENT_LENGTH, 128),
             Err(StagingError::Conflict)
         ));
+    }
+
+    #[tokio::test]
+    async fn short_put_body_returns_bad_request_without_advancing_offset() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate short-body fixture");
+        let parsed = url::Url::parse(&allocation.url).expect("parse staging URL");
+        let host = parsed.host_str().expect("staging host");
+        let authority = format!("{host}:{}", parsed.port().expect("staging port"));
+        let request = format!(
+            "PUT {} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {}\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nabc",
+            parsed.path(),
+            allocation.handle,
+        )
+        .into_bytes();
+        assert_eq!(
+            raw_staging_status(&allocation.url, request).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            test.staging
+                .inspect(&allocation.handle)
+                .await
+                .expect("inspect short-body fixture")
+                .offset,
+            0
+        );
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release short-body fixture");
+    }
+
+    #[tokio::test]
+    async fn restart_reconciliation_invalidates_and_reaps_a_complete_old_generation() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate restart fixture");
+        let response = reqwest::Client::new()
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "5")
+            .body("hello")
+            .send()
+            .await
+            .expect("upload restart fixture");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(
+                test.staging.state.limits.staging_entries,
+                test.staging.state.limits.artifact_bytes,
+            )
+            .expect("inventory durable restart state");
+        assert_eq!(
+            reconcile_inventory(
+                &test.staging.state.directory,
+                inventory,
+                &test.staging.state.limits,
+            )
+            .expect("reconcile old generation")
+            .cleaned,
+            1
+        );
+        assert_empty_closed_layout(&test.root);
+    }
+
+    #[tokio::test]
+    async fn corrupt_durable_record_fails_closed_without_deleting_payload() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate corrupt-state fixture");
+        let record_path = test
+            .root
+            .join("records")
+            .join(format!("{}.json", allocation.record));
+        std::fs::write(&record_path, b"{\"format_version\":1,\"unknown\":true}")
+            .expect("corrupt durable record");
+        let payload = payload_path(&test.root, &allocation.record);
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(
+                test.staging.state.limits.staging_entries,
+                test.staging.state.limits.artifact_bytes,
+            )
+            .expect("inventory corrupt durable state");
+        assert!(matches!(
+            reconcile_inventory(
+                &test.staging.state.directory,
+                inventory,
+                &test.staging.state.limits,
+            ),
+            Err(StagingError::Reconciliation)
+        ));
+        assert!(payload.is_file());
+        assert_eq!(
+            std::fs::read(&record_path).expect("corrupt record retained"),
+            b"{\"format_version\":1,\"unknown\":true}"
+        );
     }
 
     #[tokio::test]
@@ -3084,17 +4021,7 @@ mod tests {
             .release(&allocation.handle)
             .await
             .expect("release rejected upload");
-        let names = std::fs::read_dir(&test.root)
-            .expect("read staging root")
-            .map(|entry| {
-                entry
-                    .expect("staging entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec![".any-mcp-staging.lock"]);
+        assert_empty_closed_layout(&test.root);
     }
 
     #[tokio::test]
@@ -3158,13 +4085,13 @@ mod tests {
         let record = Arc::clone(&lease.record);
         let mut destination = lease.take_destination().expect("export destination");
         destination.write_all(b"hello").expect("write export");
-        let source = destination.commit_retained().expect("publish export");
+        let source = destination.into_anchored().expect("publish export");
         drop(source);
         let completion = PublicationCompletion::new(Arc::clone(&record.cleanup_blocked));
         drop(PublicationCompletionGuard(Arc::clone(&completion)));
         drop(PublicationOwnerGuard(Arc::clone(&completion)));
         *record.state.lock().await = RecordState::PublicationIndeterminate { completion };
-        let published = test.root.join(&record.record_name);
+        let published = test.root.join("payloads").join(&record.record_name);
         let reserved_quota = test.staging.available_quota().await;
         assert!(published.is_file());
         assert!(matches!(
@@ -3290,7 +4217,7 @@ mod tests {
             .expect("release cleanup coordinator");
         clear_cleanup_pause();
 
-        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        let staged_path = payload_path(&test.root, &allocation.record);
         tokio::time::timeout(Duration::from_secs(1), async {
             while !test.staging.state.records.read().await.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3344,17 +4271,7 @@ mod tests {
         })
         .await
         .expect("coordinator settled map ownership");
-        let names = std::fs::read_dir(&test.root)
-            .expect("read staging root")
-            .map(|entry| {
-                entry
-                    .expect("staging entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec![".any-mcp-staging.lock"]);
+        assert_empty_closed_layout(&test.root);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3435,17 +4352,7 @@ mod tests {
             .expect("abort active export");
 
         assert!(test.staging.state.records.read().await.is_empty());
-        let names = std::fs::read_dir(&test.root)
-            .expect("read staging root")
-            .map(|entry| {
-                entry
-                    .expect("staging entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec![".any-mcp-staging.lock"]);
+        assert_empty_closed_layout(&test.root);
     }
 
     #[tokio::test]
@@ -3547,7 +4454,7 @@ mod tests {
         };
         completion.wait().await;
 
-        let published = test.root.join(&record.record_name);
+        let published = test.root.join("payloads").join(&record.record_name);
         assert!(published.is_file(), "detached publication completed");
         let expired = {
             let mut records = test.staging.state.records.write().await;
@@ -3624,7 +4531,7 @@ mod tests {
             .expect("publication task")
             .expect("publication succeeds");
         clear_publication_pause();
-        let published = test.root.join(&record.record_name);
+        let published = test.root.join("payloads").join(&record.record_name);
         assert!(published.is_file());
 
         let expired = {

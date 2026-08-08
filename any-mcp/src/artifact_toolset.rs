@@ -38,8 +38,8 @@ use crate::artifact_acceptance_gates::{ArtifactAcceptanceGatePoint, FirstChunkGa
 use crate::{
     artifact_config::RelativeNativePath,
     artifact_roots::{
-        AnchoredImport, EffectiveRootRegistry, PositionalReader, ROOTS_REQUIRED_GUIDANCE,
-        RootAccessError, RootAccessErrorKind,
+        AnchoredImport, AtomicExport, EffectiveRootRegistry, PositionalReader,
+        ROOTS_REQUIRED_GUIDANCE, RootAccessError, RootAccessErrorKind, StagingPayload,
     },
     artifact_staging::{
         ArtifactStaging, RetainedStageImport, STAGING_REQUIRED_GUIDANCE, StageAllocation,
@@ -1161,7 +1161,9 @@ fn staging(runtime: &RuntimeContext) -> Result<&ArtifactStaging, ArtifactToolErr
 fn classify_staging_error(error: StagingError) -> ArtifactToolError {
     match error {
         StagingError::Disabled => ArtifactToolError::MissingStaging,
+        StagingError::InvalidPolicy | StagingError::Reconciliation => ArtifactToolError::Upstream,
         StagingError::NotFound => ArtifactToolError::NotFound,
+        StagingError::BadRequest => ArtifactToolError::Validation,
         StagingError::Conflict => ArtifactToolError::Conflict,
         StagingError::Bounded => ArtifactToolError::Bounded,
         StagingError::Timeout => ArtifactToolError::Upstream,
@@ -1443,26 +1445,28 @@ impl PreparedImport {
         }
     }
 
-    fn mark_import_dispatched(
+    async fn mark_import_dispatched(
         &mut self,
         runtime: &RuntimeContext,
     ) -> Result<(), ArtifactToolError> {
         match self {
             Self::Staged(source) => staging(runtime)?
                 .mark_import_dispatched(source)
+                .await
                 .map_err(classify_staging_error),
             Self::Local { .. } => Ok(()),
             Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
         }
     }
 
-    fn restore_after_definitive_rejection(
+    async fn restore_after_definitive_rejection(
         &mut self,
         runtime: &RuntimeContext,
     ) -> Result<(), ArtifactToolError> {
         match self {
             Self::Staged(source) => staging(runtime)?
                 .restore_import_operation(source)
+                .await
                 .map_err(classify_staging_error),
             Self::Local { .. } => Ok(()),
             Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
@@ -1870,6 +1874,7 @@ async fn file_import(
                 let _ = handle;
                 staging(runtime)?
                     .bind_import_operation(staged, key)
+                    .await
                     .map_err(classify_staging_error)?;
             }
         }
@@ -1958,14 +1963,18 @@ async fn settle_reserved_import(
     if let Some(media_type) = declared_media_type.as_ref() {
         request = request.mime(media_type);
     }
-    if let Err(error) = source.mark_import_dispatched(&runtime) {
+    if let Err(error) = source.mark_import_dispatched(&runtime).await {
         runtime.artifact_operations().remove(key).await;
         return Err(error);
     }
     let uploaded = match request.upload().await {
         Ok(uploaded) => uploaded,
         Err(error) if mutation_rejection_is_definitive(&error) => {
-            if source.restore_after_definitive_rejection(&runtime).is_err() {
+            if source
+                .restore_after_definitive_rejection(&runtime)
+                .await
+                .is_err()
+            {
                 runtime
                     .artifact_operations()
                     .set_outcome(key, OperationOutcome::Indeterminate)
@@ -1983,6 +1992,18 @@ async fn settle_reserved_import(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(ArtifactAcceptanceGatePoint::ImportPostDispatch, key)
+        .await
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     let candidate = match validated_uploaded_candidate(&uploaded, &space_id, source_length) {
         Ok(candidate) => candidate,
         Err(_) => {
@@ -2266,6 +2287,27 @@ enum ExportCompletion {
     },
 }
 
+enum ExportDestination {
+    Local(AtomicExport),
+    Remote(StagingPayload),
+}
+
+impl Write for ExportDestination {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Local(destination) => destination.write(bytes),
+            Self::Remote(destination) => destination.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Local(destination) => destination.flush(),
+            Self::Remote(destination) => destination.flush(),
+        }
+    }
+}
+
 async fn file_export(
     runtime: &RuntimeContext,
     input: FileExportInput,
@@ -2321,7 +2363,7 @@ async fn file_export(
                 }
             };
             (
-                destination,
+                ExportDestination::Local(destination),
                 ExportCompletion::Local { root_id },
                 input.expected_strong_etag.as_ref().cloned(),
             )
@@ -2392,7 +2434,7 @@ async fn file_export(
                 }
             };
             (
-                destination,
+                ExportDestination::Remote(destination),
                 ExportCompletion::Remote {
                     lease: Box::new(lease),
                     allocation,
@@ -2429,6 +2471,9 @@ async fn file_export(
     };
     let receipt = match completion {
         ExportCompletion::Local { root_id } => {
+            let ExportDestination::Local(destination) = destination else {
+                return Err(ArtifactToolError::Indeterminate);
+            };
             #[cfg(any(test, feature = "acceptance-harness"))]
             let destination =
                 destination.with_acceptance_gate(runtime.artifact_acceptance_gates().clone(), key);
@@ -2480,6 +2525,9 @@ async fn file_export(
             }
         }
         ExportCompletion::Remote { lease, allocation } => {
+            let ExportDestination::Remote(destination) = destination else {
+                return Err(ArtifactToolError::Indeterminate);
+            };
             let staging = match staging(runtime) {
                 Ok(staging) => staging,
                 Err(error) => {
@@ -3212,6 +3260,21 @@ async fn document_import_update(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(
+            ArtifactAcceptanceGatePoint::DocumentPostDispatch,
+            acceptance_key,
+        )
+        .await
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     let returned = checked_document(
         &updated,
         &space_id,

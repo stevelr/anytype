@@ -29,7 +29,7 @@ use crate::{
     artifact_client_roots::ClientRootsGate,
     artifact_config::ArtifactConfig,
     artifact_roots::RootRegistry,
-    artifact_staging::ArtifactStaging,
+    artifact_staging::{ArtifactStaging, StagingError},
     artifact_toolset::{
         ArtifactOperationState, ArtifactToolError, FileImportOutput, ImportIdempotency,
     },
@@ -246,7 +246,7 @@ impl RuntimeContext {
                     runtime.shutdown.clone(),
                 )
                 .await
-                .map_err(|_| StartupError::ArtifactStaging)?,
+                .map_err(classify_staging_startup_error)?,
             ),
             _ => None,
         };
@@ -517,10 +517,22 @@ impl RuntimeContext {
         let _ = tokio::time::timeout(timeout, drained).await;
     }
 
+    /// Waits a bounded interval for staging listener, connection, cleanup,
+    /// and publication work to release the retained instance authority.
+    pub(crate) async fn drain_artifact_staging(&self, timeout: Duration) {
+        if let Some(staging) = &self.artifact_staging {
+            let _ = staging.drain(timeout).await;
+        }
+    }
+
     /// Returns whether process shutdown has started.
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown.is_cancelled()
+    }
+
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     /// Executes one upstream operation with concurrency, timeout, and MCP
@@ -838,7 +850,7 @@ impl RuntimeContext {
                     runtime.shutdown.clone(),
                 )
                 .await
-                .map_err(|_| StartupError::ArtifactStaging)?,
+                .map_err(classify_staging_startup_error)?,
             ),
             _ => None,
         };
@@ -1233,6 +1245,10 @@ pub enum StartupError {
     ArtifactRoots,
     /// Configured private staging authority could not be activated safely.
     ArtifactStaging,
+    /// Configured private staging policy or instance ownership was invalid.
+    ArtifactStagingPolicy,
+    /// Durable private staging state could not be reconciled safely.
+    ArtifactStateReconciliation,
     /// Configured validator executables could not be pinned safely.
     ArtifactValidators,
 }
@@ -1265,10 +1281,22 @@ impl fmt::Display for StartupError {
             Self::ArtifactStaging => {
                 formatter.write_str("unable to initialize configured artifact staging")
             }
+            Self::ArtifactStagingPolicy => formatter.write_str("invalid staging policy"),
+            Self::ArtifactStateReconciliation => {
+                formatter.write_str("artifact state reconciliation failed")
+            }
             Self::ArtifactValidators => {
                 formatter.write_str("unable to initialize configured artifact validators")
             }
         }
+    }
+}
+
+fn classify_staging_startup_error(error: StagingError) -> StartupError {
+    match error {
+        StagingError::InvalidPolicy => StartupError::ArtifactStagingPolicy,
+        StagingError::Reconciliation => StartupError::ArtifactStateReconciliation,
+        _ => StartupError::ArtifactStaging,
     }
 }
 
@@ -1318,6 +1346,9 @@ where
             runtime
                 .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
                 .await;
+            runtime
+                .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
+                .await;
             return Ok(());
         }
         Err(_) => {
@@ -1336,6 +1367,9 @@ where
     runtime.begin_shutdown();
     runtime
         .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
+        .await;
+    runtime
+        .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
         .await;
     result
 }
@@ -1359,7 +1393,12 @@ where
     }
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
-        let message = self.inner.receive().await;
+        let shutdown = self.runtime.shutdown_token();
+        let message = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => None,
+            message = self.inner.receive() => message,
+        };
         if message.is_none() {
             self.runtime.begin_shutdown();
         }
