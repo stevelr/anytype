@@ -812,6 +812,7 @@ fn tool_space_policy_ownership(name: &str) -> Option<SpacePolicyOwnership> {
         | "body_block_move"
         | "body_block_update"
         | "rich_page_create"
+        | "rich_page_resume"
         | "chat_list"
         | "chat_message_add"
         | "chat_message_delete"
@@ -958,7 +959,7 @@ mod tests {
         "optional_toolset_status",
         "type_get",
     ];
-    const OPTIONAL_CREATE_TOOL_NAMES: [&str; 11] = [
+    const OPTIONAL_CREATE_TOOL_NAMES: [&str; 12] = [
         "artifact_stage_upload",
         "body_block_create",
         "chat_message_add",
@@ -967,6 +968,7 @@ mod tests {
         "file_upload",
         "property_create",
         "rich_page_create",
+        "rich_page_resume",
         "space_create",
         "tag_create",
         "type_create",

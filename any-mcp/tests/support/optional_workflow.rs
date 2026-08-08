@@ -79,6 +79,7 @@ pub enum OptionalOperation {
     BodyBlockDelete,
     BodyBlockMove,
     RichPageCreate,
+    RichPageResume,
     ChatList,
     ChatMessageList,
     ChatMessageGet,
@@ -107,7 +108,7 @@ pub enum OptionalOperation {
 
 impl OptionalOperation {
     /// Every production optional tool and resource-family operation.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 40] = [
         Self::OptionalToolsetStatus,
         Self::ArtifactRelease,
         Self::ArtifactStageUpload,
@@ -123,6 +124,7 @@ impl OptionalOperation {
         Self::BodyBlockDelete,
         Self::BodyBlockMove,
         Self::RichPageCreate,
+        Self::RichPageResume,
         Self::ChatList,
         Self::ChatMessageList,
         Self::ChatMessageGet,
@@ -167,6 +169,7 @@ impl OptionalOperation {
             Self::BodyBlockDelete => "body_block_delete",
             Self::BodyBlockMove => "body_block_move",
             Self::RichPageCreate => "rich_page_create",
+            Self::RichPageResume => "rich_page_resume",
             Self::ChatList => "chat_list",
             Self::ChatMessageList => "chat_message_list",
             Self::ChatMessageGet => "chat_message_get",
@@ -222,7 +225,8 @@ impl OptionalOperation {
             | Self::BodyBlockUpdate
             | Self::BodyBlockDelete
             | Self::BodyBlockMove
-            | Self::RichPageCreate => OptionalRegistry::BodyBlocks,
+            | Self::RichPageCreate
+            | Self::RichPageResume => OptionalRegistry::BodyBlocks,
             Self::ChatList
             | Self::ChatMessageList
             | Self::ChatMessageGet
@@ -264,7 +268,8 @@ impl OptionalOperation {
             | Self::BodyBlockUpdate
             | Self::BodyBlockDelete
             | Self::BodyBlockMove
-            | Self::RichPageCreate => OptionalFastWorkflow::BodyBlocks,
+            | Self::RichPageCreate
+            | Self::RichPageResume => OptionalFastWorkflow::BodyBlocks,
             Self::ChatList
             | Self::ChatMessageList
             | Self::ChatMessageGet
@@ -309,7 +314,8 @@ impl OptionalOperation {
             | Self::BodyBlockUpdate
             | Self::BodyBlockDelete
             | Self::BodyBlockMove
-            | Self::RichPageCreate => OptionalRealWorkflow::BodyBlocks,
+            | Self::RichPageCreate
+            | Self::RichPageResume => OptionalRealWorkflow::BodyBlocks,
             Self::ChatList
             | Self::ChatMessageList
             | Self::ChatMessageGet

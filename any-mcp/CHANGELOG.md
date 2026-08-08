@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add `rich_page_resume` for one retained runtime facade recovery claim over
+  the never-attempted suffix of a partial rich-page receipt. Recovery re-proves
+  page, type, and authored prefix evidence, and refuses uncertain or attempted
+  boundaries.
 - Verified authenticated Streamable HTTP interoperability with MCP Inspector
   2.1.0 and Claude Code 2.1.220, including lifecycle, SSE, catalog parity, and
   session termination.

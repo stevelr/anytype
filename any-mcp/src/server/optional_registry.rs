@@ -77,7 +77,7 @@ const PRODUCTION_TOOLSET_NAMES: [&str; 7] = [
     "schema",
     "views-write",
 ];
-const PRODUCTION_READ_WRITE_TOOLS: [&str; 38] = [
+const PRODUCTION_READ_WRITE_TOOLS: [&str; 39] = [
     "artifact_release",
     "artifact_stage_upload",
     "artifact_status",
@@ -109,6 +109,7 @@ const PRODUCTION_READ_WRITE_TOOLS: [&str; 38] = [
     "property_create",
     "property_update",
     "rich_page_create",
+    "rich_page_resume",
     "space_create",
     "space_update",
     "tag_create",
@@ -132,7 +133,7 @@ const PRODUCTION_READ_ONLY_TOOLS: [&str; 13] = [
     "optional_toolset_status",
     "type_get",
 ];
-const PRODUCTION_MUTATION_TOOLS: [&str; 25] = [
+const PRODUCTION_MUTATION_TOOLS: [&str; 26] = [
     "artifact_release",
     "artifact_stage_upload",
     "body_block_create",
@@ -152,6 +153,7 @@ const PRODUCTION_MUTATION_TOOLS: [&str; 25] = [
     "property_create",
     "property_update",
     "rich_page_create",
+    "rich_page_resume",
     "space_create",
     "space_update",
     "tag_create",
@@ -1369,7 +1371,7 @@ async fn production_optional_fast_workflow_registration_is_exact_and_executable(
     let expected_counts = [
         (OptionalFastWorkflow::OptionalStatus, 1_usize),
         (OptionalFastWorkflow::Artifacts, 8),
-        (OptionalFastWorkflow::BodyBlocks, 6),
+        (OptionalFastWorkflow::BodyBlocks, 7),
         (OptionalFastWorkflow::Chats, 6),
         (OptionalFastWorkflow::Files, 4),
         (OptionalFastWorkflow::Members, 2),
@@ -1386,7 +1388,7 @@ async fn production_optional_fast_workflow_registration_is_exact_and_executable(
             assert!(tool_names.insert(name), "duplicate optional tool {name}");
         }
     }
-    assert_eq!(OptionalOperation::ALL.len(), 39);
+    assert_eq!(OptionalOperation::ALL.len(), 40);
     assert_eq!(
         partition,
         expected_counts.into_iter().collect::<BTreeMap<_, _>>()

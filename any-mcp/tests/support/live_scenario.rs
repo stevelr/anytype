@@ -934,20 +934,22 @@ async fn run_body_read_only_scenario_inner(
     space_id: &str,
     object_id: &str,
 ) -> Result<BodyReadOnlyEvidence, String> {
-    const BODY_TOOLS: [&str; 6] = [
+    const BODY_TOOLS: [&str; 7] = [
         "body_block_create",
         "body_block_delete",
         "body_block_list",
         "body_block_move",
         "body_block_update",
         "rich_page_create",
+        "rich_page_resume",
     ];
-    const MUTATIONS: [&str; 5] = [
+    const MUTATIONS: [&str; 6] = [
         "body_block_create",
         "body_block_update",
         "body_block_delete",
         "body_block_move",
         "rich_page_create",
+        "rich_page_resume",
     ];
     let body_tools = driver
         .list_tools()
@@ -1578,6 +1580,7 @@ async fn run_body_scenario_inner(
         "body_block_delete",
         "body_block_move",
         "rich_page_create",
+        "rich_page_resume",
     ] {
         if !tools.iter().any(|candidate| candidate == name) {
             return Err(format!("{transport} catalog omitted {name}"));
@@ -4395,7 +4398,10 @@ const BODY_CREATE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBl
 const BODY_UPDATE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockUpdate];
 const BODY_DELETE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockDelete];
 const BODY_MOVE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::BodyBlockMove];
-const RICH_PAGE_OPERATIONS: &[OptionalOperation] = &[OptionalOperation::RichPageCreate];
+const RICH_PAGE_OPERATIONS: &[OptionalOperation] = &[
+    OptionalOperation::RichPageCreate,
+    OptionalOperation::RichPageResume,
+];
 const BODY_OPERATIONS: &[OptionalOperation] = &[
     OptionalOperation::BodyBlockList,
     OptionalOperation::BodyBlockCreate,
@@ -4403,6 +4409,7 @@ const BODY_OPERATIONS: &[OptionalOperation] = &[
     OptionalOperation::BodyBlockDelete,
     OptionalOperation::BodyBlockMove,
     OptionalOperation::RichPageCreate,
+    OptionalOperation::RichPageResume,
 ];
 const CHAT_READ_OPERATIONS: &[OptionalOperation] = &[
     OptionalOperation::ChatList,
@@ -4982,7 +4989,7 @@ const fn optional_owner(
 }
 
 /// Exact fast and real-headless ownership for every optional operation.
-pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 78] = &[
+pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 80] = &[
     optional_owner(
         OptionalOperation::OptionalToolsetStatus,
         optional_fast("optional_toolset_status_direct_contract"),
@@ -5100,7 +5107,15 @@ pub const OPTIONAL_LIVE_OWNERSHIP: &[OptionalOwnership; 78] = &[
         optional_fast("rich_page_complete"),
     ),
     optional_owner(
+        OptionalOperation::RichPageResume,
+        optional_fast("rich_page_complete"),
+    ),
+    optional_owner(
         OptionalOperation::RichPageCreate,
+        optional_real("body_blocks_direct_real_headless"),
+    ),
+    optional_owner(
+        OptionalOperation::RichPageResume,
         optional_real("body_blocks_direct_real_headless"),
     ),
     optional_owner(
@@ -5343,6 +5358,7 @@ fn parse_optional_tool(name: &str) -> Option<OptionalOperation> {
         "body_block_delete" => OptionalOperation::BodyBlockDelete,
         "body_block_move" => OptionalOperation::BodyBlockMove,
         "rich_page_create" => OptionalOperation::RichPageCreate,
+        "rich_page_resume" => OptionalOperation::RichPageResume,
         "chat_list" => OptionalOperation::ChatList,
         "chat_message_list" => OptionalOperation::ChatMessageList,
         "chat_message_get" => OptionalOperation::ChatMessageGet,
@@ -5872,7 +5888,7 @@ mod ownership_tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 38);
+        assert_eq!(tools.len(), 39);
         assert_eq!(resources.len(), 1);
         validate_optional_live_ownership(&tools, &resources, &scenarios)
             .expect("closed optional catalog parser inventory");
@@ -6039,12 +6055,12 @@ mod ownership_tests {
 
     #[test]
     fn optional_ownership_has_exact_two_tiers_for_every_operation() {
-        assert_eq!(OPTIONAL_LIVE_OWNERSHIP.len(), 78);
+        assert_eq!(OPTIONAL_LIVE_OWNERSHIP.len(), 80);
         let operations = OPTIONAL_LIVE_OWNERSHIP
             .iter()
             .map(|owner| owner.operation)
             .collect::<HashSet<_>>();
-        assert_eq!(operations.len(), 39);
+        assert_eq!(operations.len(), 40);
         assert!(operations.iter().all(|operation| {
             OPTIONAL_LIVE_OWNERSHIP
                 .iter()

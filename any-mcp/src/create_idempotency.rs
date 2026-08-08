@@ -742,7 +742,13 @@ impl IdempotencyStore {
         let attempt = attempt.clone();
         let result = match &finish {
             ResumeFinish::BeforeWritePoll(result) => result.clone(),
-            ResumeFinish::Indeterminate(result) => result.clone(),
+            ResumeFinish::Indeterminate(result) => {
+                restored.result = result.clone();
+                if let Some(metadata) = restored.replay_metadata.as_mut() {
+                    metadata.replay_witness = ReplayWitness::ResumedRelative;
+                }
+                result.clone()
+            }
             ResumeFinish::Superseded { result, metadata } => {
                 restored.result = result.clone();
                 restored.replay_metadata = Some(metadata.clone());
@@ -750,15 +756,9 @@ impl IdempotencyStore {
             }
         };
         match finish {
-            ResumeFinish::Indeterminate(_) => {
-                entries.insert(
-                    key.clone(),
-                    StoredAttempt::Indeterminate {
-                        fingerprint: restored.fingerprint,
-                    },
-                );
-            }
-            ResumeFinish::BeforeWritePoll(_) | ResumeFinish::Superseded { .. } => {
+            ResumeFinish::BeforeWritePoll(_)
+            | ResumeFinish::Indeterminate(_)
+            | ResumeFinish::Superseded { .. } => {
                 entries.insert(key.clone(), StoredAttempt::Complete(restored));
             }
         }
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_resume_token_is_a_noop_and_post_poll_is_indeterminate() {
+    async fn stale_resume_token_is_a_noop_and_post_poll_retains_receipt() {
         let store = IdempotencyStore::new(1);
         let key = key();
         let fingerprint = [10; 32];
@@ -1158,7 +1158,7 @@ mod tests {
         );
         assert!(matches!(
             store.begin(key, fingerprint).await,
-            BeginAttempt::Indeterminate
+            BeginAttempt::Cached(_)
         ));
     }
 
@@ -1257,7 +1257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rich_cached_admission_keeps_prior_across_indeterminate_finish() {
+    async fn rich_cached_admission_retains_indeterminate_finish() {
         let store = IdempotencyStore::new(1);
         let key = key();
         let fingerprint = [14; 32];
@@ -1276,12 +1276,15 @@ mod tests {
         else {
             panic!("cached rich admission");
         };
+        let indeterminate = CallToolResult::structured(
+            serde_json::json!({"status":"indeterminate","marker":"resumed"}),
+        );
         assert!(
             store
                 .finish_resume(
                     &key,
                     &claim.token,
-                    ResumeFinish::Indeterminate(tool_error(&ToolError::mutation_indeterminate(),)),
+                    ResumeFinish::Indeterminate(indeterminate),
                 )
                 .await
         );
@@ -1294,16 +1297,29 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("partial")
         );
-        assert!(matches!(
-            store
-                .begin_rich_until(
-                    Instant::now() + std::time::Duration::from_secs(1),
-                    key,
-                    fingerprint,
-                )
-                .await,
-            RichBeginAttempt::Indeterminate
-        ));
+        let RichBeginAttempt::Cached(current) = store
+            .begin_rich_until(
+                Instant::now() + std::time::Duration::from_secs(1),
+                key,
+                fingerprint,
+            )
+            .await
+        else {
+            panic!("indeterminate rich admission");
+        };
+        assert_eq!(
+            current
+                .result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("indeterminate")
+        );
+        assert_eq!(
+            current.metadata.map(|metadata| metadata.replay_witness),
+            Some(ReplayWitness::ResumedRelative)
+        );
     }
 
     #[tokio::test]

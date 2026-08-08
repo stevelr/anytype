@@ -9182,9 +9182,9 @@ mod tests {
                 }
                 let (compact_success, compact_error, standard_success, standard_error) =
                     match name {
-                        "list" => (157_266, 39_266, 183_743, 65_743),
-                        "primitive" => (119_266, 97_266, 145_743, 123_743),
-                        _ => (135_266, 117_266, 161_743, 143_743),
+                        "list" => (163_866, 45_866, 190_343, 72_343),
+                        "primitive" => (125_866, 103_866, 152_343, 130_343),
+                        _ => (141_866, 123_866, 168_343, 150_343),
                     };
                 assert!(
                     contexts["compact_read_write_success"]
@@ -9406,11 +9406,11 @@ mod tests {
             "read_only_selected_contribution_tokens":tokens(&tokenizer, read_only_value.clone())
                 .saturating_sub(tokens(&tokenizer, base_read_only_value)),
             "compact_composed_total_tokens":compact_tokens,
-            "compact_composed_ceiling_tokens":35_266,
+            "compact_composed_ceiling_tokens":41_866,
             "compact_read_only_total_tokens":compact_read_only_tokens,
             "compact_read_only_ceiling_tokens":12_869,
             "standard_composed_total_tokens":standard_tokens,
-            "standard_composed_ceiling_tokens":61_743,
+            "standard_composed_ceiling_tokens":68_343,
             "standard_read_only_total_tokens":standard_read_only_tokens,
             "standard_read_only_ceiling_tokens":33_380,
             "paired_fixtures":paired_fixtures(
@@ -13425,9 +13425,9 @@ mod tests {
             "read_only_selected_contribution_tokens",
             BODY_BLOCKS_READ_ONLY_SELECTED_TOKEN_CEILING,
         );
-        within("compact_composed_total_tokens", 35_266);
+        within("compact_composed_total_tokens", 41_866);
         within("compact_read_only_total_tokens", 12_869);
-        within("standard_composed_total_tokens", 61_743);
+        within("standard_composed_total_tokens", 68_343);
         within("standard_read_only_total_tokens", 33_380);
         for tokens in actual["per_tool_tokens"]
             .as_object()

@@ -573,7 +573,7 @@ identity, gRPC requirement union, disabled stale-call rejection, and aggregate
 all four reviewed Phase 1 catalog snapshots and `server_status` unchanged. A
 leave-one-registry-out sweep also proves that every omitted registry remains
 unreachable while the other six are active.
-The production ownership audit independently binds each of the 37 domain tools,
+The production ownership audit independently binds each of the 38 domain tools,
 `optional_toolset_status`, and the file byte-resource family to one fast and one
 real-headless executable scenario. It rejects missing, duplicate, unknown, or
 untyped catalog and scenario entries. Compile-bound runner tables execute all
@@ -583,9 +583,9 @@ resources, independent download, diagnostics, and cleanup. A separate
 all-selected sentinel composes stable read-write and preview read-only children
 and performs one real-backend read per registry.
 
-The default-off `body-blocks` registry exposes `body_block_list` plus five
+The default-off `body-blocks` registry exposes `body_block_list` plus six
 write workflows for one-block create, update, delete, move, and bounded rich
-page creation. It uses the typed `anytype-api` body model only. Reads return
+page creation and recovery. It uses the typed `anytype-api` body model only. Reads return
 exact block identity, document order, and a canonical snapshot hash; mutations
 require that hash and verify their result. Rich page construction is a finite
 flat plan and reports complete, partial, or indeterminate evidence without
@@ -594,6 +594,14 @@ two layout regions, rows, columns, and logical `rows × columns` capacity
 against the 256-block plan ceiling. Success separately requires Heart's exact
 sparse subtree: no cells without a header, or grey-background empty paragraph
 cells under the first header row only.
+`rich_page_resume` can complete only the never-attempted suffix of a retained
+partial `rich_page_create` receipt in the same runtime facade. It accepts one
+claim per receipt after it re-proves the page, retained page type, and authored
+prefix. Restart, facade replacement or eviction, missing evidence, an attempted
+or indeterminate boundary, and a consumed claim return `conflict`. It never
+replays a page create or an uncertain block write. When recovery refuses,
+read the page with `body_block_list` before choosing deliberate primitive
+mutations.
 Read-only mode retains only `body_block_list`. Acceptance executes that read
 through stable and preview stdio and compares the complete normalized result.
 Domain error parity likewise preserves `isError`, ordered content, exact
@@ -798,23 +806,24 @@ and resource names return method-not-found before argument decoding or I/O.
 Stable and experimental protocol modes use the same composed catalog.
 
 Only `compact` and `standard` application profiles exist. The optional
-`body-blocks`, `chats`, `members`, `files`, `schema`, and `views-write`
+`artifacts`, `body-blocks`, `chats`, `members`, `files`, `schema`, and `views-write`
 registries are linked and can be selected explicitly or combined in one
 comma-separated `ANY_MCP_TOOLSETS` value; they are absent by default.
 Acceptance-blocked `discussions`, plus proposed `admin`, are not selectable in
 this release. Their names become valid selectors only when a complete,
 independently reviewed production registry is linked.
 
-The `body-blocks` R5 registry provides six workflow tools for stable typed
+The `body-blocks` R5 registry provides seven workflow tools for stable typed
 body pages, verified single-block create/update/delete/move, and finite rich
 page construction; read-only mode retains only body listing. All schemas use
 closed nonrecursive variants, fail opaque and read-restricted content closed,
 permit inert bookmark creation without network fetching, and accept YouTube
 creation only as an exact 11-character video ID normalized to inert canonical
 document data.
-Rich
-construction is explicitly non-atomic and returns bounded applied, failed, and
-not-attempted evidence without compensation or automatic write resumption.
+Rich construction is non-atomic and returns bounded applied, failed, and
+not-attempted evidence without compensation. `rich_page_resume` can claim one
+retained partial receipt and issue only its never-attempted suffix after
+re-proving the page, type, and authored prefix.
 Single-block create verification derives the exact parent and sibling index
 from the pre-write snapshot, rejects collateral identity, order, value, and
 structure drift, and permits restriction refresh only on the insertion

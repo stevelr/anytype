@@ -12,9 +12,9 @@
     "compact_read_write": {
       "base_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
       "base_tokens": 9658,
-      "selected_contribution_tokens": 52158,
-      "selected_sha256": "54bbe98822fd78b83dad9000412f3dc40b544f740091f3007c67dc2b544b5725",
-      "selected_tokens": 61816
+      "selected_contribution_tokens": 56118,
+      "selected_sha256": "34e20e9e4897a5a1169fedb0225ad7fa8cf8911042613ffd3e9fbdf07a8c6450",
+      "selected_tokens": 65776
     },
     "standard_read_only": {
       "base_sha256": "c1bef45de82bc2614a4981f1da260d01e29008d4ca1f7e41470803733f12a7e3",
@@ -26,9 +26,9 @@
     "standard_read_write": {
       "base_sha256": "4e03af8ea8a70e14b4d75cb4f3a979e3c871f0e784888b79a0ff38b820812342",
       "base_tokens": 36135,
-      "selected_contribution_tokens": 52158,
-      "selected_sha256": "84bb28206cf8fece1a1cc042ace8f3605145cc928c5682efd5296a286d74935f",
-      "selected_tokens": 88293
+      "selected_contribution_tokens": 56118,
+      "selected_sha256": "b20f4dccebb3f0ac08721a407d088992c07673b3721fcc3fc5f990c244825ba7",
+      "selected_tokens": 92253
     }
   },
   "registry_budgets": {
@@ -39,10 +39,10 @@
       "tool_count": 8
     },
     "body-blocks": {
-      "catalog_ceiling_tokens": 25108,
-      "domain_tokens": 24394,
-      "selected_contribution_tokens": 24650,
-      "tool_count": 6
+      "catalog_ceiling_tokens": 31708,
+      "domain_tokens": 28354,
+      "selected_contribution_tokens": 28610,
+      "tool_count": 7
     },
     "chats": {
       "catalog_ceiling_tokens": 8500,
@@ -75,7 +75,7 @@
       "tool_count": 3
     }
   },
-  "registry_ceiling_tokens": 63008,
+  "registry_ceiling_tokens": 69608,
   "selected": ["artifacts", "body-blocks", "chats", "files", "members", "schema", "views-write"],
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }

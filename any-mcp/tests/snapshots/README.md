@@ -112,12 +112,12 @@ registry. The fixture also locks the canonical selected sets, base catalog
 SHA-256, each optional tool's standalone contribution, and the 29-token maximum
 representative result for all three test domains.
 
-`production-optional-token-budget.json` composes all six linked production
+`production-optional-token-budget.json` composes all seven linked production
 registries. It locks each registry's tool count, standalone domain tokens,
 reviewed ceiling, and selected contribution, plus exact compact/standard and
 read-write/read-only catalog hashes and totals. The aggregate read-write
-selection contributes 43,490 tokens and the read-only selection contributes
-12,235 tokens; both remain below the one common-status allowance plus the sum
+selection contributes 56,118 tokens and the read-only selection contributes
+12,564 tokens; both remain below the one common-status allowance plus the sum
 of independently reviewed registry ceilings. The four embedded Phase 1 base
 hashes and token counts make default-catalog drift visible in the same review.
 

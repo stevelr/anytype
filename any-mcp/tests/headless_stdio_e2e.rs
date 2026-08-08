@@ -261,6 +261,7 @@ const BODY_TOOL_NAMES: &[&str] = &[
     "body_block_move",
     "body_block_update",
     "rich_page_create",
+    "rich_page_resume",
 ];
 
 fn validate_preview_compact_catalog(tools: &[String]) -> Result<(), String> {
@@ -4770,7 +4771,7 @@ const READ_ONLY_CORE_TOOLS: [&str; 10] = [
     "view_list",
     "view_object_list",
 ];
-const ALL_OPTIONAL_READ_WRITE_TOOLS: [&str; 30] = [
+const ALL_OPTIONAL_READ_WRITE_TOOLS: [&str; 31] = [
     "body_block_create",
     "body_block_delete",
     "body_block_list",
@@ -4794,6 +4795,7 @@ const ALL_OPTIONAL_READ_WRITE_TOOLS: [&str; 30] = [
     "property_create",
     "property_update",
     "rich_page_create",
+    "rich_page_resume",
     "space_create",
     "space_update",
     "tag_create",
@@ -6498,6 +6500,7 @@ async fn headless_body_blocks_direct_stable_preview_and_object_show() {
                         "body_block_delete",
                         "body_block_move",
                         "rich_page_create",
+                        "rich_page_resume",
                     ] {
                         if !tools.iter().any(|candidate| candidate == name) {
                             return Err(sentinel_assertion("stable body catalog omitted a tool"));
