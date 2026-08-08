@@ -9,7 +9,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Added
 
 - Protect every cleanup-owned ignored live test with serial direct-router,
-  spawned-stdio, and discussions-process gates. A closed offline manifest and
+  spawned-stdio, and discussions-process gates. Closed offline manifests and
   executable-count checks reject renamed, missing, skipped, or zero-test
   cases; object-edit coverage uses a disposable space, and the redundant
   direct-body orphan is retired in favor of the shared body scenario.

@@ -80,6 +80,43 @@ const EXCLUDED_IGNORED_LIB_TESTS: &[(&str, &str)] = &[
     ),
 ];
 
+const HEADLESS_STDIO_IGNORED_TESTS: &[&str] = &[
+    "headless_artifact_content_spawned_scenarios",
+    "headless_artifact_lifecycle_and_payload_scenarios",
+    "headless_artifact_policy_spawned_scenarios",
+    "headless_artifact_spawned_transport_matrix_scenario",
+    "headless_body_blocks_direct_stable_preview_and_object_show",
+    "headless_body_blocks_shared_direct_stable_preview_scenarios",
+    "headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_children",
+    "headless_stdio_all_registered_optional_real_workflows",
+    "headless_stdio_chats_registry_runs_stable_and_preview_workflows",
+    "headless_stdio_compact_sentinel",
+    "headless_stdio_disposable_lifecycle_sentinel",
+    "headless_stdio_disposable_panic_cleanup_sentinel",
+    "headless_stdio_files_registry_runs_stable_and_preview_workflows",
+    "headless_stdio_members_minimizes_personal_data",
+    "headless_stdio_ordinary_tools_cover_representative_layouts",
+    "headless_stdio_preview_sentinel",
+    "headless_stdio_read_only_sentinel",
+    "headless_stdio_schema_registry_runs_all_nine_workflows",
+    "headless_stdio_standard_archive",
+    "headless_stdio_standard_discovery",
+    "headless_stdio_standard_documents",
+    "headless_stdio_standard_markdown_noop",
+    "headless_stdio_standard_mutations",
+    "headless_stdio_standard_views",
+    "shared_direct_stable_preview_views_write_acceptance_is_exact",
+];
+
+const DISCUSSIONS_STDIO_IGNORED_TESTS: &[&str] =
+    &["cleanup_owned_stable_and_preview_processes_cover_real_discussions"];
+
+#[derive(Debug, Eq, PartialEq)]
+struct InventoryDrift {
+    missing: BTreeSet<String>,
+    unexpected: BTreeSet<String>,
+}
+
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -121,6 +158,34 @@ fn assert_sorted_unique(entries: &[&str]) {
     );
 }
 
+fn inventory_drift(expected: &[&str], actual: &BTreeSet<String>) -> Option<InventoryDrift> {
+    let expected = expected
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let missing = expected
+        .difference(actual)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let unexpected = actual
+        .difference(&expected)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if missing.is_empty() && unexpected.is_empty() {
+        None
+    } else {
+        Some(InventoryDrift {
+            missing,
+            unexpected,
+        })
+    }
+}
+
+fn test_names(entries: &[&str]) -> BTreeSet<String> {
+    entries.iter().copied().map(str::to_owned).collect()
+}
+
 fn occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
@@ -160,29 +225,80 @@ fn ignored_library_manifest_is_closed_and_filter_safe() {
 }
 
 #[test]
-fn whole_binary_live_targets_match_the_gate_pins() {
+fn whole_binary_live_target_manifests_are_closed() {
+    assert_sorted_unique(HEADLESS_STDIO_IGNORED_TESTS);
+    assert_sorted_unique(DISCUSSIONS_STDIO_IGNORED_TESTS);
+    assert_eq!(HEADLESS_STDIO_IGNORED_TESTS.len(), 25);
+    assert_eq!(DISCUSSIONS_STDIO_IGNORED_TESTS.len(), 1);
     assert_eq!(
-        ignored_tests("headless_stdio_e2e", true).len(),
-        25,
-        "headless stdio live-test count changed"
+        inventory_drift(
+            HEADLESS_STDIO_IGNORED_TESTS,
+            &ignored_tests("headless_stdio_e2e", true)
+        ),
+        None,
+        "headless stdio ignored-test inventory changed"
     );
     assert_eq!(
-        ignored_tests("discussions_stdio_acceptance", true).len(),
-        1,
-        "discussions process live-test count changed"
+        inventory_drift(
+            DISCUSSIONS_STDIO_IGNORED_TESTS,
+            &ignored_tests("discussions_stdio_acceptance", true)
+        ),
+        None,
+        "discussions process ignored-test inventory changed"
+    );
+}
+
+#[test]
+fn inventory_comparison_rejects_a_renamed_test() {
+    let expected = ["headless_alpha", "headless_beta"];
+    let actual = test_names(&["headless_alpha", "headless_beta_renamed"]);
+    assert_eq!(
+        inventory_drift(&expected, &actual),
+        Some(InventoryDrift {
+            missing: test_names(&["headless_beta"]),
+            unexpected: test_names(&["headless_beta_renamed"]),
+        })
+    );
+}
+
+#[test]
+fn inventory_comparison_rejects_a_removed_test() {
+    let expected = ["headless_alpha", "headless_beta"];
+    let actual = test_names(&["headless_alpha"]);
+    assert_eq!(
+        inventory_drift(&expected, &actual),
+        Some(InventoryDrift {
+            missing: test_names(&["headless_beta"]),
+            unexpected: BTreeSet::new(),
+        })
+    );
+}
+
+#[test]
+fn inventory_comparison_rejects_a_same_count_replacement() {
+    let expected = ["headless_alpha", "headless_beta"];
+    let actual = test_names(&["headless_alpha", "headless_gamma"]);
+    assert_eq!(actual.len(), expected.len());
+    assert_eq!(
+        inventory_drift(&expected, &actual),
+        Some(InventoryDrift {
+            missing: test_names(&["headless_beta"]),
+            unexpected: test_names(&["headless_gamma"]),
+        })
     );
 }
 
 #[test]
 fn workflow_runs_each_pinned_live_target_in_both_protected_jobs() {
     let workflow = include_str!("../../.github/workflows/any-mcp.yml");
-    for needle in [
-        "run_required_live_gate direct 32 cargo test",
-        "run_required_live_gate stdio 25 cargo test",
-        "run_required_live_gate discussions 1 cargo test",
+    for (label, expected) in [
+        ("direct", ADMITTED_IGNORED_LIB_TESTS.len()),
+        ("stdio", HEADLESS_STDIO_IGNORED_TESTS.len()),
+        ("discussions", DISCUSSIONS_STDIO_IGNORED_TESTS.len()),
     ] {
+        let needle = format!("run_required_live_gate {label} {expected} cargo test");
         assert_eq!(
-            occurrences(workflow, needle),
+            occurrences(workflow, &needle),
             2,
             "workflow must run {needle:?} in both protected jobs"
         );
