@@ -13,7 +13,7 @@ class LiveWorkflowPolicyTests(unittest.TestCase):
         self.assertIn("group: anytype-headless-live", workflow)
         self.assertIn("trap 'rm -rf -- \"$gate_dir\"' EXIT", workflow)
         self.assertIn("ANYR_PY_REQUIRE_LIVE=1", workflow)
-        self.assertIn("python3 anyr/tests/run_required_python_cli.py", workflow)
+        self.assertIn("python3 -m anyr.tests.run_required_python_cli", workflow)
         self.assertIn("--category-file \"$category_file\"", workflow)
         self.assertIn("stat -c '%u' -- \"$category_file\"", workflow)
         self.assertIn("stat -c '%a' -- \"$category_file\"", workflow)

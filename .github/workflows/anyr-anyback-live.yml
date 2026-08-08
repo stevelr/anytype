@@ -102,7 +102,7 @@ jobs:
             local output="$gate_dir/gate-python-cli.log"
             local category_file="$gate_dir/gate-python-cli.category"
             set +e
-            env ANYR_PY_REQUIRE_LIVE=1 python3 anyr/tests/run_required_python_cli.py \
+            env ANYR_PY_REQUIRE_LIVE=1 python3 -m anyr.tests.run_required_python_cli \
               --category-file "$category_file" >"$output" 2>&1
             local status=$?
             set -e

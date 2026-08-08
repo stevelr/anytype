@@ -1,5 +1,7 @@
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,6 +74,70 @@ class LiveGatePolicyTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(category_file.stat().st_mode), 0o600)
         with self.assertRaisesRegex(RuntimeError, "destination"):
             write_failure_category(Path("relative.category"), "token=secret")
+
+    def test_workflow_module_argv_imports_from_repository_root(self):
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            category_file = Path(directory, "failure.category")
+            failure = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "anyr.tests.run_required_python_cli",
+                    "--category-file",
+                    str(category_file),
+                ],
+                check=False,
+                capture_output=True,
+                cwd=root,
+                env={
+                    "ANYR_PY_REQUIRE_LIVE": "1",
+                    "PATH": "",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                text=True,
+            )
+            self.assertEqual(failure.returncode, 1)
+            self.assertNotIn("ModuleNotFoundError", failure.stderr)
+            self.assertEqual(
+                category_file.read_text(encoding="ascii"), "required-test-failed\n"
+            )
+
+            fixture = Path(directory, "sitecustomize.py")
+            fixture.write_text(
+                "import unittest\n"
+                "class Passing(unittest.TestCase):\n"
+                "    def __init__(self, expected):\n"
+                "        super().__init__('runTest')\n"
+                "        self.expected = expected\n"
+                "    def id(self):\n"
+                "        return self.expected\n"
+                "    def runTest(self):\n"
+                "        pass\n"
+                "def load(expected, module=None):\n"
+                "    return unittest.TestSuite([Passing(expected)])\n"
+                "unittest.defaultTestLoader.loadTestsFromName = load\n",
+                encoding="utf-8",
+            )
+            successful_category = Path(directory, "success.category")
+            success = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "anyr.tests.run_required_python_cli",
+                    "--category-file",
+                    str(successful_category),
+                ],
+                check=False,
+                capture_output=True,
+                cwd=root,
+                env={"PYTHONPATH": directory, "PYTHONDONTWRITEBYTECODE": "1"},
+                text=True,
+            )
+            self.assertEqual(success.returncode, 0, success.stderr)
+            self.assertNotIn("ModuleNotFoundError", success.stderr)
+            self.assertIn("Ran 24 tests", success.stderr)
+            self.assertFalse(successful_category.exists())
 
     def test_python_test_manifest_matches_loader(self):
         classes = [
