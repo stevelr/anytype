@@ -1494,6 +1494,21 @@ impl PreparedImport {
         }
     }
 
+    async fn retain_candidate_cleanup(
+        &self,
+        runtime: &RuntimeContext,
+        category: &'static str,
+    ) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Staged(source) => staging(runtime)?
+                .retain_candidate_cleanup(source, category)
+                .await
+                .map_err(classify_staging_error),
+            Self::Local { .. } => Ok(()),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
+        }
+    }
+
     fn root_id(&self) -> Option<String> {
         match self {
             Self::Local { root_id, .. } => Some(root_id.clone()),
@@ -2062,13 +2077,44 @@ async fn settle_reserved_import(
                 .artifact_operations()
                 .set_outcome(key, OperationOutcome::ImportCleaning(candidate.clone()))
                 .await;
-        }
-        if source_error == ArtifactToolError::Conflict
-            && cleanup_changed_import_candidate(&runtime, &space_id, &candidate).await
-        {
-            drop(source);
-            runtime.artifact_operations().remove(key).await;
-            return Err(source_error);
+            if source
+                .retain_candidate_cleanup(&runtime, "delete_dispatched")
+                .await
+                .is_err()
+            {
+                drop(source);
+                runtime
+                    .artifact_operations()
+                    .set_outcome(
+                        key,
+                        OperationOutcome::ImportIndeterminate(candidate.clone()),
+                    )
+                    .await;
+                return Err(ArtifactToolError::Indeterminate);
+            }
+            if cleanup_changed_import_candidate(&runtime, &space_id, &candidate).await {
+                if source
+                    .restore_after_definitive_rejection(&runtime)
+                    .await
+                    .is_err()
+                {
+                    drop(source);
+                    runtime
+                        .artifact_operations()
+                        .set_outcome(
+                            key,
+                            OperationOutcome::ImportIndeterminate(candidate.clone()),
+                        )
+                        .await;
+                    return Err(ArtifactToolError::Indeterminate);
+                }
+                drop(source);
+                runtime.artifact_operations().remove(key).await;
+                return Err(source_error);
+            }
+            let _ = source
+                .retain_candidate_cleanup(&runtime, "absence_ambiguous")
+                .await;
         }
         drop(source);
         runtime

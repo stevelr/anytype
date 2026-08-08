@@ -138,6 +138,7 @@ struct DurableStageRecord {
     payload_identity: Option<DurableFileIdentity>,
     operation_fingerprint: Option<String>,
     candidate_id: Option<String>,
+    candidate_cleanup: Option<String>,
     cleanup_evidence: Option<String>,
     uncertainty: Option<String>,
 }
@@ -846,6 +847,10 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
     let has_observed = document.observed_sha256.is_some();
     let has_operation = document.operation_fingerprint.is_some();
     let has_candidate = document.candidate_id.is_some();
+    let candidate_cleanup_valid = document
+        .candidate_cleanup
+        .as_deref()
+        .is_none_or(|value| matches!(value, "delete_dispatched" | "absence_ambiguous"));
     let no_cleanup = document.cleanup_evidence.is_none();
     match document.state {
         DurableStageState::Allocated => {
@@ -854,6 +859,7 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
                 && !has_observed
                 && !has_operation
                 && !has_candidate
+                && document.candidate_cleanup.is_none()
                 && no_cleanup
                 && document.uncertainty.is_none()
         }
@@ -862,6 +868,7 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
                 && !has_observed
                 && !has_operation
                 && !has_candidate
+                && document.candidate_cleanup.is_none()
                 && no_cleanup
                 && document.uncertainty.is_none()
         }
@@ -872,6 +879,7 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
                 && has_observed
                 && !has_operation
                 && !has_candidate
+                && document.candidate_cleanup.is_none()
                 && no_cleanup
                 && document.uncertainty.is_none()
         }
@@ -882,6 +890,7 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
                 && has_observed
                 && !has_operation
                 && !has_candidate
+                && document.candidate_cleanup.is_none()
                 && no_cleanup
                 && document.uncertainty.is_none()
         }
@@ -891,6 +900,8 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
                 && offset_complete
                 && has_observed
                 && has_operation
+                && candidate_cleanup_valid
+                && (document.candidate_cleanup.is_none() || has_candidate)
                 && no_cleanup
                 && match document.uncertainty.as_deref() {
                     Some("pre_dispatch") => !has_candidate,
@@ -905,6 +916,7 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
                 && has_observed
                 && has_operation
                 && has_candidate
+                && document.candidate_cleanup.is_none()
                 && no_cleanup
                 && document.uncertainty.is_none()
         }
@@ -916,6 +928,7 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
                 .uncertainty
                 .as_deref()
                 .is_none_or(|value| matches!(value, "pre_dispatch" | "mutation_dispatched"))
+                && candidate_cleanup_valid
         }
         // This is an in-memory state only. Persisting it cannot prove which
         // side of an atomic publication became durable.
@@ -1978,6 +1991,7 @@ impl ArtifactStaging {
             payload_identity: None,
             operation_fingerprint: None,
             candidate_id: None,
+            candidate_cleanup: None,
             cleanup_evidence: None,
             uncertainty: None,
         };
@@ -2425,6 +2439,18 @@ impl ArtifactStaging {
         &self,
         source: &mut StageSource,
     ) -> Result<(), StagingError> {
+        if source
+            .record_owner
+            .durable
+            .lock()
+            .await
+            .document
+            .candidate_cleanup
+            .as_deref()
+            == Some("absence_ambiguous")
+        {
+            return Err(StagingError::Conflict);
+        }
         let prior = std::mem::replace(
             &mut *source.lease,
             RecordState::Receiving {
@@ -2444,6 +2470,7 @@ impl ArtifactStaging {
             document.state = DurableStageState::Ready;
             document.operation_fingerprint = None;
             document.candidate_id = None;
+            document.candidate_cleanup = None;
             document.uncertainty = None;
         })
         .await?;
@@ -2468,6 +2495,28 @@ impl ArtifactStaging {
         }
         self.persist_transition(&source.record_owner, |document| {
             document.candidate_id = Some(candidate.as_str().to_owned());
+        })
+        .await
+    }
+
+    /// Persists a closed candidate-cleanup category before or after the one
+    /// permitted remote deletion attempt.
+    pub(crate) async fn retain_candidate_cleanup(
+        &self,
+        source: &StageSource,
+        category: &'static str,
+    ) -> Result<(), StagingError> {
+        if !matches!(category, "delete_dispatched" | "absence_ambiguous") {
+            return Err(StagingError::BadRequest);
+        }
+        let RecordState::Reconciliation { operation, .. } = &*source.lease else {
+            return Err(StagingError::NotFound);
+        };
+        if operation != &source.operation {
+            return Err(StagingError::NotFound);
+        }
+        self.persist_transition(&source.record_owner, |document| {
+            document.candidate_cleanup = Some(category.to_owned());
         })
         .await
     }
@@ -3804,6 +3853,46 @@ mod tests {
             Some("candidate-file")
         );
         test.staging
+            .retain_candidate_cleanup(&source, "delete_dispatched")
+            .await
+            .expect("retain candidate cleanup dispatch");
+        assert_eq!(
+            source
+                .record_owner
+                .durable
+                .lock()
+                .await
+                .document
+                .candidate_cleanup
+                .as_deref(),
+            Some("delete_dispatched")
+        );
+        test.staging
+            .restore_import_operation(&mut source)
+            .await
+            .expect("proven candidate absence restores source");
+        drop(source);
+        let mut source = test
+            .staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("reacquire after candidate cleanup");
+        test.staging
+            .bind_import_operation(&mut source, [1; 32])
+            .await
+            .expect("bind consumed operation");
+        test.staging
+            .mark_import_dispatched(&mut source)
+            .await
+            .expect("dispatch consumed operation");
+        test.staging
+            .retain_import_candidate(
+                &source,
+                &EntityId::new("candidate-file").expect("candidate ID"),
+            )
+            .await
+            .expect("retain consumed candidate");
+        test.staging
             .consume(&mut source)
             .await
             .expect("consume source");
@@ -3873,6 +3962,25 @@ mod tests {
             .mark_import_dispatched(&mut source)
             .await
             .expect("persist dispatch uncertainty");
+        test.staging
+            .retain_import_candidate(
+                &source,
+                &EntityId::new("shutdown-candidate").expect("candidate ID"),
+            )
+            .await
+            .expect("persist candidate");
+        test.staging
+            .retain_candidate_cleanup(&source, "delete_dispatched")
+            .await
+            .expect("persist cleanup dispatch");
+        test.staging
+            .retain_candidate_cleanup(&source, "absence_ambiguous")
+            .await
+            .expect("persist cleanup ambiguity");
+        assert!(matches!(
+            test.staging.restore_import_operation(&mut source).await,
+            Err(StagingError::Conflict)
+        ));
         drop(source);
 
         test.shutdown.cancel();
@@ -3888,6 +3996,11 @@ mod tests {
         assert_eq!(document.state, DurableStageState::Reconciliation);
         assert_eq!(document.uncertainty.as_deref(), Some("mutation_dispatched"));
         assert!(document.operation_fingerprint.is_some());
+        assert_eq!(document.candidate_id.as_deref(), Some("shutdown-candidate"));
+        assert_eq!(
+            document.candidate_cleanup.as_deref(),
+            Some("absence_ambiguous")
+        );
     }
 
     #[tokio::test]
