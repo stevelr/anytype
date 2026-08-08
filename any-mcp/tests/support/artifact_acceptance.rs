@@ -475,7 +475,11 @@ const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStat
         | AdversarialCaseId::Sym12
         | AdversarialCaseId::Hlink01
         | AdversarialCaseId::Hlink02
-        | AdversarialCaseId::Hlink04 => {
+        | AdversarialCaseId::Hlink04
+        | AdversarialCaseId::Race01
+        | AdversarialCaseId::Race02
+        | AdversarialCaseId::Race03
+        | AdversarialCaseId::Race06 => {
             if cfg!(any(unix, windows)) {
                 AdversarialCaseStatus::Executed
             } else {
@@ -2220,6 +2224,39 @@ pub async fn run_artifact_dynamic_filesystem_cases(
         return Err("SYM-09 reached the retained-root boundary".to_owned());
     }
     execution.record_executed(AdversarialCaseId::Sym09)?;
+
+    run_import_gate_race(
+        driver,
+        run,
+        AdversarialCaseId::Race01,
+        ImportRaceMutation::Replace,
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Race01)?;
+    run_import_gate_race(
+        driver,
+        run,
+        AdversarialCaseId::Race02,
+        ImportRaceMutation::Rename,
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Race02)?;
+    run_import_gate_race(
+        driver,
+        run,
+        AdversarialCaseId::Race03,
+        ImportRaceMutation::Symlink,
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Race03)?;
+    run_import_gate_race(
+        driver,
+        run,
+        AdversarialCaseId::Race06,
+        ImportRaceMutation::HardLink,
+    )
+    .await?;
+    execution.record_executed(AdversarialCaseId::Race06)?;
 
     // Every hard-link row shares this capability observation. A filesystem
     // that cannot prove identity and the 2-to-1 count transition contributes
@@ -9858,7 +9895,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 55;
+        let implemented = 59;
         assert_eq!(
             partition
                 .iter()
