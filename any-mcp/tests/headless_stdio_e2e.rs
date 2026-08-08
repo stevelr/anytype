@@ -54,13 +54,13 @@ use support::live_scenario::{
     ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
     ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks,
     ArtifactGateLease, ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
-    ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
-    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
-    ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
-    allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
-    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
-    assert_payload_frame_independence, audit_server_log, classify_collision_frames,
-    measure_artifact_frame, prepare_artifact_symlink_startup_case,
+    ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit,
+    ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactStageAllocation,
+    ArtifactStartupCaseOutcome, ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome,
+    FixtureValidatorPolicy, ObservedOutcome, allocate_stage_upload, artifact_catalog_snapshot,
+    artifact_sha256, assert_artifact_content_parity, assert_artifact_parity,
+    assert_artifact_policy_parity, assert_payload_frame_independence, audit_server_log,
+    classify_collision_frames, measure_artifact_frame, prepare_artifact_symlink_startup_case,
     record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
     release_stage_upload, require_completed, run_artifact_adversarial_stdio_sentinels,
     run_artifact_content_scenario, run_artifact_dynamic_filesystem_stdio_sentinels,
@@ -6454,6 +6454,200 @@ async fn headless_artifact_crash06_mid_frame_scenario() {
         *cleanup_record.lock().expect("CRASH-06 cleanup record"),
         ChildCleanupRecord::Stopped
     );
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_spawned_validator_flood_cases(
+    ctx: &TestContext,
+    cleanup: [Arc<Mutex<ChildCleanupRecord>>; 2],
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<AdversarialExecution> {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    let optional = Arc::new(
+        ArtifactPolicyFixture::create_with_validator_executable(
+            &ctx.space_id,
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Optional,
+                ..ArtifactPolicyOptions::default()
+            },
+            &executable,
+        )
+        .map_err(|_| sentinel_assertion("create optional validator-flood fixture"))?,
+    );
+    record_artifact_fixture_log_needle(&optional, audit_needles)?;
+    let optional_child = spawn_disposable_artifact_driver(
+        ctx,
+        Arc::clone(&cleanup[0]),
+        Arc::clone(&optional),
+        DriverOptions::STANDARD,
+    )?;
+    lock_driver(&optional_child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("optional validator-flood child disappeared"))?
+        .initialize();
+    let staging_before = optional
+        .staging_snapshot()
+        .map_err(|_| sentinel_assertion("capture validator-flood staging state"))?;
+    let export_before = optional
+        .export_snapshot()
+        .map_err(|_| sentinel_assertion("capture validator-flood export state"))?;
+    let mut execution = AdversarialExecution::default();
+    for (case, label) in [
+        (AdversarialCaseId::Flood01, "FLOOD-01"),
+        (AdversarialCaseId::Flood03, "FLOOD-03"),
+    ] {
+        let source = format!("{}-{}.txt", label.to_ascii_lowercase(), unique_suffix());
+        optional
+            .seed_import(&source, label.as_bytes())
+            .map_err(|_| sentinel_assertion("seed validator-flood source"))?;
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&optional_child),
+        };
+        let imported = driver
+            .call_tool(
+                "file_import",
+                json!({
+                    "space": ctx.space_id,
+                    "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+                    "name": format!("{label}.txt"),
+                    "media_type": "text/plain",
+                    "idempotency_key": format!("{label}-{}", unique_suffix()),
+                }),
+            )
+            .await
+            .map_err(|_| sentinel_assertion("optional validator flood import failed"))?;
+        let file_id = imported
+            .get("file_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| sentinel_assertion("validator-flood import omitted file id"))?;
+        ctx.register_file(file_id);
+        let expected = [json!({"id": "mime", "status": "failed"})];
+        if imported
+            .get("validators")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            != Some(expected.as_slice())
+            || serde_json::to_vec(&imported)
+                .map_err(|_| sentinel_assertion("serialize validator-flood result"))?
+                .len()
+                > ARTIFACT_FRAME_CEILING_BYTES as usize
+        {
+            return Err(sentinel_assertion(
+                "validator flood result was not one bounded finding",
+            ));
+        }
+        execution
+            .record_executed(case)
+            .map_err(|_| sentinel_assertion("record validator-flood case"))?;
+    }
+    if optional.staging_snapshot().ok() != Some(staging_before)
+        || optional.export_snapshot().ok() != Some(export_before)
+    {
+        return Err(sentinel_assertion(
+            "validator flood changed artifact private state",
+        ));
+    }
+    finish_registered_artifact_child(&optional_child, None)
+        .map_err(|_| sentinel_assertion("stop optional validator-flood child"))?;
+
+    let required = Arc::new(
+        ArtifactPolicyFixture::create_with_validator_executable(
+            &ctx.space_id,
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Required,
+                ..ArtifactPolicyOptions::default()
+            },
+            &executable,
+        )
+        .map_err(|_| sentinel_assertion("create required validator-flood fixture"))?,
+    );
+    record_artifact_fixture_log_needle(&required, audit_needles)?;
+    required
+        .seed_import("flood02.txt", b"FLOOD-02")
+        .map_err(|_| sentinel_assertion("seed validator-timeout source"))?;
+    let required_child = spawn_disposable_artifact_driver(
+        ctx,
+        Arc::clone(&cleanup[1]),
+        Arc::clone(&required),
+        DriverOptions::STANDARD,
+    )?;
+    lock_driver(&required_child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("required validator-flood child disappeared"))?
+        .initialize();
+    let started = std::time::Instant::now();
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(&required_child),
+    };
+    let refusal = driver
+        .call_tool_error(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": "flood02.txt"}},
+                "name": "FLOOD-02.txt",
+                "media_type": "text/plain",
+                "idempotency_key": format!("FLOOD-02-{}", unique_suffix()),
+            }),
+        )
+        .await
+        .map_err(|_| sentinel_assertion("required validator timeout omitted tool error"))?;
+    if refusal.code() != "validation" || started.elapsed() > Duration::from_secs(25) {
+        return Err(sentinel_assertion(
+            "FLOOD-02 did not return bounded validator timeout",
+        ));
+    }
+    finish_registered_artifact_child(&required_child, None)
+        .map_err(|_| sentinel_assertion("stop required validator-flood child"))?;
+    execution
+        .record_executed(AdversarialCaseId::Flood02)
+        .map_err(|_| sentinel_assertion("record validator timeout case"))?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_validator_flood_spawned_scenarios() {
+    let cleanup = std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
+    let callback_cleanup = cleanup.clone();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-validator-flood",
+        move |ctx| {
+            Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                let execution = run_spawned_validator_flood_cases(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    &callback_audit_needles,
+                )
+                .await?;
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Flood01,
+                        AdversarialCaseId::Flood02,
+                        AdversarialCaseId::Flood03,
+                    ])
+                    .map_err(|_| sentinel_assertion("validator-flood owner inventory diverged"))
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned validator-flood acceptance");
+    require_completed(outcome, "spawned validator-flood acceptance")
+        .expect("prefix-authorized disposable admission");
+    for record in &cleanup {
+        assert_eq!(
+            *record.lock().expect("validator-flood cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+    }
+    assert_artifact_server_log_clean(&log_baseline, &audit_needles, "validator-flood");
 }
 
 #[cfg(feature = "acceptance-harness")]

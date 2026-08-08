@@ -6104,8 +6104,26 @@ impl PinnedValidatorExecutable {
     /// or pinned under the same boundary as production.
     pub fn discover_private(base: &Path) -> Result<Self, String> {
         let host = Self::discover()?;
+        Self::copy_private(host.path(), base)
+    }
+
+    /// Copies and pins one exact native candidate under the private fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if the source cannot be resolved and copied or
+    /// its private copy cannot be frozen and pinned.
+    pub fn copy_private(candidate: &Path, base: &Path) -> Result<Self, String> {
+        let source = fs::canonicalize(candidate)
+            .map_err(|_| "resolve artifact validator source executable".to_owned())?;
+        if !fs::symlink_metadata(&source)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            return Err("resolve artifact validator source executable".to_owned());
+        }
         let target = base.join("validator-bin");
-        fs::copy(host.path(), &target)
+        fs::copy(source, &target)
             .map_err(|_| "copy artifact validator into private fixture".to_owned())?;
         freeze_validator_fixture(&target)?;
         Self::pin(&target).ok_or_else(|| "pin private artifact validator fixture".to_owned())
@@ -6558,6 +6576,29 @@ impl ArtifactPolicyFixture {
     /// Returns a fixed message when a directory, source, or policy file cannot
     /// be created with private permissions.
     pub fn create_with(space_id: &str, options: ArtifactPolicyOptions) -> Result<Self, String> {
+        Self::create_with_validator_candidate(space_id, options, None)
+    }
+
+    /// Creates a fixture whose declared validator is a private copy of one
+    /// exact acceptance executable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if the executable or ordinary fixture policy
+    /// cannot satisfy the production boundary.
+    pub fn create_with_validator_executable(
+        space_id: &str,
+        options: ArtifactPolicyOptions,
+        executable: &Path,
+    ) -> Result<Self, String> {
+        Self::create_with_validator_candidate(space_id, options, Some(executable))
+    }
+
+    fn create_with_validator_candidate(
+        space_id: &str,
+        options: ArtifactPolicyOptions,
+        executable: Option<&Path>,
+    ) -> Result<Self, String> {
         if space_id.is_empty() || space_id.len() > 512 {
             return Err("artifact fixture requires an exact space identity".to_owned());
         }
@@ -6590,7 +6631,10 @@ impl ArtifactPolicyFixture {
             None
         };
         let validator = if options.validators.is_declared() {
-            Some(PinnedValidatorExecutable::discover_private(&base)?)
+            Some(match executable {
+                Some(executable) => PinnedValidatorExecutable::copy_private(executable, &base)?,
+                None => PinnedValidatorExecutable::discover_private(&base)?,
+            })
         } else {
             None
         };
@@ -10685,6 +10729,29 @@ mod tests {
             .expect("invalidate private validator inode");
         let changed = fs::read(validator.path()).expect("read invalidated validator");
         assert_ne!(artifact_sha256(&changed), pinned);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "acceptance-harness"))]
+    #[test]
+    fn acceptance_validator_fixture_freezes_the_selected_build_executable() {
+        let Some(executable) = option_env!("CARGO_BIN_EXE_any-mcp-process-test") else {
+            return;
+        };
+        let executable = PathBuf::from(executable);
+        let fixture = ArtifactPolicyFixture::create_with_validator_executable(
+            "bafyrei-validator-flood",
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Optional,
+                ..ArtifactPolicyOptions::default()
+            },
+            &executable,
+        )
+        .expect("acceptance-validator fixture");
+        let validator = fixture.validator().expect("private validator");
+        assert!(validator.path().starts_with(&fixture.base));
+        let bytes = fs::read(validator.path()).expect("read copied validator");
+        assert_eq!(artifact_sha256(&bytes), validator.sha256());
+        assert_ne!(validator.path(), executable);
     }
 
     #[test]

@@ -16,8 +16,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   process-crash owner captures a deterministic kill during a JSON-RPC frame.
   Cleanup owners cover failed import/export rollback, release and TTL
   invalidation, required-validator refusal, and read-only catalog isolation.
-  Flood owners measure maximum-occupancy aggregate status and bounded spawned
-  diagnostics.
+  Flood owners measure maximum-occupancy aggregate status, oversized validator
+  output, validator deadline enforcement, descendant cleanup, and bounded
+  spawned diagnostics.
   These and the remaining handle, process-crash, output-flood, and
   failure-cleanup rows stay pending until their live case-specific owners pass.
 - Add closed real-server adversarial artifact coverage for 43 traversal,
@@ -65,6 +66,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   session termination.
 
 ### Fixed
+
+- Keep configured validator process groups under the kill-on-drop guard until
+  stdout, stderr, exit status, and result-shape validation all succeed. A
+  validator that leaves a descendant behind after oversized output or another
+  refusal can no longer leak that process beyond the request boundary.
 
 - Reject ASCII control bytes and units in native artifact paths before I/O,
   and classify Windows reserved device components as invalid path syntax with

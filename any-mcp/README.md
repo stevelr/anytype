@@ -1911,13 +1911,16 @@ The hard-link cleanup case retains the staging reservation after a hostile-link
 conflict, including after the outside link is removed. That stable conflict
 prevents a later pathname-based deletion from changing the staged record.
 
-The validator scenarios declare one real host `file(1)`-compatible executable
-pinned by absolute path and SHA-256; nothing is shipped or synthesized, and the
+The content validator scenarios declare one real host `file(1)`-compatible
+executable pinned by absolute path and SHA-256; nothing is shipped, and the
 fixture admits exactly the ownership and mode that the production validator
 boundary admits. Set `ANY_MCP_ACCEPTANCE_VALIDATOR` to an exact executable path
-when the host keeps one outside `PATH`. Validator execution is Linux-only, so
-other platforms keep the validated declaration and expect zero available
-validators.
+when the host keeps one outside `PATH`. The validator-flood scenarios instead
+copy the acceptance process binary into the same private, immutable boundary,
+where it produces oversized stdout or stderr, exceeds the configured deadline,
+and leaves a descendant for the process-group cleanup assertion. Validator
+execution is Linux-only, so other platforms keep the validated declaration and
+expect zero available validators.
 
 Fixture discipline is part of the harness rather than each scenario: a
 prefix-authorized disposable space, a private `0700` policy tree with `0600`
