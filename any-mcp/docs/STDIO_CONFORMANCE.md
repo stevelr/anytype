@@ -68,6 +68,7 @@ through production stdio, then independently verify stored state through
 
 ```sh
 source .test-env
+export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
 # Set redacted_log to the absolute mode-0600 reviewed server event file.
 export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
 export ANY_MCP_LIVE_PRIVATE_DIR="$(mktemp -d)"
