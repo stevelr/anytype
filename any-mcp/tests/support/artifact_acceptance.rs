@@ -479,6 +479,7 @@ const fn dynamic_filesystem_status(id: AdversarialCaseId) -> AdversarialCaseStat
         | AdversarialCaseId::Race01
         | AdversarialCaseId::Race02
         | AdversarialCaseId::Race03
+        | AdversarialCaseId::Race04
         | AdversarialCaseId::Race06
         | AdversarialCaseId::Race07
         | AdversarialCaseId::Race08
@@ -1747,7 +1748,7 @@ async fn run_import_gate_race(
         unique_suffix()
     );
     let mut lease = gates.arm_import(&key).await?;
-    let request = driver.call_tool(
+    let request = driver.call_tool_error(
         "file_import",
         json!({
             "space": run.ctx.space_id,
@@ -1803,6 +1804,52 @@ enum ImportRaceMutation {
     Rename,
     Symlink,
     HardLink,
+}
+
+/// Creates a destination only after export has passed its retained-root
+/// precheck. Publication must fail closed and preserve the competing bytes.
+async fn run_export_gate_race(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<(), String> {
+    let gates = run
+        .gate_hooks
+        .ok_or_else(|| "dynamic export race requires direct acceptance gates".to_owned())?;
+    let file_id = adversarial_seed_file(driver, run, "race04-seed.bin").await?;
+    let destination = format!("race04-destination-{}", unique_suffix());
+    let key = format!("race04-gate-{}", unique_suffix());
+    let mut lease = gates.arm_export(&key).await?;
+    let request = driver.call_tool_error(
+        "file_export",
+        json!({
+            "space": run.ctx.space_id,
+            "file_id": file_id,
+            "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &destination),
+            "idempotency_key": key,
+        }),
+    );
+    tokio::pin!(request);
+    tokio::select! {
+        reached = lease.wait(Duration::from_secs(10)) => {
+            if !reached {
+                return Err("RACE-04 did not reach its exact publication gate".to_owned());
+            }
+        }
+        _ = &mut request => return Err("RACE-04 completed before its publication gate".to_owned()),
+    }
+    let competing = b"RACE-04 competing destination";
+    let path = run.policy.export_root().join(&destination);
+    fs::write(&path, competing).map_err(|_| "seed RACE-04 competing destination".to_owned())?;
+    secure_files(std::slice::from_ref(&path))?;
+    lease.release();
+    let refusal = request
+        .await
+        .map_err(|_| "RACE-04 accepted a competing destination".to_owned())?;
+    adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+    if fs::read(&path).ok().as_deref() != Some(competing) {
+        return Err("RACE-04 changed the competing destination".to_owned());
+    }
+    Ok(())
 }
 
 fn raw_content_range(start: u64, end: u64, total: u64) -> Result<HeaderValue, String> {
@@ -2279,6 +2326,9 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     )
     .await?;
     execution.record_executed(AdversarialCaseId::Race06)?;
+
+    run_export_gate_race(driver, run).await?;
+    execution.record_executed(AdversarialCaseId::Race04)?;
 
     run_raw_staging_races(driver, run, &mut execution).await?;
 
@@ -9928,7 +9978,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 64;
+        let implemented = 65;
         assert_eq!(
             partition
                 .iter()

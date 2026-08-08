@@ -2683,6 +2683,7 @@ fn dynamic_filesystem_direct_runtime_case_ids() -> Vec<AdversarialCaseId> {
         AdversarialCaseId::Race01,
         AdversarialCaseId::Race02,
         AdversarialCaseId::Race03,
+        AdversarialCaseId::Race04,
         AdversarialCaseId::Race06,
         AdversarialCaseId::Race07,
         AdversarialCaseId::Race08,
