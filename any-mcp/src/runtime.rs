@@ -822,14 +822,23 @@ impl RuntimeContext {
         artifact: &ArtifactConfig,
         read_only: bool,
     ) -> Result<Self, StartupError> {
-        let authority = SpaceAuthority::initialize(&client, &artifact.spaces)
-            .await
-            .map_err(|_| StartupError::SpacePolicy)?;
         let artifact_roots = if optional_toolsets.contains("artifacts") && !read_only {
             Some(RootRegistry::activate(artifact).map_err(|_| StartupError::ArtifactRoots)?)
         } else {
             None
         };
+        let artifact_validators = if artifact_roots.is_some() && !artifact.validators().is_empty() {
+            Some(
+                ValidatorRunner::activate(artifact.validators(), &artifact.limits)
+                    .await
+                    .map_err(|_| StartupError::ArtifactValidators)?,
+            )
+        } else {
+            None
+        };
+        let authority = SpaceAuthority::initialize(&client, &artifact.spaces)
+            .await
+            .map_err(|_| StartupError::SpacePolicy)?;
         let mut runtime = Self::from_parts_with_authority(
             client,
             RuntimeParts {
@@ -857,15 +866,6 @@ impl RuntimeContext {
                 .map_err(classify_staging_startup_error)?,
             ),
             _ => None,
-        };
-        let artifact_validators = if artifact_roots.is_some() && !artifact.validators().is_empty() {
-            Some(
-                ValidatorRunner::activate(artifact.validators(), &artifact.limits)
-                    .await
-                    .map_err(|_| StartupError::ArtifactValidators)?,
-            )
-        } else {
-            None
         };
         runtime.artifact_config = Arc::new(artifact.clone());
         runtime.artifact_roots = artifact_roots;

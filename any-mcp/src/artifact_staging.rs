@@ -14,6 +14,7 @@ use std::{
     convert::Infallible,
     fmt,
     fs::File,
+    future::Future,
     io::{self, Read, Seek, SeekFrom, Write},
     pin::Pin,
     sync::{
@@ -221,7 +222,9 @@ struct StageExportSource {
 struct VerifiedExportStream {
     reader: ReaderStream<PositionalReader>,
     lease: tokio::sync::OwnedMutexGuard<RecordState>,
+    deadline: Pin<Box<tokio::time::Sleep>>,
     final_verification_complete: bool,
+    terminated: bool,
 }
 
 impl Stream for VerifiedExportStream {
@@ -229,6 +232,16 @@ impl Stream for VerifiedExportStream {
 
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let stream = self.get_mut();
+        if stream.terminated {
+            return Poll::Ready(None);
+        }
+        if stream.deadline.as_mut().poll(context).is_ready() {
+            stream.terminated = true;
+            return Poll::Ready(Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "artifact transfer deadline exceeded",
+            ))));
+        }
         match Pin::new(&mut stream.reader).poll_next(context) {
             Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
@@ -239,8 +252,10 @@ impl Stream for VerifiedExportStream {
                     _ => false,
                 };
                 if verified {
+                    stream.terminated = true;
                     Poll::Ready(None)
                 } else {
+                    stream.terminated = true;
                     Poll::Ready(Some(Err(io::Error::other(
                         "retained artifact changed during transfer",
                     ))))
@@ -580,6 +595,7 @@ struct StagingState {
     connection_permits: Arc<tokio::sync::Semaphore>,
     rate_window: tokio::sync::Mutex<VecDeque<Instant>>,
     active: AtomicBool,
+    durability_uncertain: AtomicBool,
     task_active: AtomicUsize,
     task_notify: tokio::sync::Notify,
     shutdown: CancellationToken,
@@ -601,6 +617,9 @@ impl StagingTaskGuard {
 impl Drop for StagingTaskGuard {
     fn drop(&mut self) {
         if self.registered && !self.completed && self.fatal_if_incomplete {
+            self.state
+                .durability_uncertain
+                .store(true, Ordering::Release);
             self.state.active.store(false, Ordering::Release);
             self.state.shutdown.cancel();
         }
@@ -797,6 +816,16 @@ fn parse_record(
 }
 
 fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimits) -> bool {
+    let Ok(ttl) = chrono::Duration::from_std(limits.staging_ttl) else {
+        return false;
+    };
+    let now = Utc::now();
+    let Some(latest_creation) = now.checked_add_signed(chrono::Duration::minutes(5)) else {
+        return false;
+    };
+    let Some(latest_expiry) = latest_creation.checked_add_signed(ttl) else {
+        return false;
+    };
     let lifetime = document
         .expires_at
         .signed_duration_since(document.created_at)
@@ -804,6 +833,8 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
     if document.size_bytes > limits.artifact_bytes
         || lifetime.is_err()
         || lifetime.is_ok_and(|lifetime| lifetime > limits.staging_ttl)
+        || document.created_at > latest_creation
+        || document.expires_at > latest_expiry
         || (document.direction == DurableDirection::Import && document.size_bytes == 0)
         || (document.direction == DurableDirection::Export && document.expected_sha256.is_some())
     {
@@ -1183,13 +1214,20 @@ fn reconcile_inventory(
 }
 
 impl ArtifactStaging {
+    fn close_durable_authority(&self) {
+        self.state
+            .durability_uncertain
+            .store(true, Ordering::Release);
+        self.state.active.store(false, Ordering::Release);
+        self.state.shutdown.cancel();
+    }
+
     async fn publish_document(
         &self,
         document: &DurableStageRecord,
     ) -> Result<AnchoredImport, StagingError> {
         if !durable_semantics_valid(document, &self.state.limits) {
-            self.state.active.store(false, Ordering::Release);
-            self.state.shutdown.cancel();
+            self.close_durable_authority();
             return Err(StagingError::Indeterminate);
         }
         let bytes = durable_json(document)?;
@@ -1206,8 +1244,7 @@ impl ArtifactStaging {
         match publication {
             Ok(Ok(source)) => Ok(source),
             Ok(Err(_)) | Err(_) => {
-                self.state.active.store(false, Ordering::Release);
-                self.state.shutdown.cancel();
+                self.close_durable_authority();
                 Err(StagingError::Indeterminate)
             }
         }
@@ -1359,6 +1396,7 @@ impl ArtifactStaging {
                 )),
                 rate_window: tokio::sync::Mutex::new(VecDeque::new()),
                 active: AtomicBool::new(true),
+                durability_uncertain: AtomicBool::new(false),
                 task_active: AtomicUsize::new(0),
                 task_notify: tokio::sync::Notify::new(),
                 shutdown,
@@ -1386,6 +1424,9 @@ impl ArtifactStaging {
             || self.state.directory.authority_intact().is_err()
         {
             self.state.active.store(false, Ordering::Release);
+            self.state
+                .durability_uncertain
+                .store(true, Ordering::Release);
             self.state.shutdown.cancel();
             return Err(StagingError::Indeterminate);
         }
@@ -1517,12 +1558,20 @@ impl ArtifactStaging {
                         if let Some(cleanup) = staging.spawn_expired_cleanup(expired)
                             && cleanup.await.is_err_and(|error| error.is_panic())
                         {
+                            staging
+                                .state
+                                .durability_uncertain
+                                .store(true, Ordering::Release);
                             staging.state.active.store(false, Ordering::Release);
                             staging.state.shutdown.cancel();
                             break;
                         }
                     }
                 }
+            }
+            if staging.state.durability_uncertain.load(Ordering::Acquire) {
+                task_guard.complete();
+                return;
             }
             let records = {
                 let records = staging.state.records.write().await;
@@ -1753,6 +1802,7 @@ impl ArtifactStaging {
         handle: &str,
         record: &str,
     ) -> Response<StagingBody> {
+        let operation_deadline = tokio::time::Instant::now() + self.state.limits.operation_timeout;
         let (source, status) = match self.export_reader(handle, Some(record)).await {
             Ok(reader) => reader,
             Err(error) => return staging_http_error(error),
@@ -1783,7 +1833,9 @@ impl ArtifactStaging {
                 self.state.limits.transfer_chunk_bytes.min(1024 * 1024) as usize,
             ),
             lease,
+            deadline: Box::pin(tokio::time::sleep_until(operation_deadline)),
             final_verification_complete: false,
+            terminated: false,
         };
         let body = StreamBody::new(stream).boxed_unsync();
         let mut response = Response::new(body);
@@ -2077,8 +2129,7 @@ impl ArtifactStaging {
         }
         let mut destination = destination;
         if destination.truncate(offset).is_err() {
-            self.state.active.store(false, Ordering::Release);
-            self.state.shutdown.cancel();
+            self.close_durable_authority();
             return Err(StagingError::Indeterminate);
         }
         self.persist_transition(&lease.record, |document| {
@@ -2162,7 +2213,10 @@ impl ArtifactStaging {
         .await;
         let (source, sha256) = match publication {
             Ok(Ok(publication)) => publication,
-            Ok(Err(_)) | Err(_) => return Err(StagingError::Indeterminate),
+            Ok(Err(_)) | Err(_) => {
+                self.close_durable_authority();
+                return Err(StagingError::Indeterminate);
+            }
         };
         if sha256 != prepublication_sha256 {
             let name = lease.record.record_name.clone();
@@ -2170,6 +2224,7 @@ impl ArtifactStaging {
             let _ =
                 tokio::task::spawn_blocking(move || directory.remove_exact_record(&name, &source))
                     .await;
+            self.close_durable_authority();
             return Err(StagingError::Indeterminate);
         }
         self.persist_transition(&lease.record, |document| {
@@ -2222,14 +2277,12 @@ impl ArtifactStaging {
         let (source, independently_observed) = match publication {
             Ok(Ok(publication)) => publication,
             Ok(Err(_)) | Err(_) => {
-                self.state.active.store(false, Ordering::Release);
-                self.state.shutdown.cancel();
+                self.close_durable_authority();
                 return Err(StagingError::Indeterminate);
             }
         };
         if independently_observed != sha256 {
-            self.state.active.store(false, Ordering::Release);
-            self.state.shutdown.cancel();
+            self.close_durable_authority();
             return Err(StagingError::Indeterminate);
         }
         self.persist_transition(&lease.record, |document| {
@@ -2577,6 +2630,9 @@ impl ArtifactStaging {
             Ok(false) => Err(StagingError::Conflict),
             Err(error) => {
                 if error.is_panic() {
+                    self.state
+                        .durability_uncertain
+                        .store(true, Ordering::Release);
                     self.state.active.store(false, Ordering::Release);
                     self.state.shutdown.cancel();
                 }
@@ -2645,7 +2701,7 @@ impl ArtifactStaging {
 
     async fn cleanup_pending_record(&self, record: &Arc<StageRecord>) -> bool {
         if self.prepare_cleanup(record).await.is_err() {
-            self.state.shutdown.cancel();
+            self.close_durable_authority();
             return false;
         }
         if self
@@ -2655,7 +2711,7 @@ impl ArtifactStaging {
             .await
             .is_err()
         {
-            self.state.shutdown.cancel();
+            self.close_durable_authority();
             return false;
         }
         let target = {
@@ -2731,7 +2787,7 @@ impl ArtifactStaging {
                 if self.finish_durable_cleanup(record).await.is_ok() {
                     true
                 } else {
-                    self.state.shutdown.cancel();
+                    self.close_durable_authority();
                     false
                 }
             }
@@ -2786,15 +2842,20 @@ impl ArtifactStaging {
         drop(durable);
         let directory = self.state.directory.clone();
         let task_guard = self.task_guard();
-        let source = tokio::task::spawn_blocking(move || {
+        let publication = tokio::task::spawn_blocking(move || {
             let mut task_guard = task_guard;
             let result = directory.publish_tombstone(&record_id, &bytes);
             task_guard.complete();
             result
         })
-        .await
-        .map_err(|_| StagingError::Indeterminate)?
-        .map_err(|_| StagingError::Indeterminate)?;
+        .await;
+        let source = match publication {
+            Ok(Ok(source)) => source,
+            Ok(Err(_)) | Err(_) => {
+                self.close_durable_authority();
+                return Err(StagingError::Indeterminate);
+            }
+        };
         *record.tombstone.lock().await = Some(source);
         Ok(())
     }
@@ -3717,6 +3778,17 @@ mod tests {
             )
             .await
             .expect("retain candidate evidence");
+        assert_eq!(
+            source
+                .record_owner
+                .durable
+                .lock()
+                .await
+                .document
+                .candidate_id
+                .as_deref(),
+            Some("candidate-file")
+        );
         test.staging
             .consume(&mut source)
             .await
@@ -4543,9 +4615,17 @@ mod tests {
             .root
             .join("records")
             .join(format!("{}.json", allocation.record));
+        let record_bytes = std::fs::read(&record_path).expect("read durable record");
+        let mut far_future: DurableStageRecord =
+            serde_json::from_slice(&record_bytes).expect("parse durable record");
+        far_future.created_at += chrono::Duration::days(365);
+        far_future.expires_at += chrono::Duration::days(365);
+        assert!(!durable_semantics_valid(
+            &far_future,
+            &test.staging.state.limits
+        ));
         let mut document: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&record_path).expect("read durable record"))
-                .expect("parse durable record");
+            serde_json::from_slice(&record_bytes).expect("parse durable record value");
         document["state"] = serde_json::Value::String("ready".to_owned());
         let corrupt = serde_json::to_vec(&document).expect("serialize semantic corruption");
         std::fs::write(&record_path, &corrupt).expect("replace durable record");
