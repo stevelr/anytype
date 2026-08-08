@@ -43,7 +43,8 @@ use crate::{
     create_idempotency::{
         Attempt, BeginAttempt, CreateDisposition, CreateExecution, DEFAULT_IDEMPOTENCY_CAPACITY,
         IdempotencyKey, IdempotencyStore, PendingCandidate, PendingCandidateLookup, ReplayWitness,
-        finish_supervised_execution, wait_for_attempt_until, wait_for_leader_attempt_until,
+        RichReceiptMetadata, finish_supervised_execution, wait_for_attempt_until,
+        wait_for_leader_attempt_until,
     },
     cursor::{CursorStore, CursorToken, EvidenceCursorState, QueryFingerprint},
     discovery::DiscoveryReference,
@@ -6261,11 +6262,23 @@ impl BodyHandlers {
             .begin_until(deadline, key.clone(), fingerprint)
             .await
         {
-            BeginAttempt::Cached(result) => {
-                let replay_witness = self.rich_creates.replay_witness(&key, fingerprint).await;
-                self.replay_rich_create(runtime, &input, &resolved, result, replay_witness)
+            BeginAttempt::Cached(_) => match self
+                .rich_creates
+                .cached_rich_receipt(&key, fingerprint)
+                .await
+            {
+                Some(cached) => {
+                    self.replay_rich_create(
+                        runtime,
+                        &input,
+                        &resolved,
+                        cached.result,
+                        cached.metadata,
+                    )
                     .await
-            }
+                }
+                None => tool_error(&ToolError::conflict()),
+            },
             BeginAttempt::Indeterminate => {
                 match self.rich_creates.pending_candidate(&key, fingerprint).await {
                     PendingCandidateLookup::Available(candidate) => {
@@ -6367,6 +6380,9 @@ impl BodyHandlers {
         {
             return tool_error(&ToolError::conflict());
         }
+        let Some(page_type_id) = verified.r#type.as_ref().map(|typ| typ.id.clone()) else {
+            return tool_error(&ToolError::conflict());
+        };
         let rpc = self.rpc_config(recovery.deadline);
         let body = tokio::select! {
             biased;
@@ -6396,6 +6412,7 @@ impl BodyHandlers {
             &self.rich_create,
             &recovery,
             input.blocks.len(),
+            page_type_id,
             body,
         )
         .await
@@ -6407,7 +6424,7 @@ impl BodyHandlers {
         input: &RichPageCreateInput,
         resolved_space: &str,
         cached: CallToolResult,
-        replay_witness: Option<ReplayWitness>,
+        metadata: Option<RichReceiptMetadata>,
     ) -> CallToolResult {
         let Some(mut value) = cached.structured_content.clone() else {
             return tool_error(&ToolError::conflict());
@@ -6446,15 +6463,18 @@ impl BodyHandlers {
             Ok(projected) => projected,
             Err(_) => return tool_error(&ToolError::conflict()),
         };
+        let replay_witness = metadata.as_ref().map(|metadata| metadata.replay_witness);
         let root_append_index = match replay_witness {
             Some(ReplayWitness::RichRootAppendIndex(value)) => Some(value),
             Some(ReplayWitness::RichRecoveredCandidate | ReplayWitness::RichResumedRelative)
             | None => None,
         };
-        if value
-            .get("final_snapshot_hash")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|expected| expected != projected.hash.as_str())
+        let relative = matches!(replay_witness, Some(ReplayWitness::RichResumedRelative));
+        if (!relative
+            && value
+                .get("final_snapshot_hash")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|expected| expected != projected.hash.as_str()))
             || !verify_rich_applied_replay(input, &value, &projected, root_append_index)
         {
             return tool_error(&ToolError::conflict());
@@ -6479,6 +6499,7 @@ async fn complete_pending_rich_recovery(
     contract: &WorkflowTool<RichPageCreateOutput>,
     recovery: &PendingRichRecovery,
     total: usize,
+    page_type_id: String,
     body: Result<SnapshotHash, RichFailureCategory>,
 ) -> CallToolResult {
     let space_id = match EntityId::new(recovery.candidate.space_id()) {
@@ -6496,11 +6517,15 @@ async fn complete_pending_rich_recovery(
     let output = rich_recovered_failure(&space_id, &object_id, total, final_hash, category);
     let result = finish_rich_result(contract, output, CreateDisposition::Terminal).result;
     if store
-        .complete_pending_candidate(
+        .complete_pending_candidate_with_metadata(
             &recovery.key,
             recovery.fingerprint,
             &recovery.candidate,
             result.clone(),
+            Some(RichReceiptMetadata {
+                page_type_id,
+                replay_witness: ReplayWitness::RichRecoveredCandidate,
+            }),
         )
         .await
     {
@@ -6580,6 +6605,7 @@ async fn execute_rich_create(
             CreateDisposition::PreDispatchFailure,
         );
     }
+    attempt.record_rich_page_type_id(typ.id.clone()).await;
     let page_create = client
         .new_object(space_id.as_str(), "page")
         .name(input.name.as_str())
@@ -11918,9 +11944,15 @@ mod tests {
                     resolved_space: "space".to_owned(),
                     deadline: std::time::Instant::now() + Duration::from_secs(1),
                 };
-                let result =
-                    complete_pending_rich_recovery(&store, &contract, &recovery, 3, Err(category))
-                        .await;
+                let result = complete_pending_rich_recovery(
+                    &store,
+                    &contract,
+                    &recovery,
+                    3,
+                    "page-type".to_owned(),
+                    Err(category),
+                )
+                .await;
                 let expected_category =
                     serde_json::to_value(category).expect("category serialization");
                 assert_eq!(
@@ -11982,9 +12014,15 @@ mod tests {
             };
             let hash =
                 SnapshotHash::new("b".repeat(MAX_SNAPSHOT_HASH_BYTES)).expect("recovery hash");
-            let result =
-                complete_pending_rich_recovery(&store, &contract, &recovery, 3, Ok(hash.clone()))
-                    .await;
+            let result = complete_pending_rich_recovery(
+                &store,
+                &contract,
+                &recovery,
+                3,
+                "page-type".to_owned(),
+                Ok(hash.clone()),
+            )
+            .await;
             assert_eq!(
                 result
                     .structured_content
