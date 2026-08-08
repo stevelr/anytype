@@ -42,8 +42,8 @@ use crate::{
         RootAccessError, RootAccessErrorKind,
     },
     artifact_staging::{
-        ArtifactStaging, STAGING_REQUIRED_GUIDANCE, StageAllocation, StageDirection, StageSource,
-        StageWriteLease, StagingError,
+        ArtifactStaging, RetainedStageImport, STAGING_REQUIRED_GUIDANCE, StageAllocation,
+        StageDirection, StageSource, StageWriteLease, StagingError,
     },
     artifact_validators::ValidatorFinding,
     domain::{EntityId, SpaceId},
@@ -672,7 +672,7 @@ fn nonempty_artifact_size_schema(_: &mut SchemaGenerator) -> Schema {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct FileImportOutput {
+pub(crate) struct FileImportOutput {
     /// Canonical Anytype file object created or safely reused.
     #[schemars(length(min = 1, max = 255))]
     file_id: String,
@@ -928,7 +928,7 @@ pub(crate) struct ArtifactOperationState {
 }
 
 impl ArtifactOperationState {
-    async fn settle_import_timeout(&self, key: [u8; 32]) {
+    pub(crate) async fn settle_import_timeout(&self, key: [u8; 32]) {
         if let Some(entry) = self.entries.lock().await.get_mut(&key) {
             entry.outcome = match &entry.outcome {
                 OperationOutcome::ImportSettling(candidate) => {
@@ -1343,6 +1343,7 @@ enum PreparedImport {
         root_id: String,
     },
     Staged(StageSource),
+    StagedReplay(RetainedStageImport),
 }
 
 impl PreparedImport {
@@ -1350,6 +1351,7 @@ impl PreparedImport {
         match self {
             Self::Local { source, .. } => source.length,
             Self::Staged(source) => source.length,
+            Self::StagedReplay(source) => source.length,
         }
     }
 
@@ -1357,6 +1359,7 @@ impl PreparedImport {
         match self {
             Self::Local { sha256, .. } => sha256,
             Self::Staged(source) => &source.sha256,
+            Self::StagedReplay(source) => &source.sha256,
         }
     }
 
@@ -1364,6 +1367,7 @@ impl PreparedImport {
         match self {
             Self::Local { .. } => None,
             Self::Staged(source) => source.media_type.as_deref(),
+            Self::StagedReplay(source) => source.media_type.as_deref(),
         }
     }
 
@@ -1373,6 +1377,7 @@ impl PreparedImport {
                 .try_clone_reader()
                 .map_err(|error| classify_root_error(&error)),
             Self::Staged(source) => source.try_clone_reader().map_err(classify_staging_error),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
         }
     }
 
@@ -1381,7 +1386,7 @@ impl PreparedImport {
             Self::Local { source, .. } => source
                 .verify_unchanged()
                 .map_err(|error| classify_root_error(&error)),
-            Self::Staged(_) => Ok(()),
+            Self::Staged(_) | Self::StagedReplay(_) => Ok(()),
         }
     }
 
@@ -1390,14 +1395,14 @@ impl PreparedImport {
             Self::Local { source, .. } => source
                 .verify_unchanged()
                 .map_err(|error| classify_root_error(&error)),
-            Self::Staged(_) => Ok(()),
+            Self::Staged(_) | Self::StagedReplay(_) => Ok(()),
         }
     }
 
     fn root_id(&self) -> Option<String> {
         match self {
             Self::Local { root_id, .. } => Some(root_id.clone()),
-            Self::Staged(_) => None,
+            Self::Staged(_) | Self::StagedReplay(_) => None,
         }
     }
 
@@ -1405,6 +1410,7 @@ impl PreparedImport {
         match self {
             Self::Local { .. } => None,
             Self::Staged(source) => Some(source.record()),
+            Self::StagedReplay(source) => Some(source.record.clone()),
         }
     }
 }
@@ -1657,7 +1663,22 @@ async fn file_import(
     validate_name(&input.name)?;
     let declared_media_type = normalize_media_type(input.media_type.as_ref().map(String::as_str))?;
     let space_id = resolve_space(runtime.client(), &input.space).await?;
-    let source = prepare_import_source(runtime, input.source.resolve()?, &space_id).await?;
+    let resolved_source = input.source.resolve()?;
+    // Staged metadata is readable without acquiring its one-use authority.
+    // This deliberately lets the ledger reject a different operation before
+    // any caller can obtain a source reader.
+    let staged_handle = match &resolved_source {
+        ResolvedSource::Staged(handle) => Some(handle.clone()),
+        ResolvedSource::Local(_) => None,
+    };
+    let mut source = match &staged_handle {
+        Some(handle) => staging(runtime)?
+            .import_metadata(handle, &space_id)
+            .await
+            .map(PreparedImport::StagedReplay)
+            .map_err(classify_staging_error)?,
+        None => prepare_import_source(runtime, resolved_source, &space_id).await?,
+    };
     if declared_media_type
         .as_deref()
         .zip(source.stored_media_type())
@@ -1672,8 +1693,13 @@ async fn file_import(
     }
     let root_id = source.root_id();
     let staging_record = source.staging_record();
-    let validator_findings =
-        run_configured_validators(runtime, &source, declared_media_type.as_deref()).await?;
+    // Candidate and complete replay use retained staged identity only; they do
+    // not reopen the consumed source merely to re-run advisory validators.
+    let validator_findings = if matches!(source, PreparedImport::StagedReplay(_)) {
+        Vec::new()
+    } else {
+        run_configured_validators(runtime, &source, declared_media_type.as_deref()).await?
+    };
     let key = idempotency_key(b"import", &input.idempotency_key);
     let fingerprint = import_fingerprint(
         &space_id,
@@ -1696,10 +1722,28 @@ async fn file_import(
         .await?
     {
         ImportIdempotency::Reuse(mut output) => {
+            if let Some(handle) = staged_handle.as_deref() {
+                let retained = staging(runtime)?
+                    .reconciliation_import(handle, &space_id, key)
+                    .await
+                    .map_err(classify_staging_error)?;
+                if retained.length != source_length || retained.sha256 != content_sha256 {
+                    return Err(ArtifactToolError::Conflict);
+                }
+            }
             output.reused = true;
             return Ok(*output);
         }
         ImportIdempotency::VerifyCandidate(candidate) => {
+            if let Some(handle) = staged_handle.as_deref() {
+                let retained = staging(runtime)?
+                    .reconciliation_import(handle, &space_id, key)
+                    .await
+                    .map_err(classify_staging_error)?;
+                if retained.length != source_length || retained.sha256 != content_sha256 {
+                    return Err(ArtifactToolError::Conflict);
+                }
+            }
             let stored_media_type = verify_import_candidate(
                 runtime,
                 &space_id,
@@ -1727,13 +1771,23 @@ async fn file_import(
                 .await;
             return Ok(output);
         }
-        ImportIdempotency::Dispatch => {}
+        ImportIdempotency::Dispatch => {
+            if let Some(handle) = staged_handle {
+                let mut staged = staging(runtime)?
+                    .import_source(&handle, &space_id)
+                    .await
+                    .map_err(classify_staging_error)?;
+                staging(runtime)?
+                    .bind_import_operation(&mut staged, key)
+                    .map_err(classify_staging_error)?;
+                source = PreparedImport::Staged(staged);
+            }
+        }
     }
     let owned_runtime = runtime.clone();
     let owned_cancellation = CancellationToken::new();
     let operation_timeout = runtime.artifact_config().limits.operation_timeout;
-    let (settled, receiver) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
+    let receiver = runtime.supervise_import_settlement(key, async move {
         let result = match tokio::time::timeout(
             operation_timeout,
             settle_reserved_import(
@@ -1763,7 +1817,7 @@ async fn file_import(
                 Err(ArtifactToolError::Indeterminate)
             }
         };
-        let _ = settled.send(result);
+        result
     });
     tokio::select! {
         () = cancellation.cancelled() => Err(ArtifactToolError::Indeterminate),
@@ -1847,9 +1901,11 @@ async fn settle_reserved_import(
         if source_error == ArtifactToolError::Conflict
             && cleanup_changed_import_candidate(&runtime, &space_id, &candidate).await
         {
+            drop(source);
             runtime.artifact_operations().remove(key).await;
             return Err(source_error);
         }
+        drop(source);
         runtime
             .artifact_operations()
             .set_outcome(
@@ -1860,6 +1916,7 @@ async fn settle_reserved_import(
         return Err(ArtifactToolError::Indeterminate);
     }
     if validate_uploaded(&uploaded, &candidate, &space_id, source_length).is_err() {
+        drop(source);
         runtime
             .artifact_operations()
             .set_outcome(
@@ -1881,6 +1938,7 @@ async fn settle_reserved_import(
     {
         Ok(stored_media_type) => stored_media_type,
         Err(_) => {
+            drop(source);
             runtime
                 .artifact_operations()
                 .set_outcome(key, OperationOutcome::ImportCandidate(candidate.clone()))
@@ -1907,6 +1965,10 @@ async fn settle_reserved_import(
             return Err(ArtifactToolError::Indeterminate);
         }
     }
+    // Release the exclusive staged authority before publishing a replayable
+    // terminal ledger state.  Replays authenticate only the retained
+    // Reconciliation/Consumed identity, never a readable lease.
+    drop(source);
     let output = import_output(
         &space_id,
         &candidate,

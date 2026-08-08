@@ -97,6 +97,7 @@ pub(crate) struct StageSource {
     pub(crate) sha256: String,
     pub(crate) media_type: Option<String>,
     record: [u8; RECORD_BYTES],
+    operation: [u8; 32],
     lease: tokio::sync::OwnedMutexGuard<RecordState>,
 }
 
@@ -163,6 +164,33 @@ impl StageSource {
     }
 }
 
+/// Reconciliation metadata retained after staged import authority has been
+/// acquired.  This is intentionally content-free: it permits same-operation
+/// idempotency replay to authenticate the retained identity without handing a
+/// second caller a readable source lease.
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedStageImport {
+    pub(crate) length: u64,
+    pub(crate) sha256: String,
+    pub(crate) media_type: Option<String>,
+    pub(crate) record: String,
+}
+
+impl Drop for StageSource {
+    fn drop(&mut self) {
+        // A source lease must never silently restore Ready after it has been
+        // handed to an import settlement task.  The task publishes its ledger
+        // terminal state only after this guard is released, so a cancelled or
+        // panicked task leaves a non-acquirable reconciliation record.
+        if let RecordState::Ready { import } = &*self.lease {
+            *self.lease = RecordState::Reconciliation {
+                import: Arc::clone(import),
+                operation: self.operation,
+            };
+        }
+    }
+}
+
 /// Fixed, credential-free staging failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagingError {
@@ -190,8 +218,11 @@ enum RecordState {
         offset: u64,
     },
     Ready {
-        source: AnchoredImport,
-        sha256: String,
+        import: Arc<RetainedImport>,
+    },
+    Reconciliation {
+        import: Arc<RetainedImport>,
+        operation: [u8; 32],
     },
     Available {
         source: AnchoredImport,
@@ -202,9 +233,19 @@ enum RecordState {
     },
     CleanupPending {
         destination: Option<AtomicExport>,
-        published: bool,
+        source: Option<AnchoredImport>,
+        published_without_source: bool,
     },
-    Consumed,
+    Consumed {
+        import: Arc<RetainedImport>,
+        operation: [u8; 32],
+    },
+}
+
+#[derive(Debug)]
+struct RetainedImport {
+    source: AnchoredImport,
+    sha256: String,
 }
 
 #[derive(Debug)]
@@ -264,6 +305,17 @@ struct PublicationOwnerGuard(Arc<PublicationCompletion>);
 impl Drop for PublicationOwnerGuard {
     fn drop(&mut self) {
         self.0.mark_done(PublicationCompletion::OWNER_DONE);
+    }
+}
+
+/// Releases a cleanup claim even when its coordinator is cancelled or panics.
+///
+/// The record remains retained and charged until a coordinator proves removal.
+struct CleanupClaimGuard(Arc<AtomicBool>);
+
+impl Drop for CleanupClaimGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -1184,11 +1236,15 @@ impl ArtifactStaging {
         if sha256 != prepublication_sha256 {
             let name = lease.record.record_name.clone();
             let directory = self.state.directory.clone();
-            let _ = tokio::task::spawn_blocking(move || directory.remove_record(&name)).await;
+            let _ =
+                tokio::task::spawn_blocking(move || directory.remove_exact_record(&name, &source))
+                    .await;
             return Err(StagingError::Indeterminate);
         }
         let mut state = lease.record.state.lock().await;
-        *state = RecordState::Ready { source, sha256 };
+        *state = RecordState::Ready {
+            import: Arc::new(RetainedImport { source, sha256 }),
+        };
         drop(owner_guard);
         Ok(())
     }
@@ -1260,31 +1316,141 @@ impl ArtifactStaging {
         if record.direction != StageDirection::Import || &record.space_id != space_id {
             return Err(StagingError::NotFound);
         }
-        let state = Arc::clone(&record.state).lock_owned().await;
-        let RecordState::Ready { source, sha256 } = &*state else {
+        let mut state = Arc::clone(&record.state).lock_owned().await;
+        let RecordState::Ready { import } = &*state else {
             return Err(StagingError::NotFound);
         };
-        source
+        import
+            .source
             .verify_unchanged()
             .map_err(|_| StagingError::Conflict)?;
+        let import = Arc::clone(import);
+        *state = RecordState::Reconciliation {
+            import: Arc::clone(&import),
+            operation: [0; 32],
+        };
         Ok(StageSource {
-            file: source
+            file: import
+                .source
                 .try_clone_reader()
                 .map_err(|_| StagingError::Upstream)?,
-            length: source.length,
-            sha256: sha256.clone(),
+            length: import.source.length,
+            sha256: import.sha256.clone(),
             media_type: record.media_type.clone(),
             record: record_id,
+            operation: [0; 32],
             lease: state,
         })
     }
 
-    /// Marks one verified import source consumed.
-    pub(crate) async fn consume(&self, source: &mut StageSource) -> Result<(), StagingError> {
-        if !matches!(*source.lease, RecordState::Ready { .. }) {
+    /// Binds an already-acquired source to its idempotency operation before
+    /// dispatch.  The binding is one-way and is never exposed to another
+    /// staging caller.
+    pub(crate) fn bind_import_operation(
+        &self,
+        source: &mut StageSource,
+        operation: [u8; 32],
+    ) -> Result<(), StagingError> {
+        let RecordState::Reconciliation {
+            operation: bound, ..
+        } = &mut *source.lease
+        else {
+            return Err(StagingError::NotFound);
+        };
+        if *bound != [0; 32] && *bound != operation {
             return Err(StagingError::NotFound);
         }
-        *source.lease = RecordState::Consumed;
+        *bound = operation;
+        source.operation = operation;
+        Ok(())
+    }
+
+    /// Returns same-operation reconciliation metadata without reopening staged
+    /// authority.  Wrong operations deliberately receive the same fixed
+    /// NotFound response as an absent/stale handle.
+    pub(crate) async fn reconciliation_import(
+        &self,
+        handle: &str,
+        space_id: &SpaceId,
+        operation: [u8; 32],
+    ) -> Result<RetainedStageImport, StagingError> {
+        let (record_id, record) = self.authenticate(handle, None).await?;
+        if record.direction != StageDirection::Import || &record.space_id != space_id {
+            return Err(StagingError::NotFound);
+        }
+        let records = self.state.records.read().await;
+        if !records
+            .get(&record_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &record))
+        {
+            return Err(StagingError::NotFound);
+        }
+        let state = record.state.lock().await;
+        let (import, retained_operation) = match &*state {
+            RecordState::Reconciliation { import, operation }
+            | RecordState::Consumed { import, operation } => (import, operation),
+            _ => return Err(StagingError::NotFound),
+        };
+        if retained_operation != &operation {
+            return Err(StagingError::NotFound);
+        }
+        Ok(RetainedStageImport {
+            length: import.source.length,
+            sha256: import.sha256.clone(),
+            media_type: record.media_type.clone(),
+            record: record_hex(&record_id),
+        })
+    }
+
+    /// Reads authenticated import metadata without acquiring the one-use
+    /// source authority.  This is the only staging read permitted before an
+    /// idempotency ledger decision.
+    pub(crate) async fn import_metadata(
+        &self,
+        handle: &str,
+        space_id: &SpaceId,
+    ) -> Result<RetainedStageImport, StagingError> {
+        let (record_id, record) = self.authenticate(handle, None).await?;
+        if record.direction != StageDirection::Import || &record.space_id != space_id {
+            return Err(StagingError::NotFound);
+        }
+        let state = record.state.lock().await;
+        let import = match &*state {
+            RecordState::Ready { import }
+            | RecordState::Reconciliation { import, .. }
+            | RecordState::Consumed { import, .. } => import,
+            _ => return Err(StagingError::NotFound),
+        };
+        Ok(RetainedStageImport {
+            length: import.source.length,
+            sha256: import.sha256.clone(),
+            media_type: record.media_type.clone(),
+            record: record_hex(&record_id),
+        })
+    }
+
+    /// Marks one verified import source consumed while retaining the exact
+    /// metadata required for same-key replay.
+    pub(crate) async fn consume(&self, source: &mut StageSource) -> Result<(), StagingError> {
+        if !matches!(*source.lease, RecordState::Reconciliation { .. }) {
+            return Err(StagingError::NotFound);
+        }
+        let state = std::mem::replace(
+            &mut *source.lease,
+            RecordState::Receiving {
+                destination: None,
+                offset: 0,
+            },
+        );
+        let RecordState::Reconciliation { import, operation } = state else {
+            *source.lease = state;
+            return Err(StagingError::NotFound);
+        };
+        if operation != source.operation {
+            *source.lease = RecordState::Reconciliation { import, operation };
+            return Err(StagingError::NotFound);
+        }
+        *source.lease = RecordState::Consumed { import, operation };
         Ok(())
     }
 
@@ -1304,27 +1470,8 @@ impl ArtifactStaging {
         let Ok(mut state) = record.state.try_lock() else {
             return Err(StagingError::Conflict);
         };
-        let pending = match &mut *state {
-            RecordState::Receiving { destination, .. } => Some((destination.take(), false)),
-            RecordState::PublicationIndeterminate { completion } if completion.settled() => {
-                Some((None, true))
-            }
-            RecordState::PublicationIndeterminate { .. } => return Err(StagingError::Conflict),
-            RecordState::Ready { .. } | RecordState::Available { .. } | RecordState::Consumed => {
-                Some((None, true))
-            }
-            // A previous authenticated release may have retained the record
-            // because its private file was externally linked.  Once that
-            // coordinator has finished, the same bearer may ask it to try the
-            // bounded cleanup again.  Keep the retained capability in place;
-            // taking it here would make a failed retry unrecoverable.
-            RecordState::CleanupPending { .. } => None,
-        };
-        if let Some((destination, published)) = pending {
-            *state = RecordState::CleanupPending {
-                destination,
-                published,
-            };
+        if !transition_to_cleanup_pending(&mut state) {
+            return Err(StagingError::Conflict);
         }
         record.cleanup_blocked.store(true, Ordering::Release);
         drop(records);
@@ -1401,15 +1548,28 @@ impl ArtifactStaging {
             match &mut *state {
                 RecordState::CleanupPending {
                     destination,
-                    published: false,
+                    source: None,
+                    published_without_source: false,
                 } => destination.take().map_or(
                     PendingCleanupTarget::Absent,
                     PendingCleanupTarget::Temporary,
                 ),
                 RecordState::CleanupPending {
-                    destination: _,
-                    published: true,
-                } => PendingCleanupTarget::Published(record.record_name.clone()),
+                    destination: None,
+                    source: slot @ Some(_),
+                    published_without_source: false,
+                } => match slot.take() {
+                    Some(source) => PendingCleanupTarget::Published {
+                        name: record.record_name.clone(),
+                        source,
+                    },
+                    None => return false,
+                },
+                RecordState::CleanupPending {
+                    destination: None,
+                    source: None,
+                    published_without_source: true,
+                } => PendingCleanupTarget::IndeterminatePublished(record.record_name.clone()),
                 _ => return false,
             }
         };
@@ -1423,11 +1583,18 @@ impl ArtifactStaging {
                     PendingCleanupResult::Retain(destination)
                 }
             }
-            PendingCleanupTarget::Published(name) => {
-                if directory.remove_record(&name).is_ok() {
+            PendingCleanupTarget::Published { name, source } => {
+                if directory.remove_exact_record(&name, &source).is_ok() {
                     PendingCleanupResult::Removed
                 } else {
-                    PendingCleanupResult::RetainPublished
+                    PendingCleanupResult::RetainPublished(source)
+                }
+            }
+            PendingCleanupTarget::IndeterminatePublished(name) => {
+                if directory.remove_indeterminate_record(&name).is_ok() {
+                    PendingCleanupResult::Removed
+                } else {
+                    PendingCleanupResult::RetainIndeterminatePublished
                 }
             }
         })
@@ -1438,14 +1605,23 @@ impl ArtifactStaging {
                 let mut state = record.state.lock().await;
                 if let RecordState::CleanupPending {
                     destination: slot,
-                    published: false,
+                    source: None,
+                    published_without_source: false,
                 } = &mut *state
                 {
                     *slot = Some(destination);
                 }
                 false
             }
-            Ok(PendingCleanupResult::RetainPublished) | Err(_) => false,
+            Ok(PendingCleanupResult::RetainPublished(source)) => {
+                let mut state = record.state.lock().await;
+                if let RecordState::CleanupPending { source: slot, .. } = &mut *state {
+                    *slot = Some(source);
+                }
+                false
+            }
+            Ok(PendingCleanupResult::RetainIndeterminatePublished) => false,
+            Err(_) => false,
         }
     }
 
@@ -1459,6 +1635,7 @@ impl ArtifactStaging {
     }
 
     async fn cleanup_coordinator(&self, id: [u8; RECORD_BYTES], record: Arc<StageRecord>) -> bool {
+        let _claim = CleanupClaimGuard(Arc::clone(&record.cleanup_blocked));
         #[cfg(test)]
         pause_cleanup_for_test(&record.record_name);
         let removed = self.cleanup_pending_record(&record).await;
@@ -1472,7 +1649,6 @@ impl ArtifactStaging {
                 "Artifact staging cleanup retained private on-disk evidence"
             );
         }
-        record.cleanup_blocked.store(false, Ordering::Release);
         removed
     }
 
@@ -1506,23 +1682,44 @@ fn claim_expired_record(record: &StageRecord) -> bool {
 }
 
 fn transition_to_cleanup_pending(state: &mut RecordState) -> bool {
-    let pending = match state {
-        RecordState::Receiving { destination, .. } => Some((destination.take(), false)),
+    let prior = std::mem::replace(
+        state,
+        RecordState::CleanupPending {
+            destination: None,
+            source: None,
+            published_without_source: false,
+        },
+    );
+    let (destination, source, published_without_source) = match prior {
+        RecordState::Receiving { destination, .. } => (destination, None, false),
         RecordState::PublicationIndeterminate { completion } if completion.settled() => {
-            Some((None, true))
+            (None, None, true)
         }
-        RecordState::Ready { .. } | RecordState::Available { .. } | RecordState::Consumed => {
-            Some((None, true))
+        RecordState::Ready { import } => match Arc::try_unwrap(import) {
+            Ok(import) => (None, Some(import.source), false),
+            Err(import) => {
+                *state = RecordState::Ready { import };
+                return false;
+            }
+        },
+        prior @ RecordState::Reconciliation { .. } | prior @ RecordState::Consumed { .. } => {
+            *state = prior;
+            return false;
         }
-        RecordState::CleanupPending { .. } => return true,
-        RecordState::PublicationIndeterminate { .. } => None,
-    };
-    let Some((destination, published)) = pending else {
-        return false;
+        RecordState::Available { source, .. } => (None, Some(source), false),
+        prior @ RecordState::CleanupPending { .. } => {
+            *state = prior;
+            return true;
+        }
+        prior @ RecordState::PublicationIndeterminate { .. } => {
+            *state = prior;
+            return false;
+        }
     };
     *state = RecordState::CleanupPending {
         destination,
-        published,
+        source,
+        published_without_source,
     };
     true
 }
@@ -1530,13 +1727,18 @@ fn transition_to_cleanup_pending(state: &mut RecordState) -> bool {
 enum PendingCleanupTarget {
     Absent,
     Temporary(AtomicExport),
-    Published(String),
+    Published {
+        name: String,
+        source: AnchoredImport,
+    },
+    IndeterminatePublished(String),
 }
 
 enum PendingCleanupResult {
     Removed,
     Retain(AtomicExport),
-    RetainPublished,
+    RetainPublished(AnchoredImport),
+    RetainIndeterminatePublished,
 }
 
 struct IncomingWrite {
@@ -1870,13 +2072,18 @@ fn hash_file(reader: &mut File, expected_length: u64) -> Result<String, StagingE
 fn status_for(record: &StageRecord, state: &RecordState) -> StageStatus {
     let (state_name, offset, sha256) = match state {
         RecordState::Receiving { offset, .. } => ("receiving", *offset, None),
-        RecordState::Ready { sha256, .. } => ("ready", record.size_bytes, Some(sha256.clone())),
+        RecordState::Ready { import } => ("ready", record.size_bytes, Some(import.sha256.clone())),
+        RecordState::Reconciliation { import, .. } => (
+            "reconciliation",
+            record.size_bytes,
+            Some(import.sha256.clone()),
+        ),
         RecordState::Available { sha256, .. } => {
             ("available", record.size_bytes, Some(sha256.clone()))
         }
         RecordState::PublicationIndeterminate { .. } => ("receiving", record.size_bytes, None),
         RecordState::CleanupPending { .. } => ("receiving", record.size_bytes, None),
-        RecordState::Consumed => ("consumed", record.size_bytes, None),
+        RecordState::Consumed { .. } => ("consumed", record.size_bytes, None),
     };
     StageStatus {
         direction: record.direction,
@@ -2230,6 +2437,7 @@ mod tests {
     #[tokio::test]
     async fn linked_staged_record_retries_authenticated_cleanup_after_link_removal() {
         let test = test_staging().await;
+        let before_allocation = test.staging.available_quota().await;
         let allocation = test
             .staging
             .allocate_export(space_id(), 5, Some("application/octet-stream".to_owned()))
@@ -2268,7 +2476,10 @@ mod tests {
         ));
         assert_eq!(test.staging.available_quota().await, before_release);
         assert!(staged_path.exists());
-        assert!(retained_link.exists());
+        assert_eq!(
+            std::fs::read(&retained_link).expect("read retained link"),
+            b"hello"
+        );
         assert_eq!(test.staging.state.records.read().await.len(), 1);
 
         std::fs::remove_file(&retained_link).expect("remove retained link");
@@ -2279,6 +2490,72 @@ mod tests {
 
         assert!(!staged_path.exists());
         assert!(test.staging.state.records.read().await.is_empty());
+        assert_eq!(test.staging.available_quota().await, before_allocation);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacement_cannot_redirect_pending_cleanup() {
+        let test = test_staging().await;
+        let before_allocation = test.staging.available_quota().await;
+        let allocation = test
+            .staging
+            .allocate_export(space_id(), 5, Some("application/octet-stream".to_owned()))
+            .await
+            .expect("allocate export");
+        let reserved_quota = test.staging.available_quota().await;
+        let mut lease = test
+            .staging
+            .begin_write(
+                &allocation.handle,
+                Some(&allocation.record),
+                StageDirection::Export,
+                0,
+            )
+            .await
+            .expect("lease export");
+        let mut destination = lease.take_destination().expect("export destination");
+        destination.write_all(b"hello").expect("write export");
+        test.staging
+            .finish_export(
+                lease,
+                destination,
+                5,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_owned(),
+            )
+            .await
+            .expect("publish export");
+
+        let staged_path = test.root.join(format!("{}.bin", allocation.record));
+        let outside_original = test.root.join("outside-original.bin");
+        std::fs::hard_link(&staged_path, &outside_original).expect("link staged record");
+        assert!(matches!(
+            test.staging.release(&allocation.handle).await,
+            Err(StagingError::Conflict)
+        ));
+        let moved_original = test.root.join("moved-original.bin");
+        std::fs::rename(&staged_path, &moved_original).expect("move indexed name");
+        std::fs::write(&staged_path, b"other").expect("replace indexed name");
+
+        assert!(matches!(
+            test.staging.release(&allocation.handle).await,
+            Err(StagingError::Conflict)
+        ));
+        assert_eq!(
+            std::fs::read(&outside_original).expect("read outside original"),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(&moved_original).expect("read moved original"),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(&staged_path).expect("read replacement"),
+            b"other"
+        );
+        assert_eq!(test.staging.available_quota().await, reserved_quota);
+        assert_eq!(test.staging.state.records.read().await.len(), 1);
+        assert_ne!(test.staging.available_quota().await, before_allocation);
     }
 
     #[tokio::test]
@@ -2668,6 +2945,59 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, vec![".any-mcp-staging.lock"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_cleanup_coordinator_releases_its_claim_for_retry() {
+        let _serial = CLEANUP_TEST_SERIAL
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(
+                space_id(),
+                5,
+                Some("application/octet-stream".to_owned()),
+                None,
+            )
+            .await
+            .expect("allocate import");
+        let (id, record) = test
+            .staging
+            .authenticate(&allocation.handle, None)
+            .await
+            .expect("authenticate record");
+        record.cleanup_blocked.store(true, Ordering::Release);
+        let mut state = record.state.lock().await;
+        assert!(transition_to_cleanup_pending(&mut state));
+        drop(state);
+        let (entered, release) = install_cleanup_pause(&record.record_name);
+        let task = test
+            .staging
+            .spawn_cleanup_coordinator(id, Arc::clone(&record));
+        tokio::task::spawn_blocking(move || entered.wait())
+            .await
+            .expect("coordinator entered");
+        task.abort();
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release coordinator pause");
+        clear_cleanup_pause();
+        assert!(task.await.expect_err("coordinator aborted").is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while record.cleanup_blocked.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cleanup claim released");
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("retry after cancelled coordinator");
+        assert!(test.staging.state.records.read().await.is_empty());
     }
 
     #[tokio::test]

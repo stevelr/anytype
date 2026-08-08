@@ -551,8 +551,53 @@ impl StagingDirectory {
         begin_atomic_export_at(&self.root, &path, maximum_bytes)
     }
 
-    /// Removes one exact completed record.
-    pub(crate) fn remove_record(&self, record_name: &str) -> Result<(), RootAccessError> {
+    /// Removes one completed record after proving its retained identity.
+    ///
+    /// The record name is an index, not authority.  Cleanup reopens the fixed
+    /// name without following links and compares its stable identity with the
+    /// original retained handle before unlinking it.  Deliberately, this does
+    /// not compare ctime: creating and later removing an external hard link
+    /// legitimately changes ctime without changing the staged object.
+    pub(crate) fn remove_exact_record(
+        &self,
+        record_name: &str,
+        expected: &AnchoredImport,
+    ) -> Result<(), RootAccessError> {
+        let path = RelativeNativePath::from_utf8(record_name)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let (parent, name) = walk_parent(&self.root, &path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = parent
+            .open_with(Path::new(&name), &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        let identity = file_identity(&file, &metadata)
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        if !private_file_with_links(&file, &metadata, 1)
+            || !safe_windows_security(&file)
+            || identity != expected.snapshot.identity
+        {
+            return Err(RootAccessError::new(RootProblem::Changed));
+        }
+        parent
+            .remove_file(Path::new(&name))
+            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+        sync_parent_directory(&parent).map_err(|_| RootAccessError::new(RootProblem::Containment))
+    }
+
+    /// Removes a record whose publication outcome was already indeterminate.
+    ///
+    /// This recovery path has no retained completed handle to compare. It is
+    /// limited to publication-indeterminate state; every retained source uses
+    /// [`Self::remove_exact_record`] instead.
+    pub(crate) fn remove_indeterminate_record(
+        &self,
+        record_name: &str,
+    ) -> Result<(), RootAccessError> {
         let path = RelativeNativePath::from_utf8(record_name)
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
         let (parent, name) = walk_parent(&self.root, &path)?;

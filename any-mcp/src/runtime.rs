@@ -10,7 +10,7 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -21,7 +21,7 @@ use rmcp::{
     service::{QuitReason, RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{IntoTransport, Transport},
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -30,7 +30,7 @@ use crate::{
     artifact_config::ArtifactConfig,
     artifact_roots::RootRegistry,
     artifact_staging::ArtifactStaging,
-    artifact_toolset::ArtifactOperationState,
+    artifact_toolset::{ArtifactOperationState, ArtifactToolError, FileImportOutput},
     artifact_validators::ValidatorRunner,
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
     optional_toolsets::OptionalToolsetSelection,
@@ -69,6 +69,9 @@ pub struct RuntimeContext {
     artifact_staging: Option<ArtifactStaging>,
     artifact_validators: Option<ValidatorRunner>,
     artifact_operations: ArtifactOperationState,
+    settlement_permits: Arc<Semaphore>,
+    settlement_active: Arc<AtomicUsize>,
+    settlement_notify: Arc<Notify>,
     artifact_acceptance_gates: ArtifactAcceptanceGates,
     client_roots: Arc<ClientRootsGate>,
 }
@@ -105,6 +108,10 @@ impl fmt::Debug for RuntimeContext {
                     .map_or(0, ValidatorRunner::configured_count),
             )
             .field("artifact_operations", &"<redacted>")
+            .field(
+                "active_artifact_settlements",
+                &self.settlement_active.load(Ordering::Acquire),
+            )
             .field("client_roots", &self.client_roots)
             .finish_non_exhaustive()
     }
@@ -346,7 +353,75 @@ impl RuntimeContext {
     /// EOF is observed, before rmcp performs its bounded in-flight drain.
     pub fn begin_shutdown(&self) {
         self.permits.close();
+        self.settlement_permits.close();
         self.shutdown.cancel();
+    }
+
+    /// Runs one post-reservation import settlement under runtime ownership.
+    /// Request cancellation never reaches this task; shutdown and the
+    /// operation's independent deadline do.  A failed child is converted into
+    /// an idempotency terminal state before the caller observes failure.
+    pub(crate) fn supervise_import_settlement<F>(
+        &self,
+        key: [u8; 32],
+        operation: F,
+    ) -> tokio::sync::oneshot::Receiver<Result<FileImportOutput, ArtifactToolError>>
+    where
+        F: Future<Output = Result<FileImportOutput, ArtifactToolError>> + Send + 'static,
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let permits = Arc::clone(&self.settlement_permits);
+        let active = Arc::clone(&self.settlement_active);
+        let notify = Arc::clone(&self.settlement_notify);
+        let shutdown = self.shutdown.clone();
+        let operations = self.artifact_operations.clone();
+        tokio::spawn(async move {
+            let permit = tokio::select! {
+                permit = permits.acquire_owned() => permit.ok(),
+                () = shutdown.cancelled() => None,
+            };
+            let Some(permit) = permit else {
+                operations.settle_import_timeout(key).await;
+                let _ = sender.send(Err(ArtifactToolError::Indeterminate));
+                return;
+            };
+            active.fetch_add(1, Ordering::AcqRel);
+            let mut child = tokio::spawn(operation);
+            let result = tokio::select! {
+                joined = &mut child => match joined {
+                    Ok(result) => result,
+                    Err(_) => {
+                        operations.settle_import_timeout(key).await;
+                        Err(ArtifactToolError::Indeterminate)
+                    }
+                },
+                () = shutdown.cancelled() => {
+                    child.abort();
+                    let _ = child.await;
+                    operations.settle_import_timeout(key).await;
+                    Err(ArtifactToolError::Indeterminate)
+                },
+            };
+            drop(permit);
+            active.fetch_sub(1, Ordering::AcqRel);
+            notify.notify_waiters();
+            let _ = sender.send(result);
+        });
+        receiver
+    }
+
+    /// Waits only a bounded interval for owned artifact settlement tasks.
+    pub(crate) async fn drain_artifact_settlements(&self, timeout: Duration) {
+        let drained = async {
+            loop {
+                let notified = self.settlement_notify.notified();
+                if self.settlement_active.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        let _ = tokio::time::timeout(timeout, drained).await;
     }
 
     /// Returns whether process shutdown has started.
@@ -707,6 +782,9 @@ impl RuntimeContext {
             artifact_staging: None,
             artifact_validators: None,
             artifact_operations: ArtifactOperationState::default(),
+            settlement_permits: Arc::new(Semaphore::new(parts.max_concurrency)),
+            settlement_active: Arc::new(AtomicUsize::new(0)),
+            settlement_notify: Arc::new(Notify::new()),
             artifact_acceptance_gates: ArtifactAcceptanceGates::disabled(),
             client_roots: Arc::new(ClientRootsGate::default()),
         }
@@ -1143,10 +1221,16 @@ where
         Ok(running) => running,
         Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => {
             runtime.begin_shutdown();
+            runtime
+                .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
+                .await;
             return Ok(());
         }
         Err(_) => {
             runtime.begin_shutdown();
+            runtime
+                .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
+                .await;
             return Err(ServeError::Initialization);
         }
     };
@@ -1156,6 +1240,9 @@ where
         Ok(QuitReason::JoinError(_)) | Ok(_) | Err(_) => Err(ServeError::ServiceTask),
     };
     runtime.begin_shutdown();
+    runtime
+        .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
+        .await;
     result
 }
 
