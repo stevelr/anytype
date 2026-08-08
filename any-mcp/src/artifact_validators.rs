@@ -391,7 +391,6 @@ async fn run_validator(
         read_bounded(stderr, stderr_limit),
         wait_for_validator(&mut child, child_id, validator.config.timeout),
     );
-    process_group.disarm();
     input_result?;
     let stdout = stdout?;
     let stderr = stderr?;
@@ -403,6 +402,8 @@ async fn run_validator(
     if media_type.len() > validator.config.field_bytes || validator.config.fields == 0 {
         return Err(ValidatorExecutionError);
     }
+    terminate_process_group(child_id);
+    process_group.disarm();
     Ok(media_type)
 }
 
@@ -777,5 +778,47 @@ mod tests {
             Some("text/plain")
         );
         std::fs::remove_file(source_path).expect("remove source");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn process_group_guard_reaps_a_descendant_after_parent_exit() {
+        let shell = find_fixture_executable("sh").expect("platform shell executable");
+        let mut command = Command::new(shell);
+        command
+            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn process-group parent");
+        let child_id = child.id();
+        let mut stdout = child.stdout.take().expect("parent stdout");
+        let mut pid_bytes = Vec::new();
+        stdout
+            .read_to_end(&mut pid_bytes)
+            .await
+            .expect("read descendant pid");
+        child.wait().await.expect("wait for process-group parent");
+        let descendant = std::str::from_utf8(&pid_bytes)
+            .expect("descendant pid UTF-8")
+            .trim()
+            .parse::<i32>()
+            .expect("descendant pid integer");
+        let guard = ProcessGroupGuard::new(child_id);
+        drop(guard);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            // SAFETY: signal zero performs an existence check without changing
+            // the process, and `descendant` came from the owned fixture group.
+            if unsafe { libc::kill(descendant, 0) } != 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "process-group descendant survived guard cleanup"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }
